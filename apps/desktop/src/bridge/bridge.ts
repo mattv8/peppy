@@ -188,6 +188,47 @@ const fixtureReactionMessages: MessageView[] = [
   { id: "message-sam-4", revision: "1", sender: "self", body: "Loved “lol it autocorrected”", timestamp: "1788434880000", attachments: [] },
   { id: "message-sam-5", revision: "1", sender: "other", senderAddress: "+15555550142", body: "Reacted 👍 to “a message from last year that is not loaded…”", timestamp: "1788434940000", attachments: [] },
 ];
+/** The text route body, as spec 4.3: NFC, whitespace collapsed, quote cut to 79 graphemes plus an ellipsis past 80. */
+function composeFixtureReactionText(body: string, emoji: string): string {
+  const graphemes = Array.from(body.normalize("NFC").trim().replace(/\s+/g, " "));
+  const quote = graphemes.length > 80 ? `${graphemes.slice(0, 79).join("").trimEnd()}…` : graphemes.join("");
+  return `Reacted ${emoji} to “${quote}”`;
+}
+
+/** Reaction states from spec 4.8 and section 9, one conversation per route situation. */
+export const fixtureReactionConversations: ConversationView[] = [
+  { id: "conv-reaction-states", name: "Reaction states", preview: "Are we still on for 5 tonight?", unread: 0, reactionSupport: "native", reactionGatewayId: "gateway-pixel8", participants: ["Sam Rivera", "Alex Chen", "Jo Lee", "Maya Ortiz", "Priya Shah"], messages: [
+    { id: "reaction-group-dinner", revision: "1", sender: "other", senderAddress: "+15555550142", body: "Dinner at 7 at the usual place?", timestamp: "1788434100000", transport: "rcs", attachments: [], reactable: "native", reactions: [
+      { emoji: "👍", actors: [{ self: false, address: "+15555550101" }, { self: false, address: "+15555550102" }, { self: false, address: "+15555550103" }] },
+      { emoji: "❤️", actors: [{ self: false, address: "+15555550104" }, { self: false, address: "+15555550105" }] },
+      { emoji: "😮", actors: [{ self: false, address: "+15555550106" }] },
+    ] },
+    { id: "reaction-own-sent", revision: "1", sender: "self", body: "Yes, see you there!", timestamp: "1788434160000", transport: "rcs", status: "delivery-confirmed", attachments: [], reactable: "native", reactions: [{ emoji: "😂", actors: [{ self: true }] }] },
+    { id: "reaction-pending", revision: "1", sender: "other", senderAddress: "+15555550142", body: "Are we still on for 5 tonight?", timestamp: "1788434220000", transport: "rcs", attachments: [], reactable: "native", ownReactionRequest: { requestId: "fixture-request-sending", emoji: "😮", state: "sending" } },
+    { id: "reaction-removing", revision: "1", sender: "other", senderAddress: "+15555550142", body: "Running late, start without me", timestamp: "1788434280000", transport: "rcs", attachments: [], reactable: "native", reactions: [{ emoji: "🙏", actors: [{ self: true }] }], ownReactionRequest: { requestId: "fixture-request-removing", emoji: null, previousEmoji: "🙏", state: "sending" } },
+    { id: "reaction-not-sent", revision: "1", sender: "other", senderAddress: "+15555550142", body: "Sounds good", timestamp: "1788434340000", transport: "rcs", attachments: [], reactable: "native", ownReactionRequest: { requestId: "fixture-request-not-sent", emoji: "🙏", state: "not_sent", refusal: "rejected" } },
+    { id: "reaction-unknown", revision: "1", sender: "other", senderAddress: "+15555550142", body: "Did you get the parcel?", timestamp: "1788434400000", transport: "rcs", attachments: [], reactable: "native", ownReactionRequest: { requestId: "fixture-request-unknown", emoji: "❤️", previousEmoji: "👍", state: "unknown" } },
+    // A photo-only RCS message with another person's reaction: its badge overlays the photo (media overlay placement).
+    { id: "reaction-photo", revision: "1", sender: "other", senderAddress: "+15555550180", body: "", timestamp: "1788434900000", transport: "rcs", attachments: [{ id: "attachment-reaction-photo", name: "harbour.gif", mediaType: "image/gif", byteSize: 67, state: "ready", previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" }], reactable: "native", reactions: [{ emoji: "😍", actors: [{ self: false, address: "+15555550181" }] }] },
+    { id: "reaction-photo-note", revision: "1", sender: "self", body: "Nice shots", timestamp: "1788434950000", transport: "rcs", status: "delivery-confirmed", attachments: [] },
+    // Two photos in one message, reacted: the badge must render once for the message, not once per photo.
+    { id: "reaction-photo-pair", revision: "1", sender: "other", senderAddress: "+15555550180", body: "", timestamp: "1788434960000", transport: "rcs", attachments: [
+      { id: "attachment-reaction-pair-1", name: "pier.gif", mediaType: "image/gif", byteSize: 67, state: "ready", previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" },
+      { id: "attachment-reaction-pair-2", name: "dune.gif", mediaType: "image/gif", byteSize: 67, state: "ready", previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" },
+    ], reactable: "native", reactions: [{ emoji: "🙌", actors: [{ self: false, address: "+15555550182" }] }] },
+  ] },
+  { id: "conv-reaction-text", name: "Dana Ortiz", preview: "Sent it", unread: 0, reactionSupport: "text", reactionGatewayId: "gateway-pixel8", messages: [
+    { id: "reaction-text-incoming", revision: "1", sender: "other", senderAddress: "+15555550150", body: "Running late, start without me", timestamp: "1788434500000", transport: "sms", attachments: [], reactable: "text" },
+    { id: "reaction-text-self", revision: "1", sender: "self", body: "Sent it", timestamp: "1788434560000", transport: "sms", status: "sent", attachments: [], reactable: "text" },
+    { id: "reaction-text-failed", revision: "1", sender: "self", body: "Reacted 👍 to “Running late, start without me”", timestamp: "1788434620000", transport: "sms", status: "failed-before-submit", attachments: [] },
+  ] },
+  { id: "conv-needs-update", name: "Priya Shah", preview: "Can we move the review to Friday?", unread: 0, reactionSupport: "needs_phone_update", reactionGatewayId: "gateway-pixel8", messages: [
+    { id: "reaction-needs-update", revision: "1", sender: "other", senderAddress: "+15555550160", body: "Can we move the review to Friday?", timestamp: "1788434700000", transport: "rcs", attachments: [] },
+  ] },
+  { id: "conv-phone-offline", name: "Lee Park", preview: "Are you coming tonight?", unread: 0, reactionSupport: "native", reactionGatewayId: "gateway-offline", messages: [
+    { id: "reaction-offline", revision: "1", sender: "other", senderAddress: "+15555550170", body: "Are you coming tonight?", timestamp: "1788434800000", transport: "rcs", attachments: [], reactable: "native" },
+  ] },
+];
 const fixtureChatNotificationIcon = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAaUlEQVR42mPQrPz/fyAxw6gDkDmXXiAwLg3UUoMzBOjtCAZaWkCMGgZaW0BIDd5ESA9HEMwFtHYEUdmQ2o7Amw3p4QiC5QC9yoDRgmi0IBotiEYLotGCaLQgGi2IRguiwVcQjfYNBwIDAAwPd9Z4B+yXAAAAAElFTkSuQmCC";
 const fixtureMailNotificationIcon = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAaUlEQVR42mP4nx3+fyAxw6gDUAQe3kJgXJqopQZnCNDZEQw0tYAINQw09yUBNfgTIR0cQTgX0NgRxGVDajsCbzakhyMIlgN0KgNGC6LRgmi0IBotiEYLotGCaLQgGi2IBmFBNNo3HAAMAKbz3HgryQcuAAAAAElFTkSuQmCC";
 /** Tests only: adds a message (for example one in a send-recovery state) to a fixture conversation. Not used by the app. */
@@ -220,6 +261,7 @@ fixtureSnapshot.contactResolution = {
   "+12025550123": { contactId: "contact-aurora", bookId: "book-pixel8", displayName: "Aurora Chen" },
 };
 fixtureSnapshot.contactsPendingCount = 1;
+fixtureSnapshot.conversations.push(...fixtureReactionConversations);
 fixtureSnapshot.conversations.push({ id: "conv-sam", name: "Sam Rivera", preview: "Reacted 👍 to “a message from last year that is not loaded…”", unread: 0, participants: ["+15555550142"], messages: fixtureReactionMessages });
 
 // Group fixtures, one per UX state (ux-spec §2, §4, §7). Member addresses are fixture-only.
@@ -277,6 +319,10 @@ const fixtureSearch = (input: LocalSearchRequest): LocalSearchPage => {
   const items = [...(accepts("conversation") ? conversations : []), ...(accepts("message") ? messages : []), ...(accepts("contact") ? contacts : [])];
   return { query: input.query, items, indexState: "ready", hasMore: { conversation: false, message: false, contact: false } };
 };
+/** Listeners the app refreshes from. The fixture publishes after each reaction change, as the core does. */
+const fixtureChangeListeners = new Set<() => void>();
+const publishFixtureChange = () => { fixtureChangeListeners.forEach(listener => listener()); };
+
 const fixtureMessageWindow = (input: MessageWindowRequest): MessageWindow => {
   const conversation = fixtureSnapshot.conversations.find(item => item.id === input.conversationId);
   if (!conversation) throw fixtureError("not-found", "The requested stored item was not found.");
@@ -430,6 +476,43 @@ export const fixtureBridge: DesktopBridge = {
     }
     throw fixtureError("not-found", "The requested stored item was not found.");
   },
+  react_to_message: async ({ messageId, emoji }) => {
+    for (const conversation of fixtureSnapshot.conversations) {
+      const index = conversation.messages.findIndex(message => message.id === messageId);
+      if (index < 0) continue;
+      const message = conversation.messages[index];
+      const gateway = fixtureSnapshot.gateways.find(candidate => candidate.id === conversation.reactionGatewayId);
+      if (conversation.reactionGatewayId && gateway?.online !== true) return { accepted: false, reason: "offline" };
+      if (conversation.reactionSupport === "needs_phone_update" && !message.reactable) return { accepted: false, reason: "needs_phone_update" };
+      const route = message.reactable;
+      if (!route) return { accepted: false, reason: "not_reactable" };
+      if (route === "text") {
+        if (!emoji) return { accepted: false, reason: "invalid_emoji" };
+        conversation.messages.push({ id: `fixture-reaction-${Date.now()}`, revision: "1", sender: "self", body: composeFixtureReactionText(message.body, emoji), timestamp: String(Date.now()), attachments: [], transport: "sms", status: "sent" });
+        publishFixtureChange();
+        return { accepted: true, route };
+      }
+      if (message.ownReactionRequest?.state === "sending" || message.ownReactionRequest?.state === "unknown") return { accepted: false, reason: "busy" };
+      const previousEmoji = message.reactions?.find(reaction => reaction.actors.some(actor => actor.self))?.emoji ?? null;
+      const requestId = `fixture-request-${Date.now()}`;
+      conversation.messages[index] = { ...message, ownReactionRequest: { requestId, emoji, previousEmoji, state: "sending" } };
+      publishFixtureChange();
+      setTimeout(() => {
+        const current = conversation.messages[index];
+        const others = (current.reactions ?? []).map(reaction => ({ emoji: reaction.emoji, actors: reaction.actors.filter(actor => !actor.self) })).filter(reaction => reaction.actors.length);
+        conversation.messages[index] = { ...current, reactions: emoji ? [...others, { emoji, actors: [{ self: true }] }] : others, ownReactionRequest: undefined };
+        publishFixtureChange();
+      }, 1_000);
+      return { accepted: true, requestId, route: "native" };
+    }
+    return { accepted: false, reason: "not_reactable" };
+  },
+  dismiss_reaction_request: async ({ requestId }) => {
+    fixtureSnapshot.conversations.forEach(conversation => {
+      conversation.messages = conversation.messages.map(message => message.ownReactionRequest?.requestId === requestId ? { ...message, ownReactionRequest: undefined } : message);
+    });
+    publishFixtureChange();
+  },
   open_external_url: async url => { if (!/^(https?:\/\/|cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?)/.test(url)) throw fixtureError("invalid-request", "The URL is invalid."); },
   open_mcp_oauth_redirect: async url => { if (!/^(?:https?:\/\/|(?:vscode|vscode-insiders|cursor|windsurf|jetbrains):\/\/[^/?#@]+(?:[/?]|$))/.test(url)) throw fixtureError("invalid-request", "The URL is invalid."); },
   load_history: async (conversationId, beforeMessageId) => {
@@ -561,7 +644,10 @@ export const fixtureBridge: DesktopBridge = {
     return { headCreated: true, warning: "Simulated fixture only; native floating input is not available." };
   },
   hide_head: async conversationId => { fixtureSnapshot.head = { ...fixtureSnapshot.head, pinnedConversationIds: fixtureSnapshot.head.pinnedConversationIds?.filter(id => id !== conversationId) }; }, close_composer: async () => undefined, close_head_panel: async () => undefined, set_maximize_button_region: async () => undefined,
-  subscribe: () => () => undefined,
+  subscribe: listener => {
+    fixtureChangeListeners.add(listener);
+    return () => { fixtureChangeListeners.delete(listener); };
+  },
   subscribe_maximize_button_hover: () => () => undefined,
   subscribe_drafts: () => () => undefined,
   send_typing: async () => undefined,
@@ -810,6 +896,9 @@ export const tauriBridge: DesktopBridge = {
   set_conversation_tone: (seed, paletteIndex) => invoke("set_conversation_tone", { seed, paletteIndex }),
   cancel_send: ({ messageId }) => invoke("cancel_send", { messageId }),
   send_again: input => invoke("send_again", { input }),
+  react_to_message: ({ messageId, emoji }) => invoke("react_to_message", { messageId, emoji }),
+  dismiss_reaction_request: ({ requestId }) => invoke("dismiss_reaction_request", { requestId }),
+  open_emoji_picker: () => invoke("open_emoji_picker"),
   async window(action) { const w = (await import("@tauri-apps/api/window")).getCurrentWindow(); if (action === "minimize") await w.minimize(); else if (action === "maximize") await w.toggleMaximize(); else await w.close(); },
 };
 

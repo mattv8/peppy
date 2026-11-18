@@ -189,7 +189,12 @@ import { useAccentColor } from "./shell/useAccentColor";
 import { senderLabel, senderRunEdges } from "./sender/attribution";
 import { conversationContactAddress } from "./contacts/conversation-contact";
 import { hiddenTimeIds } from "./conversation/timestamp-bursts";
-import { createSeenReactionLedger, linkReactions, locateReactionTarget, NO_REACTIONS, ReactionBadges, ReactionNotice, ReactionSettings, useSeenBadges, useShowReactions, type ActorName, type ReactionNoticeInfo, type ReactionTargetResult, type SeenReactionLedger } from "./reactions";
+import { createSeenReactionLedger, linkReactions, locateReactionTarget, mergeReactions, NO_REACTIONS, ReactionAnnouncer, ReactionBadges, ReactionNotice, ReactionSettings, useSeenBadges, useShowReactions, type ActorName, type MergedReactionBadge, type OwnChipState, type ReactionNoticeInfo, type ReactionTargetResult, type SeenReactionLedger } from "./reactions";
+import { type Announcement, isReactionEligible, MessageReactionLayer, NO_ANNOUNCEMENT, nativeSelection } from "./reactions/ReactionLayer";
+import { pickAnnouncement, REFUSAL_COPY, requestAnnouncement, type RequestSnapshot, UNREACHABLE_COPY } from "./reactions/announcements";
+import type { OwnReactionRequestView, ReactionSubmitView } from "@peppy/desktop-ui/bridge-contracts";
+import { useReactionTarget } from "./reactions/useReactionTarget";
+import { useRovingMessages } from "./reactions/useRovingMessages";
 import { normalizeReactionText, quoteMatches } from "./reactions/parse";
 import { FALLBACK_ERROR, errorCode, errorText } from "./bridge/bridgeErrors";
 import { OneTimeCodeButton } from "./one-time-code/OneTimeCodeButton";
@@ -833,6 +838,34 @@ function RcsAttachmentStatus({ attachment, visible }: { attachment: AttachmentVi
   return <small data-rcs-media-status data-rcs-media-state={attachment.rcsSendStatus} data-rcs-media-terminal-failure={attachment.rcsSendStatus === "send_failed" || undefined}>{icon}{text}</small>;
 }
 
+/** Image-only MMS and RCS messages render as media tiles, not as articles, so they are not keyboard roving stops. */
+function isImageRun(message: MessageView): boolean {
+  return (message.transport === "mms" || message.transport === "rcs") && message.attachments.length > 0 && message.attachments.every((attachment) => attachment.mediaType.startsWith("image/"));
+}
+
+/** Status of an outgoing reaction text, mirrored read-only on its text-sourced own chip. */
+function textChipState(status: MessageStatus | undefined): OwnChipState {
+  if (status === "queued-local" || status === "server-accepted" || status === "gateway-persisted" || status === "preparing" || status === "submitted") return "sending";
+  if (status === "failed-before-submit" || status === "failed-confirmed") return "not_sent";
+  if (status === "unknown") return "unknown";
+  return "sent";
+}
+
+function withTextStatus(badges: readonly MergedReactionBadge[], state: OwnChipState | undefined): MergedReactionBadge[] {
+  if (!state || state === "sent") return [...badges];
+  return badges.map((badge) => badge.own?.source === "text" ? { ...badge, own: { ...badge.own, state } } : badge);
+}
+
+type PendingRequest = { request: OwnReactionRequestView; /** The snapshot sequence when the overlay was installed. */ installedAt: number };
+
+/** A copy of the map without one key; the same map when the key is absent, so React skips the update. */
+function withoutEntry<T>(map: ReadonlyMap<string, T>, key: string): ReadonlyMap<string, T> {
+  if (!map.has(key)) return map;
+  const next = new Map(map);
+  next.delete(key);
+  return next;
+}
+
 function showsReactionNoticeMeta(message: MessageView): boolean {
   return message.sender === "self" && Boolean(message.status && ["failed-before-submit", "failed-confirmed", "unknown"].includes(message.status));
 }
@@ -946,8 +979,11 @@ function MessageList({
   pendingSends,
   attachmentViews,
   typingRow,
+  reactionRouteOffline = false,
 }: {
   conversation?: ConversationView;
+  /** The gateway that carries this conversation's reactions is not online. */
+  reactionRouteOffline?: boolean;
   /** Copies a refused group message's body back into the composer. Nothing is sent. */
   onEditGroupResend?(message: MessageView): void;
   /** Copies an RCS message's unsent attachments (and its text, when the text carrier was unsent) back into the composer. Nothing is sent. */
@@ -1006,6 +1042,145 @@ function MessageList({
 }) {
   const reactions = useMemo(() => showReactions && conversation ? linkReactions(conversation.messages) : NO_REACTIONS, [showReactions, conversation?.messages]);
   const [focusedNoticeId, setFocusedNoticeId] = useState<string>();
+  const reactionsEnabled = Boolean(bridge.react_to_message) && Boolean(conversation);
+  // A callback ref in state, so the listeners re-attach whenever the content node is replaced.
+  const [reactionContent, setReactionContent] = useState<HTMLDivElement | null>(null);
+  const reactionBarRef = useRef<HTMLDivElement>(null);
+  const reaction = useReactionTarget(reactionContent, reactionBarRef, reactionsEnabled);
+  const reactionEligible = (message: MessageView) => reactionsEnabled && isReactionEligible(message, conversation?.reactionSupport);
+  // Optimistic own requests (ux-design D). The overlay is only a bridge over the gap between an accepted call and the
+  // next snapshot. Any snapshot that arrives after the overlay was installed is authoritative for its message, whether
+  // or not it carries the request and whether or not the reactions changed (review round 2, R2-C).
+  const [pendingRequests, setPendingRequests] = useState<ReadonlyMap<string, PendingRequest>>(new Map());
+  const pendingRef = useRef(pendingRequests);
+  pendingRef.current = pendingRequests;
+  const snapshotSeq = useRef(0);
+  const effectiveMessages = useMemo(() => (conversation?.messages ?? []).map((message) => {
+    const pending = pendingRequests.get(message.id);
+    return pending && !message.ownReactionRequest ? { ...message, ownReactionRequest: pending.request } : message;
+  }), [conversation?.messages, pendingRequests]);
+  const messagesById = useMemo(() => new Map(effectiveMessages.map((message) => [message.id, message])), [effectiveMessages]);
+  // Each delivered snapshot advances the sequence. An overlay installed at sequence N is cleared by the first snapshot
+  // after N. A cleared overlay whose snapshot no longer carries a request settles the outcome, announced as usual.
+  useEffect(() => {
+    snapshotSeq.current += 1;
+    const seq = snapshotSeq.current;
+    const current = pendingRef.current;
+    if (!current.size) return;
+    const messages = conversation?.messages ?? [];
+    const cleared: string[] = [];
+    for (const [messageId, pending] of current) {
+      if (seq <= pending.installedAt) continue;
+      cleared.push(messageId);
+      const message = messages.find((candidate) => candidate.id === messageId);
+      if (!message || message.ownReactionRequest) continue;
+      const copy = requestAnnouncement(pending.request, undefined, nativeSelection(message));
+      if (copy.alert) announceReaction(copy.alert, true);
+      else if (copy.polite) announceReaction(copy.polite);
+    }
+    if (!cleared.length) return;
+    const next = new Map(current);
+    for (const messageId of cleared) next.delete(messageId);
+    pendingRef.current = next;
+    setPendingRequests(next);
+  }, [conversation?.messages]);
+  // Keyboard stops are articles only: media runs have their own tile focus, so they are not roving stops.
+  const roving = useRovingMessages(useMemo(() => (conversation?.messages ?? [])
+    .filter((message) => reactionEligible(message) && !isImageRun(message))
+    .map((message) => message.id), [conversation?.messages, reactionsEnabled, conversation?.reactionSupport]), reaction.reveal);
+  const [announcement, setAnnouncement] = useState<Announcement>(NO_ANNOUNCEMENT);
+  const announceReaction = useCallback((text: string, alert = false) => {
+    setAnnouncement((current) => ({ seq: current.seq + 1, polite: alert ? "" : text, alert: alert ? text : "" }));
+  }, []);
+  const textOwnStatus = useMemo(() => {
+    const states = new Map<string, OwnChipState>();
+    for (const message of conversation?.messages ?? []) {
+      const notice = reactions.notices.get(message.id);
+      if (!notice?.targetId || message.sender !== "self" || notice.action !== "add") continue;
+      states.set(notice.targetId, textChipState(message.status));
+    }
+    return states;
+  }, [conversation?.messages, reactions]);
+  const badgesFor = (message: MessageView): MergedReactionBadge[] | undefined => {
+    const current = messagesById.get(message.id) ?? message;
+    const merged = mergeReactions({ parsed: reactions.badges.get(message.id), native: current.reactions, ownRequest: current.ownReactionRequest });
+    return merged.length ? withTextStatus(merged, textOwnStatus.get(message.id)) : undefined;
+  };
+  /** Chips for a message, in its row or overlaid on a photo of a media run. */
+  const badgeElement = (message: MessageView, placement: "row" | "overlay-bottom-start") => {
+    const badges = badgesFor(message);
+    return badges && <ReactionBadges
+      messageId={message.id}
+      badges={badges}
+      actorName={actorName}
+      chipRef={chipRef}
+      placement={placement}
+      onOwnChip={(badge) => { if (badge.own?.source === "native") pickFor(message.id, null); }}
+      onRetry={(_requestId, emoji) => pickFor(message.id, emoji)}
+      onDismiss={(requestId) => { void dismissRequest(requestId); }}
+    />;
+  };
+  /** Sends a pick from a chip (retry, or removing an own chip), with its polite line. */
+  const pickFor = (messageId: string, emoji: string | null) => {
+    const message = messagesById.get(messageId);
+    const selected = message ? nativeSelection(message) : undefined;
+    announceReaction(pickAnnouncement({ route: "native", emoji: emoji ?? selected ?? "", selected, removing: emoji === null }));
+    void submitReaction(messageId, emoji);
+  };
+  /**
+   * One submit path for the bar and the chips. A rejected call is reported once and never retried. The optimistic
+   * request is held only from an accepted call, and only until the snapshot catches up.
+   */
+  const submitReaction = async (messageId: string, emoji: string | null): Promise<ReactionSubmitView | undefined> => {
+    const message = messagesById.get(messageId);
+    const previousEmoji = message ? nativeSelection(message) ?? null : null;
+    const startedAt = snapshotSeq.current;
+    let result: ReactionSubmitView | undefined;
+    try {
+      result = await bridge.react_to_message?.({ messageId, emoji });
+    } catch {
+      setPendingRequests((current) => withoutEntry(current, messageId));
+      announceReaction(UNREACHABLE_COPY, true);
+      return undefined;
+    }
+    if (!result) return undefined;
+    if (result.accepted && result.requestId) {
+      // A snapshot that arrived during the call is already authoritative for this message: no overlay is needed.
+      if (snapshotSeq.current === startedAt) {
+        const request: OwnReactionRequestView = { requestId: result.requestId, emoji, previousEmoji, state: "sending" };
+        setPendingRequests((current) => new Map(current).set(messageId, { request, installedAt: snapshotSeq.current }));
+      }
+    } else if (!result.accepted) {
+      setPendingRequests((current) => withoutEntry(current, messageId));
+      if (result.reason) announceReaction(REFUSAL_COPY[result.reason], true);
+    }
+    return result;
+  };
+  const dismissRequest = async (requestId: string) => {
+    try {
+      await bridge.dismiss_reaction_request?.({ requestId });
+    } catch {
+      announceReaction(UNREACHABLE_COPY, true);
+    }
+  };
+  // Announces request transitions (failed, unknown, and resolved to sent) as they happen, not on first render.
+  const requestStates = useRef(new Map<string, RequestSnapshot>());
+  useEffect(() => {
+    const seen = requestStates.current;
+    for (const message of conversation?.messages ?? []) {
+      const request = message.ownReactionRequest;
+      const next: RequestSnapshot | undefined = request && { requestId: request.requestId, state: request.state, emoji: request.emoji, previousEmoji: request.previousEmoji };
+      const previous = seen.get(message.id);
+      // Only a request seen before can change; a request first seen on load is not news.
+      if (previous) {
+        const copy = requestAnnouncement(previous, next, nativeSelection(message));
+        if (copy.alert) announceReaction(copy.alert, true);
+        else if (copy.polite) announceReaction(copy.polite);
+      }
+      if (next) seen.set(message.id, next);
+      else seen.delete(message.id);
+    }
+  }, [announceReaction, conversation?.messages]);
   const [cancellingMessageIds, setCancellingMessageIds] = useState<ReadonlySet<string>>(new Set());
   const [localCancellationStates, setLocalCancellationStates] = useState<ReadonlyMap<string, LocalCancellationState>>(new Map());
   const cancellingMessageIdsRef = useRef(new Set<string>());
@@ -1231,7 +1406,7 @@ function MessageList({
         {historyError && <div id="history-load-error" className="history-load-error" role="alert">Couldn&apos;t load {historyErrorDirection} messages. <button id="history-retry-button" className="history-divider-action" type="button" aria-label={`Retry loading ${historyErrorDirection} messages`} disabled={historyLoading || Boolean(detachedHistory?.pendingLoad)} onClick={historyErrorDirection === "newer" ? (event) => onLoadNewer(event.currentTarget) : (event) => onLoadOlder(event.currentTarget)}>Retry</button></div>}
         {!historyLoading && !historyError && hasOlderMessages && <button id="history-load-button" className="history-divider-action" type="button" onClick={(event) => onLoadOlder(event.currentTarget)}>Load older messages</button>}
       </div>}
-      <div id="message-list-content" aria-live={suppressHistoryAnnouncements ? "off" : undefined}>
+      <div ref={setReactionContent} id="message-list-content" aria-live={suppressHistoryAnnouncements ? "off" : undefined} onKeyDown={roving.onKeyDown}>
         {conversation.messages.filter(message => suppressed.has(message.id)).map(message => <ReactionNotice key={message.id} reaction={message} notice={reactions.notices.get(message.id)!} actorName={actorName} rowRef={row => registerRow(message.id, row)} onOpen={onOpenReactionTarget} suppressedHint />)}
         {historyExhausted && <p id="history-beginning-marker" className="history-load-band" data-history-state="beginning">Beginning of conversation</p>}
         {!visualMessages.length && <p>Start the conversation.</p>}
@@ -1250,9 +1425,9 @@ function MessageList({
             if (onEditRcsUnsent && candidate.attachments.some((attachment) => attachment.rcsSendStatus === "not_sent")) return () => onEditRcsUnsent(candidate);
             return undefined;
           };
-          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} onEditResend={resendFor(candidate)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} hasMessageAction={hasCancellationAction} renderMessageAction={(candidate) => cancellationState(candidate) === "requested" ? <SendCancellationPending messageId={candidate.id} waitingForPhone /> : cancellationState(candidate) === "too-late" || cancellationState(candidate) === "unknown" || cancellationState(candidate) === "failed" ? <span data-message-cancellation-notice={candidate.id} role="status">{cancellationState(candidate) === "too-late" ? "Cancellation was too late." : cancellationState(candidate) === "unknown" ? "Cancellation status is unknown." : "Could not request cancellation."}</span> : candidate.sender === "self" && candidate.sendCancellation?.canCancel && !candidate.sendRecovery && bridge.cancel_send ? <CancelSendControl messageId={candidate.id} disabled={cancellingMessageIds.has(candidate.id)} onCancel={() => void requestSendCancellation(candidate)} /> : undefined} isMessagePending={(candidate) => cancellationState(candidate) === "requested"} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
+          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} reactable={reactionEligible} renderBadges={(candidate) => badgeElement(candidate, "overlay-bottom-start")} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} onEditResend={resendFor(candidate)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} hasMessageAction={hasCancellationAction} renderMessageAction={(candidate) => cancellationState(candidate) === "requested" ? <SendCancellationPending messageId={candidate.id} waitingForPhone /> : cancellationState(candidate) === "too-late" || cancellationState(candidate) === "unknown" || cancellationState(candidate) === "failed" ? <span data-message-cancellation-notice={candidate.id} role="status">{cancellationState(candidate) === "too-late" ? "Cancellation was too late." : cancellationState(candidate) === "unknown" ? "Cancellation status is unknown." : "Could not request cancellation."}</span> : candidate.sender === "self" && candidate.sendCancellation?.canCancel && !candidate.sendRecovery && bridge.cancel_send ? <CancelSendControl messageId={candidate.id} disabled={cancellingMessageIds.has(candidate.id)} onCancel={() => void requestSendCancellation(candidate)} /> : undefined} isMessagePending={(candidate) => cancellationState(candidate) === "requested"} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
           if (reactionNotice) return <ReactionNotice key={message.id} reaction={message} notice={reactionNotice} actorName={actorName} rowRef={(row) => registerRow(message.id, row)} onOpen={onOpenReactionTarget} busy={pendingReactionId === message.id} feedback={reactionFeedback?.reactionId === message.id ? reactionFeedback.message : undefined} meta={showsReactionNoticeMeta(message) ? <MessageMeta message={message} /> : undefined} />;
-          const badges = reactions.badges.get(message.id);
+          const badges = badgesFor(message);
           const chromeless = message.attachments.length > 0 && message.attachments.every((attachment) => attachment.mediaType.startsWith("video/")) && !message.attachments.some((attachment) => rcsPlaceholderState(attachment));
           const messageCancellationState = cancellationState(message);
           const cancellationPending = messageCancellationState === "requested";
@@ -1262,13 +1437,21 @@ function MessageList({
           const bubbleStyle: CSSProperties | undefined = chromeless
             ? aspectRatio ? { "--video-ar": aspectRatio } as CSSProperties : undefined
             : message.sender === "other" ? toneStyle(incomingToneSeed(conversationToneSeed, message.senderAddress), toneOverrides) : undefined;
+          // The roving stop announces the reaction hint and the badge group together (ux-design E).
+          const describedBy = [
+            searchTargetId === message.id ? "search-result-message-hint" : undefined,
+            roving.stopId === message.id && reactionEligible(message) ? ["message-reaction-hint", badges ? `reactions-${message.id}` : undefined].filter(Boolean).join(" ") : undefined,
+          ].filter(Boolean).join(" ") || undefined;
           const bubble = (
             <article
               ref={(row) => registerRow(message.id, row)}
               data-message-id={message.id}
               data-search-target={searchTargetId === message.id || undefined}
-              aria-describedby={searchTargetId === message.id ? "search-result-message-hint" : undefined}
-              tabIndex={searchTargetId === message.id ? -1 : undefined}
+              aria-describedby={describedBy}
+              data-reaction-ok={reactionEligible(message) ? "" : undefined}
+              onFocus={reactionEligible(message) ? () => roving.onArticleFocus(message.id) : undefined}
+              tabIndex={searchTargetId === message.id ? -1 : reactionEligible(message) ? (roving.stopId === message.id ? 0 : -1) : message.ownReactionRequest ? -1 : undefined}
+              aria-keyshortcuts={reactionEligible(message) ? "Enter" : undefined}
               className={chromeless ? "message-bubble" : `message-bubble ${message.sender}`}
               data-chromeless={chromeless || undefined}
               data-peppy-tone={(!chromeless && message.sender === "other") || undefined}
@@ -1387,7 +1570,7 @@ function MessageList({
             >
               {sender?.labelNode}
               {sender ? <div className="message-sender-line" data-sender-line>{sender.avatar ?? (showSenderAvatars && <span className="message-sender-gutter" aria-hidden="true" />)}{bubble}</div> : bubble}
-              {badges && <ReactionBadges messageId={message.id} badges={badges} actorName={actorName} chipRef={chipRef} />}
+              {badgeElement(message, "row")}
               <MessageMeta message={message} hideTime={hiddenTimes.has(message.id)} onEditResend={resendFor(message)} onCreateAgain={onCreateGroupAgain ? () => onCreateGroupAgain(message) : undefined} />
             </div>
           );
@@ -1395,6 +1578,21 @@ function MessageList({
         {typingRow && <TypingRow {...typingRow} showSenderAvatars={showSenderAvatars} conversationToneSeed={conversationToneSeed} toneOverrides={toneOverrides} />}
       </div>
     </div>
+    {reactionsEnabled && conversation && <MessageReactionLayer
+      reaction={reaction}
+      barRef={reactionBarRef}
+      messages={messagesById}
+      reactionSupport={conversation.reactionSupport}
+      routeOffline={reactionRouteOffline}
+      nameOf={(candidate) => actorName({ sender: candidate.sender, senderAddress: candidate.senderAddress })}
+      announce={announceReaction}
+      openPicker={bridge.open_emoji_picker}
+      onSubmit={(candidate, emoji) => submitReaction(candidate.id, emoji)}
+    />}
+    {/* Outside the log: the hint and both live regions are never announced as list content. */}
+    {reactionsEnabled && <span id="message-reaction-hint" className="sr-only">Press Enter to react.</span>}
+    {reactionsEnabled && <span id="message-reaction-hint-r" className="sr-only">Press R to react.</span>}
+    <ReactionAnnouncer announcement={announcement} />
     </ReactionHintLayout>
   );
 }
@@ -5813,6 +6011,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       conversation={active}
        pendingSends={visiblePendingSendRows}
        typingRow={typingRow}
+      reactionRouteOffline={Boolean(active?.reactionGatewayId) && snapshot?.gateways.find((gateway) => gateway.id === active?.reactionGatewayId)?.online !== true}
       attachmentViews={attachmentViews}
       loading={Boolean(active) && !conversationLoaded}
       registerRow={registerRow}

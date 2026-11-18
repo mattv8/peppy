@@ -22,6 +22,8 @@ export type MediaTileProps = {
   bodyRef?: Ref<HTMLButtonElement>;
   onBodyKeyDown?: KeyboardEventHandler<HTMLButtonElement>;
   bodyAttributes?: Record<`data-${string}`, string | boolean | undefined>;
+  /** Id of the text that describes the body (for a reactable photo, the "Press R to react." hint). */
+  describedBy?: string;
   suppressHeldControl?: boolean;
 };
 
@@ -103,7 +105,7 @@ function isMenuKey(event: { key: string; shiftKey: boolean }): boolean {
   return event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey);
 }
 
-export function MediaTile({ attachment, message, variant, onOpen, label, prefetchIds = [], bodyRef, onBodyKeyDown, bodyAttributes, suppressHeldControl }: MediaTileProps) {
+export function MediaTile({ attachment, message, variant, onOpen, label, prefetchIds = [], bodyRef, onBodyKeyDown, bodyAttributes, describedBy, suppressHeldControl }: MediaTileProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const bodyElementRef = useRef<HTMLButtonElement>(null);
   const heldBodyRef = useRef<HTMLDivElement>(null);
@@ -149,7 +151,8 @@ export function MediaTile({ attachment, message, variant, onOpen, label, prefetc
       openMenu(bounds.left + 8, bounds.top + 8);
     }
   };
-  const bodyProps = { ...bodyAttributes, "data-attachment-id": attachment.id, "data-message-id": message.id };
+  // Only a reactable photo sets the key: an undefined value would overwrite a describedby set on the element itself.
+  const bodyProps = { ...bodyAttributes, "data-attachment-id": attachment.id, "data-message-id": message.id, ...(describedBy ? { "aria-describedby": describedBy } : {}) };
   const noteId = `media-hold-note-${attachment.id}`;
   useLayoutEffect(() => {
     if (previousPendingOriginal.current && !pendingOriginal && heldControlFocused.current) (bodyElementRef.current ?? rootRef.current)?.focus();
