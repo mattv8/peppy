@@ -21,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -40,7 +41,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.autofill.ContentType
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentType
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
@@ -105,7 +108,14 @@ internal class HostedEnrollmentDraft : ViewModel() {
     var passphrase by mutableStateOf<String?>(null)
     var acknowledged by mutableStateOf(false)
     var accountId: String? = null
-    fun clear() { phase = HostedPhase.Start; passphrase = null; acknowledged = false; accountId = null }
+    val passphraseSaveTracker = PassphraseSaveTracker()
+    fun clear() {
+        phase = HostedPhase.Start
+        passphrase = null
+        acknowledged = false
+        accountId = null
+        passphraseSaveTracker.reset()
+    }
     override fun onCleared() { clear() }
 }
 
@@ -123,6 +133,7 @@ internal fun HostedEnrollmentScreen(
     val draft = remember(activity) { ViewModelProvider(activity)[HostedEnrollmentDraft::class.java] }
     val scope = rememberCoroutineScope()
     val client = remember(appContext) { HostedAccountClient(AndroidHostedSecureStore(appContext)) }
+    val passphraseSaver = remember(activity) { CredentialManagerPassphraseSaver(activity) }
     var phase by draft::phase
     var displayedPassphrase by draft::passphrase
     var confirmation by remember { mutableStateOf("") }
@@ -204,8 +215,12 @@ internal fun HostedEnrollmentScreen(
                         if (candidate != null && candidate != displayedPassphrase) {
                             displayedPassphrase = candidate
                             acknowledged = false
+                            draft.passphraseSaveTracker.reset()
                         }
-                        if (displayedPassphrase == null) displayedPassphrase = generateHostedPassphrase()
+                        if (displayedPassphrase == null) {
+                            displayedPassphrase = generateHostedPassphrase()
+                            draft.passphraseSaveTracker.reset()
+                        }
                         phase = if (acknowledged) HostedPhase.Confirm else HostedPhase.Passphrase
                     }
                     else -> phase = HostedPhase.Billing
@@ -483,13 +498,30 @@ internal fun HostedEnrollmentScreen(
                 OutlinedButton(onClick = ::dismiss, modifier = Modifier.testTag("hosted-cancel-button")) { Text(stringResource(R.string.peppy_back)) }
             }
             HostedPhase.Passphrase -> {
-                Text(stringResource(R.string.peppy_passphrase_create_headline))
-                Text(displayedPassphrase.orEmpty(), Modifier.testTag("passphrase-display"))
-                androidx.compose.material3.Checkbox(acknowledged, { acknowledged = it }, Modifier.testTag("passphrase-saved-checkbox"))
-                Text(stringResource(R.string.peppy_passphrase_ack_label))
-                Button(onClick = { phase = HostedPhase.Confirm }, enabled = acknowledged, modifier = Modifier.testTag("passphrase-continue-button")) {
-                    Text(stringResource(R.string.peppy_continue))
-                }
+                HostedPassphraseStep(
+                    phrase = displayedPassphrase.orEmpty(),
+                    acknowledged = acknowledged,
+                    saveState = draft.passphraseSaveTracker.status,
+                    onAcknowledgedChange = { acknowledged = it },
+                    onSave = {
+                        val phrase = displayedPassphrase ?: return@HostedPassphraseStep
+                        val saveGeneration = draft.passphraseSaveTracker.begin() ?: return@HostedPassphraseStep
+                        scope.launch {
+                            try {
+                                val outcome = passphraseSaver.save(
+                                    resources.getString(R.string.peppy_passphrase_password_manager_username),
+                                    phrase,
+                                )
+                                if (phase == HostedPhase.Passphrase) {
+                                    draft.passphraseSaveTracker.finish(saveGeneration, outcome)
+                                }
+                            } finally {
+                                draft.passphraseSaveTracker.abandon(saveGeneration)
+                            }
+                        }
+                    },
+                    onContinue = { phase = HostedPhase.Confirm },
+                )
             }
             HostedPhase.Confirm -> {
                 Text(stringResource(R.string.peppy_passphrase_confirm_headline))
@@ -498,7 +530,10 @@ internal fun HostedEnrollmentScreen(
                     { confirmation = it; confirmationError = false },
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Password),
-                    modifier = Modifier.fillMaxWidth().testTag("passphrase-confirm-field"),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentType = ContentType.Password }
+                        .testTag("passphrase-confirm-field"),
                 )
                 if (confirmationError) Text(stringResource(R.string.peppy_passphrase_mismatch), Modifier.testTag("passphrase-confirm-error"))
                 Button(onClick = {
@@ -553,7 +588,15 @@ internal fun HostedEnrollmentScreen(
                 }
             }
         }
-        if (phase != HostedPhase.Start && phase != HostedPhase.SigningIn && phase != HostedPhase.Checking && phase != HostedPhase.Provisioning) {
+        val canSignOut = phase != HostedPhase.Start &&
+            phase != HostedPhase.SigningIn &&
+            phase != HostedPhase.Checking &&
+            phase != HostedPhase.Provisioning
+        val canDeleteAccount = phase !in setOf(HostedPhase.SigningIn, HostedPhase.Checking, HostedPhase.Provisioning)
+        if (canSignOut || canDeleteAccount) {
+            HorizontalDivider()
+        }
+        if (canSignOut) {
             OutlinedButton(onClick = {
                 startWork { stamp ->
                     try {
@@ -572,7 +615,7 @@ internal fun HostedEnrollmentScreen(
                 Text(stringResource(R.string.peppy_settings_server_sign_out))
             }
         }
-        if (phase !in setOf(HostedPhase.SigningIn, HostedPhase.Checking, HostedPhase.Provisioning)) {
+        if (canDeleteAccount) {
             val playDeletionContext by playBilling?.deletionContext?.collectAsState()
                 ?: remember { mutableStateOf(null) }
             HostedEnrollmentDeletionEntry(playDeletionContext = playDeletionContext)
