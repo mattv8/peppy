@@ -98,12 +98,16 @@ class GatewayStateStore(context: Context) {
     }
 
     /**
-     * Emits after every change to the gateway state, on the thread that wrote it. The listener is held strongly
-     * by this flow's scope: SharedPreferences keeps its listeners weakly, so a dropped reference would go silent.
+     * Emits once right after the listener is registered, then after every change to the gateway state. The first
+     * signal covers any write made before registration, so a reader that read its status before registering
+     * still reloads after the last write. The listener is held strongly by this flow's scope: SharedPreferences
+     * keeps its listeners weakly. [beforeRegistration] is a test seam that runs just before registration.
      */
-    fun changes(): Flow<Unit> = callbackFlow {
+    fun changes(beforeRegistration: suspend () -> Unit = {}): Flow<Unit> = callbackFlow {
+        beforeRegistration()
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> trySend(Unit) }
         prefs.registerOnSharedPreferenceChangeListener(listener)
+        trySend(Unit)
         awaitClose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
 
