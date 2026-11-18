@@ -143,7 +143,7 @@ if [ "$1" = import ]; then
   [ "${PEPPY_APP_STORE_FAIL-}" != "import-$import_count" ] || exit 73
 fi
 if [ "$1" = cms ]; then
-  printf '<plist><dict><key>Entitlements</key><dict><key>com.apple.developer.team-identifier</key><string>%s</string><key>application-identifier</key><string>%s</string></dict></dict></plist>\n' "${SECURITY_PROFILE_TEAM-team}" "${SECURITY_PROFILE_APPLICATION_IDENTIFIER-team.org.peppy.desktop}"
+  printf '<plist><dict><key>Entitlements</key><dict><key>com.apple.developer.team-identifier</key><string>%s</string><key>com.apple.application-identifier</key><string>%s</string></dict></dict></plist>\n' "${SECURITY_PROFILE_TEAM-team}" "${SECURITY_PROFILE_APPLICATION_IDENTIFIER-team.org.peppy.desktop}"
 fi
 SECURITY
 chmod +x "$fake_bin/security"
