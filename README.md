@@ -208,6 +208,7 @@ Peppy runs on a single node. It is not a high-availability deployment.
 - Your devices encrypt messages, attachments, and contacts before they sync. The server stores the encrypted data and never receives your Vault key phrase.
 - SMS, MMS, and RCS travel through your carrier or Google Messages, outside Peppy's encryption.
 - Everyone who knows the Vault key phrase can read the vault. Removing a device does not take the phrase away from someone who knows it. Rotating the phrase protects new messages only: anyone who had the old phrase can still read earlier history.
+- During hosted setup on a phone, you can save the Vault key phrase to your password manager. That copy is protected only by the password manager, so anyone who can open it can read the vault.
 - A public image link publishes a separate, unencrypted copy of that image. The link has its own expiry and can be revoked.
 - Turning on MCP lets the server hold keys for that vault. Webhooks send message text to the address you choose.
 - Peppy does not claim forward secrecy, and it has not had an external security audit.
