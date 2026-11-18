@@ -4290,11 +4290,9 @@ mod snapshot_too_large_gate_tests {
         // The repair is only deferred: the round that calls it must not fail, so replay, drafts and
         // outbox keep running, and the live task does not sleep out the window.
         repair_if_required(&session).await.unwrap();
-        assert!(
-            !session
-                .repair_attempted
-                .load(std::sync::atomic::Ordering::SeqCst)
-        );
+        assert!(!session
+            .repair_attempted
+            .load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4315,20 +4313,16 @@ mod snapshot_too_large_gate_tests {
             &session,
             &Err(BridgeError::new(SNAPSHOT_TOO_LARGE_CODE, "too large")),
         );
-        assert!(
-            !session
-                .repair_attempted
-                .load(std::sync::atomic::Ordering::SeqCst)
-        );
+        assert!(!session
+            .repair_attempted
+            .load(std::sync::atomic::Ordering::SeqCst));
 
         session
             .repair_attempted
             .store(true, std::sync::atomic::Ordering::SeqCst);
         settle_repair_attempt(&session, &Ok(()));
-        assert!(
-            session
-                .repair_attempted
-                .load(std::sync::atomic::Ordering::SeqCst)
-        );
+        assert!(session
+            .repair_attempted
+            .load(std::sync::atomic::Ordering::SeqCst));
     }
 }

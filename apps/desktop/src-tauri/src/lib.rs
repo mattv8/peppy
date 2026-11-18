@@ -3020,7 +3020,8 @@ async fn send_again(
         )?
     };
     let request_session = session.clone();
-    let result = blocking(move || send_again_scoped(&request_session, &input, conversation)).await?;
+    let result =
+        blocking(move || send_again_scoped(&request_session, &input, conversation)).await?;
     session.notify();
     Ok(result)
 }
@@ -3031,8 +3032,9 @@ fn send_again_scoped(
     conversation: Option<ConversationId>,
 ) -> BridgeResult<compose::SendAgainResultView> {
     if let Some(conversation) = conversation {
-        let message_id = MessageId::from_str(&input.message_id)
-            .map_err(|_| BridgeError::new("invalid-request", "This message cannot be sent again."))?;
+        let message_id = MessageId::from_str(&input.message_id).map_err(|_| {
+            BridgeError::new("invalid-request", "This message cannot be sent again.")
+        })?;
         let belongs = session
             .client
             .messages_belong_to_conversation(conversation, &[message_id])
