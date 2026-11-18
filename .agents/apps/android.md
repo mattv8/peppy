@@ -58,7 +58,7 @@ The five-second acknowledgement target applies only to a healthy network, live p
 - While the phase is `BOOTSTRAP` or `BOOTSTRAP_DRAINING`, the gateway reports `{"sims":[],"setup":{"state":"importing"}}` and no SIM routes. A `LIVE` report carries `"setup":{"state":"ready"}` and publishes the routes in the pass that becomes `LIVE`. RCS eligibility and the send-cancellation capability are not gated by phase; their outbox events cannot upload before `LIVE`.
 - `SnapshotTooLarge` is not a transient failure. The phone stores a too-large marker with its timestamp in `GatewayStateStore`, and the pass ends without a failure. A begin rejection is rechecked after 6 hours. A rejection at the byte cap, after a large download, is rechecked after 7 days. An app version change allows one attempt at once.
 - Each `LIVE` pass runs gateway phase `RETIRE_SWALLOWED` (code 24) after send cancellations and before dispatch. It retires at most 200 swallowed commands per pass and requests another pass after a full batch. A failure is recorded like any phase failure and does not block dispatch.
-- Known cost: when a 7-day byte-cap recheck is allowed, the phone clears the marker at begin and shows "Setting up" for the whole re-download before the refusal returns.
+- Known cost: when a 7-day byte-cap recheck is allowed during bootstrap, the phone clears the marker at begin and shows "Setting up" for the whole re-download before the refusal returns. A `LIVE` resync or repair retry shows no setup card.
 
 ## Advanced features (GitHub release APK)
 
