@@ -385,7 +385,8 @@ pub struct SendAgainInput {
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendAgainResultView {
-    /// The new message, whose id every device derives from the original command.
+    /// The new message: an ordinary message with its own id. The link to the original is recorded
+    /// on this device only.
     pub message_id: String,
 }
 
@@ -420,17 +421,20 @@ pub fn send_again(
     {
         return Err(ComposeError::Core(CoreError::AlreadySentAgain));
     }
-    if !recovery.is_some_and(|view| view.can_send_again) {
+    let Some(recovery) = recovery.filter(|view| view.can_send_again) else {
         return Err(ComposeError::Core(CoreError::SendAgainNotAllowed));
-    }
+    };
+    // A "not sent" message may go back through its own phone, which is ready again. A removed
+    // phone is revoked, so it is never a route; any revoked gateway is refused by the lookup.
+    let own_phone_allowed = recovery.kind == "not-sent";
     let gateway = gateways
         .and_then(|gateways| find_route(gateways, &input.gateway_id, &input.sim_id))
         .filter(|gateway| !revoked_devices.contains(&gateway.id))
-        // The original's own phone is the one being recovered from; a copy cannot go back to it.
         .filter(|gateway| {
-            message
-                .target_gateway_id
-                .is_none_or(|target| target.to_string() != gateway.id)
+            own_phone_allowed
+                || message
+                    .target_gateway_id
+                    .is_none_or(|target| target.to_string() != gateway.id)
         })
         .ok_or_else(route_unavailable)?;
     if !gateway.supports_sms {

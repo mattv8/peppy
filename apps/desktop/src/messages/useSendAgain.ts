@@ -40,11 +40,14 @@ export function useSendAgain({ message, gateways, serverOffline, store, onClose 
     return eligible.length === 1 ? eligible[0].key : undefined;
   });
   const [chosen, setChosen] = useState<string | undefined>(preselected);
+  // The preselection is in force until its selection is cleared; after that the route is an ordinary choice.
+  const [preselectionKept, setPreselectionKept] = useState(preselected !== undefined);
 
   const routes: SendAgainRoute[] = sendAgainRoutes(gateways, message, rejected);
   const eligible = routes.filter((route) => route.reason === undefined);
   const selected = eligible.find((route) => route.key === chosen);
-  const onlyKey = preselected !== undefined && eligible.length === 1 && eligible[0].key === preselected ? preselected : undefined;
+  // The read-only row only while the preselection is still the current selection; a route that comes back after being cleared is a radio.
+  const onlyKey = preselectionKept && selected !== undefined && eligible.length === 1 && selected.key === preselected ? selected.key : undefined;
   const noRoute = eligible.length === 0;
   // Any eligible route that is not selected needs an explicit choice, including one that became eligible after opening.
   const needsChoice = !noRoute && !selected;
@@ -69,9 +72,13 @@ export function useSendAgain({ message, gateways, serverOffline, store, onClose 
   const latest = useRef({ sendable });
   latest.current = { sendable };
 
-  // Clear a chosen route the moment it stops being eligible; never move the choice to another phone.
+  // Clear a chosen route the moment it stops being eligible; never move the choice to another phone. A cleared
+  // preselection stays cleared: the route can come back, but only as a radio the user explicitly chooses.
   useEffect(() => {
-    if (chosen !== undefined && !selected) setChosen(undefined);
+    if (chosen !== undefined && !selected) {
+      setChosen(undefined);
+      setPreselectionKept(false);
+    }
   }, [chosen, selected]);
 
   const close = () => {
@@ -79,7 +86,7 @@ export function useSendAgain({ message, gateways, serverOffline, store, onClose 
     closedRef.current = true;
     onClose();
   };
-  /** Success, or another send already created the message: the done row takes focus only if focus was still here. */
+  /** Success, or this device already holds its copy (already-sent-again): the done row takes focus only if focus was still here. */
   const finish = () => {
     if (closedRef.current) return;
     if (focusInsideOrLost(dialogRef.current)) store.requestDoneFocus(id);
@@ -125,7 +132,8 @@ export function useSendAgain({ message, gateways, serverOffline, store, onClose 
     if (confirmRef.current && !confirmRef.current.disabled) confirmRef.current.focus();
     else titleRef.current?.focus();
   }, [failures]);
-  // Another device (or a settled call) set sentAgain, or the message is no longer sendable: close, unless a call is pending.
+  // This device now knows its copy (a settled call here, or the local snapshot carries sentAgain), or the message is no longer
+  // sendable: close, unless a call is pending. sentAgain is device-local (R16), so other devices never reach this branch.
   useEffect(() => {
     if (callActiveRef.current) return;
     if (sentAgainId !== undefined) finish();

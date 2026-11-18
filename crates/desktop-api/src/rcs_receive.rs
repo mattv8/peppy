@@ -115,11 +115,27 @@ impl OutgoingMediaOutcome {
 }
 
 /// `revoked_devices` is the host's verified roster of revoked device ids (see `send_recovery`).
+/// The recovery state is decided last, on the final displayed transport: a message that displays
+/// as RCS, even one stored as SMS, never carries `sendRecovery`.
 pub fn message_view(
     client: &Client,
     message: &Message,
-    mut attachments: Vec<AttachmentView>,
+    attachments: Vec<AttachmentView>,
     revoked_devices: &HashSet<String>,
+) -> Result<MessageView, Error> {
+    let mut view = conversation_message_view(client, message, attachments)?;
+    view.send_recovery = if view.transport == Some("rcs") {
+        None
+    } else {
+        send_recovery_view(client, message, revoked_devices)?
+    };
+    Ok(view)
+}
+
+fn conversation_message_view(
+    client: &Client,
+    message: &Message,
+    mut attachments: Vec<AttachmentView>,
 ) -> Result<MessageView, Error> {
     let is_rcs = message.payload.transport == Transport::Rcs;
     let message_id = message.payload.record.message_id;
@@ -176,7 +192,6 @@ pub fn message_view(
     }
     let mut view = base_message_view(message, attachments);
     view.send_cancellation = send_cancellation_view(client, message)?;
-    view.send_recovery = send_recovery_view(client, message, revoked_devices)?;
     if !is_rcs && !has_outgoing_rcs_media && !has_rcs_evidence {
         return Ok(view);
     }
@@ -317,6 +332,49 @@ mod tests {
             assert_eq!(view.status_at.as_deref(), Some("2"));
             assert!(!view.rcs_reported);
         }
+    }
+
+    #[test]
+    fn a_stored_sms_that_later_displays_as_rcs_loses_its_send_recovery() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("rcs-recovery.db");
+        let client = Client::open(
+            ClientConfig {
+                database_path: path.clone(),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[7; 32]).unwrap(),
+        )
+        .unwrap();
+        let mut message = rcs_message(Some(peppy_client_core::SendState::FailedBeforeSubmission));
+        message.payload.transport = Transport::Sms;
+        message.send_route = Some(peppy_client_core::SendRouteKind::Carrier);
+
+        let before = message_view(&client, &message, vec![], &HashSet::new()).unwrap();
+        assert_eq!(before.transport, Some("sms"));
+        assert_eq!(
+            before.send_recovery.as_ref().map(|r| r.kind),
+            Some("not-sent")
+        );
+
+        // RCS evidence for the same message makes the displayed transport RCS.
+        {
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute_batch(
+                "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO rcs_message_status(message_id,status_rank,rcs_reported) VALUES(?,1,0)",
+                [message.payload.record.message_id.to_string()],
+            )
+            .unwrap();
+        }
+        let after = message_view(&client, &message, vec![], &HashSet::new()).unwrap();
+
+        assert_eq!(after.transport, Some("rcs"));
+        assert!(after.send_recovery.is_none());
     }
 
     #[test]

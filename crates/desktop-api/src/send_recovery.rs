@@ -1,7 +1,7 @@
 //! Recovery state of a carrier SMS or MMS whose send may not have reached the carrier. Native and
 //! browser hosts project it with the same function, from the message and the host's verified
 //! revoked-device set. Only display facts are returned; the core decides what a copy may do.
-use peppy_client_core::{Client, Direction, Error, Message, SendState, Transport};
+use peppy_client_core::{Client, Direction, Error, Message, SendRouteKind, SendState, Transport};
 use serde::Serialize;
 use std::collections::HashSet;
 
@@ -32,6 +32,7 @@ pub fn send_recovery_view(
 ) -> Result<Option<SendRecoveryView>, Error> {
     if message.payload.direction != Direction::Outgoing
         || !matches!(message.payload.transport, Transport::Sms | Transport::Mms)
+        || message.send_route == Some(SendRouteKind::Rcs)
     {
         return Ok(None);
     }
@@ -55,8 +56,9 @@ pub fn send_recovery_view(
         });
     // The core refuses a copy for any group conversation; `group_view` is the closest public fact.
     // It also reports a one-member roster as a group, which only hides the button (never shows one
-    // the core would refuse).
-    let can_send_again = kind != "unconfirmed-removed-cancel"
+    // the core would refuse). A route the core cannot establish (`None`) is shown but not offered.
+    let can_send_again = message.send_route == Some(SendRouteKind::Carrier)
+        && kind != "unconfirmed-removed-cancel"
         && sent_again.is_none()
         && client
             .group_view(message.payload.record.conversation_id)?
@@ -142,7 +144,7 @@ mod tests {
             target_gateway_id: Some(DeviceId::new()),
             send_cancel_requested: false,
             sent_again_message_id: None,
-            send_route: None,
+            send_route: Some(SendRouteKind::Carrier),
         }
     }
 
@@ -169,6 +171,35 @@ mod tests {
         assert_eq!(view.kind, "not-sent");
         assert!(view.can_send_again);
         assert!(view.sent_again.is_none());
+    }
+
+    #[test]
+    fn a_send_routed_over_rcs_has_no_recovery_state_even_when_stored_as_sms() {
+        let fixture = fixture();
+        let mut outgoing = message(Transport::Sms, Direction::Outgoing, ConversationId::new());
+        outgoing.send_state = Some(SendState::FailedBeforeSubmission);
+        outgoing.send_route = Some(SendRouteKind::Rcs);
+
+        assert!(project(&fixture.client, &outgoing, &HashSet::new()).is_none());
+    }
+
+    #[test]
+    fn a_send_whose_route_is_unknown_shows_the_kind_but_no_button() {
+        let fixture = fixture();
+        let mut outgoing = message(Transport::Sms, Direction::Outgoing, ConversationId::new());
+        outgoing.send_state = Some(SendState::FailedBeforeSubmission);
+        outgoing.send_route = None;
+
+        let view = project(&fixture.client, &outgoing, &HashSet::new()).unwrap();
+
+        assert_eq!(view.kind, "not-sent");
+        assert!(!view.can_send_again);
+        let mut removed = message(Transport::Sms, Direction::Outgoing, ConversationId::new());
+        removed.send_route = None;
+        let roster = revoked(&removed);
+        let view = project(&fixture.client, &removed, &roster).unwrap();
+        assert_eq!(view.kind, "unconfirmed-removed");
+        assert!(!view.can_send_again);
     }
 
     #[test]
