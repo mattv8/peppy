@@ -1,6 +1,6 @@
 import type { GatewayAvailability, GatewayView } from "@peppy/desktop-ui/bridge-contracts";
 
-/** A route choice as the composer and head panel see it (mirrors `RouteChoice` in App.tsx). */
+/** A route choice as the composer and head panel see it (mirrors `RouteChoice` in setup/routeProblem.ts). */
 export type PresentedRoute =
   | { kind: "route"; gateway: GatewayView; implicit: boolean }
   | { kind: "stale"; gatewayId: string; simId: string }

@@ -2,7 +2,8 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GatewayView } from "@peppy/desktop-ui/bridge-contracts";
-import { App, headRoutePresentation, ownerWithoutPhone, routeProblem } from "./App";
+import { App, headRoutePresentation, ownerWithoutPhone } from "./App";
+import { routeProblem } from "./setup/routeProblem";
 import { bridge, fixtureBridge, type DesktopSnapshot } from "./bridge/bridge";
 import { resolveStoredRoute, settingUpGatewayFor } from "./setup/settingUpRoute";
 

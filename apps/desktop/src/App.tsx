@@ -13,7 +13,7 @@ import {
   type WheelEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { MAX_DRAFT_ATTACHMENTS, type BillingManageableIn, type BillingProvider, type ConversationFolder, type GatewayAvailability, type LocalSearchHit, type LocalSearchRequest, type NotificationQuickReplySettings, type OneTimeCodeTarget } from "@peppy/desktop-ui/bridge-contracts";
+import { MAX_DRAFT_ATTACHMENTS, type BillingManageableIn, type BillingProvider, type ConversationFolder, type LocalSearchHit, type LocalSearchRequest, type NotificationQuickReplySettings, type OneTimeCodeTarget } from "@peppy/desktop-ui/bridge-contracts";
 import {
   AppTitlebar,
   attachmentStorageRemovalText,
@@ -127,6 +127,8 @@ import { isTauriUpdateHost, useUpdateActivity } from "./updates/updates";
 import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./shell/status";
 import { SyncTooLargeNotice } from "./shell/SyncTooLargeNotice";
 import { isSettingUp, liveSettingUpGatewayFor, resolveStoredRoute, settingUpGatewayFor } from "./setup/settingUpRoute";
+import { DEFAULT_MMS_LIMIT_BYTES, availabilityProblem, gatewayAvailability, routeProblem, type RouteChoice } from "./setup/routeProblem";
+import { fileSize } from "./fileSize";
 import { formatCopy } from "./generated/peppyCopy";
 import { SystemRibbon, SystemRibbonAnnouncement, SystemRibbonStrip } from "./notices/SystemRibbon";
 import { openAccountManageUrl, resolveSystemRibbon } from "./notices/systemRibbonModel";
@@ -158,6 +160,9 @@ import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, re
 import { MmsGroupBadge, RcsBadge } from "./rcs/RcsBadge";
 import { ConversationRcsNotice } from "./rcs/ConversationRcsNotice";
 import { RcsMessageMeta } from "./rcs/RcsMessageMeta";
+import { SEND_RECOVERY_STATUS, SendRecoveryNotice } from "./messages/SendAgain";
+import { SendAgainHost } from "./messages/SendAgainHost";
+import type { SendAgainRouteLabeler } from "./messages/SendAgainRouteList";
 import { currentRcsRoute, rcsDownloadRetryBlock, rcsSendBlock } from "./rcs/rcsRoute";
 import { canRetryRcsDownload, rcsAttachmentIndex, rcsDirection, rcsOutcomeStatus, rcsPlaceholderState } from "./rcs/rcsMediaState";
 import { RcsMediaActionsProvider } from "./rcs/RcsMediaActions";
@@ -290,7 +295,6 @@ function watchCancellationFocus(origin: HTMLElement | null): CancellationFocusIn
 }
 
 const MMS_WARNING_THRESHOLD = 0.8;
-const DEFAULT_MMS_LIMIT_BYTES = 300 * 1024;
 
 const isOlderDraftView = (current: Draft | undefined, incoming: Draft) => {
   if (!current || current.id !== incoming.id) return false;
@@ -494,12 +498,6 @@ function expiryText(seconds: number): string {
   return `Expires in ${Math.round(seconds / 86400)} days.`;
 }
 
-function fileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 function attachmentState(file: AttachmentView): string {
   if (file.state === "failed")
     return `Failed${file.error ? `: ${file.error}` : ""}`;
@@ -532,16 +530,19 @@ export function readComposerConversation(search: string): string | null {
 
 /* ------------------------------------------------------------------ gateway routes */
 
+/** Route badge text for the Send again popover: the composer's SIM and availability labels, paused wording included. */
+export function sendAgainRouteLabel(gateways: GatewayView[], accountReadOnly = false): SendAgainRouteLabeler {
+  const labels = simLabels(gateways);
+  return (gateway) => ({
+    simLabel: gateway.simId ? (labels.get(routeKey(gateway.id, gateway.simId)) ?? gateway.simId) : undefined,
+    statusLabel: availabilityLabel(gateway, accountReadOnly),
+  });
+}
+
 /** Gateway and SIM together identify a route; one device can expose several SIMs. */
 const routeKey = (gatewayId: string, simId: string) =>
   `${encodeURIComponent(gatewayId)} ${encodeURIComponent(simId)}`;
 
-type RouteChoice =
-  | { kind: "route"; gateway: GatewayView; implicit: boolean }
-  | { kind: "stale"; gatewayId: string; simId: string }
-  | { kind: "none" };
-
-function gatewayAvailability(gateway: GatewayView): GatewayAvailability { return gateway.availability ?? "unknown"; }
 function formatAge(seconds: number): string { return seconds < 60 ? "under a minute" : seconds < 3_600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3_600)}h`; }
 function simLabels(gateways: GatewayView[]): Map<string, string> {
   const labels = new Map<string, string>();
@@ -574,19 +575,6 @@ function availabilityLabel(gateway: GatewayView, accountReadOnly = false): strin
     default: return "Status unknown";
   }
 }
-function availabilityProblem(gateway: GatewayView): string | undefined {
-  switch (gatewayAvailability(gateway)) {
-    case "setting_up": return formatCopy(peppyCopy.gateway_problem_setting_up, gateway.name);
-    case "offline": return `${gateway.name} isn't responding. Sending is paused until it reconnects.`;
-    case "never_connected": return `${gateway.name} has never connected. Finish setup on the phone to enable sending.`;
-    case "no_sms_sim": return `No default SMS SIM is set on ${gateway.name}. Open the phone's SIM settings to fix this.`;
-    case "sms_permission_needed": return `Peppy needs SMS permission on ${gateway.name}. Open Peppy on the phone to grant it.`;
-    case "sms_unavailable": return `SMS is unavailable on ${gateway.name}. Check carrier settings on the phone.`;
-    case "unsupported_platform": return "Can't send SMS through Peppy on this iPhone. Select an Android phone to send.";
-    case "capabilities_unknown": return `${gateway.name}'s capabilities are unknown. Sending is paused until the phone reports in.`;
-    default: return undefined;
-  }
-}
 
 /**
  * The stored route must match a reported gateway+SIM exactly; a vanished route is reported as
@@ -601,47 +589,6 @@ function resolveRoute(
   return gateways.length === 1
     ? { kind: "route", gateway: gateways[0], implicit: true }
     : { kind: "none" };
-}
-
-/** Names the blocked phone; says another phone can send only when one exists, so the user is pointed at it. */
-function settingUpProblem(gateway: GatewayView, gateways: GatewayView[]): string {
-  const another = gateways.some((item) => item.id !== gateway.id && item.supportsSms && availabilityProblem(item) === undefined);
-  return formatCopy(another ? peppyCopy.gateway_problem_setting_up_other : peppyCopy.gateway_problem_setting_up, gateway.name);
-}
-
-export function routeProblem(
-  route: RouteChoice,
-  gateways: GatewayView[],
-  requiresMms: boolean,
-  recipientCount: number,
-  mmsPlan: ReturnType<typeof planMms>,
-  oversizedImageName?: string,
-): string | undefined {
-  if (route.kind === "none")
-    return gateways.length
-      ? "choose a phone and SIM"
-      : "no phone is configured";
-  const settingUp = settingUpGatewayFor(route, gateways);
-  if (settingUp) return settingUpProblem(settingUp, gateways);
-  if (route.kind === "stale")
-    return "the selected phone/SIM is no longer reported; choose another route";
-  const availability = availabilityProblem(route.gateway);
-  if (availability) return availability;
-  if (!requiresMms && !route.gateway.supportsSms)
-    return "this phone/SIM does not support SMS";
-  if (requiresMms && !route.gateway.supportsMms)
-    return "this phone/SIM does not support MMS attachments";
-  const contentVersion = route.gateway.mmsContentVersion;
-  if (requiresMms && (!Number.isSafeInteger(contentVersion) || (contentVersion ?? 0) < 2))
-    return "this phone/SIM needs MMS content version 2";
-  const recipientLimit = Math.min(route.gateway.mmsMaxRecipients ?? 20, 20);
-  if (requiresMms && recipientCount > recipientLimit)
-    return `this MMS route supports up to ${recipientLimit} recipients`;
-  if (requiresMms && mmsPlan.kind === "error")
-    return mmsPlan.imageId && oversizedImageName
-      ? `${oversizedImageName} cannot be resized to fit the MMS limit`
-      : `the MMS estimate exceeds the ${fileSize(route.gateway.mmsMaxBytes ?? DEFAULT_MMS_LIMIT_BYTES)} limit`;
-  return undefined;
 }
 
 const requiresMms = (content: DraftContent, conversation?: ConversationView) =>
@@ -833,7 +780,7 @@ type RowRegistry = (id: string, row: HTMLElement | null) => void;
 /** Per-send options the group refusal actions use. Omitted = the latest group revision, no duplicate confirmation. */
 type GroupSendOptions = { expectedMemberRevision?: string; groupCreateConfirmDuplicate?: boolean };
 
-function MessageMeta({ message: source, hideTime = false, onEditResend, onCreateAgain }: { message: MessageView; hideTime?: boolean; onEditResend?(): void; onCreateAgain?(): void }) {
+export function MessageMeta({ message: source, hideTime = false, onEditResend, onCreateAgain }: { message: MessageView; hideTime?: boolean; onEditResend?(): void; onCreateAgain?(): void }) {
   const message = rcsOutcomeStatus(source);
   const { displayedTime, deliveryTimeFallback, deliveryTimeUnavailable } = messageTime(message);
   const formattedTime = formatDateTime(displayedTime);
@@ -843,7 +790,8 @@ function MessageMeta({ message: source, hideTime = false, onEditResend, onCreate
   const read = rcsMessage && message.status === "read";
   const phoneHistory = !rcsMessage && message.sender === "self" && !message.status && Boolean(formattedTime);
   const compactStatus = message.status && ["gateway-persisted", "preparing", "submitted", "sent"].includes(message.status);
-  const statusLabel = message.status ? STATUS_LABEL[message.status] : undefined;
+  const recovery = message.sendRecovery;
+  const statusLabel = recovery ? SEND_RECOVERY_STATUS[recovery.kind].label : message.status ? STATUS_LABEL[message.status] : undefined;
   const validTime = Boolean(formattedTime && isoTime);
   const showTime = validTime && !hideTime;
   const deliveryLabel = deliveryTimeFallback
@@ -854,12 +802,12 @@ function MessageMeta({ message: source, hideTime = false, onEditResend, onCreate
       ? "Delivery confirmed; time unavailable"
       : "Delivery confirmed";
   const statusIcon = message.status === "sent" ? <Check size={10} aria-hidden /> : message.status === "read" ? <CheckCheck size={10} aria-hidden /> : <Clock size={10} aria-hidden />;
-  const showTextStatus = !read && !deliveryConfirmed && Boolean(statusLabel) && (!compactStatus || !validTime);
-  const showCompactStatus = !deliveryConfirmed && Boolean(compactStatus && validTime);
+  const showTextStatus = !read && !deliveryConfirmed && Boolean(statusLabel) && (Boolean(recovery) || !compactStatus || !validTime);
+  const showCompactStatus = !deliveryConfirmed && !recovery && Boolean(compactStatus && validTime);
   const hasRcsMediaIssues = rcsMessage && (message.attachments.some((attachment) => ["not_sent", "send_failed", "outcome_unknown", "members_changed"].includes(attachment.rcsSendStatus ?? "")) || message.attachments.filter((attachment) => canRetryRcsDownload(attachment.rcsState)).length >= 2);
-  if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory && !read && !message.groupHint && !hasRcsMediaIssues) return null;
+  if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory && !read && !message.groupHint && !hasRcsMediaIssues && !recovery) return null;
   return <div className="message-meta" data-message-meta={message.id} data-status={message.status} aria-live={rcsMessage ? "off" : undefined}>
-    {showTextStatus && <span className="message-meta-status">{["failed-before-submit", "failed-confirmed"].includes(message.status!) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : statusIcon}{statusLabel}</span>}
+    {showTextStatus && <span className="message-meta-status" data-recovery-tone={recovery ? SEND_RECOVERY_STATUS[recovery.kind].tone : undefined}>{recovery ? (recovery.kind === "not-sent" ? <X size={10} aria-hidden /> : <TriangleAlert size={10} aria-hidden />) : ["failed-before-submit", "failed-confirmed"].includes(message.status!) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : statusIcon}{statusLabel}</span>}
     {read && <RcsMessageMeta messageId={message.id} status={message.status} statusLabel={STATUS_LABEL[message.status!]} groupHint={message.groupHint} attachments={message.attachments} />}
     {(showTextStatus || read) && showTime && <span className="message-meta-separator" aria-hidden>·</span>}
     {showTime && <time dateTime={isoTime}>{formattedTime}</time>}
@@ -867,6 +815,7 @@ function MessageMeta({ message: source, hideTime = false, onEditResend, onCreate
     {deliveryConfirmed && <span className="message-meta-status" role="img" aria-label={deliveryLabel} title={deliveryLabel}><CheckCheck size={10} aria-hidden /></span>}
     {phoneHistory && <span className="message-meta-status" role="img" aria-label="From phone history" title="From phone history" data-message-phone-icon={message.id}><Smartphone size={10} aria-hidden /></span>}
     {(rcsMessage || message.groupHint) && !read && <RcsMessageMeta messageId={message.id} status={message.status} rcsReported={message.rcsReported} statusLabel={message.status ? STATUS_LABEL[message.status] : ""} groupHint={message.groupHint} onEditResend={onEditResend} onCreateAgain={onCreateAgain} attachments={message.attachments} />}
+    {recovery && <SendRecoveryNotice message={message} />}
   </div>;
 }
 
@@ -1075,12 +1024,14 @@ function MessageList({
     };
   }, [conversation?.id]);
   cancellationStates.current = new Map(conversation?.messages.map((message) => [message.id, message.sendCancellation?.state]) ?? []);
+  // A message in a send-recovery state is terminal: cancel cannot reach the removed phone, so no cancel control or notice.
   const cancellationState = (message: MessageView) => {
+    if (message.sendRecovery) return undefined;
     return cancellationDisplayState(message.sendCancellation?.state, localCancellationStates.get(message.id));
   };
   const hasCancellationAction = (message: MessageView) => {
     const state = cancellationState(message);
-    return state === "requested" || state === "too-late" || state === "unknown" || state === "failed" || Boolean(message.sender === "self" && message.sendCancellation?.canCancel && bridge.cancel_send);
+    return state === "requested" || state === "too-late" || state === "unknown" || state === "failed" || Boolean(message.sender === "self" && message.sendCancellation?.canCancel && !message.sendRecovery && bridge.cancel_send);
   };
   const requestSendCancellation = async (message: MessageView) => {
     if (!bridge.cancel_send || cancellingMessageIdsRef.current.has(message.id)) return;
@@ -1299,7 +1250,7 @@ function MessageList({
             if (onEditRcsUnsent && candidate.attachments.some((attachment) => attachment.rcsSendStatus === "not_sent")) return () => onEditRcsUnsent(candidate);
             return undefined;
           };
-          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} onEditResend={resendFor(candidate)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} hasMessageAction={hasCancellationAction} renderMessageAction={(candidate) => cancellationState(candidate) === "requested" ? <SendCancellationPending messageId={candidate.id} waitingForPhone /> : cancellationState(candidate) === "too-late" || cancellationState(candidate) === "unknown" || cancellationState(candidate) === "failed" ? <span data-message-cancellation-notice={candidate.id} role="status">{cancellationState(candidate) === "too-late" ? "Cancellation was too late." : cancellationState(candidate) === "unknown" ? "Cancellation status is unknown." : "Could not request cancellation."}</span> : candidate.sender === "self" && candidate.sendCancellation?.canCancel && bridge.cancel_send ? <CancelSendControl messageId={candidate.id} disabled={cancellingMessageIds.has(candidate.id)} onCancel={() => void requestSendCancellation(candidate)} /> : undefined} isMessagePending={(candidate) => cancellationState(candidate) === "requested"} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
+          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} onEditResend={resendFor(candidate)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} hasMessageAction={hasCancellationAction} renderMessageAction={(candidate) => cancellationState(candidate) === "requested" ? <SendCancellationPending messageId={candidate.id} waitingForPhone /> : cancellationState(candidate) === "too-late" || cancellationState(candidate) === "unknown" || cancellationState(candidate) === "failed" ? <span data-message-cancellation-notice={candidate.id} role="status">{cancellationState(candidate) === "too-late" ? "Cancellation was too late." : cancellationState(candidate) === "unknown" ? "Cancellation status is unknown." : "Could not request cancellation."}</span> : candidate.sender === "self" && candidate.sendCancellation?.canCancel && !candidate.sendRecovery && bridge.cancel_send ? <CancelSendControl messageId={candidate.id} disabled={cancellingMessageIds.has(candidate.id)} onCancel={() => void requestSendCancellation(candidate)} /> : undefined} isMessagePending={(candidate) => cancellationState(candidate) === "requested"} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
           if (reactionNotice) return <ReactionNotice key={message.id} reaction={message} notice={reactionNotice} actorName={actorName} rowRef={(row) => registerRow(message.id, row)} onOpen={onOpenReactionTarget} busy={pendingReactionId === message.id} feedback={reactionFeedback?.reactionId === message.id ? reactionFeedback.message : undefined} meta={showsReactionNoticeMeta(message) ? <MessageMeta message={message} /> : undefined} />;
           const badges = reactions.badges.get(message.id);
           const chromeless = message.attachments.length > 0 && message.attachments.every((attachment) => attachment.mediaType.startsWith("video/")) && !message.attachments.some((attachment) => rcsPlaceholderState(attachment));
@@ -1326,7 +1277,7 @@ function MessageList({
             >
               {sender && <span className="sr-only">From {sender.label.text}: </span>}
               {cancellationPending ? <SendCancellationPending messageId={message.id} waitingForPhone /> : <>
-                {message.sender === "self" && message.sendCancellation?.canCancel && bridge.cancel_send && <CancelSendControl messageId={message.id} disabled={cancellingMessageIds.has(message.id)} onCancel={() => void requestSendCancellation(message)} />}
+                {message.sender === "self" && message.sendCancellation?.canCancel && !message.sendRecovery && bridge.cancel_send && <CancelSendControl messageId={message.id} disabled={cancellingMessageIds.has(message.id)} onCancel={() => void requestSendCancellation(message)} />}
                 {!chromeless && message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
                 {!chromeless && message.subject && <p className="message-subject">Subject: <bdi>{message.subject}</bdi></p>}
               {message.attachments.map((file) => {
@@ -5851,6 +5802,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       if (isCurrent()) setNotice("Could not load conversation media.");
     }
   };
+  const goToLatest = () => { if (active?.id) void loadLatest(active.id).catch(reportAction("Could not load the latest messages: ")); };
   const messages = (
     <MediaActionsProvider publicCopies={publicCopies} onSave={saveGalleryAttachment} onPublish={publishGalleryAttachment} onRetry={(id) => bridge.retry_attachment(id)} requestDownload={(id) => bridge.request_attachment_download(id)} requestMediaSync={bridge.media_sync_request ? attachmentIds => bridge.media_sync_request!(attachmentIds) : undefined} loadOriginal={requestOriginal} releaseMedia={releaseMedia} canCopyImage={browserHost && clipboardImageSupported()} copyNativeImage={copyNativeImage} hydrateMediaPreview={hydrateMediaPreview}>
       <RcsMediaActionsProvider retryBlock={rcsRetryBlock} retryDownload={(messageId, attachmentIndex) => bridge.retryRcsMediaDownload(messageId, attachmentIndex)} openStorageSettings={openStorageSettings}>
@@ -5890,7 +5842,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       searchTargetId={searchTargetId}
       detachedHistory={detachedHistory?.conversationId === active?.id ? detachedHistory : undefined}
       onLoadNewer={(control) => void loadNewerMessages(control)}
-      onGoToLatest={() => active?.id && void loadLatest(active.id).catch(reportAction("Could not load the latest messages: "))}
+      onGoToLatest={goToLatest}
       compactTimestamps={compactTimestamps}
       showSenderAvatars={groupSenderAvatars}
       onOpenSender={!composerConversation ? openSender : undefined}
@@ -6035,7 +5987,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             style={overlayHeight === null ? undefined : { "--composer-overlay-height": `${overlayHeight}px` } as CSSProperties}
           >
             {revoked ? <p id="composer-recovery-notice" role="status">Reconnect this computer in the main Peppy window.</p> : <>
-              {messages}
+              <SendAgainHost conversation={active} gateways={gateways} routeLabel={sendAgainRouteLabel(gateways, accountReadOnly)} serverOffline={serverOffline} onGoToLatest={goToLatest}>{messages}</SendAgainHost>
               {recipientRail}
               {composer}
             </>}
@@ -6562,7 +6514,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                           : { "--composer-overlay-height": `${overlayHeight}px` } as CSSProperties
                     }
                   >
-                    {messages}
+                    <SendAgainHost conversation={active} gateways={gateways} routeLabel={sendAgainRouteLabel(gateways, accountReadOnly)} serverOffline={serverOffline} onGoToLatest={goToLatest}>{messages}</SendAgainHost>
                     {recipientRail}
                     {slotKey && composer}
                   </div>

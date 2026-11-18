@@ -78,7 +78,7 @@ function optionId(listboxId: string, value: string) {
   return `${listboxId}-option-${encodeURIComponent(value)}`;
 }
 
-function routeBadges(option: GatewayPickerOption, id?: string, statusOverride?: GatewayPickerProps["valueStatusOverride"]) {
+export function routeBadges(option: GatewayPickerOption, id?: string, statusOverride?: GatewayPickerProps["valueStatusOverride"]) {
   const showSim = option.simLabel && option.simLabel !== option.statusLabel;
   return (
     <span id={id} data-gateway-badges>
