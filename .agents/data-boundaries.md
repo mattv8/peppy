@@ -49,7 +49,7 @@ Agent reference for security-sensitive behavior. Preserve these boundaries when 
 ## Notification storage and authority
 
 - Notification title, text, and app metadata travel in encrypted envelopes. The server drops replay history sooner once every active device has received it; the retention period (`PEPPY_REPLAY_RETENTION_DAYS`, default 30 days) is the longest it is kept. Compatible clients can supersede state after replay retention; dismissal does not erase previously synced ciphertext immediately.
-- Notification imports share the 100,000-record snapshot limit. Coalescing and compaction reduce superseded state but do not remove legacy history or vault-wide bootstrap limits.
+- Notification imports share the 100,000-record history import budget (`RECOVERY_RECORD_BUDGET`). That budget is separate from the snapshot transport ceiling below. Coalescing and compaction reduce superseded state but do not remove legacy history from the budget or the vault-wide snapshot limits.
 - While keys are locked, notification plaintext is dropped; there is no plaintext backlog. Remote app filters apply after the phone syncs, and muting cannot recall an upload in flight.
 - Every vault-secret holder can request a phone notification dismissal. Mirroring does not encrypt carrier SMS/MMS or add forward secrecy. Push wakes carry opaque, content-free hints and are neither content nor delivery evidence.
 
@@ -70,6 +70,8 @@ Agent reference for security-sensitive behavior. Preserve these boundaries when 
 - Attachment release requires the current nonzero generation, a cutoff no later than the replay floor, and proof that every reference compacted. Private-object deletion, elapsed time, or empty references do not authorize release.
 - Superseded ciphertext is not removed immediately. Retained duplicate-detection identities continue to consume server storage after compaction.
 - Snapshot imports are staged and monotonic. A manifest resync shows the server which cursors a device lacks (cursors only, no content). Historical snapshot commands never execute carrier work. Restore guards persist before import validation, so a rejected restore is not a guarantee of unchanged local state.
+- Snapshot import has two separate limits. `MAX_SNAPSHOT_RECORDS` (1,000,000 records) is the transport ceiling for full and manifest generations. `MAX_SNAPSHOT_BYTES` (512 MiB) caps the staged ciphertext. `RECOVERY_RECORD_BUDGET` (100,000 records) is the product history-import budget that history and notification admission use; it does not limit bootstrap.
+- A snapshot above either limit returns the typed `SnapshotTooLarge` error: mobile `MobileBindingsException.SnapshotTooLarge`, desktop and browser code `snapshot-too-large`. Hosts show a "history too large for this version" state and recheck on a timer, not on every pass: phones after 6 hours when refused at begin, after 7 days when refused mid-download at the byte cap, and at once after an app version change; desktop and browser every 6 hours.
 
 ## Clean-install and rename boundaries
 
