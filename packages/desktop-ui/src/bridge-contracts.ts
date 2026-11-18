@@ -273,6 +273,8 @@ export interface DesktopBridge {
   resolve_draft_conflict(input: { draftId: string; keepBranchId: string | null }): Promise<Draft>;
   acknowledge_draft_notice(draftId: string): Promise<void>;
   retry_attachment(id: string): Promise<void>;
+  /** Asks the browser worker for one fresh history import attempt (Reload on the too-large notice). */
+  retry_snapshot_import(): Promise<void>;
   save_attachment(id: string): Promise<boolean>;
   request_attachment_download(id: string): Promise<void>;
   /** Explicit user request to release named held originals using mobile data. */

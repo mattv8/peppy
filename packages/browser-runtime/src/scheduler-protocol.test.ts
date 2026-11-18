@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SchedulerProtocol } from "./scheduler-protocol.js";
+import { CoreRejectedError } from "./core.js";
 
 const binding = { vaultId: "vault", deviceId: "device" };
 
@@ -189,4 +190,65 @@ it("preserves revocation from photo reference registration", async () => {
   };
 
   await expect(new SchedulerProtocol(session, transport, binding).run(new AbortController().signal)).rejects.toMatchObject({ kind: "revoked" });
+});
+
+describe("SchedulerProtocol refused contact repair", () => {
+  /** A round that latches contact repair and serves a compacted snapshot cut. */
+  function repairRound(options: { refused: () => boolean; snapshotGets: string[] }) {
+    const session = {
+      query: async (command: string) => {
+        if (command === "key_status") return { activeEpoch: "1", unlockedEpochs: ["1"] };
+        if (command === "compaction_status") return { server_supported: false, server_active: false };
+        if (command === "sync_work_status") return { pendingSeal: false, pendingApply: false, pendingSnapshot: false };
+        if (command === "contact_photo_transfer_state") return { uploads: [], registrations: [], reclaims: [] };
+        if (command === "contact_repair_status") return { repairRequired: true };
+        throw new Error(command);
+      },
+      mutate: async (command: string) => command === "seal_pending" ? { sealed: 0 } : { backfill_complete: true, processed: 0 },
+    };
+    const transport = {
+      json: async (path: string) => {
+        if (path === "/v1/vault") return { vault_id: "vault", device_id: "device", key_epoch: 1, profile_fingerprint: "fingerprint", public_key_profile: {}, encrypted_vault_check_header: btoa("{}") };
+        options.snapshotGets.push(path);
+        return { compaction_supported: true, compaction_active: true, compaction_generation: "3" };
+      },
+      discard: async () => undefined,
+    };
+    return { protocol: new SchedulerProtocol(session, transport, binding), refused: options.refused };
+  }
+
+  it("defers the repair without failing the round while the refusal window is open", async () => {
+    const gets: string[] = [];
+    let repaired = 0;
+    const { protocol } = repairRound({ refused: () => true, snapshotGets: gets });
+    const round = await protocol.run(new AbortController().signal, {
+      snapshotRefused: () => true,
+      repairSnapshot: async () => { repaired += 1; },
+    });
+    expect(round.repairNeeded).toBe(false);
+    expect(repaired).toBe(0);
+    // Only the base compaction probe reads the snapshot; the deferred repair fetches nothing of its own.
+    expect(gets).toEqual(["/v1/snapshot"]);
+  });
+
+  it("defers a repair refused by the window without failing the round, and runs it again once the window allows", async () => {
+    const gets: string[] = [];
+    let refuse = true;
+    let attempts = 0;
+    const { protocol } = repairRound({ refused: () => refuse, snapshotGets: gets });
+    const media = {
+      repairSnapshot: async () => {
+        attempts += 1;
+        if (refuse) throw new CoreRejectedError("snapshot-too-large");
+      },
+    };
+    const first = await protocol.run(new AbortController().signal, media);
+    expect(first.repairNeeded).toBe(false);
+    expect(attempts).toBe(1);
+
+    refuse = false;
+    const retried = await protocol.run(new AbortController().signal, media);
+    expect(attempts).toBe(2);
+    expect(retried.repairNeeded).toBe(true);
+  });
 });

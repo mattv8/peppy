@@ -653,6 +653,7 @@ export class BrowserBridge implements DesktopBridge {
   public resolve_draft_conflict(input: { draftId: string; keepBranchId: string | null }): Promise<Draft> { return this.call("resolve_draft_conflict", input); }
   public acknowledge_draft_notice(draftId: string): Promise<void> { return this.call("acknowledge_draft_notice", { draftId }); }
   public retry_attachment(id: string): Promise<void> { return this.call("retry_attachment", { id }); }
+  public retry_snapshot_import(): Promise<void> { return this.call("retry_snapshot_import", {}); }
   public retryRcsMediaDownload(messageId: string, attachmentIndex: number): Promise<void> {
     if (typeof messageId !== "string" || messageId.length === 0) return Promise.reject(new BrowserBridgeError("invalid-request", "Invalid message ID."));
     if (!Number.isInteger(attachmentIndex) || attachmentIndex < 0) return Promise.reject(new BrowserBridgeError("invalid-request", "Invalid attachment index."));

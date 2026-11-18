@@ -54,6 +54,11 @@ export class CoreRejectedError extends BrowserCoreError {
   }
 }
 
+/** The core refused a snapshot begin or append because the history is too large for this version. */
+export function isSnapshotTooLarge(error: unknown): error is CoreRejectedError {
+  return error instanceof CoreRejectedError && error.code === "snapshot-too-large";
+}
+
 function isSafeResult(value: unknown): value is CoreResult {
   return value === null || typeof value === "string" || typeof value === "number" ||
     typeof value === "boolean" || Array.isArray(value) ||

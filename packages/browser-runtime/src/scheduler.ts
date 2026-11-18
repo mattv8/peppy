@@ -1,7 +1,7 @@
 import { throwIfFatalTransferError, transferContactPhotoUploads, transferDraftUploads, transferMedia, type MediaTransferResult, type WorkerMediaBridge } from "./scheduler-media.js";
 import { SchedulerProtocol, type VaultRefresh } from "./scheduler-protocol.js";
 import { TransportError } from "./transport.js";
-import { CoreRejectedError } from "./core.js";
+import { CoreRejectedError, isSnapshotTooLarge } from "./core.js";
 import type { AttachmentRetentionDriver } from "./attachment-retention.js";
 import { DraftTransport, type DraftChangesResponse, type DraftPushWire } from "./drafts.js";
 
@@ -12,6 +12,7 @@ const MAX_REPLAY_PAGES = 20;
 const APPLY_LIMIT = 8;
 const HISTORY_WORK_STEP_LIMIT = 8;
 const MAX_SNAPSHOT_ATTEMPTS = 3;
+const SNAPSHOT_TOO_LARGE_RETRY_MS = 6 * 60 * 60 * 1000;
 /** Manifest request limit; the server clamps any larger limit to this same maximum. */
 const MAX_MANIFEST_PAGE = 5000;
 const PAGE_BYTES = 8 * 1024 * 1024;
@@ -72,6 +73,7 @@ export class BrowserScheduler {
   private draftSyncFailed = false;
   private retentionNegotiationResolved = false;
   private draftSyncEnabled?: boolean;
+  private snapshotTooLargeAt?: number;
 
   public constructor(
     private readonly session: SchedulerSession,
@@ -104,6 +106,8 @@ export class BrowserScheduler {
       .then(() => this.setStatus(this.draftSyncFailed ? "error" : "connected"))
       .catch(error => {
         if (isCancelled(error)) throw error;
+        // A refused import keeps the connection; the window was stamped where the core refused it.
+        if (isSnapshotTooLarge(error)) return this.setStatus("connected");
         return this.setStatus(statusFor(error));
       })
     this.running = running.finally(() => { this.running = undefined; this.controller = undefined; });
@@ -120,6 +124,11 @@ export class BrowserScheduler {
   public untrackHistorySearch(attemptId: string): void { this.historyAttempts.delete(attemptId); }
 
   /** Makes a previously deferred attachment eligible for the next bounded poll. */
+  /** User-requested retry (Reload): clears the window so the next round attempts one fresh import. */
+  public retrySnapshotImport(): void {
+    this.snapshotTooLargeAt = undefined;
+  }
+
   public retryAttachment(id: string): void {
     this.deferredMediaIds.delete(requiredString(id));
   }
@@ -141,6 +150,7 @@ export class BrowserScheduler {
             : async () => undefined,
           afterReferences: async () => this.recordMediaTransfer(await transferMedia(this.session, this.transport, this.options.media, signal, this.deferredMediaIds, uploadsAllowed)),
           repairSnapshot: async () => this.snapshot(signal),
+          snapshotRefused: () => this.snapshotRetryBlocked(),
         });
         this.epochValue = outcome.vault;
       } else if (this.transport.discard === undefined || !negotiationResolved) {
@@ -166,7 +176,8 @@ export class BrowserScheduler {
       await this.refreshServerContext(signal);
       await this.publishProgress("applying");
     } catch (error) {
-      await this.refreshOfflineContext(statusFor(error), signal);
+      // A refused import keeps the server reachable; it is not a connection error.
+      await this.refreshOfflineContext(isSnapshotTooLarge(error) ? "connected" : statusFor(error), signal);
       throw error;
     }
   }
@@ -302,6 +313,7 @@ export class BrowserScheduler {
         page = object(await this.transport.json(`/v1/events?after=${encodeURIComponent(cursor)}&limit=${PAGE_LIMIT}`, { method: "GET", signal, limit: PAGE_BYTES }));
       } catch (error) {
         if (isResync(error)) {
+          // Throws while the window is open: a refused import is never "caught up".
           await this.snapshot(signal);
           finalPageWasFull = false;
           continue;
@@ -384,12 +396,14 @@ export class BrowserScheduler {
   }
 
   private async snapshot(signal: AbortSignal): Promise<void> {
+    if (this.snapshotRetryBlocked()) throw new CoreRejectedError("snapshot-too-large");
     let attempt = 0;
     let fresh = false;
     let manifestAllowed = true;
     for (;;) {
       try {
         const progress = await this.startOrResumeSnapshot(signal, fresh, manifestAllowed);
+        this.snapshotTooLargeAt = undefined;
         await this.importSnapshotCut(progress, signal);
         await this.apply(signal);
         return;
@@ -400,6 +414,12 @@ export class BrowserScheduler {
           manifestAllowed = false;
           fresh = true;
           continue;
+        }
+        if (isSnapshotTooLarge(error)) {
+          // Stamp every refusal, so each later window starts from the newest rejection.
+          this.snapshotTooLargeAt = Date.now();
+          void this.refreshSnapshotTooLargeContext(signal);
+          throw error;
         }
         attempt += 1;
         if (!isResync(error) || attempt === MAX_SNAPSHOT_ATTEMPTS) throw error;
@@ -536,13 +556,43 @@ export class BrowserScheduler {
       capabilities,
       connection: this.draftSyncFailed ? "error" : "connected",
       outboxRejected: this.outboxRejected,
+      ...(this.snapshotTooLargeAt !== undefined ? { snapshotTooLarge: true } : {}),
     });
+  }
+
+  private async refreshSnapshotTooLargeContext(signal: AbortSignal | undefined): Promise<void> {
+    if (!signal || signal.aborted) return;
+    try {
+      const [devices, capabilities] = await Promise.all([
+        this.transport.json("/v1/devices", { method: "GET", signal }),
+        this.transport.json("/v1/capabilities", { method: "GET", signal }),
+      ]);
+      await this.session.query("_worker_apply_server_context", {
+        devices,
+        capabilities,
+        connection: "connected",
+        snapshotTooLarge: true,
+      });
+    } catch {
+      // The handled core rejection remains the visible state; polling will retry context refresh.
+    }
+  }
+
+  private snapshotRetryBlocked(): boolean {
+    return this.snapshotTooLargeAt !== undefined
+      && Date.now() - this.snapshotTooLargeAt < SNAPSHOT_TOO_LARGE_RETRY_MS;
   }
 
   private async refreshOfflineContext(connection: SchedulerConnection, signal: AbortSignal): Promise<void> {
     if (signal.aborted) return;
     try {
-      await this.session.query("_worker_apply_server_context", { devices: null, capabilities: null, connection });
+      // Every context write carries the refusal, or the host would clear a window that is still open.
+      await this.session.query("_worker_apply_server_context", {
+        devices: null,
+        capabilities: null,
+        connection,
+        ...(this.snapshotTooLargeAt !== undefined ? { snapshotTooLarge: true } : {}),
+      });
     } catch {
       // Context is advisory; retain the original sync error and prior Rust-validated gateways.
     }

@@ -972,6 +972,34 @@ select:focus-visible {
 /* Own-import progress: a 4px accent bar and a tabular count, sized inside the banner row. */
 #sync-progress progress { flex: 1 1 160px; min-width: 120px; height: 4px; accent-color: var(--peppy-accent); }
 #sync-progress [data-sync-count] { margin: 0; font-variant-numeric: tabular-nums; }
+/* History too large: a persistent warning strip in the same slot as #sync-progress. */
+#sync-too-large {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--peppy-warning-border);
+  background: var(--peppy-warning-surface);
+  color: var(--peppy-warning-text);
+  font-size: 12px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+#sync-too-large .sync-progress-icon { flex: 0 0 auto; color: var(--peppy-warning-text); }
+#sync-too-large .sync-progress-main { display: flex; flex: 1 1 auto; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
+#sync-too-large .sync-progress-title { margin: 0; color: var(--peppy-text-primary); font-weight: 600; }
+#sync-too-large .sync-progress-main p { margin: 0; color: var(--peppy-text-primary); }
+#sync-too-large-action { flex: 0 0 auto; }
+@media (max-width: 600px) {
+  #sync-too-large { flex-wrap: wrap; }
+  #sync-too-large .sync-progress-main { flex: 1 1 calc(100% - 22px); }
+  #sync-too-large-action { margin-inline-start: 22px; }
+}
+@media (forced-colors: active) {
+  #sync-too-large { border-bottom-color: CanvasText; }
+}
 #draft-recipients {
   position: absolute;
   z-index: 10;

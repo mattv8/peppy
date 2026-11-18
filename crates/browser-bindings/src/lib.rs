@@ -206,10 +206,15 @@ struct HostContext {
     /// Set only by the worker context path; never deserialized from renderer host context.
     #[serde(skip)]
     outbox_rejected: bool,
+    #[serde(skip)]
+    snapshot_too_large: bool,
 }
 
 fn connection_snapshot(context: &HostContext) -> (&'static str, Option<&'static str>) {
     match context.connection.as_deref() {
+        Some("connected") if context.snapshot_too_large => {
+            ("connected", Some("snapshot-too-large"))
+        }
         Some("connected") if context.outbox_rejected => ("connected", Some("outbox-rejected")),
         Some("connected") => ("connected", None),
         Some("offline") => ("offline", Some("offline")),
