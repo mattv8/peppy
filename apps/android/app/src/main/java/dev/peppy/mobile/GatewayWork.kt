@@ -340,10 +340,11 @@ class GatewaySync(
     private val processPendingSendCancellations: () -> Boolean = { client.processPendingSendCancellations() },
     /**
      * Retires commands a snapshot swallowed as history, at most one core batch per LIVE pass before
-     * dispatch. Returns true when the batch was full, so the pass asks for another pass.
+     * dispatch. Returns true while the core reports more to retire, so the pass asks for another pass.
      */
     private val retireSwallowedCommands: () -> Boolean = {
-        client.retireSwallowedCommands() >= RETIRE_SWALLOWED_BATCH.toUInt()
+        client.retireSwallowedCommands()
+        client.swallowedRetirementMoreRemains()
     },
     /** Cancellation fences phases before they admit new permits or invoke host effects. */
     private val effectPermitted: () -> Boolean = { true },
@@ -1014,8 +1015,6 @@ class GatewaySync(
     }
 
     companion object {
-        /** Must equal `RETIRE_SWALLOWED_BATCH` in `crates/client-core/src/lib.rs`. */
-        const val RETIRE_SWALLOWED_BATCH = 200
         const val EVENT_PAGE = 50
         const val RECEIVE_PAGES = 4
         const val SNAPSHOT_PAGE = 200
