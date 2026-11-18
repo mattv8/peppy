@@ -1,0 +1,147 @@
+name: Merge serializer
+
+on:
+  push:
+    branches: [production]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  pull_request_target: # zizmor: ignore[dangerous-triggers] -- metadata only; never checks out PR code
+    branches: [production]
+    types: [auto_merge_enabled, auto_merge_disabled, closed, converted_to_draft, ready_for_review, reopened, edited]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: merge-serializer-production
+  cancel-in-progress: false
+
+env:
+  BASE_BRANCH: production
+  REQUIRED_CHECKS: gate
+
+jobs:
+  advance-queue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Advance the queue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PEPPY_AUTOMATION_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::PEPPY_AUTOMATION_TOKEN is required." >&2
+            exit 1
+          fi
+          fail() {
+            echo "::error::$1" >&2
+            exit 1
+          }
+          # shellcheck disable=SC2016 # jq variables are not shell variables.
+          eligibility='def eligible_pr: .auto_merge != null and .draft == false and .base.ref == $base and .head.repo.full_name == $repo and (.head.ref | IN("production", "staging", "main", "beta") | not);'
+          valid_detail() {
+            jq -e 'type == "object" and (.number | type == "number" and . > 0 and floor == .) and (.node_id | type == "string" and length > 0) and ((.auto_merge == null) or (.auto_merge | type == "object")) and (.draft | type == "boolean") and (.base.ref | type == "string") and (.head.sha | type == "string" and length > 0) and (.head.ref | type == "string") and ((.head.repo == null) or (.head.repo.full_name | type == "string")) and (.mergeable_state | type == "string" and length > 0)' >/dev/null
+          }
+          eligible_pr() {
+            jq -e --arg repo "$REPO" --arg base "$BASE_BRANCH" "$eligibility eligible_pr" >/dev/null
+          }
+          fetch_pr() {
+            local number="$1" pr state attempt
+            for attempt in 1 2 3; do
+              pr=$(gh api "/repos/${REPO}/pulls/${number}") || return 1
+              valid_detail <<<"$pr" || return 1
+              state=$(jq -r '.mergeable_state' <<<"$pr")
+              if [ "$state" != unknown ] || [ "$attempt" -eq 3 ]; then
+                printf '%s\n' "$pr"
+                return 0
+              fi
+              echo "PR #${number}: merge state unknown; retrying (${attempt}/3)." >&2
+              sleep 2
+            done
+          }
+          branch_sha() {
+            local response
+            response=$(gh api "/repos/${REPO}/branches/${BASE_BRANCH}") || return 1
+            jq -er '.commit.sha | select(type == "string" and length > 0)' <<<"$response"
+          }
+          behind_by() {
+            local response
+            response=$(gh api "/repos/${REPO}/compare/${1}...${2}") || return 1
+            jq -er '.behind_by | select(type == "number" and . >= 0 and floor == .)' <<<"$response"
+          }
+          pages=$(gh api --paginate --slurp "/repos/${REPO}/pulls?base=${BASE_BRANCH}&state=open&sort=created&direction=asc&per_page=100") || fail "PR list API failed."
+          prs=$(jq -ce 'if type == "array" and all(.[]; type == "array") then add // [] else error("malformed pages") end | if all(.[]; type == "object" and (.number | type == "number" and . > 0 and floor == .) and (.created_at | type == "string" and length > 0) and (.draft | type == "boolean") and ((.auto_merge == null) or (.auto_merge | type == "object")) and (.base.ref | type == "string") and (.head.ref | type == "string") and ((.head.repo == null) or (.head.repo.full_name | type == "string"))) then sort_by(.created_at, .number) else error("malformed PR") end' <<<"$pages") || fail "Malformed PR list."
+          queued=$(jq -r --arg repo "$REPO" --arg base "$BASE_BRANCH" "$eligibility .[] | select(eligible_pr) | .number" <<<"$prs") || fail "Failed to filter PRs."
+          if [ -z "$queued" ]; then
+            echo "Queue empty."
+            exit 0
+          fi
+          base_sha=$(branch_sha) || fail "Branch API failed or returned malformed data."
+          candidate="" candidate_node="" candidate_sha="" hold=""
+          for number in $queued; do
+            pr=$(fetch_pr "$number") || fail "PR #${number} API failed or returned malformed data."
+            if ! eligible_pr <<<"$pr"; then
+              echo "PR #${number}: changed eligibility — skipping."
+              continue
+            fi
+            state=$(jq -r '.mergeable_state' <<<"$pr")
+            sha=$(jq -r '.head.sha' <<<"$pr")
+            behind=$(behind_by "$base_sha" "$sha") || fail "Compare API failed or returned malformed data."
+            if [ "$behind" -gt 0 ]; then
+              if [ "$state" = dirty ]; then
+                echo "PR #${number}: merge conflicts — skipping."
+              elif [ -z "$candidate" ]; then
+                candidate="$number"
+                candidate_node=$(jq -r '.node_id' <<<"$pr")
+                candidate_sha="$sha"
+                echo "PR #${number}: behind — candidate."
+              else
+                echo "PR #${number}: behind — waiting."
+              fi
+              continue
+            fi
+            checks=$(gh api --paginate --slurp "/repos/${REPO}/commits/${sha}/check-runs?per_page=100") || fail "Check runs API failed."
+            decision=$(jq -er --arg required "$REQUIRED_CHECKS" '
+              if type != "array" or (all(.[]; type == "object" and (.check_runs | type == "array")) | not) then error("malformed pages") else [.[].check_runs[]] end |
+              if all(.[]; type == "object" and (.id | type == "number") and (.name | type == "string") and (.status | type == "string") and ((.conclusion == null) or (.conclusion | type == "string"))) then . else error("malformed check") end |
+              . as $runs | [$required | split("\n")[] | select(length > 0) | . as $name | [$runs[] | select(.name == $name)] | max_by(.id)] |
+              if length == 0 then error("no required checks configured")
+              elif any(.[]; . == null or .status != "completed") then "inflight"
+              elif any(.[]; (.conclusion | IN("success", "neutral", "skipped") | not)) then "failed"
+              else "success" end' <<<"$checks") || fail "Malformed check runs."
+            if [ "$decision" = inflight ]; then
+              echo "PR #${number}: checks in flight — holding queue."
+              hold=1
+            elif [ "$decision" = failed ]; then
+              echo "PR #${number}: required check failed — skipping."
+            elif [[ "$state" = clean || "$state" = unstable || "$state" = has_hooks || "$state" = unknown ]]; then
+              echo "PR #${number}: ready for auto-merge — holding queue."
+              hold=1
+            else
+              echo "PR #${number}: ${state} — skipping."
+            fi
+          done
+          if [ -n "$hold" ] || [ -z "$candidate" ]; then
+            exit 0
+          fi
+          current=$(fetch_pr "$candidate") || fail "PR revalidation failed."
+          current_sha=$(jq -r '.head.sha' <<<"$current")
+          if ! eligible_pr <<<"$current" || [ "$current_sha" != "$candidate_sha" ]; then
+            echo "PR #${candidate}: changed before update — no-op."
+            exit 0
+          fi
+          base_sha=$(branch_sha) || fail "Branch revalidation failed."
+          behind=$(behind_by "$base_sha" "$candidate_sha") || fail "Compare revalidation failed."
+          if [ "$behind" -eq 0 ]; then
+            echo "PR #${candidate}: no longer behind — no-op."
+            exit 0
+          fi
+          # shellcheck disable=SC2016 # GraphQL variables are not shell variables.
+          query='mutation($id: ID!, $expectedHeadOid: GitObjectID!) { updatePullRequestBranch(input: {pullRequestId: $id, updateMethod: REBASE, expectedHeadOid: $expectedHeadOid}) { pullRequest { number } } }'
+          response=$(gh api graphql -f query="$query" -F id="$candidate_node" -F expectedHeadOid="$candidate_sha") || fail "Rebase update API failed."
+          jq -e --argjson number "$candidate" '(.errors // [] | length == 0) and .data.updatePullRequestBranch.pullRequest.number == $number' <<<"$response" >/dev/null || fail "Rebase update failed."
+          echo "Rebase update requested for PR #${candidate}."
