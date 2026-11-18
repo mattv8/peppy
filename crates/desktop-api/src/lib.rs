@@ -35,6 +35,8 @@ pub use search_history::*;
 pub mod send_recovery;
 pub use send_recovery::{SendRecoveryView, SentAgainView, send_recovery_view};
 #[cfg(test)]
+mod send_again_flow_tests;
+#[cfg(test)]
 mod send_again_tests;
 
 #[derive(Serialize)]

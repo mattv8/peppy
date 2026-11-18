@@ -194,6 +194,40 @@ describe("SendAgainPopover: selection rules", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("a sole preselected route that goes unavailable and returns is a selectable radio, never re-selected, and sends once", async () => {
+    const send = vi.spyOn(bridge, "send_again").mockResolvedValue({ messageId: "m1-sent-again" });
+    const { update } = renderHost({ gateways: [phone()] });
+    openSendAgain();
+    // 1. Opened with exactly one eligible route: preselected, read-only, confirm enabled.
+    expect(document.querySelector('[data-send-again-route="pixel:sim-1"]')).toHaveAttribute("data-send-again-route-state", "only");
+    expect(confirmButton()).not.toHaveAttribute("aria-disabled", "true");
+
+    // 2. Unavailable: the selection is cleared, confirm is blocked, and the reason is shown.
+    update({ gateways: [phone({ availability: "offline" })] });
+    expect(document.querySelector("[data-send-again-none]")).toBeInTheDocument();
+    expect(document.querySelector('[data-send-again-reason="pixel:sim-1"]')).toHaveTextContent("isn't responding");
+    expect(confirmButton()).toHaveAttribute("aria-disabled", "true");
+
+    // 3. Eligible again: a selectable radio, nothing selected, confirm still blocked.
+    update({ gateways: [phone()] });
+    expect(document.querySelector('[data-send-again-route="pixel:sim-1"]')).toHaveAttribute("data-send-again-route-state", "eligible");
+    const radio = document.querySelector<HTMLInputElement>('[data-send-again-route="pixel:sim-1"] input')!;
+    expect(radio).not.toBeDisabled();
+    expect(radio).not.toBeChecked();
+    expect(confirmButton()).toHaveAttribute("aria-disabled", "true");
+    expect(send).not.toHaveBeenCalled();
+
+    // 4. The user chooses it: it stays a radio (now checked) and confirm sends through it exactly once.
+    fireEvent.click(radio);
+    expect(document.querySelector<HTMLInputElement>('[data-send-again-route="pixel:sim-1"] input')).toBeChecked();
+    expect(document.querySelector('[data-send-again-route="pixel:sim-1"]')).toHaveAttribute("data-send-again-route-state", "eligible");
+    expect(confirmButton()).not.toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(confirmButton());
+    await waitFor(() => expect(popover()).toBeNull());
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({ messageId: "m1", gatewayId: "pixel", simId: "sim-1" });
+  });
+
   it("moves a preselected single route to the no-route state when it stops being eligible", () => {
     const send = vi.spyOn(bridge, "send_again").mockResolvedValue({ messageId: "x" });
     const { update } = renderHost({ gateways: [phone()] });
@@ -306,7 +340,7 @@ describe("SendAgainPopover: errors and blocks", () => {
     await waitFor(() => expect(confirmButton()).toHaveFocus());
   });
 
-  it("closes without an error when another send already created the message", async () => {
+  it("closes without an error when this device already holds its copy (already-sent-again)", async () => {
     vi.spyOn(bridge, "send_again").mockRejectedValueOnce({ code: "already-sent-again", message: "raw" });
     renderHost();
     openSendAgain();
@@ -396,7 +430,7 @@ describe("SendAgainPopover: pending, in-flight guard and host", () => {
     expect(popover()).toBeNull();
   });
 
-  it("shows the sent-again row, not the button, after its popover closes for an external sentAgain", () => {
+  it("shows the sent-again row, not the button, after its popover closes for a sentAgain the local snapshot carries", () => {
     const { update } = renderHost();
     openSendAgain();
     update({ messages: [original({ kind: "not-sent", canSendAgain: false, sentAgain: { messageId: "m1-sent-again" } })] });
@@ -481,7 +515,7 @@ describe("SendAgainPopover: close, focus and keyboard", () => {
     expect(elsewhere).toHaveFocus();
   });
 
-  it("closes when another device sets sentAgain while the popover is open, and does not steal focus from the page", () => {
+  it("closes when this device's snapshot carries sentAgain while the popover is open, and does not steal focus from the page", () => {
     const { update } = renderHost();
     openSendAgain();
     const elsewhere = document.createElement("input");
