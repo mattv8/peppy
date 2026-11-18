@@ -3980,6 +3980,11 @@ impl NativeClient {
         with_client(&self.client, Client::retire_swallowed_commands)
     }
 
+    /// Whether the last retirement stopped at a bound, so a later pass should retire again.
+    pub fn swallowed_retirement_more_remains(&self) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, Client::swallowed_retirement_more_remains)
+    }
+
     pub fn record_send_result(
         &self,
         command_id: String,

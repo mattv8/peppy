@@ -299,7 +299,7 @@ fn retirement_is_bounded_per_call_and_retires_every_swallowed_command() {
 }
 
 #[test]
-fn a_later_published_snapshot_clears_the_retirement_watermark() {
+fn a_later_published_snapshot_is_retired_from_the_saved_position() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
     let (desktop_cfg, gateway_cfg) = (
@@ -335,7 +335,7 @@ fn a_later_published_snapshot_clears_the_retirement_watermark() {
     assert_eq!(
         gateway.retire_swallowed_commands().unwrap(),
         1,
-        "the watermark no longer hides a command a later snapshot brought"
+        "a command a later snapshot brought is found after the earlier pass"
     );
 }
 
@@ -856,4 +856,84 @@ fn two_devices_sending_again_each_run_their_own_command_on_their_own_route() {
         message(&device_y, original).sent_again_message_id,
         Some(copy_y.message_id)
     );
+}
+
+#[test]
+fn history_applied_after_an_empty_retirement_pass_is_retired_later() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let (desktop_cfg, gateway_cfg) = (
+        config(&dir, "desktop", &vault),
+        config(&dir, "gateway", &vault),
+    );
+    let desktop = unlocked(&desktop_cfg, &vault);
+    let conversation = ConversationId::new();
+    desktop
+        .queue_send(sms(conversation, "waiting for keys"), route(&gateway_cfg))
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&desktop);
+
+    // Locked gateway: the snapshot imports, but its record waits in the journal for keys.
+    let gateway = open(&gateway_cfg);
+    import(&gateway, &all_records(&server), server.log.len() as u64);
+    assert_eq!(
+        gateway.apply_pending(usize::MAX).unwrap().waiting_for_keys,
+        1
+    );
+    assert_eq!(
+        gateway.retire_swallowed_commands().unwrap(),
+        0,
+        "the ledger is empty, so this pass finds nothing"
+    );
+    assert!(!gateway.swallowed_retirement_more_remains().unwrap());
+
+    // The keys arrive and the record applies. No new snapshot is imported, yet the command is retired.
+    gateway
+        .unlock(&vault.profile, &vault.header, PASSPHRASE)
+        .unwrap();
+    connect(&gateway);
+    gateway.apply_pending(usize::MAX).unwrap();
+    assert_eq!(gateway.retire_swallowed_commands().unwrap(), 1);
+
+    server.upload(&gateway);
+    server.sync(&desktop);
+    assert_eq!(
+        only_message(&desktop, conversation).send_state,
+        Some(SendState::FailedBeforeSubmission)
+    );
+}
+
+#[test]
+fn send_route_reports_the_route_a_command_was_authored_for() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let gateway_cfg = config(&dir, "gateway", &vault);
+    let desktop = unlocked(&config(&dir, "sender", &vault), &vault);
+    let conversation = ConversationId::new();
+    let carrier = desktop
+        .queue_send(sms(conversation, "carrier"), route(&gateway_cfg))
+        .unwrap();
+    let rcs = desktop
+        .queue_send(
+            sms(conversation, "rcs"),
+            GatewayRoute::RcsLink {
+                gateway_device_id: gateway_cfg.device_id,
+            },
+        )
+        .unwrap();
+    let incoming_id = desktop
+        .capture_incoming(incoming("received", "received-route"))
+        .unwrap()
+        .message_id;
+
+    assert_eq!(
+        message(&desktop, carrier.message_id).send_route,
+        Some(SendRouteKind::Carrier)
+    );
+    assert_eq!(
+        message(&desktop, rcs.message_id).send_route,
+        Some(SendRouteKind::Rcs)
+    );
+    assert_eq!(message(&desktop, incoming_id).send_route, None);
 }

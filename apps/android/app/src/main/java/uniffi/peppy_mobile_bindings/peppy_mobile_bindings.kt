@@ -1219,6 +1219,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_snapshot_projection_status(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_swallowed_retirement_more_remains(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_unlock(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_demand_rcs_media_retry_for_attachment(
@@ -1831,6 +1833,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_snapshot_projection_status(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_swallowed_retirement_more_remains(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_unlock(`ptr`: Long,`profileJson`: RustBuffer.ByValue,`headerJson`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_demand_rcs_media_retry_for_attachment(`ptr`: Long,`messageId`: RustBuffer.ByValue,`attachmentIndex`: Int,uniffi_out_err: UniffiRustCallStatus, 
@@ -3136,6 +3140,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_snapshot_projection_status() and 0xFFFF) != 18121) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_swallowed_retirement_more_remains() and 0xFFFF) != 34404) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_unlock() and 0xFFFF) != 27497) {
@@ -4469,6 +4476,11 @@ public interface NativeClientInterface {
     fun `snapshotProgress`(): NativeSnapshotProgress?
     
     fun `snapshotProjectionStatus`(): NativeSnapshotProjectionStatus?
+    
+    /**
+     * Whether the last retirement stopped at a bound, so a later pass should retire again.
+     */
+    fun `swallowedRetirementMoreRemains`(): kotlin.Boolean
     
     fun `unlock`(`profileJson`: kotlin.String, `headerJson`: kotlin.String, `passphrase`: kotlin.String)
     
@@ -7861,6 +7873,23 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     callWithHandle {
     uniffiRustCallWithError(MobileBindingsException) { _status ->
     UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_snapshot_projection_status(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Whether the last retirement stopped at a bound, so a later pass should retire again.
+     */
+    @Throws(MobileBindingsException::class)override fun `swallowedRetirementMoreRemains`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_swallowed_retirement_more_remains(
         it,
         _status)
 }
