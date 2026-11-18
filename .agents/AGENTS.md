@@ -128,6 +128,16 @@ This reference records non-obvious Peppy domain constraints.
   reference was compacted. Empty reference sets, elapsed time, or private-object
   deletion alone do not establish release authority. See
   [release proof tests](../services/server/tests/attachments.rs).
+- Reaction requests are Event-purpose payloads aimed at one gateway, not
+  commands, and never enter the received-command ledger. A device seals one
+  only for a gateway whose latest `ReactionCapability` is `supported: true`.
+  The gateway attempts a request once (`begin_reaction_attempt`); an
+  unfinished attempt becomes unknown and is never retried. Snapshot- or
+  restore-learned, retired-epoch and expired (ten minutes plus skew) requests
+  never authorize an attempt. A `MessageReactions` set from a producer not yet
+  proven to own the conversation's link is staged, not quarantined. SMS/MMS
+  reactions are ordinary outgoing texts, never sent to groups. See
+  [reactions](../crates/client-core/src/reactions.rs).
 
 ## Protocol contracts
 
