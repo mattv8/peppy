@@ -1,12 +1,15 @@
 package dev.peppy.mobile.billing
 
+import android.app.Activity
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import dev.peppy.mobile.testing.ComposeTestActivityRule
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
@@ -16,6 +19,12 @@ import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import uniffi.peppy_mobile_bindings.NativeBillingProvider
+import uniffi.peppy_mobile_bindings.NativePlayBillingContext
+import uniffi.peppy_mobile_bindings.NativePlayLinkOutcome
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -35,5 +44,105 @@ class PlaySubscriptionPanelComposeTest {
 
         compose.waitForIdle()
         compose.runOnIdle { assertEquals(2, loads.get()) }
+    }
+
+    @Test fun providerPlayHidesRestoreWhenEnrollmentSuppliesSingleCheckAction() {
+        compose.setContent {
+            MaterialTheme {
+                ProviderPlay(
+                    context = NativePlayBillingContext("account", true, "peppy.monthly", listOf("monthly"), "binding", NativeBillingProvider.PLAY),
+                    notice = null,
+                    androidContext = LocalContext.current,
+                    onRestore = {},
+                    showRestoreActions = false,
+                )
+            }
+        }
+
+        compose.onNodeWithTag("play-manage-button").fetchSemanticsNode()
+        compose.onNodeWithTag("play-restore-button").assertDoesNotExist()
+    }
+
+    @Test fun enrollmentReadyPanelHidesRestoreAction() {
+        composePanel(panelCoordinator())
+
+        compose.onNodeWithTag("play-restore-button").assertDoesNotExist()
+        compose.onNodeWithTag("play-pending-check").assertDoesNotExist()
+    }
+
+    @Test fun accountPanelKeepsRestoreActionByDefault() {
+        compose.setContent {
+            MaterialTheme {
+                PlaySubscriptionPanel(panelCoordinator(), "account", onSignIn = {})
+            }
+        }
+
+        compose.onNodeWithTag("play-restore-button").fetchSemanticsNode()
+    }
+
+    @Test fun enrollmentNotEntitlingPanelHidesRestoreAction() {
+        composePanel(panelCoordinator(purchases = listOf(panelPurchase()), outcome = NativePlayLinkOutcome.NOT_ENTITLING))
+
+        compose.onNodeWithTag("play-restore-button").assertDoesNotExist()
+        compose.onNodeWithTag("play-pending-check").assertDoesNotExist()
+    }
+
+    @Test fun enrollmentPendingPanelHidesCheckAgainAction() {
+        composePanel(panelCoordinator(purchases = listOf(panelPurchase(pending = true))))
+
+        compose.onNodeWithTag("play-restore-button").assertDoesNotExist()
+        compose.onNodeWithTag("play-pending-check").assertDoesNotExist()
+    }
+
+    private fun composePanel(coordinator: PlayBillingCoordinator) {
+        compose.setContent {
+            MaterialTheme {
+                PlaySubscriptionPanel(coordinator, "account", onSignIn = {}, showRestoreActions = false)
+            }
+        }
+    }
+
+    private fun panelCoordinator(
+        purchases: List<BillingPurchase> = emptyList(),
+        outcome: NativePlayLinkOutcome = NativePlayLinkOutcome.LINKED,
+    ): PlayBillingCoordinator {
+        val snapshot = BillingSessionSnapshot("account", "session", null)
+        val context = NativePlayBillingContext("account", true, "peppy.monthly", listOf("monthly"), "binding", NativeBillingProvider.NONE)
+        return PlayBillingCoordinator(
+            PanelHost(snapshot, context, outcome),
+            PanelGateway(purchases),
+            CoroutineScope(Job() + Dispatchers.Unconfined),
+            refreshAccount = {},
+        )
+    }
+
+    private class PanelHost(
+        private val snapshot: BillingSessionSnapshot,
+        private val context: NativePlayBillingContext,
+        private val outcome: NativePlayLinkOutcome,
+    ) : PlayBillingHost {
+        override suspend fun snapshot(accountId: String) = snapshot
+        override suspend fun context(snapshot: BillingSessionSnapshot) = context
+        override suspend fun link(
+            snapshot: BillingSessionSnapshot,
+            operationId: String,
+            productId: String,
+            token: String,
+        ) = outcome
+        override suspend fun current(snapshot: BillingSessionSnapshot) = true
+    }
+
+    private class PanelGateway(private val purchases: List<BillingPurchase>) : PlayBillingGateway {
+        override fun setEvents(listener: (Int, List<BillingPurchase>) -> Unit) = Unit
+        override fun connect(onReady: (Boolean) -> Unit) = onReady(true)
+        override fun queryOffers(productId: String, onResult: (Boolean, List<BillingOffer>) -> Unit) =
+            onResult(true, listOf(BillingOffer(productId, "monthly", "offer", "$9.99", false)))
+        override fun launch(activity: Activity, offer: BillingOffer, accountBinding: String) = 0
+        override fun queryPurchases(onResult: (Boolean, List<BillingPurchase>) -> Unit) = onResult(true, purchases)
+        override fun close() = Unit
+    }
+
+    private companion object {
+        fun panelPurchase(pending: Boolean = false) = BillingPurchase("token", listOf("peppy.monthly"), "binding", pending)
     }
 }

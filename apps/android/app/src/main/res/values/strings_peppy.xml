@@ -773,6 +773,7 @@
     <string name="peppy_play_restore_cta">Restore purchases</string>
     <string name="peppy_play_restore_working">Checking Google Play for your subscription…</string>
     <string name="peppy_play_restore_none">No Peppy subscription was found on this Google Play account.</string>
+    <string name="peppy_hosted_check_none">No Peppy subscription was found for this account or on this Google Play account.</string>
     <string name="peppy_play_pending_title">Waiting for payment approval</string>
     <string name="peppy_play_pending_body">Google Play hasn\'t finished processing this payment. Peppy access starts after it completes. You can leave this screen and check again later.</string>
     <string name="peppy_play_pending_check">Check again</string>
@@ -789,6 +790,7 @@
     <string name="peppy_play_resubscribe_cta">Resubscribe in Google Play</string>
     <string name="peppy_play_link_retry_body">Your purchase is saved in Google Play. Try again to finish linking it to your Peppy account.</string>
     <string name="peppy_play_not_active_body">Google Play didn\'t confirm an active subscription for this purchase. Try Restore purchases, or check the subscription in Google Play.</string>
+    <string name="peppy_play_not_active_body_check">Google Play didn\'t confirm an active subscription for this purchase. Check it in Google Play, then tap Check subscription.</string>
     <string name="peppy_play_other_account_title">Linked to a different Peppy account</string>
     <string name="peppy_play_other_account_body">This Google Play subscription is already linked to a different Peppy account, so it can\'t be used here. Sign in with that account, or manage the subscription in Google Play.</string>
     <string name="peppy_play_wrong_account_body">You\'re signed in to a different Peppy account than the one this purchase belongs to. Sign in with the original account to continue.</string>

@@ -40,6 +40,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -64,6 +67,8 @@ import dev.peppy.mobile.account.HostedFailure
 import dev.peppy.mobile.account.HostedAccountDeletionEntry
 import dev.peppy.mobile.account.openHostedAccountDeletion
 import dev.peppy.mobile.billing.PlayBillingCoordinator
+import dev.peppy.mobile.billing.PlayBillingNotice
+import dev.peppy.mobile.billing.PlaySubscriptionState
 import dev.peppy.mobile.billing.PlaySubscriptionPanel
 import dev.peppy.mobile.billing.isPlayDistribution
 import dev.peppy.mobile.diagnostics.HostedAuthDiagnostics
@@ -125,6 +130,8 @@ internal fun HostedEnrollmentScreen(
     var confirmationError by remember { mutableStateOf(false) }
     var work by remember { mutableStateOf<Job?>(null) }
     var generation by remember { mutableStateOf(0L) }
+    var serverCheckRunning by remember { mutableStateOf(false) }
+    var manualCheckError by remember { mutableStateOf(false) }
     val diagnostics = remember { HostedAuthDiagnostics(BuildConfig.PEPPY_HOSTED_AUTH_DIAGNOSTICS) }
 
     fun clearSecrets() {
@@ -133,6 +140,7 @@ internal fun HostedEnrollmentScreen(
         confirmationError = false
     }
     fun cancelWork(clearDraft: Boolean = true) {
+        serverCheckRunning = false
         generation++
         work?.cancel()
         work = null
@@ -145,6 +153,7 @@ internal fun HostedEnrollmentScreen(
     }
     fun fail(message: String) { phase = HostedPhase.Error(message) }
     fun startWork(block: suspend (Long) -> Unit) {
+        serverCheckRunning = false
         work?.cancel()
         client.cancelPendingWork()
         val stamp = ++generation
@@ -157,74 +166,110 @@ internal fun HostedEnrollmentScreen(
         }
     }
     fun isCurrent(stamp: Long) = stamp == generation
-    fun reconcile() = startWork { stamp ->
-        diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.STARTED)
-        phase = HostedPhase.Checking
-        try {
-            val pending = client.pendingProvisioning()?.use { it.view() }
-            val account = client.account()
-            if (!isCurrent(stamp)) {
-                diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.STALE)
-                return@startWork
-            }
-            if (draft.accountId != null && draft.accountId != account.accountId) clearSecrets()
-            draft.accountId = account.accountId
-            when {
-                pending != null && account.vaultId != null && account.vaultId != pending.vaultId -> phase = HostedPhase.ExistingVault
-                pending != null -> phase = HostedPhase.Confirm
-                account.vaultId != null -> phase = HostedPhase.ExistingVault
-                account.access == "read_write" -> {
-                    // A phrase made durable before an interrupted checkpoint write must be offered again.
-                    val candidate = client.candidatePendingSecret()
-                    if (!isCurrent(stamp)) {
-                        diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.STALE)
-                        return@startWork
-                    }
-                    if (candidate != null && candidate != displayedPassphrase) {
-                        displayedPassphrase = candidate
-                        acknowledged = false
-                    }
-                    if (displayedPassphrase == null) displayedPassphrase = generateHostedPassphrase()
-                    phase = if (acknowledged) HostedPhase.Confirm else HostedPhase.Passphrase
-                }
-                else -> phase = HostedPhase.Billing
-            }
-            diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.SUCCESS)
-        } catch (failure: HostedFailure) {
-            if (!isCurrent(stamp)) {
-                diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.STALE)
-                return@startWork
-            }
-            when (failure.kind) {
-                HostedFailure.Kind.SESSION_EXPIRED -> {
-                    diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.SESSION_EXPIRED)
-                    phase = HostedPhase.Start
-                    diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.RETURNED_START)
-                }
-                HostedFailure.Kind.WRONG_ACCOUNT -> {
-                    diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
-                    fail(resources.getString(R.string.peppy_production_account_mismatch))
-                }
-                HostedFailure.Kind.STORAGE -> {
-                    diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
-                    fail(resources.getString(R.string.peppy_production_secure_storage_failed))
-                }
-                else -> {
-                    diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
-                    fail(resources.getString(R.string.peppy_production_network_failed))
-                }
-            }
-        } catch (cancelled: CancellationException) {
-            diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.STALE)
-            throw cancelled
-        } catch (_: Exception) {
-            if (isCurrent(stamp)) {
-                diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
-                fail(resources.getString(R.string.peppy_production_network_failed))
-            } else {
-                diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.STALE)
-            }
+    fun isManualBillingCheck(manual: Boolean) = manual && (phase == HostedPhase.Billing || phase == HostedPhase.ExistingVault)
+    fun failManualBillingCheck(manual: Boolean) {
+        if (isManualBillingCheck(manual)) {
+            manualCheckError = true
+        } else {
+            fail(resources.getString(R.string.peppy_production_network_failed))
         }
+    }
+    fun reconcile(manual: Boolean = false) {
+        if (manual) manualCheckError = false
+        val phaseBeforeCheck = phase
+        startWork { stamp ->
+            var serverCheckSucceeded = false
+            diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.STARTED)
+            if (!manual) phase = HostedPhase.Checking
+            try {
+                val pending = client.pendingProvisioning()?.use { it.view() }
+                val account = client.account()
+                if (!isCurrent(stamp)) {
+                    diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.STALE)
+                    return@startWork
+                }
+                if (draft.accountId != null && draft.accountId != account.accountId) clearSecrets()
+                draft.accountId = account.accountId
+                when {
+                    pending != null && account.vaultId != null && account.vaultId != pending.vaultId -> phase = HostedPhase.ExistingVault
+                    pending != null -> phase = HostedPhase.Confirm
+                    account.vaultId != null -> phase = HostedPhase.ExistingVault
+                    account.access == "read_write" -> {
+                        // A phrase made durable before an interrupted checkpoint write must be offered again.
+                        val candidate = client.candidatePendingSecret()
+                        if (!isCurrent(stamp)) {
+                            diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.STALE)
+                            return@startWork
+                        }
+                        if (candidate != null && candidate != displayedPassphrase) {
+                            displayedPassphrase = candidate
+                            acknowledged = false
+                        }
+                        if (displayedPassphrase == null) displayedPassphrase = generateHostedPassphrase()
+                        phase = if (acknowledged) HostedPhase.Confirm else HostedPhase.Passphrase
+                    }
+                    else -> phase = HostedPhase.Billing
+                }
+                diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.SUCCESS)
+                serverCheckSucceeded = true
+            } catch (failure: HostedFailure) {
+                if (!isCurrent(stamp)) {
+                    diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.STALE)
+                    return@startWork
+                }
+                when (failure.kind) {
+                    HostedFailure.Kind.SESSION_EXPIRED -> {
+                        diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.SESSION_EXPIRED)
+                        phase = HostedPhase.Start
+                        diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.RETURNED_START)
+                    }
+                    HostedFailure.Kind.WRONG_ACCOUNT -> {
+                        diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
+                        fail(resources.getString(R.string.peppy_production_account_mismatch))
+                    }
+                    HostedFailure.Kind.STORAGE -> {
+                        diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
+                        fail(resources.getString(R.string.peppy_production_secure_storage_failed))
+                    }
+                    else -> {
+                        diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
+                        failManualBillingCheck(manual)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.STALE)
+                throw cancelled
+            } catch (_: Exception) {
+                if (isCurrent(stamp)) {
+                    diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.FAILURE)
+                    failManualBillingCheck(manual)
+                } else {
+                    diagnostics.record(HostedAuthStage.RECONCILIATION, HostedAuthOutcome.STALE)
+                }
+            } finally {
+                if (manual && isCurrent(stamp)) serverCheckRunning = false
+            }
+            if (serverCheckSucceeded && manual && phase == phaseBeforeCheck && isManualBillingCheck(manual)) playBilling?.restore()
+        }
+        if (manual) serverCheckRunning = true
+    }
+
+    LaunchedEffect(phase) {
+        manualCheckError = false
+    }
+    @Composable
+    fun PlayEnrollmentCheck(fullWidth: Boolean) {
+        val coordinator = requireNotNull(playBilling)
+        val playState by coordinator.state.collectAsState()
+        val playNotice by coordinator.notice.collectAsState()
+        HostedPlayEnrollmentCheck(
+            serverCheckRunning = serverCheckRunning,
+            playState = playState,
+            notice = playNotice,
+            hasInlineError = manualCheckError,
+            fullWidth = fullWidth,
+            onCheckAgain = { reconcile(manual = true) },
+        )
     }
 
     LaunchedEffect(client) {
@@ -232,7 +277,7 @@ internal fun HostedEnrollmentScreen(
         reconcile()
     }
     if (isPlayDistribution() && playBilling != null) {
-        HostedEnrollmentLinkReconciler(playBilling.linked, { phase }, ::reconcile)
+        HostedEnrollmentLinkReconciler(playBilling.linked, { phase }) { reconcile() }
     }
     DisposableEffect(client) {
         val lifecycle = activity.lifecycle
@@ -409,8 +454,8 @@ internal fun HostedEnrollmentScreen(
                     playContent = {
                         val coordinator = requireNotNull(playBilling)
                         Text(stringResource(R.string.peppy_hosted_subscribe_headline), style = MaterialTheme.typography.titleMedium)
-                        PlaySubscriptionPanel(coordinator, draft.accountId, onSignIn = { phase = HostedPhase.Start })
-                        HostedPlayEnrollmentCheck(::reconcile)
+                        PlaySubscriptionPanel(coordinator, draft.accountId, onSignIn = { phase = HostedPhase.Start }, showRestoreActions = false)
+                        PlayEnrollmentCheck(fullWidth = true)
                     },
                     onSubscribe = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/account/subscribe"))) },
                     onCheckAgain = ::reconcile,
@@ -419,12 +464,14 @@ internal fun HostedEnrollmentScreen(
             HostedPhase.ExistingVault -> {
                 Text(stringResource(R.string.peppy_production_existing_vault))
                 if (isPlayDistribution()) {
+                    val coordinator = requireNotNull(playBilling)
                     PlaySubscriptionPanel(
-                        coordinator = requireNotNull(playBilling),
+                        coordinator = coordinator,
                         accountId = draft.accountId,
                         onSignIn = { phase = HostedPhase.Start },
+                        showRestoreActions = false,
                     )
-                    HostedPlayEnrollmentCheck(::reconcile)
+                    PlayEnrollmentCheck(fullWidth = false)
                 } else OutlinedButton(onClick = {
                     context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/account")))
                 }, modifier = Modifier.testTag("hosted-existing-manage-account")) {
@@ -557,9 +604,38 @@ internal fun HostedEnrollmentLinkReconciler(
 }
 
 @Composable
-internal fun HostedPlayEnrollmentCheck(onCheckAgain: () -> Unit) {
-    OutlinedButton(onClick = onCheckAgain, modifier = Modifier.testTag("play-enrollment-check-again")) {
-        Text(stringResource(R.string.peppy_production_billing_check))
+internal fun HostedPlayEnrollmentCheck(
+    serverCheckRunning: Boolean,
+    playState: PlaySubscriptionState,
+    notice: PlayBillingNotice?,
+    hasInlineError: Boolean,
+    fullWidth: Boolean,
+    onCheckAgain: () -> Unit,
+) {
+    val disabledForPanel = when (playState) {
+        PlaySubscriptionState.Loading,
+        PlaySubscriptionState.Reconnecting,
+        PlaySubscriptionState.Purchasing,
+        PlaySubscriptionState.Verifying,
+        PlaySubscriptionState.RestoreWorking -> true
+        else -> false
+    }
+    OutlinedButton(
+        onClick = onCheckAgain,
+        enabled = !serverCheckRunning && !disabledForPanel,
+        modifier = (if (fullWidth) Modifier.fillMaxWidth() else Modifier).testTag("play-enrollment-check-again"),
+    ) {
+        Text(stringResource(if (serverCheckRunning || playState == PlaySubscriptionState.RestoreWorking) R.string.peppy_hosted_account_checking else R.string.peppy_production_billing_check))
+    }
+    when {
+        hasInlineError -> Text(
+            stringResource(R.string.peppy_production_network_failed),
+            Modifier.testTag("play-enrollment-check-error").semantics { liveRegion = LiveRegionMode.Polite },
+        )
+        !serverCheckRunning && notice == PlayBillingNotice.RESTORE_NONE -> Text(
+            stringResource(R.string.peppy_hosted_check_none),
+            Modifier.testTag("play-restore-none-notice").semantics { liveRegion = LiveRegionMode.Polite },
+        )
     }
 }
 
