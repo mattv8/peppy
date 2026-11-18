@@ -37,6 +37,7 @@ mod notifications;
 mod rcs_receive;
 #[cfg(test)]
 mod rcs_receive_tests;
+mod reactions;
 mod search_history;
 mod sync;
 mod typing;
@@ -375,6 +376,9 @@ impl BrowserCore {
                 self.draft_sync_command(command, args_value(raw_args)?)
             }
             "mark_seen" => self.mark_seen(args_value(raw_args)?),
+            "react_to_message" | "dismiss_reaction_request" => {
+                self.reactions_command(command, args_value(raw_args)?)
+            }
             "unread_message_batches" => self.unread_message_batches(args_value(raw_args)?),
             "mark_read_batch" => self.mark_read_batch(args_value(raw_args)?),
             _ if attachment_retention::handles(command) => {
@@ -535,6 +539,7 @@ impl BrowserCore {
             .or_else(|| conversations.first().map(|c| c.conversation_id))
             .or_else(|| drafts.first().map(|d| d.conversation_id));
         let mut views = Vec::new();
+        let reaction_gateways = self.context.gateways.as_deref().unwrap_or_default();
         for conversation in &conversations {
             let latest = client
                 .latest_message(conversation.conversation_id)
@@ -542,6 +547,11 @@ impl BrowserCore {
             let draft = drafts_by_conversation
                 .get(&conversation.conversation_id)
                 .copied();
+            let reactions = peppy_desktop_api::reactions::conversation_reactions(
+                conversation,
+                reaction_gateways,
+                draft.and_then(|draft| draft.route.as_ref()),
+            );
             let draft_only = draft
                 .map(|draft| client.compose_draft_is_new(draft.draft_id))
                 .transpose()
@@ -615,6 +625,8 @@ impl BrowserCore {
                 rcs_history_gap: rcs_metadata.is_some_and(|item| item.rcs_history_gap),
                 group: dto::conversation_group_view(client, conversation.conversation_id)
                     .map_err(core)?,
+                reaction_support: Some(reactions.support),
+                reaction_gateway_id: reactions.gateway_id,
             });
         }
         for draft in drafts
@@ -649,6 +661,8 @@ impl BrowserCore {
                 rcs_encryption: None,
                 rcs_history_gap: false,
                 group: None,
+                reaction_support: None,
+                reaction_gateway_id: None,
             });
         }
         let keys = client.key_status().map_err(core)?;

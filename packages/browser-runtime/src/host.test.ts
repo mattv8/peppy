@@ -1099,6 +1099,46 @@ describe("browser host RPC", () => {
     expect(session.calls).toEqual([{ command: "set_conversation_tone", args, mutation: true }]);
   });
 
+  it("routes reactions and their dismissal through the checkpointed mutation allowlist", async () => {
+    const session = new FakeSession();
+    const messageId = "message-1";
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "react_to_message", args: { messageId, emoji: "👍" } }))
+      .resolves.toMatchObject({ ok: true });
+    await expect(dispatchBrowserRpc(session, { id: 2, command: "react_to_message", args: { messageId, emoji: null } }))
+      .resolves.toMatchObject({ ok: true });
+    await expect(dispatchBrowserRpc(session, { id: 3, command: "dismiss_reaction_request", args: { requestId: "request-1" } }))
+      .resolves.toMatchObject({ ok: true });
+
+    expect(session.calls).toEqual([
+      { command: "react_to_message", args: { messageId, emoji: "👍" }, mutation: true },
+      { command: "react_to_message", args: { messageId, emoji: null }, mutation: true },
+      { command: "dismiss_reaction_request", args: { requestId: "request-1" }, mutation: true },
+    ]);
+  });
+
+  it("rejects malformed reaction arguments without touching the session", async () => {
+    const session = new FakeSession();
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "react_to_message", args: { messageId: "", emoji: "👍" } }))
+      .resolves.toMatchObject({ ok: false, error: { code: "invalid-request" } });
+    await expect(dispatchBrowserRpc(session, { id: 2, command: "react_to_message", args: { messageId: "message-1", emoji: 3 } }))
+      .resolves.toMatchObject({ ok: false, error: { code: "invalid-request" } });
+    await expect(dispatchBrowserRpc(session, { id: 3, command: "dismiss_reaction_request", args: {} }))
+      .resolves.toMatchObject({ ok: false, error: { code: "invalid-request" } });
+
+    expect(session.calls).toEqual([]);
+  });
+
+  it("offers no emoji picker command in the browser", async () => {
+    const session = new FakeSession();
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "open_emoji_picker", args: {} }))
+      .resolves.toMatchObject({ ok: false, error: { code: "invalid-request" } });
+
+    expect(session.calls).toEqual([]);
+  });
+
     it("checkpoints media demand and cache release instead of exposing generic core dispatch", async () => {
     const session = new FakeSession();
     const id = "00000000-0000-0000-0000-000000000001";
