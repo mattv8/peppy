@@ -101,8 +101,6 @@ class GoogleMessagesLinkService : Service() {
     private lateinit var mediaRcsSendWork: RcsNativeSendWork
     private lateinit var mediaRcsReceiveWork: RcsNativeSendWork
     private lateinit var reactionWork: RcsNativeSendWork
-    /** Written only on the notification executor, so reads and writes never race. */
-    private var publishedReactionCapability: Boolean? = null
     private lateinit var mediaFiles: RcsMediaPrivateFiles
     private lateinit var mediaQueue: RcsMediaTransferQueue
     private lateinit var typingBridge: TypingBridge
@@ -199,8 +197,12 @@ class GoogleMessagesLinkService : Service() {
             executor = NATIVE_RCS_SEND_EXECUTOR,
         )
         reactionWork = RcsNativeSendWork(
-            enabled = ::reactionsEnabled,
-            candidates = { if (reactionsEnabled()) listOf(REACTION_PASS) else emptyList() },
+            enabled = ::nativeRcsEnabled,
+            // Like the sibling queues, the link is opened only when core holds work for it.
+            candidates = {
+                val pending = NativeGateway.open(applicationContext)?.pendingReactionJobs().orEmpty()
+                if (pending.isEmpty()) emptyList() else listOf(REACTION_PASS)
+            },
             execute = { runReactionPass() },
             current = { isCurrent(lifecycleGeneration) },
             executor = NATIVE_RCS_SEND_EXECUTOR,
@@ -842,18 +844,16 @@ class GoogleMessagesLinkService : Service() {
         }
     }
 
-    /** Advertises reactions only while the feature is enabled and the link is running. Runs off the main thread. */
+    /**
+     * Advertises reactions on every status publish. Core skips an unchanged value per key epoch, so a
+     * new epoch is advertised without a local cache. Runs off the main thread.
+     */
     private fun publishReactionCapability(status: LinkStatus) {
-        val supported = NATIVE_RCS_REACTIONS_ENABLED && status.state == "linked" && status.running
-        if (supported == publishedReactionCapability) return
         runCatching {
             val client = NativeGateway.open(applicationContext) ?: return
-            client.publishReactionCapability(supported)
-            publishedReactionCapability = supported
+            client.publishReactionCapability(reactionsSupported(status))
         }.onFailure { recordGoogleMessagesLinkEvent("reaction", "capability_failed", 0) }
     }
-
-    private fun reactionsEnabled(): Boolean = NATIVE_RCS_REACTIONS_ENABLED && nativeRcsEnabled()
 
     /** One serialized pass over pending reaction jobs, off the main thread. */
     private fun runReactionPass() {
@@ -962,6 +962,9 @@ class GoogleMessagesLinkService : Service() {
         internal var testHooks = ServiceTestHooks()
         @Volatile internal var nativeRcsSendExecutorEnabledForTest: Boolean? = null
         internal fun nativeRcsEnabled(): Boolean = nativeRcsSendExecutorEnabledForTest ?: NATIVE_RCS_ENABLED
+        /** The phone can execute reaction jobs only while native RCS is on and the link is running. */
+        internal fun reactionsSupported(status: LinkStatus): Boolean =
+            nativeRcsEnabled() && status.state == "linked" && status.running
 
         fun createNotificationChannel(context: Context) {
             context.getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL_ID, context.getString(R.string.peppy_google_messages_link_notif_channel_name), NotificationManager.IMPORTANCE_LOW).apply {
@@ -1030,8 +1033,6 @@ class GoogleMessagesLinkService : Service() {
                 NotificationManagerCompat.from(context).areNotificationsEnabled()
         private const val SERVICE_STOP_JOIN_MS = 2_000L
         private const val NATIVE_RCS_ENABLED = true
-        /** Dark until the linked-phone gate passes: no capability is advertised and no reaction job runs. */
-        private const val NATIVE_RCS_REACTIONS_ENABLED = false
         private val REACTION_PASS = RcsNativeCommand("reactions", "", "")
         private val NATIVE_RCS_SEND_EXECUTOR = Executors.newSingleThreadExecutor()
         private val BLOCKED_SEND_RETRY_SCHEDULER = Executors.newSingleThreadScheduledExecutor()
