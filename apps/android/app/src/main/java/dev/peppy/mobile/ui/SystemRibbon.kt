@@ -175,6 +175,16 @@ internal fun buildSystemRibbonModel(context: Context, slot: RibbonSlot, nowMs: L
         manageUrl = null,
         dismissible = false,
     )
+    RibbonSlot.HistoryTooLarge -> SystemRibbonModel(
+        key = "history_too_large",
+        severity = NativeNoticeSeverity.WARNING,
+        title = context.getString(R.string.peppy_sync_too_large_title),
+        body = context.getString(R.string.peppy_sync_too_large_body),
+        actionLabel = context.getString(R.string.peppy_sync_stopped_action),
+        manageUrl = null,
+        dismissible = false,
+        actionDescription = context.getString(R.string.peppy_system_banner_opens_sync_details),
+    )
     is RibbonSlot.Account -> {
         val notice = slot.notice
         val copy = accountCopy(notice.kind)
@@ -272,8 +282,8 @@ internal fun SystemRibbon(model: SystemRibbonModel, linkFailed: Boolean, onActio
 private const val BODY_COLLAPSED_LINES = 3
 
 /**
- * The one global ribbon slot: sync stopped, server offline, then account read-only, then account
- * warning. It shows only for an enrolled device, and server offline only with vault keys ready (as before).
+ * The one global ribbon slot: sync stopped, server offline, history too large, then account read-only,
+ * then account warning. It shows only for an enrolled device, and server offline only with vault keys ready (as before).
  * Every NativeGateway or account read runs on [Dispatchers.IO]. Returns whether the ribbon is
  * shown, so content below it can consume the status-bar inset the ribbon already pads.
  */
@@ -284,6 +294,7 @@ internal fun SystemRibbonHost(
     syncStopped: Boolean = false,
     onOpenSyncDetails: () -> Unit = {},
     onOpenSubscription: () -> Unit = {},
+    historyTooLarge: Boolean = false,
 ): Boolean {
     if (!enrolled) return false
     val context = LocalContext.current
@@ -313,13 +324,14 @@ internal fun SystemRibbonHost(
         snoozedKeys = activeSnoozeKeys(snoozes, now),
         nowMs = now,
         syncStopped = syncStopped,
+        historyTooLarge = historyTooLarge,
     ) ?: return false
     val model = buildSystemRibbonModel(context, slot, now)
     SystemRibbon(
         model = model,
         linkFailed = linkFailed,
         onAction = {
-            if (slot is RibbonSlot.SyncStopped) onOpenSyncDetails()
+            if (slot is RibbonSlot.SyncStopped || slot is RibbonSlot.HistoryTooLarge) onOpenSyncDetails()
             else if ((slot as? RibbonSlot.Account)?.notice?.kind?.let(::accountNoticeOpensSubscription) == true) onOpenSubscription()
             else if (model.manageUrl?.let { openManageUrl(context, it) } != true) linkFailed = true
         },

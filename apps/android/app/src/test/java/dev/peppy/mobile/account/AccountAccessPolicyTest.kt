@@ -36,6 +36,9 @@ class AccountAccessPolicyTest {
     }
 
     @Test fun readOnlyErrorBeatsWarningAndReturnsWhenReachable() {
+        assertEquals(RibbonSlot.HistoryTooLarge, resolveRibbonSlot(false, notice(), emptySet(), now, historyTooLarge = true))
+        assertEquals(RibbonSlot.ServerOffline, resolveRibbonSlot(true, notice(), emptySet(), now, historyTooLarge = true))
+        assertEquals(RibbonSlot.SyncStopped, resolveRibbonSlot(false, notice(), emptySet(), now, syncStopped = true, historyTooLarge = true))
         assertEquals(RibbonSlot.Account(notice()), resolveRibbonSlot(false, notice(), emptySet(), now))
         assertEquals(RibbonSlot.Account(warning), resolveRibbonSlot(false, warning, emptySet(), now))
         assertNull(resolveRibbonSlot(false, null, emptySet(), now))

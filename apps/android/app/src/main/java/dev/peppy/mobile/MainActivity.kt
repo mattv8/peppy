@@ -126,6 +126,9 @@ import dev.peppy.mobile.sms.SmsTab
 import dev.peppy.mobile.sms.SyncDetailsRequests
 import dev.peppy.mobile.sms.StoppedSyncDetailsDialog
 import dev.peppy.mobile.sms.SyncDetailsRoute
+import dev.peppy.mobile.gateway.GatewayStateReloadEffect
+import dev.peppy.mobile.gateway.SetupFinishTracker
+import dev.peppy.mobile.gateway.historyTooLargeRibbonVisible
 import dev.peppy.mobile.sms.syncDetailsRoute
 import dev.peppy.mobile.sms.syncStopped
 import dev.peppy.mobile.ui.InfoButton
@@ -259,7 +262,7 @@ internal fun syncMessage(status: GatewayStatus): String = when {
         }
     !status.sharedKeysReady -> stringResource(R.string.peppy_not_unlocked)
     status.syncPhase == SyncPhase.LIVE -> stringResource(R.string.peppy_toggle_android_sync_ready)
-    else -> "Getting ready. Your texts will show on your other devices when this finishes."
+    else -> stringResource(R.string.peppy_toggle_android_sync_setup_body)
 }
 
 internal data class SubscriptionSelection(
@@ -420,6 +423,11 @@ private fun CompanionScreen(activity: ComponentActivity) {
         onDispose { subscriptionCoordinator?.release() }
     }
 
+    // Persisted gateway changes (setup progress, phase, too-large marker) reload only the status, coalesced; no work is enqueued.
+    GatewayStateReloadEffect(context) {
+        status = withContext(Dispatchers.IO) { NativeGateway.status(context) }
+    }
+
     LaunchedEffect(refresh, permissionRefresh) {
         val current = withContext(Dispatchers.IO) { NativeGateway.status(context) }
         if (current.sharedKeysReady) GatewayWork.ensurePeriodic(context)
@@ -435,6 +443,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
     LaunchedEffect(status?.enrolled) {
         if (status?.enrolled != true) appFiltersOpen = false
     }
+    LaunchedEffect(status) { SetupFinishTracker.observe(status) }
     LaunchedEffect(status?.enrolled, status?.origin, syncStopped(status)) {
         if (status?.enrolled != true || !syncStopped(status)) stoppedSyncDetailsOpen = false
     }
@@ -513,6 +522,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
                 enrolled = true,
                 unlocked = status?.sharedKeysReady == true,
                 syncStopped = syncStopped(status),
+                historyTooLarge = historyTooLargeRibbonVisible(status),
                 onOpenSyncDetails = {
                     settingsOpen = false
                     subscriptionOpen = false
@@ -544,6 +554,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
             enrolled = status?.enrolled == true,
             unlocked = status?.sharedKeysReady == true,
             syncStopped = syncStopped(status),
+            historyTooLarge = historyTooLargeRibbonVisible(status),
             onOpenSyncDetails = {
                 settingsOpen = false
                 subscriptionOpen = false
