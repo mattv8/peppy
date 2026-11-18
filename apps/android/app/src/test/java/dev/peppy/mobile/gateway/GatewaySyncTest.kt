@@ -755,7 +755,8 @@ class GatewaySyncTest : GatewayTestBase() {
     fun fullRetirementBatchAsksForAnotherPassAndTheRemainderFinishes() {
         val client = enrollAndUnlock()
         snapshot = JSONArray().apply {
-            repeat(GatewaySync.RETIRE_SWALLOWED_BATCH + 1) { index ->
+            // One more than the core's retirement batch of 200.
+            repeat(201) { index ->
                 val (_, wire) = desktopCommandEnvelope(SimRoutes.routeId(3), "swallowed $index")
                 put(record(index + 1, wire))
             }
