@@ -659,13 +659,13 @@ mod tests {
         let count = MAX_PREPARATION_PASSES
             * peppy_client_core::MAX_PREPARED_ATTACHMENT_RETENTION_OPERATIONS
             + 1;
-        for index in 0..count {
-            let source = fixture.dir.path().join(format!("budget-{index}.txt"));
-            fs::write(&source, b"attachment").unwrap();
-            let attachment = session
-                .client
-                .prepare_attachment(&source, "text/plain", "budget.txt")
-                .unwrap();
+        let source = fixture.dir.path().join("budget.txt");
+        fs::write(&source, b"attachment").unwrap();
+        let attachment = session
+            .client
+            .prepare_attachment(&source, "text/plain", "budget.txt")
+            .unwrap();
+        for _ in 0..count {
             session
                 .client
                 .begin_attachment_retention_use(
@@ -674,6 +674,20 @@ mod tests {
                 )
                 .unwrap();
         }
+
+        let pending = session
+            .client
+            .pending_attachment_retention_operations()
+            .unwrap();
+        assert_eq!(pending.len(), count);
+        assert!(pending
+            .iter()
+            .all(|operation| operation.attachment_id == attachment.attachment_id));
+        let pending_ids: std::collections::HashSet<_> = pending
+            .iter()
+            .map(|operation| operation.use_id.to_string())
+            .collect();
+        assert_eq!(pending_ids.len(), count);
 
         crate::sync::work_round(&session).await.unwrap();
 
@@ -695,6 +709,31 @@ mod tests {
             .iter()
             .all(|request| request.path != "/v1/attachments/reserve"));
         let requests = seen.lock().unwrap();
+        let registered: Vec<_> = requests
+            .iter()
+            .filter(|request| request.path.ends_with("/retention-uses"))
+            .map(|request| {
+                let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+                body["use_id"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert_eq!(registered.len(), count - 1);
+        let registered_ids: std::collections::HashSet<_> = registered.into_iter().collect();
+        assert_eq!(registered_ids.len(), count - 1);
+        assert!(registered_ids.is_subset(&pending_ids));
+        let remaining = session
+            .client
+            .pending_attachment_retention_operations()
+            .unwrap();
+        assert!(!registered_ids.contains(&remaining[0].use_id.to_string()));
+        assert_eq!(
+            session
+                .client
+                .attachment_info(attachment.attachment_id)
+                .unwrap()
+                .state,
+            peppy_client_core::AttachmentState::PendingUpload
+        );
         let draft_probe = requests
             .iter()
             .position(|request| request.method == "GET" && request.path.starts_with("/v1/drafts?"))
