@@ -867,6 +867,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_mms_acquisition_outcome(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_reaction_attempt(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_send_attempt(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_sender_unblock(
@@ -981,6 +983,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ingest_raw(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ingest_rcs_message_reactions(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_initial_replay_caught_up(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_install_downloaded_attachment(
@@ -1075,6 +1079,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_phone_read_effects(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_reaction_jobs(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_sender_unblocks(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_uploads(
@@ -1099,6 +1105,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_message_history_capture_source(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_reaction_capability(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_send_cancellation_capability(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_sender_blocklist(
@@ -1120,6 +1128,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_mms_backfill_recheck_outcome(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_rcs_link_lifecycle(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_reaction_outcome(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_recovery_snapshot_capacity(
     ): Int
@@ -1481,6 +1491,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_mms_acquisition_outcome(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_reaction_attempt(`ptr`: Long,`requestId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_send_attempt(`ptr`: Long,`commandId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_sender_unblock(`ptr`: Long,`requestId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1595,6 +1607,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_ingest_raw(`ptr`: Long,`envelopeJson`: RustBuffer.ByValue,`cursor`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_ingest_rcs_message_reactions(`ptr`: Long,`googleConversationId`: RustBuffer.ByValue,`googleMessageId`: RustBuffer.ByValue,`reactions`: RustBuffer.ByValue,`observedAtMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_initial_replay_caught_up(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_install_downloaded_attachment(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,`downloadedPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1689,6 +1703,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_phone_read_effects(`ptr`: Long,`nowMs`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_reaction_jobs(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_sender_unblocks(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_uploads(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1713,6 +1729,8 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_message_history_capture_source(`ptr`: Long,`facts`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_reaction_capability(`ptr`: Long,`supported`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_send_cancellation_capability(`ptr`: Long,`supported`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_sender_blocklist(`ptr`: Long,`numbers`: RustBuffer.ByValue,`canUnblock`: Byte,uniffi_out_err: UniffiRustCallStatus, 
@@ -1734,6 +1752,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_mms_backfill_recheck_outcome(`ptr`: Long,`acquisitionId`: RustBuffer.ByValue,`nowMs`: Long,`outcome`: RustBuffer.ByValue,`conditions`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_rcs_link_lifecycle(`ptr`: Long,`state`: RustBuffer.ByValue,`availability`: Byte,`health`: Byte,`phoneResponsive`: Byte,`observedAtMs`: Long,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_reaction_outcome(`ptr`: Long,`requestId`: RustBuffer.ByValue,`outcome`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_recovery_snapshot_capacity(`ptr`: Long,`highWaterCursor`: RustBuffer.ByValue,`recordCount`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -2614,6 +2634,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_mms_acquisition_outcome() and 0xFFFF) != 53880) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_reaction_attempt() and 0xFFFF) != 44924) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_send_attempt() and 0xFFFF) != 43275) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2785,6 +2808,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ingest_raw() and 0xFFFF) != 45413) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ingest_rcs_message_reactions() and 0xFFFF) != 47343) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_initial_replay_caught_up() and 0xFFFF) != 37136) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2926,6 +2952,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_phone_read_effects() and 0xFFFF) != 55700) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_reaction_jobs() and 0xFFFF) != 22692) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_sender_unblocks() and 0xFFFF) != 42922) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2962,6 +2991,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_message_history_capture_source() and 0xFFFF) != 6609) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_reaction_capability() and 0xFFFF) != 30354) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_send_cancellation_capability() and 0xFFFF) != 8795) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2993,6 +3025,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_rcs_link_lifecycle() and 0xFFFF) != 61306) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_reaction_outcome() and 0xFFFF) != 716) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_recovery_snapshot_capacity() and 0xFFFF) != 22677) {
@@ -3967,6 +4002,8 @@ public interface NativeClientInterface {
     
     fun `beginMmsAcquisitionOutcome`(`input`: NativeMmsAcquisitionInput): NativeMmsBeginOutcome
     
+    fun `beginReactionAttempt`(`requestId`: kotlin.String): NativeReactionAttemptDecision
+    
     /**
      * A carrier API may be invoked only when this returns NativePermitState::Permit.
      */
@@ -4151,6 +4188,12 @@ public interface NativeClientInterface {
      */
     fun `ingestRaw`(`envelopeJson`: kotlin.ByteArray, `cursor`: kotlin.String): NativeIngestResult
     
+    /**
+     * Publishes this gateway's reaction set for one RCS message when it changed. Returns whether
+     * a `MessageReactions` event was published.
+     */
+    fun `ingestRcsMessageReactions`(`googleConversationId`: kotlin.String, `googleMessageId`: kotlin.String, `reactions`: List<NativeRcsReactionEntry>, `observedAtMs`: kotlin.Long): kotlin.Boolean
+    
     fun `initialReplayCaughtUp`(): kotlin.Boolean
     
     fun `installDownloadedAttachment`(`attachmentId`: kotlin.String, `downloadedPath`: kotlin.String)
@@ -4279,6 +4322,8 @@ public interface NativeClientInterface {
     
     fun `pendingPhoneReadEffects`(`nowMs`: kotlin.Long, `limit`: kotlin.UInt): List<NativePhoneReadEffect>
     
+    fun `pendingReactionJobs`(): List<NativeReactionJob>
+    
     fun `pendingSenderUnblocks`(): List<NativeSenderUnblockWork>
     
     fun `pendingUploads`(): List<NativeCipherObject>
@@ -4314,6 +4359,8 @@ public interface NativeClientInterface {
      * them to the protocol's decimal control generation.
      */
     fun `publishMessageHistoryCaptureSource`(`facts`: NativeMessageHistorySourceFacts): kotlin.String
+    
+    fun `publishReactionCapability`(`supported`: kotlin.Boolean)
     
     fun `publishSendCancellationCapability`(`supported`: kotlin.Boolean)
     
@@ -4353,6 +4400,8 @@ public interface NativeClientInterface {
      * Records the local Google Messages lifecycle and publishes its content-free status.
      */
     fun `recordRcsLinkLifecycle`(`state`: NativeRcsLinkState, `availability`: kotlin.Boolean, `health`: kotlin.Boolean, `phoneResponsive`: kotlin.Boolean, `observedAtMs`: kotlin.Long, `nowMs`: kotlin.Long)
+    
+    fun `recordReactionOutcome`(`requestId`: kotlin.String, `outcome`: NativeReactionOutcome, `reason`: NativeReactionRefusal?)
     
     fun `recordRecoverySnapshotCapacity`(`highWaterCursor`: kotlin.String, `recordCount`: kotlin.ULong)
     
@@ -5021,6 +5070,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterTypeNativeMmsAcquisitionInput.lower(`input`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `beginReactionAttempt`(`requestId`: kotlin.String): NativeReactionAttemptDecision {
+            return FfiConverterTypeNativeReactionAttemptDecision.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_reaction_attempt(
+        it,
+        
+        FfiConverterString.lower(`requestId`),_status)
 }
     }
     )
@@ -5974,6 +6038,28 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    /**
+     * Publishes this gateway's reaction set for one RCS message when it changed. Returns whether
+     * a `MessageReactions` event was published.
+     */
+    @Throws(MobileBindingsException::class)override fun `ingestRcsMessageReactions`(`googleConversationId`: kotlin.String, `googleMessageId`: kotlin.String, `reactions`: List<NativeRcsReactionEntry>, `observedAtMs`: kotlin.Long): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_ingest_rcs_message_reactions(
+        it,
+        
+        FfiConverterString.lower(`googleConversationId`),
+        FfiConverterString.lower(`googleMessageId`),
+        FfiConverterSequenceTypeNativeRcsReactionEntry.lower(`reactions`),
+        FfiConverterLong.lower(`observedAtMs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `initialReplayCaughtUp`(): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithHandle {
@@ -6702,6 +6788,20 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `pendingReactionJobs`(): List<NativeReactionJob> {
+            return FfiConverterSequenceTypeNativeReactionJob.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_reaction_jobs(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `pendingSenderUnblocks`(): List<NativeSenderUnblockWork> {
             return FfiConverterSequenceTypeNativeSenderUnblockWork.lift(
     callWithHandle {
@@ -6906,6 +7006,20 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `publishReactionCapability`(`supported`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_reaction_capability(
+        it,
+        
+        FfiConverterBoolean.lower(`supported`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `publishSendCancellationCapability`(`supported`: kotlin.Boolean)
         = 
     callWithHandle {
@@ -7092,6 +7206,22 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         FfiConverterBoolean.lower(`phoneResponsive`),
         FfiConverterLong.lower(`observedAtMs`),
         FfiConverterLong.lower(`nowMs`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `recordReactionOutcome`(`requestId`: kotlin.String, `outcome`: NativeReactionOutcome, `reason`: NativeReactionRefusal?)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_reaction_outcome(
+        it,
+        
+        FfiConverterString.lower(`requestId`),
+        FfiConverterTypeNativeReactionOutcome.lower(`outcome`),
+        FfiConverterOptionalTypeNativeReactionRefusal.lower(`reason`),_status)
 }
     }
     
@@ -15892,6 +16022,57 @@ public object FfiConverterTypeNativeRcsProviderRoute: FfiConverterRustBuffer<Nat
 
 
 
+/**
+ * One reaction entry as the RCS link reported it, before core canonicalises the addresses.
+ */
+data class NativeRcsReactionEntry (
+    var `emoji`: kotlin.String
+    , 
+    var `isSelf`: kotlin.Boolean
+    , 
+    var `addresses`: List<kotlin.String>
+    , 
+    var `unresolvedActors`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeRcsReactionEntry: FfiConverterRustBuffer<NativeRcsReactionEntry> {
+    override fun read(buf: ByteBuffer): NativeRcsReactionEntry {
+        return NativeRcsReactionEntry(
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeRcsReactionEntry) = (
+            FfiConverterString.allocationSize(value.`emoji`) +
+            FfiConverterBoolean.allocationSize(value.`isSelf`) +
+            FfiConverterSequenceString.allocationSize(value.`addresses`) +
+            FfiConverterUInt.allocationSize(value.`unresolvedActors`)
+    )
+
+    override fun write(value: NativeRcsReactionEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`emoji`, buf)
+            FfiConverterBoolean.write(value.`isSelf`, buf)
+            FfiConverterSequenceString.write(value.`addresses`, buf)
+            FfiConverterUInt.write(value.`unresolvedActors`, buf)
+    }
+}
+
+
+
 data class NativeRcsReceiveContext (
     var `conversationId`: kotlin.String
     , 
@@ -16045,6 +16226,117 @@ public object FfiConverterTypeNativeRcsUnlinkCutoverGenerations: FfiConverterRus
     override fun write(value: NativeRcsUnlinkCutoverGenerations, buf: ByteBuffer) {
             FfiConverterULong.write(value.`ownershipGeneration`, buf)
             FfiConverterULong.write(value.`lifecycleGeneration`, buf)
+    }
+}
+
+
+
+data class NativeReactionAttemptDecision (
+    var `permitted`: kotlin.Boolean
+    , 
+    var `requestId`: kotlin.String?
+    , 
+    var `googleConversationId`: kotlin.String?
+    , 
+    var `googleMessageId`: kotlin.String?
+    , 
+    var `action`: NativeReactionAction?
+    , 
+    var `emoji`: kotlin.String?
+    , 
+    var `reason`: NativeReactionRefusal?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeReactionAttemptDecision: FfiConverterRustBuffer<NativeReactionAttemptDecision> {
+    override fun read(buf: ByteBuffer): NativeReactionAttemptDecision {
+        return NativeReactionAttemptDecision(
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeNativeReactionAction.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeNativeReactionRefusal.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeReactionAttemptDecision) = (
+            FfiConverterBoolean.allocationSize(value.`permitted`) +
+            FfiConverterOptionalString.allocationSize(value.`requestId`) +
+            FfiConverterOptionalString.allocationSize(value.`googleConversationId`) +
+            FfiConverterOptionalString.allocationSize(value.`googleMessageId`) +
+            FfiConverterOptionalTypeNativeReactionAction.allocationSize(value.`action`) +
+            FfiConverterOptionalString.allocationSize(value.`emoji`) +
+            FfiConverterOptionalTypeNativeReactionRefusal.allocationSize(value.`reason`)
+    )
+
+    override fun write(value: NativeReactionAttemptDecision, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`permitted`, buf)
+            FfiConverterOptionalString.write(value.`requestId`, buf)
+            FfiConverterOptionalString.write(value.`googleConversationId`, buf)
+            FfiConverterOptionalString.write(value.`googleMessageId`, buf)
+            FfiConverterOptionalTypeNativeReactionAction.write(value.`action`, buf)
+            FfiConverterOptionalString.write(value.`emoji`, buf)
+            FfiConverterOptionalTypeNativeReactionRefusal.write(value.`reason`, buf)
+    }
+}
+
+
+
+data class NativeReactionJob (
+    var `requestId`: kotlin.String
+    , 
+    var `messageId`: kotlin.String
+    , 
+    var `conversationId`: kotlin.String
+    , 
+    var `emoji`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeReactionJob: FfiConverterRustBuffer<NativeReactionJob> {
+    override fun read(buf: ByteBuffer): NativeReactionJob {
+        return NativeReactionJob(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeReactionJob) = (
+            FfiConverterString.allocationSize(value.`requestId`) +
+            FfiConverterString.allocationSize(value.`messageId`) +
+            FfiConverterString.allocationSize(value.`conversationId`) +
+            FfiConverterOptionalString.allocationSize(value.`emoji`)
+    )
+
+    override fun write(value: NativeReactionJob, buf: ByteBuffer) {
+            FfiConverterString.write(value.`requestId`, buf)
+            FfiConverterString.write(value.`messageId`, buf)
+            FfiConverterString.write(value.`conversationId`, buf)
+            FfiConverterOptionalString.write(value.`emoji`, buf)
     }
 }
 
@@ -20107,6 +20399,116 @@ public object FfiConverterTypeNativeRcsTargetDecision : FfiConverterRustBuffer<N
 
 
 
+enum class NativeReactionAction {
+    
+    ADD,
+    SWITCH,
+    REMOVE,
+    NOOP;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeReactionAction: FfiConverterRustBuffer<NativeReactionAction> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeReactionAction.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeReactionAction) = 4UL
+
+    override fun write(value: NativeReactionAction, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeReactionOutcome {
+    
+    SENT,
+    UNKNOWN,
+    NOT_SENT;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeReactionOutcome: FfiConverterRustBuffer<NativeReactionOutcome> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeReactionOutcome.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeReactionOutcome) = 4UL
+
+    override fun write(value: NativeReactionOutcome, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeReactionRefusal {
+    
+    EXPIRED,
+    MESSAGE_UNAVAILABLE,
+    NOT_RCS,
+    LINK_UNAVAILABLE,
+    REJECTED,
+    BUSY,
+    INVALID_EMOJI;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeReactionRefusal: FfiConverterRustBuffer<NativeReactionRefusal> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeReactionRefusal.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeReactionRefusal) = 4UL
+
+    override fun write(value: NativeReactionRefusal, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 enum class NativeRemoteAttachmentState {
     
     AVAILABLE,
@@ -21343,6 +21745,70 @@ public object FfiConverterOptionalTypeNativeRcsProviderRouteReason: FfiConverter
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeNativeReactionAction: FfiConverterRustBuffer<NativeReactionAction?> {
+    override fun read(buf: ByteBuffer): NativeReactionAction? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeReactionAction.read(buf)
+    }
+
+    override fun allocationSize(value: NativeReactionAction?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeReactionAction.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeReactionAction?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeReactionAction.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNativeReactionRefusal: FfiConverterRustBuffer<NativeReactionRefusal?> {
+    override fun read(buf: ByteBuffer): NativeReactionRefusal? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeReactionRefusal.read(buf)
+    }
+
+    override fun allocationSize(value: NativeReactionRefusal?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeReactionRefusal.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeReactionRefusal?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeReactionRefusal.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeNativeStorageCleanupUnavailableReason: FfiConverterRustBuffer<NativeStorageCleanupUnavailableReason?> {
     override fun read(buf: ByteBuffer): NativeStorageCleanupUnavailableReason? {
         if (buf.get().toInt() == 0) {
@@ -22079,6 +22545,34 @@ public object FfiConverterSequenceTypeNativeRcsOwnerUnlinkCutoverCandidate: FfiC
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeNativeRcsReactionEntry: FfiConverterRustBuffer<List<NativeRcsReactionEntry>> {
+    override fun read(buf: ByteBuffer): List<NativeRcsReactionEntry> {
+        val len = buf.getInt()
+        return List<NativeRcsReactionEntry>(len) {
+            FfiConverterTypeNativeRcsReactionEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativeRcsReactionEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativeRcsReactionEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativeRcsReactionEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativeRcsReactionEntry.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeNativeRcsReceiveContext: FfiConverterRustBuffer<List<NativeRcsReceiveContext>> {
     override fun read(buf: ByteBuffer): List<NativeRcsReceiveContext> {
         val len = buf.getInt()
@@ -22097,6 +22591,34 @@ public object FfiConverterSequenceTypeNativeRcsReceiveContext: FfiConverterRustB
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeNativeRcsReceiveContext.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNativeReactionJob: FfiConverterRustBuffer<List<NativeReactionJob>> {
+    override fun read(buf: ByteBuffer): List<NativeReactionJob> {
+        val len = buf.getInt()
+        return List<NativeReactionJob>(len) {
+            FfiConverterTypeNativeReactionJob.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativeReactionJob>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativeReactionJob.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativeReactionJob>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativeReactionJob.write(it, buf)
         }
     }
 }

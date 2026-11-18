@@ -404,6 +404,9 @@ mod tests {
             send_cancel_requested: false,
             sent_again_message_id: None,
             send_route: None,
+            reactions: Vec::new(),
+            own_reaction_request: None,
+            reactable: None,
         };
         let source = MessageWindow {
             conversation_id: message.payload.record.conversation_id.to_string(),

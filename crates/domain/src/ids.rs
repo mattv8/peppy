@@ -47,6 +47,7 @@ opaque_id!(EnvelopeId);
 opaque_id!(EventId);
 opaque_id!(ConversationId);
 opaque_id!(MessageId);
+opaque_id!(ReactionRequestId);
 opaque_id!(AttachmentId);
 opaque_id!(DraftId);
 

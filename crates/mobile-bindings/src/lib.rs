@@ -12,10 +12,11 @@ use peppy_client_core::{
     MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBeginOutcome, MmsLegacyBackfillState,
     MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource, NativeKeyCache, NotificationCapture,
     NotificationCaptureOutcome, NotificationTarget, PermitBlock, PermitDecision,
-    PhoneReadCandidate, PhoneReadTransport, ProviderRowRef, QuarantineReason, ReceivedCommand,
-    SendCancellationState, SendCancellationView, SendResult, SendState, SenderUnblockOutcome,
-    SmsAcquisitionInput, SmsAcquisitionState, SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan,
-    SmsSource, Transport, VaultCheckHeader, VaultId,
+    PhoneReadCandidate, PhoneReadTransport, ProviderRowRef, QuarantineReason, RcsReactionEntry,
+    ReactionAction, ReactionAttemptDecision, ReactionRefusal, ReactionRequestId,
+    ReactionResultState, ReceivedCommand, SendCancellationState, SendCancellationView, SendResult,
+    SendState, SenderUnblockOutcome, SmsAcquisitionInput, SmsAcquisitionState, SmsHistoryStatus,
+    SmsReconciliationPlan, SmsScanPlan, SmsSource, Transport, VaultCheckHeader, VaultId,
 };
 use std::{
     fmt,
@@ -655,6 +656,60 @@ pub struct NativeSendCancellationView {
     pub requires_gateway_update: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeReactionRefusal {
+    Expired,
+    MessageUnavailable,
+    NotRcs,
+    LinkUnavailable,
+    Rejected,
+    Busy,
+    InvalidEmoji,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeReactionOutcome {
+    Sent,
+    Unknown,
+    NotSent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeReactionAction {
+    Add,
+    Switch,
+    Remove,
+    Noop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeReactionJob {
+    pub request_id: String,
+    pub message_id: String,
+    pub conversation_id: String,
+    pub emoji: Option<String>,
+}
+
+/// One reaction entry as the RCS link reported it, before core canonicalises the addresses.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeRcsReactionEntry {
+    pub emoji: String,
+    pub is_self: bool,
+    pub addresses: Vec<String>,
+    pub unresolved_actors: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeReactionAttemptDecision {
+    pub permitted: bool,
+    pub request_id: Option<String>,
+    pub google_conversation_id: Option<String>,
+    pub google_message_id: Option<String>,
+    pub action: Option<NativeReactionAction>,
+    pub emoji: Option<String>,
+    pub reason: Option<NativeReactionRefusal>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeCarrierCommand {
     pub command_id: String,
@@ -1039,6 +1094,66 @@ fn send_state_name(state: SendState) -> &'static str {
         SendState::FailedBeforeSubmission => "FailedBeforeSubmission",
         SendState::FailedConfirmed => "FailedConfirmed",
         SendState::OutcomeUnknown => "OutcomeUnknown",
+    }
+}
+
+fn reaction_refusal(reason: NativeReactionRefusal) -> ReactionRefusal {
+    match reason {
+        NativeReactionRefusal::Expired => ReactionRefusal::Expired,
+        NativeReactionRefusal::MessageUnavailable => ReactionRefusal::MessageUnavailable,
+        NativeReactionRefusal::NotRcs => ReactionRefusal::NotRcs,
+        NativeReactionRefusal::LinkUnavailable => ReactionRefusal::LinkUnavailable,
+        NativeReactionRefusal::Rejected => ReactionRefusal::Rejected,
+        NativeReactionRefusal::Busy => ReactionRefusal::Busy,
+        NativeReactionRefusal::InvalidEmoji => ReactionRefusal::InvalidEmoji,
+    }
+}
+
+fn native_reaction_refusal(reason: ReactionRefusal) -> NativeReactionRefusal {
+    match reason {
+        ReactionRefusal::Expired => NativeReactionRefusal::Expired,
+        ReactionRefusal::MessageUnavailable => NativeReactionRefusal::MessageUnavailable,
+        ReactionRefusal::NotRcs => NativeReactionRefusal::NotRcs,
+        ReactionRefusal::LinkUnavailable => NativeReactionRefusal::LinkUnavailable,
+        ReactionRefusal::Rejected => NativeReactionRefusal::Rejected,
+        ReactionRefusal::Busy => NativeReactionRefusal::Busy,
+        ReactionRefusal::InvalidEmoji => NativeReactionRefusal::InvalidEmoji,
+    }
+}
+
+fn native_reaction_attempt_decision(
+    value: ReactionAttemptDecision,
+) -> NativeReactionAttemptDecision {
+    match value {
+        ReactionAttemptDecision::Permit {
+            request_id,
+            google_conversation_id,
+            google_message_id,
+            action,
+            emoji,
+        } => NativeReactionAttemptDecision {
+            permitted: true,
+            request_id: Some(request_id.to_string()),
+            google_conversation_id: Some(google_conversation_id),
+            google_message_id: Some(google_message_id),
+            action: Some(match action {
+                ReactionAction::Add => NativeReactionAction::Add,
+                ReactionAction::Switch => NativeReactionAction::Switch,
+                ReactionAction::Remove => NativeReactionAction::Remove,
+                ReactionAction::Noop => NativeReactionAction::Noop,
+            }),
+            emoji: Some(emoji),
+            reason: None,
+        },
+        ReactionAttemptDecision::Refused { reason } => NativeReactionAttemptDecision {
+            permitted: false,
+            request_id: None,
+            google_conversation_id: None,
+            google_message_id: None,
+            action: None,
+            emoji: None,
+            reason: Some(native_reaction_refusal(reason)),
+        },
     }
 }
 
@@ -3968,6 +4083,83 @@ impl NativeClient {
     ) -> Result<(), MobileBindingsError> {
         with_client(&self.client, |client| {
             client.publish_send_cancellation_capability(supported)
+        })
+    }
+
+    pub fn publish_reaction_capability(&self, supported: bool) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.publish_reaction_capability(supported)
+        })
+    }
+
+    pub fn pending_reaction_jobs(&self) -> Result<Vec<NativeReactionJob>, MobileBindingsError> {
+        with_client(&self.client, Client::pending_reaction_jobs).map(|jobs| {
+            jobs.into_iter()
+                .map(|job| NativeReactionJob {
+                    request_id: job.request_id.to_string(),
+                    message_id: job.message_id.to_string(),
+                    conversation_id: job.conversation_id.to_string(),
+                    emoji: job.emoji,
+                })
+                .collect()
+        })
+    }
+
+    pub fn begin_reaction_attempt(
+        &self,
+        request_id: String,
+    ) -> Result<NativeReactionAttemptDecision, MobileBindingsError> {
+        let request_id = parse_id::<ReactionRequestId>(&request_id)?;
+        with_client(&self.client, |client| {
+            client.begin_reaction_attempt(request_id)
+        })
+        .map(native_reaction_attempt_decision)
+    }
+
+    pub fn record_reaction_outcome(
+        &self,
+        request_id: String,
+        outcome: NativeReactionOutcome,
+        reason: Option<NativeReactionRefusal>,
+    ) -> Result<(), MobileBindingsError> {
+        let request_id = parse_id::<ReactionRequestId>(&request_id)?;
+        let outcome = match outcome {
+            NativeReactionOutcome::Sent => ReactionResultState::Sent,
+            NativeReactionOutcome::Unknown => ReactionResultState::Unknown,
+            NativeReactionOutcome::NotSent => ReactionResultState::NotSent {
+                reason: reaction_refusal(reason.ok_or(MobileBindingsError::InvalidRequest)?),
+            },
+        };
+        with_client(&self.client, |client| {
+            client.record_reaction_outcome(request_id, outcome)
+        })
+    }
+
+    /// Publishes this gateway's reaction set for one RCS message when it changed. Returns whether
+    /// a `MessageReactions` event was published.
+    pub fn ingest_rcs_message_reactions(
+        &self,
+        google_conversation_id: String,
+        google_message_id: String,
+        reactions: Vec<NativeRcsReactionEntry>,
+        observed_at_ms: i64,
+    ) -> Result<bool, MobileBindingsError> {
+        let entries = reactions
+            .into_iter()
+            .map(|entry| RcsReactionEntry {
+                emoji: entry.emoji,
+                is_self: entry.is_self,
+                addresses: entry.addresses,
+                unresolved_actors: entry.unresolved_actors,
+            })
+            .collect();
+        with_client(&self.client, |client| {
+            client.ingest_rcs_message_reactions(
+                &google_conversation_id,
+                &google_message_id,
+                entries,
+                observed_at_ms,
+            )
         })
     }
 

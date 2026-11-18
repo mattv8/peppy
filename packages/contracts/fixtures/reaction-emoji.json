@@ -1,0 +1,39 @@
+{
+  "rules": [
+    "One grapheme cluster.",
+    "At most 32 UTF-8 bytes.",
+    "Contains an Extended_Pictographic character, or is a pair of regional indicators (a country flag).",
+    "No U+FE0E (text variation selector) anywhere.",
+    "No leading or trailing U+200D (zero width joiner).",
+    "No keycap sequence (U+20E3).",
+    "No tag characters (U+E0020 to U+E007F), so tag-sequence subdivision flags are refused."
+  ],
+  "accept": [
+    "👍",
+    "❤️",
+    "🙏",
+    "👍🏽",
+    "👨‍👩‍👧",
+    "🇨🇦",
+    "☺️",
+    "👩🏽‍💻",
+    "🏳️‍🌈",
+    "🏳️‍👩🏽‍💻‍🌈",
+    "‼️",
+    "⁉️",
+    "↔️"
+  ],
+  "reject": [
+    "1️⃣",
+    "#️⃣",
+    "🏴󠁧󠁢󠁳󠁣󠁴󠁿",
+    "a",
+    "👍👍",
+    "",
+    "🇨",
+    "☺︎",
+    "👍‍",
+    "‍👍",
+    "👨🏽‍👩🏽‍👧🏽‍👦🏽"
+  ]
+}

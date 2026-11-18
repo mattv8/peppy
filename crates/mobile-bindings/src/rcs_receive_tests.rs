@@ -101,6 +101,27 @@ fn go_wire_record_empty_status_and_original_go_sample_are_accepted() {
 }
 
 #[test]
+fn go_record_with_reaction_facts_still_ingests_the_message() {
+    for reactions in [
+        json!([]),
+        json!([{ "emoji": "👍", "is_self": true, "addresses": [], "unresolved_actors": 0 }]),
+    ] {
+        let mut value: serde_json::Value = serde_json::from_str(GO_RECORD).unwrap();
+        value["reactions"] = reactions;
+        let fixture = self::fixture();
+        let result = fixture
+            .client
+            .gateway_ingest_go_rcs_record_json(
+                fixture.conversation_id.clone(),
+                fixture.generation,
+                value.to_string(),
+            )
+            .unwrap();
+        assert_eq!(result.record_outcome, "unmatched_outgoing");
+    }
+}
+
+#[test]
 fn go_exported_receive_record_ingests_through_mobile_boundary() {
     let Ok(path) = std::env::var("PEPPY_RCS_GO_RECEIVE_RECORD_PATH") else {
         return;

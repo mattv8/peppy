@@ -1021,12 +1021,15 @@ fn load_messages(
         .into_iter()
         .map(|message| (message.payload.record.message_id, message))
         .collect();
-    ids.iter()
+    let mut messages = ids
+        .iter()
         .map(|id| {
             let id = parse::<MessageId>(id)?;
             by_id.remove(&id).ok_or(Error::Database)
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    store.project_reactions_all(&mut messages)?;
+    Ok(messages)
 }
 
 #[cfg(test)]
