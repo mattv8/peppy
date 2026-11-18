@@ -351,6 +351,7 @@ impl BrowserCore {
             "save_draft" => self.save_draft(args_value(raw_args)?),
             "discard_draft" => self.discard_draft(args_value(raw_args)?),
             "send_draft" => self.send_draft(args_value(raw_args)?),
+            "send_again" => self.send_again(args_value(raw_args)?),
             "resolve_draft_conflict"
             | "acknowledge_draft_notice"
             | "_worker_draft_sync_supported"
@@ -496,6 +497,7 @@ impl BrowserCore {
         Ok(json!({}))
     }
     fn snapshot(&self, args: Value) -> Result<Value, Failure> {
+        let revoked = self.context.revoked_device_ids.clone();
         let metadata_only = match args.get("metadataOnly") {
             Some(Value::Bool(value)) => *value,
             Some(_) => return Err(invalid()),
@@ -582,7 +584,7 @@ impl BrowserCore {
                     .map_err(core)?;
                     let messages = history
                         .iter()
-                        .map(|message| rcs_receive::message_view(client, message))
+                        .map(|message| rcs_receive::message_view(client, message, &revoked))
                         .collect::<Result<Vec<_>, _>>()?;
                     (messages, Some(has_more))
                 } else {
@@ -843,6 +845,7 @@ impl BrowserCore {
         Ok(view)
     }
     fn load_history(&self, args: Value) -> Result<Value, Failure> {
+        let revoked = self.context.revoked_device_ids.clone();
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct HistoryRequest {
@@ -861,7 +864,7 @@ impl BrowserCore {
         let messages = page
             .messages
             .iter()
-            .map(|message| rcs_receive::message_view(client, message))
+            .map(|message| rcs_receive::message_view(client, message, &revoked))
             .collect::<Result<Vec<_>, _>>()?;
         serde_json::to_value(dto::HistoryPage {
             conversation_id: conversation.to_string(),
@@ -888,12 +891,13 @@ impl BrowserCore {
             .map_err(|_| core(CoreError::Database))
     }
     fn load_message_window(&self, args: Value) -> Result<Value, Failure> {
+        let revoked = self.context.revoked_device_ids.clone();
         let input: dto::MessageWindowRequestView =
             serde_json::from_value(args).map_err(|_| invalid())?;
         let client = self.client()?;
         let window = client.load_message_window(input.into()).map_err(core)?;
         serde_json::to_value(dto::try_message_window_view(window, |message| {
-            rcs_receive::message_view(client, &message)
+            rcs_receive::message_view(client, &message, &revoked)
         })?)
         .map_err(|_| core(CoreError::Database))
     }
@@ -934,6 +938,24 @@ impl BrowserCore {
             .then(|| self.context.gateways.as_deref().unwrap_or(&[]));
         serde_json::to_value(
             compose::send_draft(self.client()?, &input, gateways).map_err(compose_failure)?,
+        )
+        .map_err(|_| core(CoreError::Database))
+    }
+    /// Explicit "Send again" of a message whose send may not have reached the carrier. The
+    /// revoked set and the phone list come from the verified server roster only.
+    fn send_again(&self, args: Value) -> Result<Value, Failure> {
+        let input: compose::SendAgainInput = serde_json::from_value(args).map_err(|_| invalid())?;
+        let gateways = self
+            .gateways_known
+            .then(|| self.context.gateways.as_deref().unwrap_or(&[]));
+        serde_json::to_value(
+            compose::send_again(
+                self.client()?,
+                &input,
+                gateways,
+                &self.context.revoked_device_ids,
+            )
+            .map_err(compose_failure)?,
         )
         .map_err(|_| core(CoreError::Database))
     }

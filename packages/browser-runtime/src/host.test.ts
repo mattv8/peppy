@@ -3230,3 +3230,44 @@ describe("browser snapshot import retry command", () => {
     expect(attached.messages).toContainEqual({ id: 1, ok: true, value: undefined });
   });
 });
+
+describe("send_again host command", () => {
+  const args = { messageId: "message-old", gatewayId: "gateway-pixel", simId: "sim-1" };
+
+  it("is an allowlisted mutation that takes flat arguments, checkpoints through the session and wakes the outbox", async () => {
+    const session = new FakeSession();
+    const wake = vi.fn();
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, wake } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "send_again", args });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+
+    expect(session.calls).toContainEqual({ command: "send_again", args, mutation: true });
+    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: { command: "send_again" } });
+    expect(wake).toHaveBeenCalled();
+  });
+
+  it("passes already-sent-again, route-unavailable and attachments-unavailable through to the renderer", async () => {
+    for (const code of ["already-sent-again", "route-unavailable", "attachments-unavailable"]) {
+      class RefusingSession extends FakeSession {
+        public override async mutate(command: string, args: Record<string, unknown>): Promise<import("./core.js").CoreResult> {
+          this.calls.push({ command, args, mutation: true });
+          throw { code };
+        }
+      }
+      const session = new RefusingSession();
+      const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+      const attached = port();
+      await host.attach(attached);
+      attached.emit({ id: 2, command: "send_again", args });
+      await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
+
+      expect(attached.messages).toContainEqual(expect.objectContaining({ id: 2, ok: false, error: expect.objectContaining({ code }) }));
+    }
+  });
+});

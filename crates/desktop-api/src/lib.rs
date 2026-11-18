@@ -32,6 +32,10 @@ pub mod search;
 pub use search::*;
 pub mod search_history;
 pub use search_history::*;
+pub mod send_recovery;
+pub use send_recovery::{SendRecoveryView, SentAgainView, send_recovery_view};
+#[cfg(test)]
+mod send_again_tests;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -289,6 +293,9 @@ pub struct MessageView {
     pub rcs_reported: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub send_cancellation: Option<SendCancellationView>,
+    /// Recovery state of a carrier send that may not have reached the carrier (see `send_recovery`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_recovery: Option<SendRecoveryView>,
 }
 
 #[derive(Serialize)]
@@ -783,6 +790,7 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
         },
         rcs_reported: false,
         send_cancellation: None,
+        send_recovery: None,
     }
 }
 

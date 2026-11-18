@@ -2,13 +2,15 @@
 use crate::{
     DraftView, GatewayAvailability, GatewayView, SendResultView, draft_view, group_refusal_view,
     mms_plan::{MmsImage, MmsPlan, MmsPlanError, plan_mms},
+    send_recovery_view,
 };
 use peppy_client_core::{
     AttachmentId, Client, CommandId, ComposeDraft, ComposeDraftUpdate, ConversationId, DeviceId,
     Direction, DraftId, DraftSendParts, Error as CoreError, GatewayRoute, GroupDraftSend, Message,
-    SendRefusalReason, Transport, compose_transport,
+    MessageId, SendRefusalReason, Transport, compose_transport,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::str::FromStr;
 
 const MAX_ATTACHMENTS: usize = 10;
@@ -369,6 +371,138 @@ pub fn send_draft(
 ) -> Result<SendResultView, ComposeError> {
     let prepared = prepare_draft_send(client, input, gateways)?;
     queue_prepared_draft_send(client, &prepared, gateways, None)
+}
+
+/// Input of the explicit "Send again" command: the original message and the route to copy it to.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendAgainInput {
+    pub message_id: String,
+    pub gateway_id: String,
+    pub sim_id: String,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendAgainResultView {
+    /// The new message, whose id every device derives from the original command.
+    pub message_id: String,
+}
+
+/// Core refusals that mean the chosen carrier route cannot take this copy.
+const ROUTE_REFUSALS: [&str; 3] = [
+    "carrier route required",
+    "subscription id",
+    "MMS requires 1..=20 recipients",
+];
+
+/// Creates the explicit copy of a message that may not have reached the carrier. The message must
+/// currently offer Send again for `revoked_devices`, which the host verified from its roster; the
+/// route must pass the same guard a draft send passes.
+pub fn send_again(
+    client: &Client,
+    input: &SendAgainInput,
+    gateways: Option<&[GatewayView]>,
+    revoked_devices: &HashSet<String>,
+) -> Result<SendAgainResultView, ComposeError> {
+    let original = MessageId::from_str(&input.message_id)
+        .map_err(|_| ComposeError::Core(CoreError::SendAgainNotAllowed))?;
+    let message = client
+        .message_by_id(original)
+        .map_err(ComposeError::Core)?
+        .ok_or(ComposeError::Core(CoreError::SendAgainNotAllowed))?;
+    let recovery =
+        send_recovery_view(client, &message, revoked_devices).map_err(ComposeError::Core)?;
+    // A repeat on the device that already made the copy is `already-sent-again`, not a refusal.
+    if recovery
+        .as_ref()
+        .is_some_and(|view| view.sent_again.is_some())
+    {
+        return Err(ComposeError::Core(CoreError::AlreadySentAgain));
+    }
+    if !recovery.is_some_and(|view| view.can_send_again) {
+        return Err(ComposeError::Core(CoreError::SendAgainNotAllowed));
+    }
+    let gateway = gateways
+        .and_then(|gateways| find_route(gateways, &input.gateway_id, &input.sim_id))
+        .filter(|gateway| !revoked_devices.contains(&gateway.id))
+        // The original's own phone is the one being recovered from; a copy cannot go back to it.
+        .filter(|gateway| {
+            message
+                .target_gateway_id
+                .is_none_or(|target| target.to_string() != gateway.id)
+        })
+        .ok_or_else(route_unavailable)?;
+    if !gateway.supports_sms {
+        return Err(route_unavailable());
+    }
+    gateway_sendable(gateway).map_err(|_| route_unavailable())?;
+    if message.payload.transport == Transport::Mms {
+        check_mms_route(client, &message, gateway)?;
+    }
+    let route = parse_route(&input.gateway_id, &input.sim_id).map_err(|_| route_unavailable())?;
+    let queued = client
+        .send_again(original, route)
+        .map_err(send_again_error)?;
+    Ok(SendAgainResultView {
+        message_id: queued.message_id.to_string(),
+    })
+}
+
+fn route_unavailable() -> ComposeError {
+    ui(
+        "route-unavailable",
+        "That phone can't send right now. Choose another.",
+    )
+}
+
+/// The MMS limits a draft send checks on the route, applied to the original's content.
+fn check_mms_route(
+    client: &Client,
+    message: &Message,
+    gateway: &GatewayView,
+) -> Result<(), ComposeError> {
+    if !gateway.supports_mms
+        || gateway.mms_content_version.unwrap_or(0) < 2
+        || message.payload.recipients.len() > gateway.mms_max_recipients.unwrap_or(MAX_RECIPIENTS)
+    {
+        return Err(route_unavailable());
+    }
+    let images = message
+        .payload
+        .record
+        .attachments
+        .iter()
+        .map(|reference| {
+            client
+                .attachment_info(reference.attachment_id)
+                .map(|info| MmsImage {
+                    id: info.attachment_id.to_string(),
+                    bytes: info.plaintext_bytes,
+                    media_type: info.media_type,
+                })
+                .map_err(ComposeError::Core)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    plan_mms(
+        gateway.mms_max_bytes.unwrap_or(FALLBACK_MMS_MAX_BYTES),
+        gateway.mms_content_version.unwrap_or(0),
+        &message.payload.body,
+        &images,
+    )
+    .map(|_| ())
+    .map_err(|_| route_unavailable())
+}
+
+/// Maps a core refusal of a copy: route refusals become `route-unavailable`; the rest keep the
+/// core's own code (`already-sent-again`, `attachments-unavailable`, `invalid-request`).
+pub(crate) fn send_again_error(error: CoreError) -> ComposeError {
+    match error {
+        CoreError::InvalidRequest(reason) if ROUTE_REFUSALS.contains(&reason) => {
+            route_unavailable()
+        }
+        other => ComposeError::Core(other),
+    }
 }
 
 /// Runs the same local composition policy as `send_draft`, then queues the command ID already

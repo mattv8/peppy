@@ -280,6 +280,25 @@ mod tests {
     }
 
     #[test]
+    fn send_again_is_a_registered_command_that_refuses_an_unknown_message() {
+        let (_root, mut core, _device) = unlocked_core();
+        let response: Value = serde_json::from_str(
+            &core.dispatch(
+                &json!({"command": "send_again", "args": {
+                    "messageId": DeviceId::new().to_string(),
+                    "gatewayId": DeviceId::new().to_string(),
+                    "simId": "sim-1"
+                }})
+                .to_string(),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(response["ok"], false, "{response}");
+        assert_eq!(response["error"]["code"], "invalid-request");
+    }
+
+    #[test]
     fn valid_gateway_context_enables_a_real_draft_send() {
         let (_root, mut core, device) = unlocked_core();
         let gateway = DeviceId::new();

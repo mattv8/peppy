@@ -996,6 +996,25 @@ impl Session {
         Ok(result)
     }
 
+    /// Explicit copy of a stranded send, routed like a draft send; the roster's revoked devices
+    /// decide whether the original may be copied.
+    pub fn send_again(
+        &self,
+        input: &peppy_desktop_api::compose::SendAgainInput,
+    ) -> BridgeResult<peppy_desktop_api::compose::SendAgainResultView> {
+        let (gateways, known) = self.gateways();
+        let revoked = self.revoked_devices();
+        let result = compose::send_again(
+            &self.client,
+            input,
+            known.then_some(gateways.as_slice()),
+            &revoked,
+        )
+        .map_err(compose_error)?;
+        self.request_work();
+        Ok(result)
+    }
+
     pub fn mark_seen(&self, ids: &[String]) -> BridgeResult<()> {
         self.mark_seen_scoped(ids, None)
     }
@@ -1543,6 +1562,7 @@ impl Session {
         eligible: Option<&HashSet<AttachmentId>>,
     ) -> BridgeResult<Vec<dto::MessageView>> {
         let mut retention_states = HashMap::new();
+        let revoked = self.revoked_devices();
         messages
             .iter()
             .map(|message| {
@@ -1556,6 +1576,7 @@ impl Session {
                         eligible,
                         &mut retention_states,
                     ),
+                    &revoked,
                 )
                 .map_err(core_error)
             })

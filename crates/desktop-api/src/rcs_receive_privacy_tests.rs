@@ -8,6 +8,7 @@ use peppy_client_core::{
     VaultCheckHeader, VaultId,
 };
 use serde_json::Value;
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -179,7 +180,7 @@ fn incoming_rcs_placeholders_project_each_receive_state_without_compressing_indi
                 .unwrap();
         }
         let view = serde_json::to_value(
-            rcs_receive::message_view(&fixture.client, message, vec![]).unwrap(),
+            rcs_receive::message_view(&fixture.client, message, vec![], &HashSet::new()).unwrap(),
         )
         .unwrap();
         assert_eq!(view["body"], DELIVERED_BODY);
@@ -198,9 +199,10 @@ fn incoming_rcs_placeholders_project_each_receive_state_without_compressing_indi
         .client
         .mark_rcs_media_download_state(message_id, 1, RcsMediaSyncState::QuotaFull)
         .unwrap();
-    let view =
-        serde_json::to_value(rcs_receive::message_view(&fixture.client, message, vec![]).unwrap())
-            .unwrap();
+    let view = serde_json::to_value(
+        rcs_receive::message_view(&fixture.client, message, vec![], &HashSet::new()).unwrap(),
+    )
+    .unwrap();
     assert_eq!(view["attachments"][0]["index"], 0);
     assert_eq!(view["attachments"][1]["index"], 1);
     assert_eq!(view["attachments"][1]["rcsState"], "quota_full");
@@ -277,9 +279,10 @@ fn remote_sparse_stored_attachment_projects_beside_failed_and_oversized_slots() 
             )
         })
         .collect();
-    let view =
-        serde_json::to_value(rcs_receive::message_view(&remote, message, attachments).unwrap())
-            .unwrap();
+    let view = serde_json::to_value(
+        rcs_receive::message_view(&remote, message, attachments, &HashSet::new()).unwrap(),
+    )
+    .unwrap();
     let slots = view["attachments"].as_array().unwrap();
     assert_eq!(slots.len(), 3);
     assert_eq!(slots[0]["index"], 0);
@@ -383,8 +386,10 @@ fn desktop_rcs_views_do_not_leak_provider_identity() {
     let snapshot: Vec<Value> = all
         .iter()
         .map(|message| {
-            serde_json::to_value(rcs_receive::message_view(client, message, vec![]).unwrap())
-                .unwrap()
+            serde_json::to_value(
+                rcs_receive::message_view(client, message, vec![], &HashSet::new()).unwrap(),
+            )
+            .unwrap()
         })
         .collect();
     let history: Vec<Value> = client
@@ -393,8 +398,10 @@ fn desktop_rcs_views_do_not_leak_provider_identity() {
         .messages
         .iter()
         .map(|message| {
-            serde_json::to_value(rcs_receive::message_view(client, message, vec![]).unwrap())
-                .unwrap()
+            serde_json::to_value(
+                rcs_receive::message_view(client, message, vec![], &HashSet::new()).unwrap(),
+            )
+            .unwrap()
         })
         .collect();
     let window = client
@@ -404,7 +411,7 @@ fn desktop_rcs_views_do_not_leak_provider_identity() {
         })
         .unwrap();
     let window = serde_json::to_value(message_window_view(window, |message| {
-        rcs_receive::message_view(client, &message, vec![]).unwrap()
+        rcs_receive::message_view(client, &message, vec![], &HashSet::new()).unwrap()
     }))
     .unwrap();
     let window_messages = window["messages"].as_array().unwrap().clone();
@@ -421,7 +428,8 @@ fn desktop_rcs_views_do_not_leak_provider_identity() {
     assert_delivered_rcs("window", &window_messages);
     let reported_without_status = find_body(&all, LATEST_BODY);
     let reported_without_status = serde_json::to_value(
-        rcs_receive::message_view(client, reported_without_status, vec![]).unwrap(),
+        rcs_receive::message_view(client, reported_without_status, vec![], &HashSet::new())
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(reported_without_status["rcsReported"], true);
@@ -461,7 +469,8 @@ fn read_status_does_not_reuse_delivery_timestamp() {
         )
         .unwrap();
 
-    let view = rcs_receive::message_view(&fixture.client, &delivered, vec![]).unwrap();
+    let view =
+        rcs_receive::message_view(&fixture.client, &delivered, vec![], &HashSet::new()).unwrap();
     assert_eq!(view.status, Some("read"));
     assert_eq!(view.status_at, None);
     assert!(view.rcs_reported);
