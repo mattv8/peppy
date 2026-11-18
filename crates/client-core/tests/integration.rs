@@ -66,6 +66,7 @@ mod sender_blocklist;
 mod sms_acquisition;
 mod sms_flow;
 mod sms_repair;
+mod snapshot_benchmark;
 mod snapshot_manifest;
 mod snapshot_projection;
 mod snapshot_restart;
