@@ -31,6 +31,9 @@ final class AppModel {
     private(set) var lastError: String?
     private(set) var lastSync: SyncReport?
     private(set) var lastSyncDate: Date?
+    private(set) var setupProgress: SetupProgress?
+    private(set) var historyTooLarge = false
+    private var setupTracker = SetupProgressTracker()
     private(set) var serverReachability: ServerReachabilityState = .unknown
     /// The global ribbon's account notice. It stays empty until the first successful read.
     let accountAccess = AccountAccessModel()
@@ -99,6 +102,10 @@ final class AppModel {
                 budget.maxRequests = 8
                 budget.maxUploads = 4
                 budget.maxApplyRounds = 4
+            }
+            if reason == .backgroundRefresh || reason == .backgroundProcessing {
+                // iOS imports snapshots only in the foreground; a background pass never starts or continues one.
+                budget.snapshotTimeLimit = 0
             }
             let report = try await session.contactsPass(
                 reason: reason, provider: provider, preferences: preferences, budget: budget,
@@ -769,9 +776,14 @@ final class AppModel {
         // A background APNs launch has no SwiftUI `.task` to open the session first.
         guard let opened = try? await session.open(), opened.databaseOpen, opened.keysUnlocked else { return false }
         do {
-            _ = try await session.syncOnce()
+            // Wake sync is background work: it never starts or continues a snapshot import.
+            var budget = SyncBudget()
+            budget.snapshotTimeLimit = 0
+            let report = try await session.syncOnce(budget: budget)
             await publishServerReachability()
-            return true
+            // The OS fetch result means new data arrived: only records fetched from the server in this
+            // pass count. A deferred or caught-up pass reports false, and nothing claims the vault is caught up.
+            return report.journaled > 0 || report.snapshotRecords > 0
         } catch {
             await publishServerReachability()
             return false
@@ -801,18 +813,47 @@ final class AppModel {
         guard status.databaseOpen, status.keysUnlocked, activity == .idle else { return }
         activity = .syncing
         defer { activity = .idle }
+        // The setup card shows only while an import is actually staged or draining.
+        let importInProgress = (try? await session.setupProgress(snapshotRemaining: lastSync?.snapshotRemaining ?? 0)) != nil
+        setupProgress = importInProgress ? SetupProgress.checking : nil
+        var passesRun = 0
         do {
-            let report = try await session.syncOnce()
-            lastSync = report
-            lastSyncDate = Date()
-            lastError = report.uploadRefused.map { "Upload refused; the message stays queued. \($0.userMessage)" }
-            if report.refusedByAccountPolicy { await refreshAccountAccessAfterPolicyDenial() }
+            while true {
+                let report = try await session.syncOnce()
+                passesRun += 1
+                lastSync = report
+                lastSyncDate = Date()
+                let persistedHistoryTooLarge = await session.historyTooLarge()
+                historyTooLarge = report.historyTooLarge || persistedHistoryTooLarge
+                if historyTooLarge {
+                    setupProgress = nil
+                } else {
+                    setupProgress = try await session.setupProgress(snapshotRemaining: report.snapshotRemaining)
+                }
+                if setupTracker.observe(progress: setupProgress, historyTooLarge: historyTooLarge, complete: report.complete) {
+                    #if canImport(UIKit)
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: String(localized: "peppy.sync_setup_done_title", table: "Peppy")
+                    )
+                    #endif
+                }
+                lastError = report.uploadRefused.map { "Upload refused; the message stays queued. \($0.userMessage)" }
+                if report.refusedByAccountPolicy { await refreshAccountAccessAfterPolicyDenial() }
+                guard ForegroundPassLoop.shouldRepeat(
+                    after: report, passesRun: passesRun, foregroundActive: foregroundActive, cancelled: Task.isCancelled
+                ) else { break }
+            }
         } catch ClientError.canceled {
             // Leaving the foreground is not a failure.
+            setupProgress = nil
         } catch ClientError.syncInProgress {
             // A contact pass holds the sync guard; it uploads and receives too.
+            setupProgress = nil
         } catch is CancellationError {
+            setupProgress = nil
         } catch {
+            setupProgress = nil
             lastError = (error as? ClientError)?.userMessage ?? "Sync failed."
         }
         if let opened = try? await session.open() { setStatus(opened) }
@@ -903,6 +944,14 @@ final class AppModel {
             devices = []
             devicesLoaded = false
             invalidateGoogleMessagesLinkStatuses()
+        }
+        if status.identity != nextStatus.identity {
+            // Too-large state and setup progress belong to the vault that produced them.
+            historyTooLarge = false
+            setupProgress = nil
+            setupTracker = SetupProgressTracker()
+            lastSync = nil
+            lastSyncDate = nil
         }
         status = nextStatus
     }

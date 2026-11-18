@@ -8,14 +8,51 @@ import Testing
 @Suite struct ForegroundSyncTests {
     let passphrase = "io synthetic vault passphrase"
 
+    /// A monotonic test clock in nanoseconds; each read advances it by `step`.
+    final class TestClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: UInt64 = 1_000_000_000
+        private let step: UInt64
+
+        init(stepSeconds: Double = 0) {
+            step = UInt64(stepSeconds * 1_000_000_000)
+        }
+
+        func now() -> UInt64 {
+            lock.withLock {
+                defer { value &+= step }
+                return value
+            }
+        }
+    }
+
+    final class CancelBeforeSecondSnapshotPageTransport: HTTPTransport, @unchecked Sendable {
+        private let inner: any HTTPTransport
+        private let lock = NSLock()
+        private var pages = 0
+
+        init(_ inner: any HTTPTransport) { self.inner = inner }
+
+        func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+            if request.url.path == "/v1/snapshot/records",
+               lock.withLock({ pages += 1; return pages > 1 }) {
+                throw CancellationError()
+            }
+            return try await inner.send(request)
+        }
+    }
+
     func capture(_ client: NativeClient, _ body: String) throws -> NativeCaptured {
         try client.captureIncoming(sms: NativeIncomingSms(
             conversationId: nil, senderAddress: "+15550001111", body: body, providerMessageId: UUID().uuidString, imported: false
         ))
     }
 
-    func sync(_ client: NativeClient, _ server: FakeServer, budget: SyncBudget = SyncBudget()) async throws -> SyncReport {
-        try await ForegroundSync(client: client, server: serverClient(server), vaultId: server.vaultId, budget: budget).run()
+    func sync(
+        _ client: NativeClient, _ server: FakeServer, budget: SyncBudget = SyncBudget(),
+        clock: @escaping @Sendable () -> UInt64 = TestClock().now
+    ) async throws -> SyncReport {
+        try await ForegroundSync(client: client, server: serverClient(server), vaultId: server.vaultId, budget: budget, clock: clock).run()
     }
 
     @Test func outboxUploadsAreAckedAndAnotherDeviceReceivesThem() async throws {
@@ -60,7 +97,35 @@ import Testing
         try fresh.dispose()
     }
 
-    @Test func aSnapshotInterruptedByTheBudgetResumesOnTheNextPass() async throws {
+    @Test func aSnapshotLargerThanTheRequestBudgetCompletesInOneFrozenTimePass() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let producer = try openUnlockedClient(server, passphrase: passphrase)
+        for index in 0..<30 { _ = try capture(producer, "history \(index)") }
+        _ = try await sync(producer, server)
+        _ = try await sync(producer, server)
+        server.mutate { $0.replayFloor = 2 }
+
+        let fresh = try openUnlockedClient(server, passphrase: passphrase)
+        var budget = SyncBudget()
+        budget.pageLimit = 1
+        budget.maxRequests = 6
+        let clock = TestClock()
+        let mark = server.paths.count
+        let report = try await ForegroundSync(
+            client: fresh, server: serverClient(server), vaultId: server.vaultId, budget: budget, clock: clock.now
+        ).run()
+        let paths = Array(server.paths.dropFirst(mark))
+        #expect(report.snapshotPublished && report.complete && report.snapshotRecords == 30)
+        #expect(report.requests == paths.count, "every request is counted, including snapshot pages")
+        #expect(
+            paths.filter { !$0.contains("/v1/snapshot/records") }.count <= budget.maxRequests,
+            "ordinary requests stay within maxRequests while 30 single-record pages run unmetered"
+        )
+        try producer.dispose()
+        try fresh.dispose()
+    }
+
+    @Test func aSnapshotTimeBudgetResumesWithoutStartingAnotherCut() async throws {
         let server = try FakeServer(passphrase: passphrase)
         let producer = try openUnlockedClient(server, passphrase: passphrase)
         for index in 0..<4 { _ = try capture(producer, "history \(index)") }
@@ -70,14 +135,44 @@ import Testing
         let fresh = try openUnlockedClient(server, passphrase: passphrase)
         var budget = SyncBudget()
         budget.pageLimit = 1
-        budget.maxRequests = 6 // declaration, probe, replay 409, snapshot cut, two pages
-        let partial = try await sync(fresh, server, budget: budget)
-        #expect(!partial.complete && !partial.snapshotPublished && partial.requests == 6)
-        #expect(try fresh.snapshotProgress()?.receivedRecords == 2)
+        budget.snapshotTimeLimit = 60
+        let expiring = TestClock(stepSeconds: 30)
+        let partial = try await ForegroundSync(
+            client: fresh, server: serverClient(server), vaultId: server.vaultId, budget: budget, clock: expiring.now
+        ).run()
+        #expect(!partial.complete && !partial.snapshotPublished)
+        #expect(try fresh.snapshotProgress()?.receivedRecords == 1)
 
-        budget.maxRequests = 24
-        let resumed = try await sync(fresh, server, budget: budget)
+        let mark = server.paths.count
+        let resumed = try await ForegroundSync(
+            client: fresh, server: serverClient(server), vaultId: server.vaultId, budget: budget, clock: TestClock().now
+        ).run()
+        let paths = Array(server.paths.dropFirst(mark))
         #expect(resumed.snapshotPublished && resumed.complete && resumed.receiveCursor == "4")
+        #expect(paths.filter { $0 == "GET /v1/snapshot" }.count == 1, "the only cut request is the capability probe")
+        try producer.dispose()
+        try fresh.dispose()
+    }
+
+    @Test func cancellationStopsSnapshotImportBetweenPages() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let producer = try openUnlockedClient(server, passphrase: passphrase)
+        for index in 0..<3 { _ = try capture(producer, "history \(index)") }
+        _ = try await sync(producer, server)
+        server.mutate { $0.replayFloor = 2 }
+        let fresh = try openUnlockedClient(server, passphrase: passphrase)
+        var budget = SyncBudget()
+        budget.pageLimit = 1
+        await #expect(throws: CancellationError.self) {
+            try await ForegroundSync(
+                client: fresh,
+                server: serverClient(server, transport: CancelBeforeSecondSnapshotPageTransport(server)),
+                vaultId: server.vaultId,
+                budget: budget
+            ).run()
+        }
+        #expect(try fresh.snapshotProgress()?.receivedRecords == 1)
+        #expect(server.paths.filter { $0 == "GET /v1/snapshot/records" }.count == 1)
         try producer.dispose()
         try fresh.dispose()
     }
@@ -248,8 +343,13 @@ import Testing
         budget.maxRequests = 9
         let before = server.paths.count
         let report = try await sync(fresh, server, budget: budget)
+        let paths = Array(server.paths.dropFirst(before))
         #expect(!report.complete)
-        #expect(report.requests == 9 && server.paths.count - before == 9)
+        #expect(report.requests == paths.count, "every request is counted, snapshot pages included")
+        #expect(
+            paths.filter { !$0.contains("/v1/snapshot/records") }.count == 9,
+            "ordinary requests (probe, cuts, replay) stop at maxRequests; snapshot pages are time-bounded"
+        )
         #expect(report.snapshotPublished && report.receiveCursor == "3")
         try producer.dispose()
         try fresh.dispose()
@@ -265,24 +365,91 @@ import Testing
         let fresh = try openUnlockedClient(server, passphrase: passphrase)
         var budget = SyncBudget()
         budget.applyLimit = 2
-        budget.maxApplyRounds = 2 // drain check, pre-snapshot check; none left to drain
+        // Nothing is left after the drain, so the pass must report complete.
         let first = try await sync(fresh, server, budget: budget)
-        #expect(first.snapshotPublished && first.snapshotRemaining == 5 && !first.complete)
-
-        budget.maxApplyRounds = 1
-
-        let before = server.paths.count
-        let second = try await sync(fresh, server, budget: budget)
-        #expect(second.snapshotRemaining > 0 && !second.complete)
-        #expect(
-            Array(server.paths.dropFirst(before)) == ["POST /v1/compaction/capability", "GET /v1/snapshot"],
-            "the capability probe runs, but live replay stays blocked while published records are undrained"
-        )
+        #expect(first.snapshotPublished && first.snapshotRemaining == 0 && first.complete)
+        #expect(first.receiveCursor == "5")
 
         let last = try await sync(fresh, server)
         #expect(last.snapshotRemaining == 0 && last.complete && last.receiveCursor == "5")
-        #expect(server.paths.count > before)
-        #expect(try fresh.listConversations().count == 1)
+        try producer.dispose()
+        try fresh.dispose()
+    }
+
+    /// A drain longer than the ordinary apply allowance must not stop the pass before replay: drain rounds
+    /// are bounded by the time budget and counted apart from ordinary replay rounds.
+    @Test func aLongDrainDoesNotSpendTheOrdinaryReplayAllowance() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let producer = try openUnlockedClient(server, passphrase: passphrase)
+        for index in 0..<5 { _ = try capture(producer, "history \(index)") }
+        _ = try await sync(producer, server)
+        server.mutate { $0.replayFloor = 3 }
+
+        let fresh = try openUnlockedClient(server, passphrase: passphrase)
+        var budget = SyncBudget()
+        budget.applyLimit = 1 // one record per drain round: at least five drain rounds
+        // Two ordinary rounds: one for the empty pre-receive apply, one after the drain. A new cut needs a
+        // round left, and the drain itself must not consume either.
+        budget.maxApplyRounds = 2
+        let mark = server.paths.count
+        let report = try await sync(fresh, server, budget: budget)
+        #expect(report.snapshotPublished && report.snapshotRemaining == 0)
+        #expect(
+            Array(server.paths.dropFirst(mark)).contains("GET /v1/events"),
+            "the drain finished and live replay ran in the same pass"
+        )
+        #expect(report.applyRounds > budget.maxApplyRounds, "drain rounds were counted, not charged to the ordinary allowance")
+        try producer.dispose()
+        try fresh.dispose()
+    }
+
+    @Test func anExhaustedDrainTimeBudgetPerformsNoReplay() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let producer = try openUnlockedClient(server, passphrase: passphrase)
+        for index in 0..<5 { _ = try capture(producer, "history \(index)") }
+        _ = try await sync(producer, server)
+        server.mutate { $0.replayFloor = 3 }
+
+        let fresh = try openUnlockedClient(server, passphrase: passphrase)
+        // Each clock read advances 30 s: the import takes one step, and the drain has no time left.
+        let expiring = TestClock(stepSeconds: 30)
+        let mark = server.paths.count
+        let partial = try await sync(fresh, server, clock: expiring.now)
+        #expect(!partial.complete && partial.snapshotPublished && partial.snapshotRemaining == 5)
+        #expect(
+            Array(server.paths.dropFirst(mark)) == [
+                "POST /v1/compaction/capability", "GET /v1/snapshot", "GET /v1/events",
+                "GET /v1/snapshot", "GET /v1/snapshot/records",
+            ],
+            "no live replay request follows the published, undrained generation"
+        )
+
+        let resumed = try await sync(fresh, server)
+        #expect(resumed.snapshotRemaining == 0 && resumed.complete && resumed.receiveCursor == "5")
+        try producer.dispose()
+        try fresh.dispose()
+    }
+
+    @Test func aZeroSnapshotBudgetNeverBeginsOrImportsASnapshot() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let producer = try openUnlockedClient(server, passphrase: passphrase)
+        for index in 0..<3 { _ = try capture(producer, "history \(index)") }
+        _ = try await sync(producer, server)
+        server.mutate { $0.replayFloor = 2 }
+
+        let fresh = try openUnlockedClient(server, passphrase: passphrase)
+        var background = SyncBudget()
+        background.snapshotTimeLimit = 0
+        let mark = server.paths.count
+        let report = try await sync(fresh, server, budget: background)
+        // The probe's cut read and the single replay answer that asked for a snapshot. No cut is begun,
+        // no page is fetched, and the 409 is not retried.
+        #expect(
+            Array(server.paths.dropFirst(mark)) == ["POST /v1/compaction/capability", "GET /v1/snapshot", "GET /v1/events"],
+            "a background pass never starts a snapshot import"
+        )
+        #expect(!report.complete && !report.snapshotPublished)
+        #expect(try fresh.snapshotProgress() == nil)
         try producer.dispose()
         try fresh.dispose()
     }
@@ -422,8 +589,9 @@ import Testing
         offerManifest(server)
         let (holder, conversationId) = try await staleHolder(server)
         var budget = SyncBudget()
-        budget.maxRequests = 5 // capability probe, cut, events resync, cut, manifest; the first records request is refused
-        let partial = try await sync(holder, server, budget: budget)
+        budget.snapshotTimeLimit = 60
+        let deadlineClock = TestClock(stepSeconds: 30)
+        let partial = try await sync(holder, server, budget: budget, clock: deadlineClock.now)
         #expect(!partial.complete && !partial.snapshotPublished)
         let staged = try #require(try holder.snapshotProgress())
         #expect(staged.manifest && staged.receivedRecords == 3 && staged.lastCursor == "3")
@@ -446,8 +614,9 @@ import Testing
         offerManifest(server)
         let (holder, conversationId) = try await staleHolder(server)
         var budget = SyncBudget()
-        budget.maxRequests = 5
-        _ = try await sync(holder, server, budget: budget)
+        budget.snapshotTimeLimit = 60
+        let deadlineClock = TestClock(stepSeconds: 30)
+        _ = try await sync(holder, server, budget: budget, clock: deadlineClock.now)
         #expect(try holder.snapshotProgress()?.manifest == true)
 
         offerManifest(server, manifestAnswer: { request in server.reply(request, 404, ["code": "not_found"]) })
@@ -496,8 +665,9 @@ import Testing
         offerManifest(server)
         let (holder, conversationId) = try await staleHolder(server)
         var budget = SyncBudget()
-        budget.maxRequests = 5 // stages the manifest generation with nothing appended
-        _ = try await sync(holder, server, budget: budget)
+        budget.snapshotTimeLimit = 60
+        let deadlineClock = TestClock(stepSeconds: 30)
+        _ = try await sync(holder, server, budget: budget, clock: deadlineClock.now)
         #expect(try holder.snapshotProgress()?.manifest == true)
 
         let resyncOnce = OnceFlag()
@@ -556,11 +726,12 @@ import Testing
         let (holder, conversationId) = try await staleHolder(server)
         var budget = SyncBudget()
         budget.pageLimit = 1
-        budget.maxRequests = 6 // capability probe, cut, events resync, cut, and two single-record pages
-        let partial = try await sync(holder, server, budget: budget)
+        budget.snapshotTimeLimit = 60
+        let deadlineClock = TestClock(stepSeconds: 30)
+        let partial = try await sync(holder, server, budget: budget, clock: deadlineClock.now)
         #expect(!partial.complete && !partial.snapshotPublished)
         let staged = try #require(try holder.snapshotProgress())
-        #expect(!staged.manifest && staged.receivedRecords == 2)
+        #expect(!staged.manifest && staged.receivedRecords == 1)
 
         offerManifest(server) // the server now advertises manifests; the staged generation is a full import
         budget.maxRequests = 24
@@ -569,10 +740,10 @@ import Testing
 
         #expect(Array(server.paths.dropFirst(mark)) == [
             "POST /v1/compaction/capability", "GET /v1/snapshot", "GET /v1/snapshot/records",
-            "GET /v1/snapshot/records", "GET /v1/snapshot/records", "GET /v1/events",
+            "GET /v1/snapshot/records", "GET /v1/snapshot/records", "GET /v1/snapshot/records", "GET /v1/events",
         ])
         #expect(queries(server, "/v1/snapshot/manifest").isEmpty)
-        #expect(resumed.snapshotPublished && resumed.snapshotRecords == 3 && resumed.receiveCursor == "5" && resumed.complete)
+        #expect(resumed.snapshotPublished && resumed.snapshotRecords == 4 && resumed.receiveCursor == "5" && resumed.complete)
         #expect(try holder.messages(conversationId: conversationId).count == 5)
         try holder.dispose()
     }

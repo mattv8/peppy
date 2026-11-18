@@ -289,6 +289,9 @@ public actor NativeSession {
     private var status = SessionStatus()
     private var reachability = ServerReachability()
     private let attachmentRetentionHTTP = AttachmentRetentionHTTPState()
+    private let snapshotTooLargeStore: SnapshotTooLargeStore
+    private let appBuild: String
+    private let snapshotClock: @Sendable () -> Date
     private var syncing = false
     private var changingEnrollment = false
     private struct PhoneClaimContext: Sendable {
@@ -312,12 +315,18 @@ public actor NativeSession {
         secureStore: any SecureStore,
         transport: any HTTPTransport,
         databaseDirectory: URL,
-        allowLoopbackHTTP: Bool
+        allowLoopbackHTTP: Bool,
+        snapshotTooLargeStore: SnapshotTooLargeStore = SnapshotTooLargeStore(),
+        appBuild: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+        snapshotClock: @escaping @Sendable () -> Date = Date.init
     ) {
         store = EnrollmentStore(secure: secureStore)
         self.transport = transport
         self.databaseDirectory = databaseDirectory
         self.allowLoopbackHTTP = allowLoopbackHTTP
+        self.snapshotTooLargeStore = snapshotTooLargeStore
+        self.appBuild = appBuild
+        self.snapshotClock = snapshotClock
     }
 
     // MARK: Enrollment
@@ -1256,11 +1265,23 @@ public actor NativeSession {
         }
     }
 
+    /// Every enrollment change (disconnect, self-revoke, vault deletion, claim, phone enrollment) runs here.
+    /// When it succeeds and the active identity is no longer the one it started with, that vault's
+    /// too-large marker is cleared: the marker belongs to the enrollment being left.
     private func changeEnrollment(_ body: () async throws -> SessionStatus) async throws -> SessionStatus {
         guard !changingEnrollment else { throw ClientError.enrollmentChangeInProgress }
         changingEnrollment = true
         defer { changingEnrollment = false }
-        do { return try await body() } catch { throw ClientError.wrap(error) }
+        let leaving = record?.identity ?? (try? store.activeIdentity())
+        do {
+            let status = try await body()
+            if let leaving, (try? store.activeIdentity()) != leaving {
+                snapshotTooLargeStore.clear(vaultID: leaving.vaultId)
+            }
+            return status
+        } catch {
+            throw ClientError.wrap(error)
+        }
     }
 
     private func hostedSession(for origin: ServerOrigin) async throws -> String? {
@@ -1342,6 +1363,7 @@ public actor NativeSession {
 
     /// Applies a verified record to the open client, or opens it.
     private func adopt(_ verified: EnrollmentRecord) throws -> SessionStatus {
+        if record?.identity != verified.identity { snapshotTooLargeStore.clear(vaultID: verified.identity.vaultId) }
         guard client != nil, record?.identity == verified.identity else { return try open() }
         let epochChanged = record?.keyEpoch != verified.keyEpoch
         record = verified
@@ -1472,7 +1494,7 @@ public actor NativeSession {
             let server = try observedServer(identity)
             var retentionMeter = RequestMeter(limit: min(8, budget.maxRequests))
             _ = try await retentionPass(client: client, server: server, identity: identity, meter: &retentionMeter, allowReadyAdvertisement: false)
-            let report = try await ForegroundSync(client: client, server: server, vaultId: identity.vaultId, budget: budget).run()
+            let report = try await foregroundSync(client: client, server: server, identity: identity, budget: budget).run()
             registerDeviceHintIfContactsReady()
             _ = try await retentionPass(client: client, server: server, identity: identity, meter: &retentionMeter, allowReadyAdvertisement: true)
             refreshCount()
@@ -1480,6 +1502,39 @@ public actor NativeSession {
         } catch {
             throw ClientError.wrap(error)
         }
+    }
+
+    /// The only place a `ForegroundSync` is built, so every caller (message sync, contacts, wake) shares
+    /// the too-large marker gate and records the same outcomes.
+    private func foregroundSync(
+        client: NativeClient, server: ServerClient, identity: EnrollmentIdentity, budget: SyncBudget
+    ) -> ForegroundSync {
+        let markerStore = snapshotTooLargeStore
+        let vaultID = identity.vaultId
+        let build = appBuild
+        let now = snapshotClock
+        return ForegroundSync(
+            client: client, server: server, vaultId: vaultID, budget: budget,
+            shouldBeginSnapshot: { markerStore.shouldBeginSnapshot(vaultID: vaultID, build: build, now: now()) },
+            didRejectSnapshotAsTooLarge: { rejection in
+                markerStore.mark(vaultID: vaultID, build: build, rejection: rejection, now: now())
+            },
+            didBeginSnapshot: { markerStore.clear(vaultID: vaultID) }
+        )
+    }
+
+    /// Rust owns the durable staging rows; this exposes only presentation-safe progress.
+    public func setupProgress(snapshotRemaining: UInt64 = 0) throws -> SetupProgress? {
+        guard let client else { throw ClientError.notEnrolled }
+        if let progress = try client.snapshotProgress() {
+            return .downloading(staged: progress.receivedRecords, expected: progress.expectedRecords)
+        }
+        return snapshotRemaining > 0 ? .organizing(remaining: snapshotRemaining) : nil
+    }
+
+    public func historyTooLarge() -> Bool {
+        guard let record else { return false }
+        return snapshotTooLargeStore.marker(for: record.identity.vaultId) != nil
     }
 
     /// Observes the enrolled server even while vault keys are locked. It does not open a socket or
@@ -1568,7 +1623,7 @@ public actor NativeSession {
         let identity = record.identity
         do {
             let server = try observedServer(identity)
-            let sync = ForegroundSync(client: client, server: server, vaultId: identity.vaultId, budget: budget)
+            let sync = foregroundSync(client: client, server: server, identity: identity, budget: budget)
             var retentionMeter = RequestMeter(limit: min(8, budget.maxRequests))
             var retention = try await retentionPass(client: client, server: server, identity: identity, meter: &retentionMeter, allowReadyAdvertisement: false)
             var syncError: ClientError?
