@@ -409,7 +409,9 @@ This reference records non-obvious Peppy domain constraints.
   (`RemoteMessagingProtocol.isOwnEvent`). Own events still arrive through
   HTTP replay, and a frame over 64 KiB still schedules a pass. One pass
   receives up to four replay pages (`RECEIVE_PAGES`), which equals its apply
-  budget. An unchanged RCS eligibility is republished at most once per
+  budget. Snapshot staging and the drain of a published snapshot are the
+  exception: each runs for a 20 second time budget per pass (see
+  [gateway bootstrap](apps/android.md#gateway-bootstrap)). An unchanged RCS eligibility is republished at most once per
   `RCS_ELIGIBILITY_REPUBLISH_FLOOR_MS` (24 hours): peers keep an eligibility
   current from the gateway status heartbeat and the linked-since fence, so
   never add a reader that expires an eligibility by its own `observed_at_ms`.
