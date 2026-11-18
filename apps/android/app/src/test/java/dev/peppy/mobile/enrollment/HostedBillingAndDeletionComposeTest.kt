@@ -1,22 +1,26 @@
 package dev.peppy.mobile.enrollment
 
+import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.foundation.layout.Column
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performSemanticsAction
 import dev.peppy.mobile.account.HostedAccountDeletionEntry
 import dev.peppy.mobile.account.PLAY_SUBSCRIPTIONS_URL
 import dev.peppy.mobile.billing.PlayDeletionContext
+import dev.peppy.mobile.billing.PlayBillingNotice
+import dev.peppy.mobile.billing.PlaySubscriptionState
 import dev.peppy.mobile.testing.ComposeTestActivityRule
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -39,7 +43,14 @@ class HostedBillingAndDeletionComposeTest {
             MaterialTheme {
                 HostedBillingPhase(isPlay = true, playContent = {
                     Text("Play", Modifier.testTag("play-billing-content"))
-                    HostedPlayEnrollmentCheck {}
+                    HostedPlayEnrollmentCheck(
+                        serverCheckRunning = false,
+                        playState = PlaySubscriptionState.NotEntitling,
+                        notice = null,
+                        hasInlineError = false,
+                        fullWidth = true,
+                        onCheckAgain = {},
+                    )
                 }, onSubscribe = {}, onCheckAgain = {})
             }
         }
@@ -279,10 +290,17 @@ class HostedBillingAndDeletionComposeTest {
         compose.setContent {
             MaterialTheme {
                 var phase by remember { mutableStateOf<HostedPhase>(HostedPhase.Billing) }
-                HostedPlayEnrollmentCheck {
+                HostedPlayEnrollmentCheck(
+                    serverCheckRunning = false,
+                    playState = PlaySubscriptionState.NotEntitling,
+                    notice = null,
+                    hasInlineError = false,
+                    fullWidth = true,
+                    onCheckAgain = {
                     reconciliations.incrementAndGet()
                     phase = HostedPhase.Billing
-                }
+                    },
+                )
                 Text(phase.toString(), Modifier.testTag("enrollment-phase-${phase::class.simpleName}"))
             }
         }
@@ -291,5 +309,44 @@ class HostedBillingAndDeletionComposeTest {
         compose.waitForIdle()
         compose.onNodeWithTag("enrollment-phase-Billing").fetchSemanticsNode()
         compose.runOnIdle { assertEquals(1, reconciliations.get()) }
+    }
+
+    @Test fun manualPlayCheckShowsBusyLabelWhileServerCheckRuns() {
+        compose.setContent {
+            MaterialTheme {
+                HostedPlayEnrollmentCheck(
+                    serverCheckRunning = true,
+                    playState = PlaySubscriptionState.NotEntitling,
+                    notice = null,
+                    hasInlineError = false,
+                    fullWidth = true,
+                    onCheckAgain = {},
+                )
+            }
+        }
+
+        compose.onNodeWithTag("play-enrollment-check-again").assertIsNotEnabled()
+        compose.onNodeWithText("Checking your account…").fetchSemanticsNode()
+    }
+
+    @Test fun manualPlayCheckShowsServerAndPlayResultsUnderTheButton() {
+        val hasInlineError = mutableStateOf(false)
+        compose.setContent {
+            MaterialTheme {
+                HostedPlayEnrollmentCheck(
+                    serverCheckRunning = false,
+                    playState = PlaySubscriptionState.NotEntitling,
+                    notice = PlayBillingNotice.RESTORE_NONE,
+                    hasInlineError = hasInlineError.value,
+                    fullWidth = true,
+                    onCheckAgain = {},
+                )
+            }
+        }
+
+        compose.onNodeWithTag("play-restore-none-notice").fetchSemanticsNode()
+        compose.onNodeWithTag("play-enrollment-check-error").assertDoesNotExist()
+        compose.runOnIdle { hasInlineError.value = true }
+        compose.onNodeWithTag("play-enrollment-check-error").fetchSemanticsNode()
     }
 }

@@ -439,6 +439,7 @@ internal class PlayBillingCoordinator internal constructor(
 
         if (pendingPurchases.isNotEmpty()) mutableState.value = PlaySubscriptionState.Pending
         purchased.forEach { link(it, current) }
+        if (mutableState.value is PlaySubscriptionState.RestoreWorking) restoreBaseState()
         if (purchased.isEmpty() && pendingPurchases.isEmpty()) {
             restoreBaseState()
             if (!automatic) mutableNotice.value = PlayBillingNotice.RESTORE_NONE

@@ -52,6 +52,7 @@ internal fun PlaySubscriptionPanel(
     loadRevision: Int = 0,
     onSignIn: () -> Unit,
     signInError: String? = null,
+    showRestoreActions: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -63,7 +64,7 @@ internal fun PlaySubscriptionPanel(
     LaunchedEffect(Unit) { withContext(Dispatchers.IO) { AccountAccessState.ensureLoaded(context) } }
     PlaySubscriptionLoadEffect(accountId, enrolledVaultId, loadRevision, coordinator::load)
     PlaySubscriptionFeedbackLayout(signInError, modifier) {
-        if (notice == PlayBillingNotice.RESTORE_NONE) Text(
+        if (showRestoreActions && notice == PlayBillingNotice.RESTORE_NONE) Text(
             stringResource(R.string.peppy_play_restore_none),
             Modifier.testTag("play-restore-none-notice").semantics { liveRegion = LiveRegionMode.Polite },
         )
@@ -97,6 +98,7 @@ internal fun PlaySubscriptionPanel(
                 }?.notice,
                 context,
                 coordinator::restore,
+                showRestoreActions,
             )
             is PlaySubscriptionState.Ready -> {
                 val chosen = selected?.takeIf { it in current.plans }
@@ -119,8 +121,10 @@ internal fun PlaySubscriptionPanel(
                     onClick = { (context as? Activity)?.let { coordinator.select(chosen); coordinator.purchase(it) } },
                     modifier = Modifier.fillMaxWidth().testTag("play-subscribe-button"),
                 ) { Text(stringResource(R.string.peppy_hosted_subscribe_cta)) }
-                OutlinedButton(onClick = coordinator::restore, modifier = Modifier.fillMaxWidth().testTag("play-restore-button")) {
-                    Text(stringResource(R.string.peppy_play_restore_cta))
+                if (showRestoreActions) {
+                    OutlinedButton(onClick = coordinator::restore, modifier = Modifier.fillMaxWidth().testTag("play-restore-button")) {
+                        Text(stringResource(R.string.peppy_play_restore_cta))
+                    }
                 }
             }
             PlaySubscriptionState.Purchasing -> Text(stringResource(R.string.peppy_play_checking), Modifier.testTag("play-subscription-status"))
@@ -128,17 +132,24 @@ internal fun PlaySubscriptionPanel(
             PlaySubscriptionState.Pending -> {
                 Text(stringResource(R.string.peppy_play_pending_title), Modifier.testTag("play-subscription-status"))
                 Text(stringResource(R.string.peppy_play_pending_body))
-                OutlinedButton(onClick = coordinator::restore, modifier = Modifier.testTag("play-pending-check")) { Text(stringResource(R.string.peppy_play_pending_check)) }
+                if (showRestoreActions) {
+                    OutlinedButton(onClick = coordinator::restore, modifier = Modifier.testTag("play-pending-check")) { Text(stringResource(R.string.peppy_play_pending_check)) }
+                }
             }
-            PlaySubscriptionState.Verifying -> Text(stringResource(R.string.peppy_hosted_purchase_verifying), Modifier.testTag("play-subscription-status"))
+            PlaySubscriptionState.Verifying -> Text(
+                stringResource(R.string.peppy_hosted_purchase_verifying),
+                Modifier.testTag("play-subscription-status").semantics { liveRegion = LiveRegionMode.Polite },
+            )
             PlaySubscriptionState.RestoreNone -> Status(R.string.peppy_play_restore_none)
             PlaySubscriptionState.LinkRetry -> {
                 Status(R.string.peppy_play_link_retry_body)
                 OutlinedButton(onClick = coordinator::retry, modifier = Modifier.testTag("play-link-retry")) { Text(stringResource(R.string.peppy_try_again)) }
             }
             PlaySubscriptionState.NotEntitling -> {
-                Status(R.string.peppy_play_not_active_body)
-                OutlinedButton(onClick = coordinator::restore, modifier = Modifier.testTag("play-restore-button")) { Text(stringResource(R.string.peppy_play_restore_cta)) }
+                Status(if (showRestoreActions) R.string.peppy_play_not_active_body else R.string.peppy_play_not_active_body_check)
+                if (showRestoreActions) {
+                    OutlinedButton(onClick = coordinator::restore, modifier = Modifier.testTag("play-restore-button")) { Text(stringResource(R.string.peppy_play_restore_cta)) }
+                }
             }
             PlaySubscriptionState.BoundToOtherAccount -> {
                 Text(stringResource(R.string.peppy_play_other_account_title), Modifier.testTag("play-subscription-error"))
@@ -218,11 +229,12 @@ internal fun PlaySubscriptionLoadEffect(
     }
 }
 
-@Composable private fun ProviderPlay(
+@Composable internal fun ProviderPlay(
     context: uniffi.peppy_mobile_bindings.NativePlayBillingContext,
     notice: CachedAccountNotice?,
     androidContext: android.content.Context,
     onRestore: () -> Unit,
+    showRestoreActions: Boolean,
 ) {
     var manageFailure by remember { mutableStateOf(false) }
     Text(stringResource(R.string.peppy_play_provider_label), Modifier.testTag("play-subscription-provider"))
@@ -251,8 +263,10 @@ internal fun PlaySubscriptionLoadEffect(
         ) { Text(stringResource(R.string.peppy_play_manage_cta)) }
     }
     if (manageFailure) Text(stringResource(R.string.peppy_toggle_android_link_unavailable), Modifier.testTag("play-manage-error"))
-    OutlinedButton(onClick = onRestore, modifier = Modifier.testTag("play-restore-button")) {
-        Text(stringResource(R.string.peppy_play_restore_cta))
+    if (showRestoreActions) {
+        OutlinedButton(onClick = onRestore, modifier = Modifier.testTag("play-restore-button")) {
+            Text(stringResource(R.string.peppy_play_restore_cta))
+        }
     }
 }
 

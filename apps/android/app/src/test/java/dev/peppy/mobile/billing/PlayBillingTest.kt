@@ -95,6 +95,16 @@ class PlayBillingTest {
         collector.cancel()
     }
 
+    @Test fun restoringAnAlreadyLinkedPurchaseReturnsToTheBaseState() {
+        val fixture = readyFixture()
+        fixture.gateway.completePurchases(listOf(purchase("token")))
+        fixture.coordinator.restore()
+        fixture.gateway.completePurchases(listOf(purchase("token")))
+
+        assertTrue(fixture.coordinator.state.value is PlaySubscriptionState.ProviderPlay)
+        assertFalse(fixture.coordinator.state.value is PlaySubscriptionState.Verifying)
+    }
+
     @Test fun pendingAndForeignPurchasesNeverLink() {
         val fixture = readyFixture()
         fixture.gateway.completePurchases(listOf(
