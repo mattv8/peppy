@@ -8411,6 +8411,56 @@
         }
       }
     },
+    "peppy.passphrase_save_password_manager": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save to password manager"
+          }
+        }
+      }
+    },
+    "peppy.passphrase_save_password_manager_note": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your password manager keeps a copy. Anyone who can open it can unlock your Peppy vault."
+          }
+        }
+      }
+    },
+    "peppy.passphrase_saved_password_manager": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved to your password manager"
+          }
+        }
+      }
+    },
+    "peppy.passphrase_save_password_manager_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not save to your password manager. Try again, or save your Vault key phrase another way."
+          }
+        }
+      }
+    },
+    "peppy.passphrase_password_manager_username": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy Vault key phrase"
+          }
+        }
+      }
+    },
     "peppy.provisioning_headline": {
       "localizations": {
         "en": {

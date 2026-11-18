@@ -842,6 +842,11 @@
     <string name="peppy_passphrase_copy">Copy Vault key phrase</string>
     <string name="peppy_passphrase_copied">Copied</string>
     <string name="peppy_passphrase_create_submit">Create my server</string>
+    <string name="peppy_passphrase_save_password_manager">Save to password manager</string>
+    <string name="peppy_passphrase_save_password_manager_note">Your password manager keeps a copy. Anyone who can open it can unlock your Peppy vault.</string>
+    <string name="peppy_passphrase_saved_password_manager">Saved to your password manager</string>
+    <string name="peppy_passphrase_save_password_manager_failed">Could not save to your password manager. Try again, or save your Vault key phrase another way.</string>
+    <string name="peppy_passphrase_password_manager_username">Peppy Vault key phrase</string>
     <string name="peppy_provisioning_headline">Setting up your server…</string>
     <string name="peppy_provisioning_error">Setup could not finish. Your subscription is active. Try again to resume.</string>
     <string name="peppy_provisioning_ready">Server ready</string>
