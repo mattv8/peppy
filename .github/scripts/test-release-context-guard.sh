@@ -48,7 +48,7 @@ image_channel=stable
 printf 'later\n' >> "$root/fixture"
 git -C "$root" commit --quiet -am later
 tip=$(git -C "$root" rev-parse HEAD)
-unrelated=$(printf unrelated | git -C "$root" commit-tree "$(git -C "$root" rev-parse HEAD^{tree})")
+unrelated=$(printf unrelated | git -C "$root" commit-tree "$(git -C "$root" rev-parse 'HEAD^{tree}')")
 git -C "$root" checkout --quiet --detach "$sha"
 ancestor_guard() {
   (cd "$root" && env RELEASE_CONTEXT_MODE=production-ancestor GITHUB_EVENT_NAME="$1" GITHUB_REF="$2" \
