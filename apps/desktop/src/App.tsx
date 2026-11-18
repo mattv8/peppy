@@ -14,6 +14,8 @@ import {
   type WheelEvent,
 } from "react";
 import { flushSync } from "react-dom";
+import { StartupScreen } from "./shell/StartupScreen";
+import { useLaunchProgress } from "./shell/useLaunchProgress";
 import { MAX_DRAFT_ATTACHMENTS, type BillingManageableIn, type BillingProvider, type ConversationFolder, type LocalSearchHit, type LocalSearchRequest, type NotificationQuickReplySettings, type OneTimeCodeTarget } from "@peppy/desktop-ui/bridge-contracts";
 import {
   AppTitlebar,
@@ -2293,6 +2295,7 @@ export function hasInFlightAttachmentPreparation(
 }
 
 export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind?: "native" | "browser"; fixedOrigin?: string; accountUrl?: string } = {}) {
+  const launchProgress = useLaunchProgress(bridge);
   const platform = detectPlatform();
   const browserHost = hostKind === "browser";
   const narrowBrowserViewport = useNarrowBrowserViewport(browserHost);
@@ -5410,7 +5413,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     </>;
 
   if (loading && composerConversation)
-    return <main ref={mainRef} id="composer-shell" aria-busy="true" data-platform={platform}>Loading messaging state…</main>;
+    return <main ref={mainRef} id="composer-shell" data-platform={platform}><StartupScreen variant="composer" progress={launchProgress} /></main>;
 
   const setupCode = snapshot?.connection.errorCode;
   const nativeCredentialed = snapshot?.mode === "native" && !["server-required", "credentials-required", "revoked"].includes(setupCode ?? "");
@@ -6253,7 +6256,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       data-browser-setup={browserHost && showSetup ? "true" : undefined}
       data-narrow-browser={narrowBrowserViewport || undefined}
       inert={lifecyclePending ? true : undefined}
-      aria-busy={loading || lifecyclePending ? "true" : undefined}
+      aria-busy={lifecyclePending ? "true" : undefined}
     >
       <AppTitlebar
         onMinimize={browserHost ? undefined : () => void bridge.window("minimize")}
@@ -6333,22 +6336,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         />}
         {loading || (!snapshot && draftSubscriptionError) ? (
           <section id="desktop-loading-state">
-            {draftSubscriptionError ? (
-              <DraftNotice
-                notice={{
-                  kind: "save-failed",
-                  message: "Draft updates unavailable. Retry setup to load messaging state.",
-                  tone: "error",
-                  role: "alert",
-                  action: "retry",
-                }}
-                onAction={() => {
-                  setLoading(true);
-                  setDraftSubscriptionError(undefined);
-                  restartDraftSubscriptionRef.current?.();
-                }}
-              />
-            ) : "Loading messaging state…"}
+            <StartupScreen variant="main" progress={launchProgress} error={draftSubscriptionError ? {
+              title: "Couldn't open your messages",
+              message: "Draft updates aren't available. Try again to finish loading.",
+              onRetry: () => {
+                setLoading(true);
+                setDraftSubscriptionError(undefined);
+                restartDraftSubscriptionRef.current?.();
+              },
+            } : undefined} />
           </section>
         ) : <>
         <aside

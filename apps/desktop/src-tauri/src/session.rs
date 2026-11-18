@@ -135,6 +135,7 @@ pub struct Session {
     /// Wakes the live supervisor for an explicitly requested bounded inbound replay.
     pub replay_wake: Notify,
     pub cancel: CancellationToken,
+    first_snapshot: tokio::sync::watch::Sender<bool>,
     /// Set only after this open session has completed the capability negotiation (including the
     /// explicit legacy 404/405 fallback). Producer commands must not create unclassified uses
     /// while negotiation is still retrying.
@@ -480,6 +481,7 @@ pub(crate) fn missing_draft_attachment_view(
 
 /// Opens (or re-attaches to) the binding's database with its existing protected key, and
 /// restores cached purpose keys without a passphrase when their integrity check passes.
+#[cfg(test)]
 pub fn open_session(
     root: &Path,
     store: &dyn SecretStore,
@@ -487,6 +489,20 @@ pub fn open_session(
     cached_epochs: &[u32],
     notifier: Notifier,
 ) -> BridgeResult<Session> {
+    open_session_with_progress(root, store, binding, cached_epochs, notifier, None)
+}
+
+pub(crate) fn open_session_with_progress(
+    root: &Path,
+    store: &dyn SecretStore,
+    binding: &Binding,
+    cached_epochs: &[u32],
+    notifier: Notifier,
+    progress: Option<&crate::launch_progress::LaunchTracker>,
+) -> BridgeResult<Session> {
+    if let Some(progress) = progress {
+        progress.enter(peppy_desktop_api::LaunchPhase::Unlocking);
+    }
     let credential = stored_credential(store, binding)?.ok_or_else(BridgeError::no_session)?;
     let data_dir = prepare_data_dir(root, binding)?;
     let database = binding.database_path(root);
@@ -496,21 +512,51 @@ pub fn open_session(
         vault_id: VaultId::from_str(&binding.vault_id).map_err(|_| host())?,
         device_id: DeviceId::from_str(&binding.device_id).map_err(|_| host())?,
     };
+    if let Some(progress) = progress {
+        progress.enter(peppy_desktop_api::LaunchPhase::Opening);
+    }
     let client =
         Client::open(config, DatabaseKey::new(&key).map_err(core_error)?).map_err(core_error)?;
+    let mut updating = false;
+    let mut base = 0u64;
     for epoch in cached_epochs {
         if let Some(bytes) = store.get(&binding.key_cache_account(*epoch))? {
-            match client
-                .import_native_key_cache(&NativeKeyCache::from_native_storage(bytes.to_vec()))
-            {
+            let cache = NativeKeyCache::from_native_storage(bytes.to_vec());
+            let mut epoch_completed = 0;
+            let result = if let Some(progress) = progress {
+                client.import_native_key_cache_with_progress(&cache, &mut |update| {
+                    if !updating {
+                        updating = true;
+                        progress.enter(peppy_desktop_api::LaunchPhase::Updating);
+                    }
+                    epoch_completed = update.completed;
+                    progress.set_update(base.saturating_add(update.completed), base.saturating_add(update.total));
+                })
+            } else {
+                client.import_native_key_cache(&cache)
+            };
+            base = base.saturating_add(epoch_completed);
+            match result {
                 // A stale or unverifiable cache simply leaves this epoch locked.
                 Ok(())
                 | Err(
                     peppy_client_core::Error::InvalidKeyCache
                     | peppy_client_core::Error::InvalidProfile,
                 ) => {}
-                Err(error) => return Err(core_error(error)),
+                Err(error) => {
+                    if updating {
+                        if let Some(progress) = progress {
+                            progress.clear_update();
+                        }
+                    }
+                    return Err(core_error(error));
+                }
             }
+        }
+    }
+    if updating {
+        if let Some(progress) = progress {
+            progress.clear_update();
         }
     }
     let api = Api::new(&credential.origin, &credential.device_token)?;
@@ -542,6 +588,7 @@ pub fn open_session(
         live_context_wake: Notify::new(),
         replay_wake: Notify::new(),
         cancel: CancellationToken::new(),
+        first_snapshot: tokio::sync::watch::channel(false).0,
         attachment_retention_negotiated: AtomicBool::new(false),
         attachment_retention_supported: AtomicBool::new(false),
         attachment_retention_ready_advertised: AtomicBool::new(false),
@@ -572,6 +619,18 @@ pub fn open_session(
 }
 
 impl Session {
+    pub(crate) fn mark_first_snapshot_served(&self) {
+        self.first_snapshot.send_replace(true);
+    }
+
+    pub(crate) async fn first_snapshot_or_timeout(&self) {
+        let mut snapshot = self.first_snapshot.subscribe();
+        tokio::select! {
+            _ = self.cancel.cancelled() => {},
+            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {},
+            _ = snapshot.wait_for(|served| *served) => {},
+        }
+    }
     pub fn is_revoked(&self) -> bool {
         self.status
             .lock()

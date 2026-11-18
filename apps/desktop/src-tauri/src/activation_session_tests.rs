@@ -164,6 +164,8 @@ async fn claim_unlock_survives_stale_session_race_reopen_and_live_rounds() {
     drop(session);
     tokio::time::sleep(Duration::from_millis(100)).await;
     let reopened = state.session().await.unwrap().unwrap();
+    // The UI's first load_state releases the startup-deferred live loop.
+    reopened.mark_first_snapshot_served();
     let reopened_keys = reopened.client.key_status().unwrap();
     assert_eq!(reopened_keys.active_epoch, Some(1));
     assert!(reopened_keys.unlocked_epochs.contains(&1));

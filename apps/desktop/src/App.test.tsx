@@ -3896,13 +3896,20 @@ describe("draft durability", () => {
     const draftBridge = bridge as typeof bridge & {
       subscribe_drafts(listener: (draft: Draft) => void): (() => void) & { ready?: Promise<void> };
     };
-    vi.mocked(draftBridge.subscribe_drafts).mockImplementation(() => unsubscribe);
+    const pending = deferred<void>();
+    vi.mocked(draftBridge.subscribe_drafts)
+      .mockImplementationOnce(() => unsubscribe)
+      .mockImplementation(() => Object.assign(vi.fn(), { ready: pending.promise }));
 
     render(<App />);
 
     const notice = await screen.findByRole("alert");
-    expect(notice).toHaveAttribute("data-draft-notice");
-    expect(notice).toHaveTextContent("Draft updates unavailable");
+    expect(notice).toHaveAttribute("id", "startup-error");
+    expect(notice).toHaveTextContent("Draft updates aren't available");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(document.getElementById("startup-screen")).toHaveFocus();
+    expect(document.getElementById("startup-error")).not.toBeInTheDocument();
+    await waitFor(() => expect(draftBridge.subscribe_drafts).toHaveBeenCalledTimes(2));
   });
 
   it("serializes delayed saves against the acknowledged revision without replacing newer text", async () => {
@@ -5862,8 +5869,8 @@ describe("host state display", () => {
     const trigger = document.querySelector("[data-status-trigger]") as HTMLButtonElement;
     expect(trigger).toHaveAttribute("data-status-tone", "neutral");
     expect(trigger).toHaveAccessibleName(/loading status/i);
-    expect(document.getElementById("desktop-shell")).toHaveAttribute("aria-busy", "true");
-    expect(screen.getByText("Loading messaging state…")).toBeVisible();
+    expect(document.getElementById("desktop-shell")).not.toHaveAttribute("aria-busy");
+    expect(document.getElementById("startup-title")).toHaveTextContent("Opening your messages…");
     expect(document.getElementById("desktop-loading-state")).toBeVisible();
     expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));

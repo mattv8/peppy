@@ -106,6 +106,7 @@ export {
   Check,
   CheckCheck,
   CheckCircle,
+  CircleAlert,
   ChevronDown,
   ChevronLeft,
   ChevronRight,

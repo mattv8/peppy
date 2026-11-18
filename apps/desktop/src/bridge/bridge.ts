@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+import type { LaunchProgress } from "@peppy/generated/launch-progress";
 
 /**
  * UI-only native boundary. These DTOs intentionally contain no credentials,
@@ -174,7 +175,11 @@ export {
 
 /** Extends the sanitized enrollment DTO; the QR payload may intentionally render an invitation secret, never root/private keys or device credentials. */
 export type EnrollmentView = SharedEnrollmentView & { computerClaimant?: ComputerClaimantView };
-export type DesktopBridge = Omit<SharedDesktopBridge, "enrollment_discover"> & { enrollment_discover(origin?: string): Promise<EnrollmentView> };
+export type DesktopBridge = Omit<SharedDesktopBridge, "enrollment_discover"> & {
+  enrollment_discover(origin?: string): Promise<EnrollmentView>;
+  launch_progress?: () => Promise<LaunchProgress>;
+  subscribe_launch_progress?: (listener: (progress: LaunchProgress) => void) => (() => void) & { ready?: Promise<void> };
+};
 
 const fixtureMessages: MessageView[] = [
   { id: "message-aurora-1", revision: "1", sender: "other", body: "Can you send over the estimate?", timestamp: "1788434460000", attachments: [] },
@@ -836,6 +841,8 @@ export const renewHostedSession = () => "__TAURI_INTERNALS__" in window
   ? invoke<void>("hosted_session_renew")
   : Promise.resolve();
 export const tauriBridge: DesktopBridge = {
+  launch_progress: () => invoke("launch_progress"),
+  subscribe_launch_progress: listener => subscribeWindowEvent("peppy://launch-progress", payload => listener(payload as LaunchProgress)),
   prepare_pasted_attachments: async files => {
     const views: AttachmentView[] = [];
     const failures: string[] = [];

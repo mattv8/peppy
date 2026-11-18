@@ -46,6 +46,7 @@ mod activation_session_tests;
 #[cfg(test)]
 mod draft_command_tests;
 mod hosted;
+mod launch_progress;
 mod lifecycle;
 #[allow(dead_code)]
 pub(crate) mod live_typing;
@@ -108,7 +109,7 @@ use peppy_desktop_api::compose::{self, DiscardDraftInput};
 #[cfg(target_os = "macos")]
 use secure_store::BundledStore;
 use secure_store::{KeyringStore, SecretStore};
-use session::{open_session, DeferredHydration, DraftInput, Notifier, Session, VaultSummary};
+use session::{DeferredHydration, DraftInput, Notifier, Session, VaultSummary};
 use sync::{blocking, fetch_vault, vault_header};
 
 #[cfg(target_os = "linux")]
@@ -196,6 +197,7 @@ pub struct AppState {
     /// Serializes credential import and post-dialog credential export against configuration changes.
     import_lock: tokio::sync::Mutex<()>,
     notifier: Notifier,
+    pub(crate) launch_progress: Arc<launch_progress::LaunchTracker>,
     notifications: Arc<NotificationSettings>,
     notification_activation: notification_activation::ActivationState,
     lifecycle: std::sync::Mutex<lifecycle::Coordinator>,
@@ -224,6 +226,7 @@ pub struct AppState {
 /// Commands a composer window may call (mirrors `capabilities/composer.json`).
 pub const COMPOSER_COMMANDS: &[&str] = &[
     "load_state",
+    "launch_progress",
     "account_access",
     "load_history",
     "open_external_url",
@@ -702,6 +705,7 @@ impl AppState {
             enrollment: Mutex::new(enrollment::Controller::default()),
             import_lock: tokio::sync::Mutex::new(()),
             notifier,
+            launch_progress: Arc::new(launch_progress::LaunchTracker::default()),
             notifications,
             notification_activation: notification_activation::ActivationState::default(),
             lifecycle: std::sync::Mutex::new(lifecycle::Coordinator::default()),
@@ -888,8 +892,16 @@ impl AppState {
             self.notifier.clone(),
             binding.clone(),
         );
+        let progress = self.launch_progress.clone();
         let session = match blocking(move || {
-            open_session(&root, &*store, &opening_binding, &epochs, notifier)
+            session::open_session_with_progress(
+                &root,
+                &*store,
+                &opening_binding,
+                &epochs,
+                notifier,
+                Some(&progress),
+            )
         })
         .await
         {
@@ -1216,64 +1228,78 @@ async fn load_state(
     history_from_message_id: Option<String>,
     metadata_only: Option<bool>,
 ) -> BridgeResult<Snapshot> {
-    let operation = admit_update_operation(&state)?;
-    if state.app_locked.load(Ordering::Acquire) {
-        return Ok(locked_snapshot(
-            state.app_lock_checking.load(Ordering::Acquire),
-            state.app_lock_storage_available.load(Ordering::Acquire),
-        ));
-    }
-    let origin = state.config()?.origin;
-    let session = match state.session_admitted(&operation).await {
-        Ok(Some(session)) => session,
-        Ok(None) => return Ok(empty_snapshot(origin)),
-        Err(error) if error.code == "revoked" => return Ok(revoked_snapshot(origin)),
-        Err(error) => return Err(error),
-    };
-    session.consume_deferred_follow_up();
-    let preferences = {
-        let session = session.clone();
-        let settings = state.notifications.clone();
-        blocking(move || session.notification_preferences(&settings)).await?
-    };
-    let (mut snapshot, deferred) = load_state_for_window_with_options(
-        &state,
-        window.label(),
-        session.clone(),
-        LoadStateOptions {
-            conversation_id,
-            history_from_message_id,
-            origin: origin.clone(),
-            preferences,
-            metadata_only: metadata_only.unwrap_or(false),
-        },
-    )
-    .await?;
-    match finalize_snapshot(&state, &session).await? {
-        SnapshotFinalization::Locked => {
+    let result = async {
+        let operation = admit_update_operation(&state)?;
+        if state.app_locked.load(Ordering::Acquire) {
             return Ok(locked_snapshot(
                 state.app_lock_checking.load(Ordering::Acquire),
                 state.app_lock_storage_available.load(Ordering::Acquire),
             ));
         }
-        SnapshotFinalization::Revoked => return Ok(revoked_snapshot(origin)),
-        SnapshotFinalization::Empty => return Ok(empty_snapshot(state.config()?.origin)),
-        SnapshotFinalization::Publish => {}
+        let origin = state.config()?.origin;
+        let session = match state.session_admitted(&operation).await {
+            Ok(Some(session)) => session,
+            Ok(None) => return Ok(empty_snapshot(origin)),
+            Err(error) if error.code == "revoked" => return Ok(revoked_snapshot(origin)),
+            Err(error) => return Err(error),
+        };
+        state
+            .launch_progress
+            .enter(peppy_desktop_api::LaunchPhase::Loading);
+        session.consume_deferred_follow_up();
+        let preferences = {
+            let session = session.clone();
+            let settings = state.notifications.clone();
+            blocking(move || session.notification_preferences(&settings)).await?
+        };
+        let (mut snapshot, deferred) = load_state_for_window_with_options(
+            &state,
+            window.label(),
+            session.clone(),
+            LoadStateOptions {
+                conversation_id,
+                history_from_message_id,
+                origin: origin.clone(),
+                preferences,
+                metadata_only: metadata_only.unwrap_or(false),
+            },
+        )
+        .await?;
+        session.mark_first_snapshot_served();
+        match finalize_snapshot(&state, &session).await? {
+            SnapshotFinalization::Locked => {
+                return Ok(locked_snapshot(
+                    state.app_lock_checking.load(Ordering::Acquire),
+                    state.app_lock_storage_available.load(Ordering::Acquire),
+                ));
+            }
+            SnapshotFinalization::Revoked => return Ok(revoked_snapshot(origin)),
+            SnapshotFinalization::Empty => return Ok(empty_snapshot(state.config()?.origin)),
+            SnapshotFinalization::Publish => {}
+        }
+        let (pinned_conversation_ids, panel) = heads_runtime::snapshot(&app, window.label());
+        snapshot.head.pinned_conversation_ids = Some(pinned_conversation_ids);
+        snapshot.head.panel = Some(panel);
+        snapshot.desktop = Some(dto::Desktop {
+            tray_available: TRAY_ACTIVE.load(Ordering::Relaxed),
+            start_at_login: app.autolaunch().is_enabled().unwrap_or(false),
+            startup_supported: cfg!(any(target_os = "macos", target_os = "windows")),
+            background: startup::background_requested(std::env::args()),
+        });
+        if session.schedule_deferred_follow_up(deferred) {
+            session.notify_deferred_follow_up();
+        }
+        start_search_index_driver(app, session);
+        Ok(snapshot)
     }
-    let (pinned_conversation_ids, panel) = heads_runtime::snapshot(&app, window.label());
-    snapshot.head.pinned_conversation_ids = Some(pinned_conversation_ids);
-    snapshot.head.panel = Some(panel);
-    snapshot.desktop = Some(dto::Desktop {
-        tray_available: TRAY_ACTIVE.load(Ordering::Relaxed),
-        start_at_login: app.autolaunch().is_enabled().unwrap_or(false),
-        startup_supported: cfg!(any(target_os = "macos", target_os = "windows")),
-        background: startup::background_requested(std::env::args()),
-    });
-    if session.schedule_deferred_follow_up(deferred) {
-        session.notify_deferred_follow_up();
-    }
-    start_search_index_driver(app, session);
-    Ok(snapshot)
+    .await;
+    state.launch_progress.mark_ready();
+    result
+}
+
+#[tauri::command]
+fn launch_progress(state: State<'_, AppState>) -> peppy_desktop_api::LaunchProgress {
+    state.launch_progress.snapshot()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6770,6 +6796,18 @@ pub fn run() {
                 window_placement::restore_initial(&main);
             }
             let state = app.state::<AppState>();
+            let handle = app.handle().clone();
+            // Tauri emit takes internal locks and can invoke native listeners synchronously.
+            // Keep it off the decoder recovery callback, which holds the core Store lock.
+            let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                while let Ok(progress) = progress_rx.recv() {
+                    let _ = handle.emit(launch_progress::EVENT, progress);
+                }
+            });
+            state.launch_progress.set_emitter(Arc::new(move |progress| {
+                let _ = progress_tx.send(progress);
+            }));
             // Install the locked tray before anything can read protected storage.
             let installed = tray::install(
                 app.handle(),
@@ -7230,6 +7268,7 @@ pub fn run() {
         set_maximize_button_region,
         close_head_panel,
         login_item::startup_status,
+        launch_progress,
         login_item::set_start_at_login,
         login_item::set_open_in_background,
         login_item::open_login_items,
