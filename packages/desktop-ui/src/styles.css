@@ -969,6 +969,9 @@ select:focus-visible {
   #sync-progress .sync-progress-cursors { grid-template-columns: minmax(0, 1fr); }
   #sync-progress .sync-progress-cursors dd { margin-bottom: 4px; }
 }
+/* Own-import progress: a 4px accent bar and a tabular count, sized inside the banner row. */
+#sync-progress progress { flex: 1 1 160px; min-width: 120px; height: 4px; accent-color: var(--peppy-accent); }
+#sync-progress [data-sync-count] { margin: 0; font-variant-numeric: tabular-nums; }
 #draft-recipients {
   position: absolute;
   z-index: 10;

@@ -55,6 +55,35 @@ describe("SyncProgress", () => {
     expect(details()).not.toHaveAttribute("open");
   });
 
+  it("shows receiving counts as a determinate progress bar and replaces cursor details", () => {
+    render(<SyncProgress progress={progress({ snapshotReceived: "42000", snapshotExpected: "108882" })} />);
+    expect(screen.getByRole("progressbar", { name: "Loading your history" })).toHaveAttribute("value", "42000");
+    expect(screen.getByRole("progressbar", { name: "Loading your history" })).toHaveAttribute("max", "108882");
+    expect(document.querySelector("[data-sync-count]")).toHaveTextContent("42,000 of 108,882 items");
+    const disclosure = within(details()!);
+    expect(disclosure.getByText("Downloaded")).toBeInTheDocument();
+    expect(disclosure.getByText("Expected")).toBeInTheDocument();
+    expect(disclosure.queryByText("Received through")).toBeNull();
+  });
+
+  it("shows an indeterminate organizing bar with no count while organizing a counted import", () => {
+    const { rerender } = render(<SyncProgress progress={progress()} />);
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(document.querySelector("[data-sync-count]")).toBeNull();
+    rerender(<SyncProgress progress={progress({ phase: "applying", snapshotReceived: "42", snapshotExpected: "108" })} />);
+    const bar = screen.getByRole("progressbar", { name: "Organizing downloaded history" });
+    expect(bar).not.toHaveAttribute("value");
+    expect(bar).not.toHaveAttribute("max");
+    expect(document.querySelector("[data-sync-count]")).toBeNull();
+  });
+
+  it("falls back to the plain banner when the download total is zero", () => {
+    render(<SyncProgress progress={progress({ snapshotReceived: "0", snapshotExpected: "0" })} />);
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(document.querySelector("[data-sync-count]")).toBeNull();
+    expect(document.querySelector("[data-sync-processed]")).toBeInTheDocument();
+  });
+
   it("keeps huge cursor strings exact inside the details disclosure", () => {
     render(<SyncProgress progress={progress()} />);
     const disclosure = within(details()!);
