@@ -1,6 +1,15 @@
 name: Play publish
 
 on:
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      track:
+        required: false
+        type: string
+        default: internal
   workflow_dispatch:
     inputs:
       release_tag:
@@ -18,7 +27,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: play-publish-${{ inputs.release_tag }}
+  group: play-publish
   cancel-in-progress: false
 
 defaults:
@@ -42,10 +51,13 @@ jobs:
       status: ${{ steps.plan.outputs.status }}
       track: ${{ steps.plan.outputs.track }}
     steps:
-      - name: Require production dispatch
+      - name: Require production release event
         run: |
           set -euo pipefail
-          [ "$GITHUB_EVENT_NAME:$GITHUB_REF" = 'workflow_dispatch:refs/heads/production' ] || { echo 'Play publishing requires a workflow dispatch on production' >&2; exit 1; }
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF" in
+            workflow_dispatch:refs/heads/production|push:refs/heads/production) ;;
+            *) echo 'Play publishing requires a production dispatch or push' >&2; exit 1 ;;
+          esac
       - id: plan
         name: Validate release tag and track
         run: |
