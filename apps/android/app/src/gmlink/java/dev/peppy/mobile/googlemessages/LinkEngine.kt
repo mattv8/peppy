@@ -32,6 +32,9 @@ interface LinkHandle {
     fun acceptsStreamOutput(generation: Long, revision: Long, streamEpoch: Long): Boolean =
         acceptsOutput(generation, revision)
     fun prepareNativeRcs(requestJson: String): String = "{\"code\":\"invalid_request\"}"
+    /** Defaults are conservative: a commit that cannot be proven unsent is unknown, never rejected. */
+    fun prepareReaction(requestJson: String): String = "{\"code\":\"rejected\"}"
+    fun commitPreparedReaction(requestJson: String): String = "{\"code\":\"outcome_unknown\"}"
     fun bindNativeRcsRoute(ticketId: String, linkGeneration: Long, sessionGeneration: Long, contextRevision: Long, mappingRevision: Long, observedAtMs: Long): String = "{\"code\":\"rejected\"}"
     /** Holds Go's current frozen ticket while [classifier] performs captured-core classification. */
     fun withNativeRcsTargetClassification(ticketId: String, classifier: NativeRcsTargetClassifier): Boolean = false

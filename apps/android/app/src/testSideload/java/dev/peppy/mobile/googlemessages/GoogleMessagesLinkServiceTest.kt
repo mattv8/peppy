@@ -24,6 +24,7 @@ import dev.peppy.mobile.RemoteMessagingRuntime
 import dev.peppy.mobile.googlemessages.live.LiveTypingCredentials
 import dev.peppy.mobile.googlemessages.live.LiveTypingListener
 import uniffi.peppy_mobile_bindings.NativeLiveClock
+import uniffi.peppy_mobile_bindings.NativeRcsReactionEntry
 import uniffi.peppy_mobile_bindings.NativeLiveEnableContext
 import uniffi.peppy_mobile_bindings.NativeLiveOutbound
 import uniffi.peppy_mobile_bindings.NativeLiveOutcome
@@ -1278,6 +1279,7 @@ class GoogleMessagesLinkServiceTest {
         }
         override fun clearHint(context: NativeRcsReceiveContext) = "recorded"
         override fun invalidate(context: NativeRcsReceiveContext, googleId: String, eventAtMs: Long?) = false
+        override fun ingestReactions(googleConversationId: String, googleMessageId: String, reactions: List<NativeRcsReactionEntry>, observedAtMs: Long) = false
     }
 
     private class ReconnectRunHandle : StatusHandle(LINKED_STATUS) {

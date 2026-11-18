@@ -10,6 +10,7 @@ import dev.peppy.mobile.gateway.NativeGateway
 import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.peppy_mobile_bindings.NativeRcsIngestOutcome
+import uniffi.peppy_mobile_bindings.NativeRcsReactionEntry
 import uniffi.peppy_mobile_bindings.NativeRcsObservationProvenance
 import uniffi.peppy_mobile_bindings.NativeRcsReceiveContext
 import java.util.concurrent.ConcurrentHashMap
@@ -67,6 +68,7 @@ internal class RcsReceiveCoordinator(
             when (event) {
                 is LiveEvent.Record -> runCatching {
                     val outcome = core.ingest(context, event.record, NativeRcsObservationProvenance.LIVE)
+                    ingestReactions(event.record)
                     GoogleMessagesLinkService.requestRcsMediaReceive()
                     // The proof was withdrawn after the context was read. A new proof reopens the
                     // lane, and recovery then fetches this record from the unchanged watermark.
@@ -83,6 +85,14 @@ internal class RcsReceiveCoordinator(
 
     private fun requestGatewayUpload() {
         runCatching { requestUpload() }
+    }
+
+    /** Ingests the record's reaction set, including for records core reports as duplicates. A failure never aborts the record. */
+    private fun ingestReactions(record: String) {
+        val facts = reactionFactsOf(record) ?: return
+        runCatching {
+            core.ingestReactions(facts.googleConversationId, facts.googleMessageId, facts.reactions, nowMs())
+        }.onFailure { recordGoogleMessagesLinkEvent("reaction", "ingest_failed", 0) }
     }
 
     private fun unknownGroupSender(record: String): Boolean =
@@ -287,6 +297,7 @@ internal class RcsReceiveCoordinator(
     private fun ingestAborts(context: NativeRcsReceiveContext, record: String): Boolean {
         val outcome = runCatching {
             core.ingest(context, record, NativeRcsObservationProvenance.HISTORICAL).also {
+                ingestReactions(record)
                 GoogleMessagesLinkService.requestRcsMediaReceive()
             }
         }.getOrNull() ?: return true
@@ -423,10 +434,15 @@ internal interface RcsReceiveCore {
     /** Fenced hint removal that keeps the gap open for a later trigger. */
     fun clearHint(context: NativeRcsReceiveContext): String
     fun invalidate(context: NativeRcsReceiveContext, googleId: String, eventAtMs: Long?): Boolean
+
+    /** Publishes the record's full reaction set; true only when core published a changed set. */
+    fun ingestReactions(googleConversationId: String, googleMessageId: String, reactions: List<NativeRcsReactionEntry>, observedAtMs: Long): Boolean
 }
 
 private class GeneratedRcsReceiveCore(private val context: Context) : RcsReceiveCore {
     private fun client() = checkNotNull(NativeGateway.open(context))
+    override fun ingestReactions(googleConversationId: String, googleMessageId: String, reactions: List<NativeRcsReactionEntry>, observedAtMs: Long) =
+        client().ingestRcsMessageReactions(googleConversationId, googleMessageId, reactions, observedAtMs)
     override fun context(googleId: String) = client().gatewayRcsReceiveContext(googleId)
     override fun contexts() = client().gatewayRcsLinkOwnedConversations()
     override fun ingest(context: NativeRcsReceiveContext, record: String, provenance: NativeRcsObservationProvenance) = if (provenance == NativeRcsObservationProvenance.LIVE) client().gatewayIngestGoRcsRecordJson(context.conversationId, context.ownershipGeneration, record) else client().gatewayIngestRcsProjectedObservation(context.conversationId, context.ownershipGeneration, record, provenance)
