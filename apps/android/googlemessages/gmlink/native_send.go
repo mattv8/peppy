@@ -76,7 +76,7 @@ func (link *Link) PrepareNativeRcs(requestJSON string) string {
 		link.clearPreparedTicketLocked()
 	}
 	link.expireNativeTicketLocked(now)
-	if link.nativeTicket != nil || link.nativeInFlight != nil || link.preparedTicket != nil || link.sendAdmissionInFlight {
+	if link.nativeTicket != nil || link.nativeInFlight != nil || link.preparedTicket != nil || link.preparedReactionTicket != nil || link.sendAdmissionInFlight {
 		link.mu.Unlock()
 		return link.nativePrepareResult("busy", "busy")
 	}

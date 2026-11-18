@@ -1,0 +1,50 @@
+[
+  {
+    "name": "self_only",
+    "reactions": [
+      {
+        "emoji": "👍",
+        "is_self": true,
+        "addresses": [],
+        "unresolved_actors": 0
+      }
+    ]
+  },
+  {
+    "name": "unresolved_only",
+    "reactions": [
+      {
+        "emoji": "🙏",
+        "is_self": false,
+        "addresses": [],
+        "unresolved_actors": 1
+      }
+    ]
+  },
+  {
+    "name": "mixed",
+    "reactions": [
+      {
+        "emoji": "❤️",
+        "is_self": true,
+        "addresses": [
+          "+15551234567"
+        ],
+        "unresolved_actors": 1
+      }
+    ]
+  },
+  {
+    "name": "custom_with_unicode",
+    "reactions": [
+      {
+        "emoji": "👨‍👩‍👧",
+        "is_self": false,
+        "addresses": [
+          "+15557654321"
+        ],
+        "unresolved_actors": 0
+      }
+    ]
+  }
+]

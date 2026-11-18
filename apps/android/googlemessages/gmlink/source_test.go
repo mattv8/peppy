@@ -19,12 +19,12 @@ var allowedLibgmCalls = map[string]bool{
 	"FetchConfig": true, "SetEventHandler": true, "SetPingInterval": true, "StartGaiaPairing": true,
 	"SetRPCDiagnosticObserver": true, // Local fixed-enum diagnostics configuration; no RPC effect.
 	"FinishGaiaPairing":        true, "Connect": true, "Disconnect": true, "ListConversations": true, "GetConversation": true,
-	"GetOrCreateConversation": true, "SendMessage": true, "FetchMessages": true, "SetTyping": true, "UnpairGaia": true,
+	"GetOrCreateConversation": true, "SendMessage": true, "SendReaction": true, "FetchMessages": true, "SetTyping": true, "UnpairGaia": true,
 }
 
 // forbiddenRPCNames are the unapproved read, send, open, delete and Bugle-revoke methods.
 var forbiddenRPCNames = []string{
-	"MarkRead", "SendReaction", "DeleteMessage",
+	"MarkRead", "DeleteMessage",
 	"UpdateConversation", "UpdateSettings", "UnpairBugle", "Unpair", "RevokeRelayPairing",
 }
 
