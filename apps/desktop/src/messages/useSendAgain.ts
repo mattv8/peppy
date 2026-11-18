@@ -53,7 +53,7 @@ export function useSendAgain({ message, gateways, serverOffline, store, onClose 
   const needsChoice = !noRoute && !selected;
   const pending = store.isPending(id);
 
-  const sentAgainId = store.sentAgainFor(id) ?? message.sendRecovery?.sentAgain?.messageId;
+  const sentAgainId = message.sentAgain?.messageId ?? message.sendRecovery?.sentAgain?.messageId ?? store.sentAgainFor(id);
   const sendable = message.sendRecovery?.canSendAgain === true && sentAgainId === undefined;
   const storedError = store.errorFor(id);
   const missingAttachments = storedError === "attachments-unavailable" || message.attachments.some((attachment) => attachment.localAvailable === false);
@@ -65,7 +65,8 @@ export function useSendAgain({ message, gateways, serverOffline, store, onClose 
     : serverOffline ? peppyCopy.message_send_again_offline
       : storedError === "route-unavailable" ? peppyCopy.message_send_again_route_gone
         : storedError === "offline" ? peppyCopy.message_send_again_offline
-          : storedError !== undefined ? peppyCopy.message_send_again_failed
+          : storedError === "invalid-request" ? peppyCopy.message_send_again_failed
+            : storedError !== undefined ? peppyCopy.message_send_again_unconfirmed_call
             : undefined;
   const confirmDescribedBy = needsChoice ? `send-again-hint-${id}` : alert !== undefined ? `send-again-error-${id}` : undefined;
 

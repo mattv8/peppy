@@ -1074,6 +1074,18 @@ export const nativeCatalog = Object.freeze(
 
 /** Desktop wording overrides and desktop-only keys. Mobile outputs use `catalog` only. */
 export const desktopOverrides = Object.freeze({
+  message_send_details_label: "Details for %1$s",
+  message_send_again_sent: "Sent again",
+  message_send_history_action: "History",
+  message_send_history_label: "Send history, %1$s attempts",
+  message_send_history_delivered_label: "Delivery confirmed. Send history, %1$s attempts",
+  message_send_history_title: "Send history",
+  message_send_history_latest: "Latest attempt",
+  message_send_history_attempt: "Attempt %1$s",
+  message_send_history_close: "Close",
+  message_send_earlier_may_have_sent: "An earlier attempt may also have been sent.",
+  message_send_earlier_was_sent: "An earlier attempt was also sent.",
+  message_send_again_unconfirmed_call: "Couldn't confirm it was sent again. Check the conversation before trying again.",
   attachment_storage_used_of_limit: "%1$s of %2$s used",
   attachment_storage_included_plus_addon: "%1$s included + %2$s add-on storage",
   group_details_open_label: "Group details",
@@ -1461,8 +1473,6 @@ export const desktopOverrides = Object.freeze({
   message_send_again_offline: "You're offline. Reconnect to send again.",
   message_send_again_failed: "Couldn't send again. The original message is unchanged.",
   message_send_again_pending: "Sending…",
-  message_send_again_done: "Sent again as a new message.",
-  message_send_again_done_unconfirmed: "Sent again as a new message. The first one may also have been sent.",
   message_send_again_show: "Show",
   message_send_again_show_label: "Show the new message",
 });

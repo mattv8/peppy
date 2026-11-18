@@ -8,6 +8,8 @@ import { SendAgainHost, type SendAgainHostProps } from "./SendAgainHost";
 import { SendRecoveryNotice } from "./SendAgain";
 import type { SendAgainRouteLabeler } from "./SendAgainRouteList";
 import { formatComposerReason } from "@peppy/desktop-ui";
+import { useContext } from "react";
+import { SendAgainStoreContext } from "./SendAgain";
 
 afterEach(() => {
   cleanup();
@@ -251,8 +253,16 @@ describe("SendAgainPopover: selection rules", () => {
 });
 
 describe("SendAgainPopover: errors and blocks", () => {
+  it("does not claim the original is unchanged when the call outcome is unknown", async () => {
+    vi.spyOn(bridge, "send_again").mockRejectedValueOnce(new Error("connection lost"));
+    renderHost();
+    openSendAgain();
+    fireEvent.click(confirmButton());
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't confirm it was sent again. Check the conversation before trying again.");
+    expect(confirmButton()).not.toHaveAttribute("aria-disabled", "true");
+  });
   it.each([
-    ["an unrecognised code", "unexpected", peppyCopy.message_send_again_failed],
+    ["an unrecognised code", "unexpected", peppyCopy.message_send_again_unconfirmed_call],
     ["offline at call time", "offline", peppyCopy.message_send_again_offline],
   ])("shows the copy for %s and keeps the popover open", async (_label, code, text) => {
     vi.spyOn(bridge, "send_again").mockRejectedValueOnce({ code, message: "raw" });
@@ -361,6 +371,22 @@ describe("SendAgainPopover: errors and blocks", () => {
 });
 
 describe("SendAgainPopover: pending, in-flight guard and host", () => {
+  it("clears the transient link after a top-level sentAgain snapshot", async () => {
+    vi.spyOn(bridge, "send_again").mockResolvedValue({ messageId: "copy" });
+    const Probe = () => {
+      const store = useContext(SendAgainStoreContext);
+      return <output data-testid="transient-link">{store?.sentAgainFor("m1") ?? ""}</output>;
+    };
+    const build = (message: MessageView) => <SendAgainHost conversation={{ id: "c", name: "Ana", preview: "", unread: 0, messages: [message] }} gateways={[phone()]} routeLabel={routeLabel} serverOffline={false} onGoToLatest={() => {}}>
+      <SendRecoveryNotice message={message} /><Probe />
+    </SendAgainHost>;
+    const view = render(build(original()));
+    openSendAgain();
+    fireEvent.click(confirmButton());
+    await waitFor(() => expect(screen.getByTestId("transient-link")).toHaveTextContent("copy"));
+    view.rerender(build(original(undefined, { sentAgain: { messageId: "copy" } })));
+    await waitFor(() => expect(screen.getByTestId("transient-link")).toBeEmptyDOMElement());
+  });
   it("locks the dialog while the send is pending: Escape, Cancel and outside presses are ignored, and both buttons are disabled", async () => {
     const pending = deferred<{ messageId: string }>();
     vi.spyOn(bridge, "send_again").mockReturnValueOnce(pending.promise);
@@ -419,7 +445,7 @@ describe("SendAgainPopover: pending, in-flight guard and host", () => {
     fireEvent.click(cancelButton());
     expect(popover()).toBeNull();
     openSendAgain();
-    expect(screen.getByRole("alert")).toHaveTextContent(peppyCopy.message_send_again_failed);
+    expect(screen.getByRole("alert")).toHaveTextContent(peppyCopy.message_send_again_unconfirmed_call);
   });
 
   it("toggles closed when the Send again button is pressed while its popover is open", () => {
@@ -597,6 +623,16 @@ describe("SendAgainPopover: placement", () => {
 });
 
 describe("SendAgainPopover: done row and Show", () => {
+  it("Show finds an attempt represented by a grouped row", () => {
+    const onGoToLatest = vi.fn();
+    renderHost({ messages: [original({ kind: "not-sent", canSendAgain: false, sentAgain: { messageId: "hidden-copy" } })], onGoToLatest });
+    const row = document.createElement("article");
+    row.dataset.resendAttempts = "hidden-copy latest";
+    document.body.appendChild(row);
+    fireEvent.click(screen.getByRole("button", { name: peppyCopy.message_send_again_show_label }));
+    expect(row).toHaveFocus();
+    expect(onGoToLatest).not.toHaveBeenCalled();
+  });
   it("Show focuses the new message row when it is rendered", () => {
     const onGoToLatest = vi.fn();
     renderHost({ messages: [original({ kind: "not-sent", canSendAgain: false, sentAgain: { messageId: "m1-sent-again" } })], onGoToLatest });

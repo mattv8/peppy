@@ -35,7 +35,18 @@ describe("Send again popover CSS", () => {
     expect(css).toMatch(/@media \(pointer: coarse\) \{ \[data-send-again-actions\] button \{ min-height: 44px; \} \}/);
   });
 
-  it("keeps the recovery row's rule that the bubble layout depends on", () => {
-    expect(css).toMatch(/\.message-meta \[data-message-recovery\] \{ display: flex; flex: 1 0 100%;/);
+  it("keeps recovery actions inline", () => {
+    expect(css).toMatch(/\.message-meta \[data-message-recovery\] \{ display: flex; flex-wrap: wrap;/);
+  });
+
+  it("aligns grouped self footers and their warning to the right and centers actions", () => {
+    expect(block(".message-row.self .message-meta:has(.message-resend-warning)")).toMatch(/justify-content:\s*flex-end/);
+    expect(block(".message-row.self .message-resend-warning")).toMatch(/justify-content:\s*flex-end/);
+    expect(css).toMatch(/\.message-meta:has\(\.message-meta-action\).*align-items:\s*center/);
+  });
+
+  it("gives compact actions fine and coarse pointer targets", () => {
+    expect(block(".message-meta-action")).toMatch(/min-height:\s*28px/);
+    expect(css).toMatch(/@media \(pointer: coarse\) \{ \.message-meta \.message-meta-action, \.message-meta \[data-message-recovery\] button \{ min-width: 44px; min-height: 44px; \} \}/);
   });
 });

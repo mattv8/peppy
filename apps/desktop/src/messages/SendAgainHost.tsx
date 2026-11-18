@@ -40,7 +40,10 @@ export function SendAgainHost({ conversation, gateways, routeLabel, serverOfflin
   // A sent-again result is kept until the snapshot carries the original's own sentAgain.
   useEffect(() => {
     setSentAgain((current) => {
-      const confirmed = [...current.keys()].filter((messageId) => messages?.find((message) => message.id === messageId)?.sendRecovery?.sentAgain);
+      const confirmed = [...current.keys()].filter((messageId) => {
+        const message = messages?.find((item) => item.id === messageId);
+        return message?.sentAgain ?? message?.sendRecovery?.sentAgain;
+      });
       if (confirmed.length === 0) return current;
       const next = new Map(current);
       confirmed.forEach((messageId) => next.delete(messageId));
@@ -59,7 +62,8 @@ export function SendAgainHost({ conversation, gateways, routeLabel, serverOfflin
     },
     close: (messageId) => setOpen((current) => current?.messageId === messageId ? undefined : current),
     showSentAgain: (messageId) => {
-      const row = Array.from(document.querySelectorAll<HTMLElement>("[data-message-id]")).find((element) => element.dataset.messageId === messageId);
+      const row = Array.from(document.querySelectorAll<HTMLElement>("[data-message-id]")).find((element) => element.dataset.messageId === messageId)
+        ?? Array.from(document.querySelectorAll<HTMLElement>("[data-resend-attempts]")).find((element) => element.dataset.resendAttempts?.split(" ").includes(messageId));
       if (!row) {
         onGoToLatest();
         return;

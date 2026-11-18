@@ -1,6 +1,6 @@
 use crate::{
-    AttachmentView, MessageView, SendCancellationView, message_view as base_message_view,
-    send_recovery_view,
+    AttachmentView, MessageView, SendCancellationView, SentAgainView,
+    message_view as base_message_view, send_recovery_view,
 };
 use peppy_client_core::{
     Client, Direction, Error, Message, RcsMessageStatus, SendCancellationState, Transport,
@@ -115,8 +115,9 @@ impl OutgoingMediaOutcome {
 }
 
 /// `revoked_devices` is the host's verified roster of revoked device ids (see `send_recovery`).
-/// The recovery state is decided last, on the final displayed transport: a message that displays
-/// as RCS, even one stored as SMS, never carries `sendRecovery`.
+/// The recovery state and the "Send again" link are decided last, on the final displayed transport:
+/// a message that displays as RCS, even one stored as SMS, never carries `sendRecovery` or
+/// `sentAgain`. The link is independent of the recovery state, so it stays after recovery closes.
 pub fn message_view(
     client: &Client,
     message: &Message,
@@ -124,7 +125,17 @@ pub fn message_view(
     revoked_devices: &HashSet<String>,
 ) -> Result<MessageView, Error> {
     let mut view = conversation_message_view(client, message, attachments)?;
-    view.send_recovery = if view.transport == Some("rcs") {
+    let displays_as_rcs = view.transport == Some("rcs");
+    view.sent_again = if displays_as_rcs {
+        None
+    } else {
+        message
+            .sent_again_message_id
+            .map(|message_id| SentAgainView {
+                message_id: message_id.to_string(),
+            })
+    };
+    view.send_recovery = if displays_as_rcs {
         None
     } else {
         send_recovery_view(client, message, revoked_devices)?
@@ -401,6 +412,68 @@ mod tests {
 
         assert_eq!(after.transport, Some("rcs"));
         assert!(after.send_recovery.is_none());
+    }
+
+    fn sent_again_sms(send_state: peppy_client_core::SendState) -> (Message, String) {
+        let mut message = rcs_message(Some(send_state));
+        message.payload.transport = Transport::Sms;
+        message.send_route = Some(peppy_client_core::SendRouteKind::Carrier);
+        let copy = peppy_client_core::MessageId::new();
+        message.sent_again_message_id = Some(copy);
+        (message, copy.to_string())
+    }
+
+    #[test]
+    fn a_sent_again_link_is_top_level_while_the_original_is_in_recovery() {
+        let client = client();
+        let (message, copy) = sent_again_sms(peppy_client_core::SendState::FailedBeforeSubmission);
+
+        let view = message_view(&client, &message, vec![], &HashSet::new()).unwrap();
+
+        assert_eq!(
+            view.send_recovery.as_ref().map(|r| r.kind),
+            Some("not-sent")
+        );
+        let value = serde_json::to_value(&view).unwrap();
+        assert_eq!(value["sentAgain"]["messageId"], copy);
+        assert_eq!(value["sendRecovery"]["sentAgain"]["messageId"], copy);
+    }
+
+    #[test]
+    fn a_sent_again_link_outlives_the_recovery_state() {
+        let client = client();
+        for state in [
+            peppy_client_core::SendState::SubmittedToOs,
+            peppy_client_core::SendState::Sent,
+            peppy_client_core::SendState::Delivered,
+        ] {
+            let (message, copy) = sent_again_sms(state);
+
+            let view = message_view(&client, &message, vec![], &HashSet::new()).unwrap();
+
+            assert!(view.send_recovery.is_none(), "{state:?} has no recovery");
+            let value = serde_json::to_value(&view).unwrap();
+            assert!(value.get("sendRecovery").is_none());
+            assert_eq!(value["sentAgain"]["messageId"], copy);
+        }
+    }
+
+    #[test]
+    fn a_message_displayed_as_rcs_has_no_sent_again_link() {
+        let client = client();
+        let mut message = rcs_message(Some(peppy_client_core::SendState::Delivered));
+        message.sent_again_message_id = Some(peppy_client_core::MessageId::new());
+
+        let view = message_view(&client, &message, vec![], &HashSet::new()).unwrap();
+
+        assert_eq!(view.transport, Some("rcs"));
+        assert!(view.sent_again.is_none());
+        assert!(
+            serde_json::to_value(&view)
+                .unwrap()
+                .get("sentAgain")
+                .is_none()
+        );
     }
 
     #[test]

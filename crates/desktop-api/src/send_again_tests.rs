@@ -214,6 +214,61 @@ fn the_sending_device_offers_one_copy_after_its_phone_is_removed() {
 }
 
 #[test]
+fn a_sent_again_link_whose_copy_row_is_gone_is_not_projected() {
+    let fixture = fixture();
+    let removed = DeviceId::new();
+    let second = DeviceId::new();
+    let (_, original) = queue_sms(&fixture.client, removed, "purged copy");
+    let roster = revoked(&[removed]);
+    let phones = [phone(second, GatewayAvailability::Connected, false)];
+    let copy = compose::send_again(
+        &fixture.client,
+        &copy_input(original, second),
+        Some(&phones),
+        &roster,
+    )
+    .ok()
+    .unwrap();
+    let original_message = fixture.client.message_by_id(original).unwrap().unwrap();
+    let linked =
+        crate::rcs_receive::message_view(&fixture.client, &original_message, vec![], &roster)
+            .unwrap();
+    assert_eq!(
+        linked.sent_again.map(|link| link.message_id),
+        Some(copy.message_id.clone())
+    );
+
+    // The copy row disappears (for example a local purge): the core stops reporting the link.
+    {
+        let db = rusqlite::Connection::open(&fixture.path).unwrap();
+        db.execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+        db.execute(
+            "DELETE FROM messages WHERE id=?",
+            [copy.message_id.as_str()],
+        )
+        .unwrap();
+    }
+    let after = fixture.client.message_by_id(original).unwrap().unwrap();
+    let view = crate::rcs_receive::message_view(&fixture.client, &after, vec![], &roster).unwrap();
+
+    assert!(view.sent_again.is_none());
+    assert!(
+        view.send_recovery
+            .as_ref()
+            .is_some_and(|r| r.sent_again.is_none())
+    );
+    assert!(
+        serde_json::to_value(&view)
+            .unwrap()
+            .get("sentAgain")
+            .is_none()
+    );
+}
+
+#[test]
 fn an_mms_copy_reuses_the_attachment_on_this_device() {
     let fixture = fixture();
     let removed = DeviceId::new();
