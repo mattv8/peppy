@@ -1396,6 +1396,8 @@ export const peppyCopy = {
   gateway_status_setting_up: "Setting up",
   gateway_problem_setting_up: "%1$s is still setting up. It can send when that finishes.",
   gateway_problem_setting_up_other: "%1$s is still setting up. Choose another phone, or wait for it to finish.",
+  gateway_problem_importing_delayed: "%1$s was last seen %2$s ago. Sending is paused until it reconnects.",
+  gateway_problem_importing_delayed_unknown: "%1$s hasn't been seen recently. Sending is paused until it reconnects.",
   composer_status_setting_up_detail: "It is importing your message history, which can take several minutes. Your draft is saved.",
   gateway_presence_finished_setup: "%1$s finished setting up. You can send now.",
   devices_setting_up_badge: "Setting up",

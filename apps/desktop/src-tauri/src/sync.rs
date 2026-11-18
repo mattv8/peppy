@@ -684,6 +684,39 @@ impl SnapshotTooLargeGate {
 /// Snapshot refusal code shared with the desktop bridge.
 const SNAPSHOT_TOO_LARGE_CODE: &str = "snapshot-too-large";
 
+/// The snapshot append a test forces to be refused as too large (the core's byte cap, which a real
+/// test cannot reach within a practical size).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppendKind {
+    Records,
+    Manifest,
+}
+
+/// Test seam for append refusals. Production builds never refuse here.
+#[cfg(test)]
+fn forced_append_refusal(session: &Session, kind: AppendKind) -> Option<BridgeError> {
+    let forced = *session
+        .refuse_snapshot_append
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    (forced == Some(kind)).then(|| BridgeError::new(SNAPSHOT_TOO_LARGE_CODE, "forced refusal"))
+}
+
+#[cfg(not(test))]
+fn forced_append_refusal(_session: &Session, _kind: AppendKind) -> Option<BridgeError> {
+    None
+}
+
+/// Records a too-large refusal of any snapshot write (begin or append) in the session gate, then
+/// returns the result unchanged. Every snapshot write passes through here, so the window exists
+/// before any caller decides how to react (a deferred repair, a failed live round).
+fn record_snapshot_refusal<T>(session: &Session, result: BridgeResult<T>) -> BridgeResult<T> {
+    if matches!(&result, Err(error) if error.code == SNAPSHOT_TOO_LARGE_CODE) {
+        snapshot_gate(session).record_too_large(Instant::now());
+    }
+    result
+}
+
 /// Lock the session-wide snapshot gate. A poisoned lock still holds valid gate state.
 fn snapshot_gate(session: &Session) -> std::sync::MutexGuard<'_, SnapshotTooLargeGate> {
     session
@@ -771,15 +804,7 @@ async fn start_or_resume(
         }
     })
     .await;
-    let progress = match progress {
-        Ok(progress) => progress,
-        Err(error) => {
-            if error.code == SNAPSHOT_TOO_LARGE_CODE {
-                snapshot_gate(session).record_too_large(Instant::now());
-            }
-            return Err(error);
-        }
-    };
+    let progress = record_snapshot_refusal(session, progress)?;
     snapshot_gate(session).clear();
     session.set_status(|status| {
         if status.error_code == Some(SNAPSHOT_TOO_LARGE_CODE) {
@@ -940,12 +965,20 @@ async fn import_manifest_cut(
             .collect::<BridgeResult<Vec<_>>>()
             .map_err(|_| CutError::Impossible)?;
         let (c, generation) = (client(session), progress.generation);
-        let manifest = match blocking(move || {
-            c.append_snapshot_manifest(generation, &entries)
-                .map_err(core_error)
-        })
-        .await
-        {
+        let forced = forced_append_refusal(session, AppendKind::Manifest);
+        let manifest = match record_snapshot_refusal(
+            session,
+            match forced {
+                Some(error) => Err(error),
+                None => {
+                    blocking(move || {
+                        c.append_snapshot_manifest(generation, &entries)
+                            .map_err(core_error)
+                    })
+                    .await
+                }
+            },
+        ) {
             Ok(manifest) => manifest,
             // Too many entries for one page, or another refused page: restart the cut.
             Err(error) if error.code == "invalid-request" => return Err(CutError::Impossible),
@@ -1047,11 +1080,20 @@ async fn append_snapshot_records(
         })
         .collect::<BridgeResult<Vec<_>>>()?;
     let (c, generation) = (client(session), progress.generation);
-    blocking(move || {
-        c.append_snapshot_raw_page(generation, &records)
-            .map_err(core_error)
-    })
-    .await
+    let forced = forced_append_refusal(session, AppendKind::Records);
+    record_snapshot_refusal(
+        session,
+        match forced {
+            Some(error) => Err(error),
+            None => {
+                blocking(move || {
+                    c.append_snapshot_raw_page(generation, &records)
+                        .map_err(core_error)
+                })
+                .await
+            }
+        },
+    )
 }
 
 /// HTTP replay after the durable receive cursor (bounded pages, adaptive size).
@@ -2491,7 +2533,7 @@ async fn reclaim_contact_photos(
 /// session (or per manual request) so an unsupported server cannot cause a snapshot loop.
 /// Runs the optional contact repair. A refusal by the window only defers it: the caller's round keeps
 /// going (replay, drafts, outbox), and the repair is attempted again once the window allows.
-async fn repair_if_required(session: &Arc<Session>) -> BridgeResult<()> {
+pub(crate) async fn repair_if_required(session: &Arc<Session>) -> BridgeResult<()> {
     let c = client(session);
     let required = blocking(move || c.contact_repair_required().map_err(core_error)).await?;
     if !required {

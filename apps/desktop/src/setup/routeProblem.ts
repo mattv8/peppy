@@ -33,6 +33,27 @@ function settingUpProblem(gateway: GatewayView, gateways: GatewayView[]): string
   return formatCopy(another ? peppyCopy.gateway_problem_setting_up_other : peppyCopy.gateway_problem_setting_up, gateway.name);
 }
 
+/**
+ * Why a phone whose import flag is set cannot send. The flag refuses the send whatever presence says;
+ * the wording follows the phone's live presence: setup while live, then the same sentences a phone
+ * that is not importing gets when it is offline or delayed.
+ */
+export function importingRefusal(gateway: GatewayView, gateways: GatewayView[]): string {
+  const availability = gatewayAvailability(gateway);
+  if (availability === "offline") return availabilityProblem(gateway) ?? settingUpProblem(gateway, gateways);
+  if (availability === "delayed") {
+    const seconds = gateway.lastSeenAgeSeconds;
+    return seconds === undefined
+      ? formatCopy(peppyCopy.gateway_problem_importing_delayed_unknown, gateway.name)
+      : formatCopy(peppyCopy.gateway_problem_importing_delayed, gateway.name, ageText(seconds));
+  }
+  return settingUpProblem(gateway, gateways);
+}
+
+function ageText(seconds: number): string {
+  return seconds < 60 ? "under a minute" : seconds < 3_600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3_600)}h`;
+}
+
 export function routeProblem(
   route: RouteChoice,
   gateways: GatewayView[],
@@ -46,7 +67,7 @@ export function routeProblem(
       ? "choose a phone and SIM"
       : "no phone is configured";
   const settingUp = settingUpGatewayFor(route, gateways);
-  if (settingUp) return settingUpProblem(settingUp, gateways);
+  if (settingUp) return importingRefusal(settingUp, gateways);
   if (route.kind === "stale")
     return "the selected phone/SIM is no longer reported; choose another route";
   const availability = availabilityProblem(route.gateway);
