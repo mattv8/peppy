@@ -234,7 +234,7 @@ val robolectricDependencies = listOf(
     "org.robolectric:android-all-instrumented:11-robolectric-6757853-i7",
     "org.robolectric:android-all-instrumented:12-robolectric-7732740-i7",
     "org.robolectric:android-all-instrumented:14-robolectric-10818077-i7",
-    "org.robolectric:android-all-instrumented:15-robolectric-13954326-i7",
+    "org.robolectric:android-all-instrumented:15-robolectric-14663667-2-i7",
 ).mapIndexed { index, coordinate ->
     configurations.create("robolectricDependency$index").also { configuration ->
         dependencies.add(configuration.name, coordinate)
@@ -451,7 +451,7 @@ dependencies {
     implementation("androidx.camera:camera-view:1.4.2")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     // Optional at runtime without google-services.json; required to compile the content-free wake service.
-    implementation("com.google.firebase:firebase-messaging:26.0.1")
+    implementation("com.google.firebase:firebase-messaging:26.0.2")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.ui:ui")
@@ -463,7 +463,7 @@ dependencies {
     implementation("com.android.billingclient:billing:9.1.0")
 
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.robolectric:robolectric:4.17")
+    testImplementation("org.robolectric:robolectric:4.18")
     testImplementation("androidx.test:core:1.6.1")
     testImplementation("androidx.work:work-testing:2.12.0")
     testImplementation(platform("androidx.compose:compose-bom:2026.09.00"))

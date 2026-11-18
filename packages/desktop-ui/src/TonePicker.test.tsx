@@ -113,13 +113,13 @@ describe("TonePicker", () => {
     const swatchColor = vi.fn((index: number | null) => `var(--accent-${index ?? "default"})`);
     render(<TonePicker id="tone" seed="contact" automaticIndex={9} value={60} label="Accent color" defaultLabel="Default (Coral)" swatchColor={swatchColor} variant="field" onSelect={vi.fn()} />);
     expect(screen.getByRole("button", { name: "Accent color: Red" })).toHaveAttribute("aria-label", "Accent color: Red");
-    expect(document.querySelector("[data-tone-picker-swatch]")).toHaveStyle({ background: "var(--accent-60)" });
+    expect(document.querySelector<HTMLElement>("[data-tone-picker-swatch]")!.style.background).toBe("var(--accent-60)");
     fireEvent.click(screen.getByRole("button", { name: "Accent color: Red" }));
     expect(screen.getByRole("dialog", { name: "Accent color" })).toBeVisible();
     expect(screen.getByRole("radiogroup", { name: "Accent color" })).toBeVisible();
     expect(screen.getByText("Accent color")).toBeVisible();
-    expect(screen.getByRole("radio", { name: "Default (Coral)" })).toHaveStyle("--tone-swatch: var(--accent-default)");
-    expect(screen.getByRole("radio", { name: "Red" })).toHaveStyle("--tone-swatch: var(--accent-60)");
+    expect(screen.getByRole("radio", { name: "Default (Coral)" }).style.getPropertyValue("--tone-swatch")).toBe("var(--accent-default)");
+    expect(screen.getByRole("radio", { name: "Red" }).style.getPropertyValue("--tone-swatch")).toBe("var(--accent-60)");
   });
 
   it("completes synchronous selections", async () => {

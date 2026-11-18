@@ -98,8 +98,8 @@ class ContainerWorkflowTests(unittest.TestCase):
             build = next(step for step in steps if step.get("uses", "").startswith("docker/build-push-action@"))
             metadata = next(step for step in steps if step.get("id") == "metadata")["run"]
             self.assertEqual(checkout["with"]["ref"], "${{ inputs.ref || github.sha }}")
-            self.assertEqual(buildx["uses"], "docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f")
-            self.assertEqual(build["uses"], "docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8")
+            self.assertEqual(buildx["uses"], "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069")
+            self.assertEqual(build["uses"], "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc")
             self.assertIn("version must match X.Y.Z or X.Y.Z-prerelease", metadata)
             self.assertIn("revision=$(git rev-parse HEAD)", metadata)
             labels = build["with"]["labels"]
