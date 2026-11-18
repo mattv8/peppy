@@ -32,6 +32,7 @@ mod devices;
 mod dialogs;
 mod distribution;
 mod dto;
+mod emoji_picker;
 mod enrollment;
 mod error;
 mod fsutil;
@@ -230,6 +231,9 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "send_draft",
     "send_again",
     "cancel_send",
+    "react_to_message",
+    "dismiss_reaction_request",
+    "open_emoji_picker",
     "send_typing",
     "set_typing_sharing",
     "mark_seen",
@@ -278,7 +282,14 @@ fn cancellation_command_is_acl_granted_to_main_and_composer_windows() {
     const MAIN_CAPABILITY: &str = include_str!("../capabilities/default.json");
     const COMPOSER_CAPABILITY: &str = include_str!("../capabilities/composer.json");
 
-    for command in ["send_typing", "set_typing_sharing", "cancel_send"] {
+    for command in [
+        "send_typing",
+        "set_typing_sharing",
+        "cancel_send",
+        "react_to_message",
+        "dismiss_reaction_request",
+        "open_emoji_picker",
+    ] {
         assert!(
             APP_MANIFEST.contains(&format!("\"{command}\",")),
             "{command} must be declared in the app manifest"
@@ -3111,6 +3122,147 @@ fn request_send_cancellation_scoped(
         .client
         .request_send_cancellation(message_id)
         .map_err(core_error)
+}
+
+#[tauri::command]
+async fn react_to_message(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    message_id: String,
+    emoji: Option<String>,
+) -> BridgeResult<dto::ReactionSubmitView> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    let message_id = MessageId::from_str(&message_id)
+        .map_err(|_| BridgeError::new("invalid-message", "The message ID is invalid."))?;
+    let conversation = reaction_conversation_scope(&window, &state, &session)?;
+    let submit_session = session.clone();
+    let result = blocking(move || {
+        react_to_message_scoped(&submit_session, message_id, emoji, conversation)
+    })
+    .await?;
+    if result.accepted {
+        session.request_work();
+    }
+    session.notify();
+    Ok(result)
+}
+
+/// The conversation a reaction command may touch: `None` for the main window, the composer's own
+/// conversation for a composer window (the same resolution `cancel_send` uses).
+fn reaction_conversation_scope(
+    window: &tauri::WebviewWindow,
+    state: &AppState,
+    session: &Arc<Session>,
+) -> BridgeResult<Option<ConversationId>> {
+    if window.label() == tray::MAIN {
+        return Ok(None);
+    }
+    let source = tray::composer_conversation(window.label()).ok_or_else(window_error)?;
+    effective_composer_conversation(state, window.label(), session, Some(&source.to_string()))
+}
+
+fn react_to_message_scoped(
+    session: &Session,
+    message_id: MessageId,
+    emoji: Option<String>,
+    conversation: Option<ConversationId>,
+) -> BridgeResult<dto::ReactionSubmitView> {
+    if let Some(conversation) = conversation {
+        let belongs = session
+            .client
+            .messages_belong_to_conversation(conversation, &[message_id])
+            .map_err(core_error)?;
+        if !belongs {
+            return Err(BridgeError::new(
+                "window-context",
+                "A composer window can only react to messages in its own conversation.",
+            ));
+        }
+    }
+    let (gateways, _) = session.gateways();
+    dto::reactions::react(&session.client, message_id, emoji, &gateways).map_err(core_error)
+}
+
+#[tauri::command]
+async fn dismiss_reaction_request(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    request_id: String,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    let conversation = reaction_conversation_scope(&window, &state, &session)?;
+    let dismiss_session = session.clone();
+    blocking(move || dismiss_reaction_request_scoped(&dismiss_session, &request_id, conversation))
+        .await?;
+    session.notify();
+    Ok(())
+}
+
+fn dismiss_reaction_request_scoped(
+    session: &Session,
+    request_id: &str,
+    conversation: Option<ConversationId>,
+) -> BridgeResult<()> {
+    match dto::reactions::dismiss(&session.client, request_id, conversation).map_err(core_error)? {
+        dto::reactions::DismissScope::Dismissed => Ok(()),
+        dto::reactions::DismissScope::OutsideScope => Err(BridgeError::new(
+            "window-context",
+            "A composer window can only dismiss reaction requests in its own conversation.",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod reaction_command_tests {
+    use super::*;
+
+    #[test]
+    fn reaction_session_guard_rejects_a_message_outside_the_composer_window() {
+        let fixture = crate::tests::fixture();
+        let session = crate::tests::open(&fixture, &fixture.binding, &[]);
+
+        let error = react_to_message_scoped(
+            &session,
+            MessageId::new(),
+            Some("👍".into()),
+            Some(ConversationId::new()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "window-context");
+    }
+
+    #[test]
+    fn dismiss_refuses_a_request_outside_the_composer_conversation() {
+        let fixture = crate::tests::fixture();
+        let session = crate::tests::open(&fixture, &fixture.binding, &[]);
+
+        let error = dismiss_reaction_request_scoped(
+            &session,
+            &peppy_client_core::ReactionRequestId::new().to_string(),
+            Some(ConversationId::new()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "window-context");
+    }
+
+    #[test]
+    fn dismiss_from_the_main_window_reaches_core() {
+        let fixture = crate::tests::fixture();
+        let session = crate::tests::open(&fixture, &fixture.binding, &[]);
+
+        let error = dismiss_reaction_request_scoped(
+            &session,
+            &peppy_client_core::ReactionRequestId::new().to_string(),
+            None,
+        )
+        .unwrap_err();
+
+        assert_ne!(error.code, "window-context");
+    }
 }
 
 #[cfg(test)]
@@ -7016,6 +7168,9 @@ pub fn run() {
         send_draft,
         send_again,
         cancel_send,
+        react_to_message,
+        dismiss_reaction_request,
+        emoji_picker::open_emoji_picker,
         live_typing::send_typing,
         live_typing::set_typing_sharing,
         mark_seen,

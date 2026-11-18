@@ -274,6 +274,29 @@ mod tests {
         assert!(view.send_cancellation.is_none());
     }
 
+    #[test]
+    fn reaction_facts_survive_the_rcs_projection() {
+        let client = client();
+        let mut message = rcs_message(None);
+        message.reactions = vec![peppy_client_core::MessageReaction {
+            emoji: "👍".into(),
+            actors: vec![peppy_client_core::ReactionActor {
+                is_self: true,
+                address: None,
+            }],
+        }];
+        message.reactable = Some(peppy_client_core::ReactionRoute::Native);
+
+        let value =
+            serde_json::to_value(message_view(&client, &message, vec![], &HashSet::new()).unwrap())
+                .unwrap();
+
+        assert_eq!(value["reactable"], "native");
+        assert_eq!(value["reactions"][0]["emoji"], "👍");
+        assert_eq!(value["reactions"][0]["actors"][0]["self"], true);
+        assert!(value.get("ownReactionRequest").is_none());
+    }
+
     fn rcs_message(send_state: Option<peppy_client_core::SendState>) -> Message {
         Message {
             payload: MessagePayload {
@@ -305,6 +328,9 @@ mod tests {
             send_cancel_requested: false,
             sent_again_message_id: None,
             send_route: None,
+            reactions: Vec::new(),
+            own_reaction_request: None,
+            reactable: None,
         }
     }
 

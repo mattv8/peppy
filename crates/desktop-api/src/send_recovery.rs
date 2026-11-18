@@ -145,6 +145,9 @@ mod tests {
             send_cancel_requested: false,
             sent_again_message_id: None,
             send_route: Some(SendRouteKind::Carrier),
+            reactions: Vec::new(),
+            own_reaction_request: None,
+            reactable: None,
         }
     }
 

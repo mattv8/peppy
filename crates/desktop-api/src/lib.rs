@@ -26,6 +26,11 @@ pub mod mms_plan;
 pub mod notification_activation;
 pub use notification_activation::*;
 pub mod quick_reply;
+pub mod reactions;
+pub use reactions::{
+    ConversationReactions, MessageReactionView, OwnReactionRequestView, ReactionActorView,
+    ReactionSubmitView,
+};
 pub mod rcs_status;
 pub use rcs_status::*;
 pub mod search;
@@ -252,6 +257,12 @@ pub struct ConversationView {
     /// Present only for a group conversation (a roster or an RCS group mapping).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<GroupView>,
+    /// Reaction route the conversation offers; absent for draft-only rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reaction_support: Option<&'static str>,
+    /// Gateway the reaction route uses; the UI reads its presence for the offline gate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reaction_gateway_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -298,6 +309,12 @@ pub struct MessageView {
     /// Recovery state of a carrier send that may not have reached the carrier (see `send_recovery`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub send_recovery: Option<SendRecoveryView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reactions: Option<Vec<MessageReactionView>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub own_reaction_request: Option<OwnReactionRequestView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reactable: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -793,6 +810,12 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
         rcs_reported: false,
         send_cancellation: None,
         send_recovery: None,
+        reactions: reactions::reactions_view(&message.reactions),
+        own_reaction_request: message
+            .own_reaction_request
+            .as_ref()
+            .map(reactions::own_reaction_request_view),
+        reactable: reactions::reactable_wire(message.reactable),
     }
 }
 
@@ -954,6 +977,8 @@ mod tests {
             rcs_encryption: Some(true),
             rcs_history_gap: true,
             group: None,
+            reaction_support: Some("native"),
+            reaction_gateway_id: Some("gateway".into()),
         };
 
         let value = serde_json::to_value(view).unwrap();
@@ -1144,6 +1169,9 @@ mod tests {
             send_cancel_requested: false,
             sent_again_message_id: None,
             send_route: None,
+            reactions: Vec::new(),
+            own_reaction_request: None,
+            reactable: None,
         };
 
         let view = message_view(&message, vec![]);
@@ -1193,6 +1221,9 @@ mod tests {
             send_cancel_requested: false,
             sent_again_message_id: None,
             send_route: None,
+            reactions: Vec::new(),
+            own_reaction_request: None,
+            reactable: None,
         }
     }
 
