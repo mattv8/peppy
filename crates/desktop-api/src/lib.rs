@@ -161,6 +161,9 @@ pub struct GatewayView {
     /// A truthful presence/capability projection. Missing from legacy cached views means unknown.
     #[serde(default)]
     pub availability: GatewayAvailability,
+    /// True only while the gateway reports an active history import.
+    #[serde(default)]
+    pub setting_up: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_seen_age_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -186,6 +189,7 @@ pub enum GatewayAvailability {
     Unknown,
     Connected,
     Delayed,
+    SettingUp,
     Offline,
     NeverConnected,
     NoSmsSim,

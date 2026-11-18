@@ -268,6 +268,48 @@ describe("DevicesSettings", () => {
     expect(phone.querySelector('[data-device-badge="presence"]')).toHaveTextContent("Last seen 5m ago");
   });
 
+  it("shows the setting-up badge and note only for a connected, unrevoked phone", async () => {
+    vi.mocked(bridge.list_devices).mockResolvedValue({ currentDeviceId: "self", devices: [
+      { id: "self", name: "This Mac", kind: "desktop", role: "owner", revoked: false },
+      { id: "importing", name: "Pixel 8", kind: "android", role: "gateway", revoked: false, presence: { state: "connected", last_seen_age_seconds: 0 }, settingUp: true },
+      { id: "stale", name: "Galaxy", kind: "android", role: "gateway", revoked: false, presence: { state: "seen", last_seen_age_seconds: 300 }, settingUp: true },
+      { id: "removed", name: "Old phone", kind: "android", role: "gateway", revoked: true, presence: { state: "connected", last_seen_age_seconds: 0 }, settingUp: true },
+    ] });
+    render(<DevicesSettings />);
+    await screen.findByText("Pixel 8");
+
+    const importing = document.querySelector('[data-device-id="importing"]')!;
+    const badge = importing.querySelector('[data-device-badge="setup"]');
+    expect(badge).toHaveTextContent("Setting up");
+    expect(badge).toHaveAttribute("data-setup-state", "importing");
+    expect(importing.querySelector('[data-device-badge="presence"]')).toHaveTextContent("Connected");
+    expect(importing.querySelector("[data-device-setup-note]")).toHaveTextContent("It can't send texts until this finishes.");
+
+    expect(document.querySelector('[data-device-id="stale"] [data-device-badge="setup"]')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-device-id="stale"] [data-device-setup-note]')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-device-id="removed"] [data-device-badge="setup"]')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-device-id="removed"] [data-device-setup-note]')).not.toBeInTheDocument();
+  });
+
+  it("explains texts waiting on a removed gateway only in its remove dialog", async () => {
+    vi.mocked(bridge.list_devices).mockResolvedValue({ currentDeviceId: "self", devices: [
+      { id: "self", name: "This Mac", kind: "desktop", role: "owner", revoked: false },
+      { id: "phone", name: "Pixel 8", kind: "android", role: "gateway", revoked: false },
+      { id: "tablet", name: "Old tablet", kind: "android", role: "device", revoked: false },
+    ] });
+    render(<DevicesSettings />);
+    await screen.findByText("Pixel 8");
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove Pixel 8" }));
+    expect(await screen.findByText("Texts waiting to be sent from this phone will show as not confirmed. You can send them again.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByText("Texts waiting to be sent from this phone will show as not confirmed. You can send them again.")).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove Old tablet" }));
+    expect(await screen.findByRole("dialog", { name: "Remove Old tablet?" })).toBeInTheDocument();
+    expect(screen.queryByText("Texts waiting to be sent from this phone will show as not confirmed. You can send them again.")).not.toBeInTheDocument();
+  });
+
   it("shows current and unknown device details as separate badges", async () => {
     vi.mocked(bridge.list_devices).mockResolvedValue({ currentDeviceId: "self", devices: [
       { id: "self", name: "Unknown desktop", kind: "unrecognized", role: "unknown", revoked: false },

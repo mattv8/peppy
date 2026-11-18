@@ -120,7 +120,15 @@ fn parse_route(gateway: &str, sim: &str) -> Result<GatewayRoute, ComposeError> {
         subscription_id: sim.to_owned(),
     })
 }
+/// The single send admission guard for compose, quick reply and RCS. The setup flag wins over the
+/// displayed availability, so a setting-up phone stays refused while its presence is delayed.
 pub(crate) fn gateway_sendable(gateway: &GatewayView) -> Result<(), ComposeError> {
+    if gateway.setting_up {
+        return Err(ui(
+            "gateway-setting-up",
+            "The selected phone is still setting up; the draft was kept.",
+        ));
+    }
     let (code, message) = match gateway.availability {
         GatewayAvailability::Offline => (
             "gateway-offline",
@@ -129,6 +137,10 @@ pub(crate) fn gateway_sendable(gateway: &GatewayView) -> Result<(), ComposeError
         GatewayAvailability::NeverConnected => (
             "gateway-not-connected",
             "The selected phone has not connected yet; the draft was kept.",
+        ),
+        GatewayAvailability::SettingUp => (
+            "gateway-setting-up",
+            "The selected phone is still setting up; the draft was kept.",
         ),
         GatewayAvailability::NoSmsSim => (
             "gateway-no-sms-sim",
@@ -1108,6 +1120,7 @@ mod tests {
             supports_sms: true,
             supports_mms: true,
             availability,
+            setting_up: availability == GatewayAvailability::SettingUp,
             last_seen_age_seconds: None,
             presence: None,
             wake_route: false,
@@ -1120,10 +1133,36 @@ mod tests {
     }
 
     #[test]
+    fn setting_up_flag_refuses_send_even_when_presentation_is_delayed() {
+        let mut delayed = gateway(GatewayAvailability::Delayed);
+        delayed.setting_up = true;
+        match gateway_sendable(&delayed) {
+            Err(ComposeError::Ui { code, .. }) => assert_eq!(code, "gateway-setting-up"),
+            _ => panic!("a setting-up phone must not be sendable while its presence is delayed"),
+        }
+    }
+
+    #[test]
+    fn setting_up_route_is_refused_by_route_lookup_and_send_guard() {
+        let mut placeholder = gateway(GatewayAvailability::SettingUp);
+        placeholder.sim_id = String::new();
+        assert!(find_route(std::slice::from_ref(&placeholder), GATEWAY_ID, "").is_none());
+
+        let routed = gateway(GatewayAvailability::SettingUp);
+        let found = find_route(std::slice::from_ref(&routed), GATEWAY_ID, "sim")
+            .expect("the reported route is found");
+        match gateway_sendable(found) {
+            Err(ComposeError::Ui { code, .. }) => assert_eq!(code, "gateway-setting-up"),
+            _ => panic!("a setting-up phone must not be sendable"),
+        }
+    }
+
+    #[test]
     fn send_guard_blocks_unavailable_states_and_keeps_unknown_sendable() {
         for availability in [
             GatewayAvailability::Offline,
             GatewayAvailability::NeverConnected,
+            GatewayAvailability::SettingUp,
             GatewayAvailability::NoSmsSim,
             GatewayAvailability::SmsPermissionNeeded,
             GatewayAvailability::SmsUnavailable,

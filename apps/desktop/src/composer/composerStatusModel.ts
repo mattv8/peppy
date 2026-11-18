@@ -10,6 +10,7 @@ export type ComposerStatusInput = {
   draftSendBlock?: string;
   draftBlockKind?: "attachment" | "offline" | "conflict" | "failed-attachment";
   routeProblem?: string;
+  routeProblemKind?: "setting-up";
   rcsBlock: RcsBlock;
   mainWindowRecovery?: boolean;
   groupItems: InlineStatusItem[];
@@ -56,7 +57,12 @@ export function composerStatusItems(input: ComposerStatusInput): InlineStatusIte
       ...(key === "draft-conflict" || key === "failed-attachment" ? { srOnly: true } : {}),
     } });
   }
-  if (input.routeProblem) items.push({ priority: 40, rawReason: input.routeProblem, item: { key: "route-problem", tone: "warning", message: formatComposerReason(input.mainWindowRecovery ? `${input.routeProblem} in the main window` : input.routeProblem) } });
+  if (input.routeProblem) items.push({ priority: 40, rawReason: input.routeProblem, item: {
+    key: "route-problem",
+    tone: "warning",
+    message: formatComposerReason(input.mainWindowRecovery ? `${input.routeProblem} in the main window` : input.routeProblem),
+    ...(input.routeProblemKind === "setting-up" ? { detail: peppyCopy.composer_status_setting_up_detail, hooks: { "data-route-block": "setting-up" } } : {}),
+  } });
   const rcs = rcsStatus(input.rcsBlock);
   if (rcs) items.push({ priority: 50, item: rcs });
   return items

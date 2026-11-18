@@ -21,6 +21,8 @@ pub struct DeviceRow {
     pub role: String,
     pub revoked: bool,
     #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
     presence: Option<serde_json::Value>,
@@ -150,6 +152,14 @@ enum SimReports {
     Invalid,
 }
 
+pub fn setting_up(value: &serde_json::Value) -> bool {
+    value
+        .get("setup")
+        .and_then(|setup| setup.get("state"))
+        .and_then(serde_json::Value::as_str)
+        == Some("importing")
+}
+
 fn sims(value: &serde_json::Value) -> SimReports {
     let Some(list) = value.get("sims").and_then(serde_json::Value::as_array) else {
         return SimReports::Invalid;
@@ -189,6 +199,7 @@ fn presence(value: Option<&serde_json::Value>) -> Option<GatewayPresence> {
     })
 }
 
+#[cfg(test)]
 fn availability(
     kind: Option<&str>,
     report_exists: bool,
@@ -196,6 +207,26 @@ fn availability(
     presence: Option<&GatewayPresence>,
     wake_route: bool,
     sms: Option<Status>,
+) -> GatewayAvailability {
+    availability_with_setup(
+        kind,
+        report_exists,
+        reports,
+        presence,
+        wake_route,
+        sms,
+        false,
+    )
+}
+
+fn availability_with_setup(
+    kind: Option<&str>,
+    report_exists: bool,
+    reports: &SimReports,
+    presence: Option<&GatewayPresence>,
+    wake_route: bool,
+    sms: Option<Status>,
+    setting_up: bool,
 ) -> GatewayAvailability {
     if kind == Some("ios") {
         return GatewayAvailability::UnsupportedPlatform;
@@ -206,19 +237,6 @@ fn availability(
     ) && !report_exists
     {
         return GatewayAvailability::NeverConnected;
-    }
-    match reports {
-        SimReports::Empty => return GatewayAvailability::NoSmsSim,
-        SimReports::Valid(_) => match sms {
-            Some(Status::PermissionRequired) => {
-                return GatewayAvailability::SmsPermissionNeeded;
-            }
-            Some(Status::Available) => {}
-            Some(Status::Unknown) => {}
-            Some(_) => return GatewayAvailability::SmsUnavailable,
-            None => return GatewayAvailability::CapabilitiesUnknown,
-        },
-        SimReports::Invalid => {}
     }
     let presence_is_offline = match presence {
         Some(GatewayPresence {
@@ -235,6 +253,34 @@ fn availability(
         }) => true,
         _ => false,
     };
+    if setting_up {
+        return if presence_is_offline {
+            GatewayAvailability::Offline
+        } else if matches!(
+            presence,
+            Some(GatewayPresence {
+                state: GatewayPresenceState::Seen,
+                last_seen_age_seconds: Some(age),
+            }) if *age > 90
+        ) {
+            GatewayAvailability::Delayed
+        } else {
+            GatewayAvailability::SettingUp
+        };
+    }
+    match reports {
+        SimReports::Empty => return GatewayAvailability::NoSmsSim,
+        SimReports::Valid(_) => match sms {
+            Some(Status::PermissionRequired) => {
+                return GatewayAvailability::SmsPermissionNeeded;
+            }
+            Some(Status::Available) => {}
+            Some(Status::Unknown) => {}
+            Some(_) => return GatewayAvailability::SmsUnavailable,
+            None => return GatewayAvailability::CapabilitiesUnknown,
+        },
+        SimReports::Invalid => {}
+    }
     if presence_is_offline {
         return GatewayAvailability::Offline;
     }
@@ -304,7 +350,12 @@ pub fn gateway_views(
             .iter()
             .find(|row| uuid::Uuid::parse_str(&row.device_id).is_ok_and(|other| other == id));
         let simulated = report.is_some_and(|row| row.simulator);
-        let reports = report.map_or(SimReports::Invalid, |row| sims(&row.capabilities));
+        let setting_up = report.is_some_and(|row| setting_up(&row.capabilities));
+        // An importing phone offers no SIM rows, even when its report still lists SIMs.
+        let reports = match report {
+            Some(_) if setting_up => SimReports::Empty,
+            _ => report.map_or(SimReports::Invalid, |row| sims(&row.capabilities)),
+        };
         let presence = presence(device.presence.as_ref());
         let wake_route = device.wake_route;
         match &reports {
@@ -326,13 +377,14 @@ pub fn gateway_views(
                     if simulated {
                         note = format!("SIMULATED gateway: carrier delivery is simulated. {note}");
                     }
-                    let availability = availability(
+                    let availability = availability_with_setup(
                         device.kind.as_deref(),
                         true,
                         &reports,
                         presence.as_ref(),
                         wake_route,
                         Some(sim.sms),
+                        setting_up,
                     );
                     views.push(GatewayView {
                         id: id.to_string(),
@@ -347,6 +399,7 @@ pub fn gateway_views(
                         supports_sms,
                         supports_mms,
                         availability,
+                        setting_up,
                         last_seen_age_seconds: presence
                             .as_ref()
                             .and_then(|value| value.last_seen_age_seconds),
@@ -361,23 +414,31 @@ pub fn gateway_views(
                 }
             }
             SimReports::Empty | SimReports::Invalid => {
-                let availability = availability(
+                let availability = availability_with_setup(
                     device.kind.as_deref(),
                     report.is_some(),
                     &reports,
                     presence.as_ref(),
                     wake_route,
                     None,
+                    setting_up,
                 );
+                let name = if setting_up {
+                    clean_label(device.name.as_deref().unwrap_or(""))
+                        .unwrap_or_else(|| format!("Phone {short}"))
+                } else {
+                    format!("Phone {short}")
+                };
                 views.push(GatewayView {
                     id: id.to_string(),
-                    name: format!("Phone {short}"),
+                    name,
                     sim_id: String::new(),
                     online: availability == GatewayAvailability::Connected,
                     simulated,
                     supports_sms: false,
                     supports_mms: false,
                     availability,
+                    setting_up,
                     last_seen_age_seconds: presence
                         .as_ref()
                         .and_then(|value| value.last_seen_age_seconds),
@@ -648,6 +709,102 @@ mod tests {
             malformed_view.presence.unwrap().state,
             GatewayPresenceState::Never
         );
+    }
+
+    #[test]
+    fn importing_report_that_lists_sims_still_yields_one_non_routable_placeholder() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[{
+            "device_id":id,"role":"gateway","revoked":false,"name":"Pixel 8",
+            "presence":{"state":"connected","last_seen_age_seconds":0}
+        }]}))
+        .unwrap();
+        let importing: CapabilitiesResponse = serde_json::from_value(serde_json::json!({"capabilities":[{
+            "device_id":id,"simulator":false,"capabilities":{
+                "sims":[
+                    {"subscription_id":"sim-1","sms":"available","mms":"available","mms_content_version":2},
+                    {"subscription_id":"sim-2","sms":"available","mms":"available","mms_content_version":2}
+                ],
+                "setup":{"state":"importing"}
+            }
+        }]}))
+        .unwrap();
+        let views = gateway_views(&devices, &importing);
+        assert_eq!(views.len(), 1);
+        let view = &views[0];
+        assert_eq!(view.availability, GatewayAvailability::SettingUp);
+        assert!(view.setting_up);
+        assert!(view.sim_id.is_empty());
+        assert!(!view.supports_sms && !view.supports_mms);
+        assert_eq!(view.name, "Pixel 8");
+        assert!(find_route(&views, &id, "sim-1").is_none());
+        assert!(find_route(&views, &id, "sim-2").is_none());
+    }
+
+    #[test]
+    fn importing_gateway_is_non_routable_until_presence_becomes_stale() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[{
+            "device_id":id,"role":"gateway","revoked":false,
+            "presence":{"state":"connected","last_seen_age_seconds":0}
+        }]}))
+        .unwrap();
+        let importing: CapabilitiesResponse = serde_json::from_value(serde_json::json!({"capabilities":[{
+            "device_id":id,"simulator":false,"capabilities":{"sims":[],"setup":{"state":"importing"}}
+        }]})).unwrap();
+        let view = gateway_views(&devices, &importing).pop().unwrap();
+        assert_eq!(view.availability, GatewayAvailability::SettingUp);
+        assert!(view.setting_up);
+        assert!(!view.supports_sms && !view.supports_mms);
+        assert_eq!(view.sim_id, "");
+
+        let offline: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[{
+            "device_id":id,"role":"gateway","revoked":false,
+            "presence":{"state":"seen","last_seen_age_seconds":2701}
+        }]}))
+        .unwrap();
+        assert_eq!(
+            gateway_views(&offline, &importing)[0].availability,
+            GatewayAvailability::Offline
+        );
+
+        let delayed: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[{
+            "device_id":id,"role":"gateway","revoked":false,
+            "presence":{"state":"seen","last_seen_age_seconds":91}
+        }]}))
+        .unwrap();
+        assert_eq!(
+            gateway_views(&delayed, &importing)[0].availability,
+            GatewayAvailability::Delayed
+        );
+    }
+
+    #[test]
+    fn ready_legacy_and_unknown_setup_states_keep_existing_capability_projection() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[{
+            "device_id":id,"role":"gateway","revoked":false,
+            "presence":{"state":"connected","last_seen_age_seconds":0}
+        }]}))
+        .unwrap();
+        for setup in [
+            serde_json::json!({"state":"ready"}),
+            serde_json::json!({"state":"future"}),
+            serde_json::Value::Null,
+        ] {
+            let capabilities: CapabilitiesResponse =
+                serde_json::from_value(serde_json::json!({"capabilities":[{
+                    "device_id":id,"simulator":false,"capabilities":{
+                        "sims":[{"subscription_id":"sim","sms":"available","mms":"available"}],
+                        "setup":setup
+                    }
+                }]}))
+                .unwrap();
+            let view = gateway_views(&devices, &capabilities).pop().unwrap();
+            assert_eq!(view.availability, GatewayAvailability::Connected);
+            assert!(!view.setting_up);
+            assert!(view.supports_sms);
+        }
     }
 
     #[test]

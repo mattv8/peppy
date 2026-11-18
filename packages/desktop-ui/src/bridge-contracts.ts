@@ -84,9 +84,9 @@ export type ConversationView = { id: string; name: string; preview: string; unre
 /** Effective folder from core: an archived conversation reads as `inbox` once a newer message arrives. */
 export type ConversationFolder = "inbox" | "archived" | "spam";
 export type HistoryPage = { conversationId: string; messages: MessageView[]; hasMore: boolean };
-export type GatewayAvailability = "unknown" | "connected" | "delayed" | "offline" | "never_connected" | "no_sms_sim" | "sms_permission_needed" | "sms_unavailable" | "capabilities_unknown" | "unsupported_platform";
+export type GatewayAvailability = "unknown" | "connected" | "delayed" | "setting_up" | "offline" | "never_connected" | "no_sms_sim" | "sms_permission_needed" | "sms_unavailable" | "capabilities_unknown" | "unsupported_platform";
 export type GatewayPresence = { state: "connected" | "seen" | "never"; last_seen_age_seconds: number | null };
-export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; availability?: GatewayAvailability; lastSeenAgeSeconds?: number; presence?: GatewayPresence; wakeRoute?: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
+export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; availability?: GatewayAvailability; settingUp?: boolean; lastSeenAgeSeconds?: number; presence?: GatewayPresence; wakeRoute?: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
 export type DraftConflictView = { branchId: string; text: string; attachmentIds: string[]; recipientIds: string[]; gatewayId?: string; simId?: string };
 export type DraftSyncView = { state: "local-only" | "saving" | "saved-local" | "syncing" | "synced" | "paused" | "failed"; expiresAt: string | null; conflicts: DraftConflictView[]; notice: "restored-after-expiry" | "kept-after-sent" | "updated-from-other-device" | null; sendRequiresConnection: boolean };
 export type SendResultView = { accepted: boolean; status: MessageStatus; reason?: "members_changed" | "update_required" | "withdrawn" | "create_unconfirmed" | "create_not_rcs" | string; refusedAttachmentIds?: string[]; revision?: string; parts?: number; group?: { members: string[]; memberRevision: string } };
@@ -143,7 +143,7 @@ export type ContactBookState = "active" | "limited" | "unavailable" | "retired";
 /** Native values: requests go to the owner phone, so `canRestore` follows `canWrite`; `supportsNotes`/`supportsBirthday` follow the phone's platform (iOS has no notes). */
 export type BookCapabilities = { canWrite: boolean; canDelete: boolean; supportsNotes: boolean; supportsPhoto: boolean; canRestore?: boolean; supportsBirthday?: boolean; canSync?: boolean };
 export type ContactBookView = { id: string; deviceName: string; state: ContactBookState; capabilities: BookCapabilities; contactCount: number; defaultAccountLabel?: string; lastSyncAt?: string; stalenessNote?: string; pendingEditCount: number; ownerDeviceId?: string; sourceRevoked?: boolean };
-export type ManagedDeviceView = { id: string; name: string; kind: string | null; role: string; revoked: boolean; presence?: GatewayPresence; wakeRoute?: boolean };
+export type ManagedDeviceView = { id: string; name: string; kind: string | null; role: string; revoked: boolean; settingUp?: boolean; presence?: GatewayPresence; wakeRoute?: boolean };
 export type DeviceRosterView = { currentDeviceId: string; devices: ManagedDeviceView[] };
 export type ContactScanStatus = { requestId: string; bookId: string; state: "queued" | "waiting" | "scanning" | "completed" | "blocked" | "failed" | "expired"; reason?: string; expiresAt?: number };
 /** `label` is the wire value (round-trips unchanged); `displayLabel` is for people (e.g. Apple raw labels). */

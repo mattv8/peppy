@@ -1,5 +1,5 @@
 import type { GatewayAvailability } from "@peppy/desktop-ui/bridge-contracts";
-import { Check, ChevronDown, Clock, Radio, TriangleAlert } from "@peppy/desktop-ui";
+import { Check, ChevronDown, Clock, Loader2, Radio, TriangleAlert } from "@peppy/desktop-ui";
 import { createPortal } from "react-dom";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import "./GatewayPicker.css";
@@ -12,6 +12,8 @@ export type GatewayPickerOption = {
   simulated?: boolean;
   availability?: GatewayAvailability;
   disabled?: boolean;
+  /** Why a disabled option is listed: it stays focusable and announced, but cannot be chosen. */
+  disabledReason?: string;
   gatewayId?: string;
   simId?: string;
 };
@@ -37,13 +39,19 @@ function findOption(options: GatewayPickerOption[], value: string) {
   return options.find((option) => option.value === value);
 }
 
+/** Options a user can move to: enabled ones, and blocked ones that explain why (never committable). */
+function isNavigable(option: GatewayPickerOption) {
+  return !option.disabled || option.disabledReason !== undefined;
+}
+
 function firstEnabledOption(options: GatewayPickerOption[]) {
-  return options.find((option) => !option.disabled);
+  return options.find(isNavigable);
 }
 
 function statusIcon(availability: GatewayAvailability | undefined): ReactNode {
   if (availability === "connected") return <Check aria-hidden size={12} />;
   if (availability === "delayed") return <Clock aria-hidden size={12} />;
+  if (availability === "setting_up") return <Loader2 className="busy-indicator-icon" aria-hidden size={12} />;
   if (availability === "unknown" || availability === "capabilities_unknown") return <Radio aria-hidden size={12} />;
   if (availability && availability !== "offline") return <TriangleAlert aria-hidden size={12} />;
   return null;
@@ -57,9 +65,13 @@ function nextEnabledOption(options: GatewayPickerOption[], activeValue: string |
   const startIndex = Math.max(0, options.findIndex((option) => option.value === activeValue));
   for (let offset = 1; offset <= options.length; offset += 1) {
     const option = options[(startIndex + (offset * direction) + options.length) % options.length];
-    if (!option.disabled) return option;
+    if (isNavigable(option)) return option;
   }
   return undefined;
+}
+
+function optionReasonId(listboxId: string, value: string) {
+  return `${optionId(listboxId, value)}-reason`;
 }
 
 function optionId(listboxId: string, value: string) {
@@ -91,9 +103,9 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
   const selected = findOption(options, value);
   const canOpen = !disabled && options.length > 0;
   const activeCandidate = findOption(options, activeValue ?? "");
-  const active = activeCandidate && !activeCandidate.disabled
+  const active = activeCandidate && isNavigable(activeCandidate)
     ? activeCandidate
-    : (selected && !selected.disabled ? selected : firstEnabledOption(options));
+    : (selected && isNavigable(selected) ? selected : firstEnabledOption(options));
   const activeOptionId = active ? optionId(listboxId, active.value) : undefined;
   const summaryId = `${listboxId}-summary`;
   const describedByIds = [summaryId, describedBy].filter(Boolean).join(" ");
@@ -128,7 +140,7 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
       close();
       return;
     }
-    if (open && (!activeCandidate || activeCandidate.disabled)) setActiveValue(firstEnabledOption(options)?.value);
+    if (open && (!activeCandidate || !isNavigable(activeCandidate))) setActiveValue(firstEnabledOption(options)?.value);
   }, [activeValue, canOpen, open, options]);
 
   useLayoutEffect(() => {
@@ -185,10 +197,10 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
     const first = firstEnabledOption(options);
-    const last = [...options].reverse().find((option) => !option.disabled);
+    const last = [...options].reverse().find(isNavigable);
     if (!open && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
       event.preventDefault();
-      const selectedEnabled = selected && !selected.disabled ? selected : undefined;
+      const selectedEnabled = selected && isNavigable(selected) ? selected : undefined;
       openWith(event.key === "Home" ? first : event.key === "End" ? last : selectedEnabled ?? first);
       return;
     }
@@ -209,7 +221,7 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
       typeaheadRef.current += event.key.toLocaleLowerCase();
       if (typeaheadTimerRef.current) clearTimeout(typeaheadTimerRef.current);
       typeaheadTimerRef.current = setTimeout(() => { typeaheadRef.current = ""; }, TYPEAHEAD_RESET_MS);
-      const match = options.find((option) => !option.disabled && optionSearchText(option).startsWith(typeaheadRef.current));
+      const match = options.find((option) => isNavigable(option) && optionSearchText(option).startsWith(typeaheadRef.current));
       if (match) setActiveValue(match.value);
       return;
     }
@@ -240,6 +252,7 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
           role="option"
           aria-selected={option.value === value}
           aria-disabled={option.disabled || undefined}
+          aria-describedby={option.disabledReason ? optionReasonId(listboxId, option.value) : undefined}
           data-gateway-id={option.gatewayId}
           data-sim-id={option.simId}
           data-gateway-availability={option.availability}
@@ -248,6 +261,7 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
           onClick={() => commit(option)}
         >
           {routeBadges(option)}
+          {option.disabledReason && <span id={optionReasonId(listboxId, option.value)} hidden>{option.disabledReason}</span>}
           {option.value === value && <Check aria-hidden size={14} />}
         </div>
       ))}

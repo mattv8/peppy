@@ -125,6 +125,8 @@ import { AppLockScreen, AppLockSettings } from "./shell/AppLock";
 import { UpdatesSettings } from "./updates/UpdatesSettings";
 import { isTauriUpdateHost, useUpdateActivity } from "./updates/updates";
 import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./shell/status";
+import { isSettingUp, liveSettingUpGatewayFor, resolveStoredRoute, settingUpGatewayFor } from "./setup/settingUpRoute";
+import { formatCopy } from "./generated/peppyCopy";
 import { SystemRibbon, SystemRibbonAnnouncement, SystemRibbonStrip } from "./notices/SystemRibbon";
 import { openAccountManageUrl, resolveSystemRibbon } from "./notices/systemRibbonModel";
 import { useAccountNotice } from "./notices/useAccountNotice";
@@ -559,6 +561,7 @@ function availabilityLabel(gateway: GatewayView, accountReadOnly = false): strin
       const seen = gateway.lastSeenAgeSeconds !== undefined ? `Last seen ${formatAge(gateway.lastSeenAgeSeconds)} ago` : "Last seen";
       return accountReadOnly ? `${peppyCopy.account_send_paused_status}, ${seen}` : seen;
     }
+    case "setting_up": return peppyCopy.gateway_status_setting_up;
     case "offline": return "Not responding";
     case "never_connected": return "Never connected";
     case "no_sms_sim": return "No SMS SIM";
@@ -572,6 +575,7 @@ function availabilityLabel(gateway: GatewayView, accountReadOnly = false): strin
 }
 function availabilityProblem(gateway: GatewayView): string | undefined {
   switch (gatewayAvailability(gateway)) {
+    case "setting_up": return formatCopy(peppyCopy.gateway_problem_setting_up, gateway.name);
     case "offline": return `${gateway.name} isn't responding. Sending is paused until it reconnects.`;
     case "never_connected": return `${gateway.name} has never connected. Finish setup on the phone to enable sending.`;
     case "no_sms_sim": return `No default SMS SIM is set on ${gateway.name}. Open the phone's SIM settings to fix this.`;
@@ -592,20 +596,19 @@ function resolveRoute(
   content: DraftContent,
   gateways: GatewayView[],
 ): RouteChoice {
-  if (content.gatewayId && content.simId) {
-    const gateway = gateways.find(
-      (item) => item.id === content.gatewayId && item.simId === content.simId,
-    );
-    return gateway
-      ? { kind: "route", gateway, implicit: false }
-      : { kind: "stale", gatewayId: content.gatewayId, simId: content.simId };
-  }
+  if (content.gatewayId && content.simId) return resolveStoredRoute({ gatewayId: content.gatewayId, simId: content.simId }, gateways);
   return gateways.length === 1
     ? { kind: "route", gateway: gateways[0], implicit: true }
     : { kind: "none" };
 }
 
-function routeProblem(
+/** Names the blocked phone; says another phone can send only when one exists, so the user is pointed at it. */
+function settingUpProblem(gateway: GatewayView, gateways: GatewayView[]): string {
+  const another = gateways.some((item) => item.id !== gateway.id && item.supportsSms && availabilityProblem(item) === undefined);
+  return formatCopy(another ? peppyCopy.gateway_problem_setting_up_other : peppyCopy.gateway_problem_setting_up, gateway.name);
+}
+
+export function routeProblem(
   route: RouteChoice,
   gateways: GatewayView[],
   requiresMms: boolean,
@@ -617,6 +620,8 @@ function routeProblem(
     return gateways.length
       ? "choose a phone and SIM"
       : "no phone is configured";
+  const settingUp = settingUpGatewayFor(route, gateways);
+  if (settingUp) return settingUpProblem(settingUp, gateways);
   if (route.kind === "stale")
     return "the selected phone/SIM is no longer reported; choose another route";
   const availability = availabilityProblem(route.gateway);
@@ -703,13 +708,45 @@ function GatewaySelector({
   const simLabel = (gateway: GatewayView) => gateway.simId ? (labels.get(routeKey(gateway.id, gateway.simId)) ?? gateway.simId) : "No SMS SIM";
   const selectedGateway = route.kind === "route" ? route.gateway : undefined;
   const selectedAvailability = selectedGateway && gatewayAvailability(selectedGateway);
-  const presenceHint = selectedGateway && (availabilityProblem(selectedGateway) ?? (selectedAvailability === "unknown" ? `${selectedGateway.name}'s status is unknown.` : undefined));
+  // The finished-setup hint says "You can send now", so it is raised only for a phone that is actually
+  // sendable (the composer's own rule), and cleared as soon as that stops being true.
+  const selectedSettingUp = Boolean(settingUpGatewayFor(route, gateways));
+  const phoneId = settingUpGatewayFor(route, gateways)?.id ?? selectedGateway?.id;
+  const sendableNow = Boolean(selectedGateway) && routeProblem(route, gateways, false, 1, { kind: "none" } as never) === undefined;
+  const [finishedSetup, setFinishedSetup] = useState<{ id: string; name: string }>();
+  const setupTracker = useRef<{ id?: string; settingUp: boolean }>({ settingUp: false });
+  // The phone counts as "was setting up" until it is seen sendable; the flip to not-setting-up alone is not enough.
+  const settingUpNow = Boolean(settingUpGatewayFor(route, gateways));
+  useEffect(() => {
+    const previous = setupTracker.current;
+    if (previous.id !== phoneId) {
+      setupTracker.current = { id: phoneId, settingUp: settingUpNow };
+      setFinishedSetup(undefined);
+      return;
+    }
+    if (settingUpNow) {
+      setupTracker.current = { id: phoneId, settingUp: true };
+      setFinishedSetup(undefined);
+      return;
+    }
+    if (!sendableNow) {
+      setFinishedSetup(undefined);
+      return;
+    }
+    if (previous.settingUp && selectedGateway) {
+      setupTracker.current = { id: phoneId, settingUp: false };
+      setFinishedSetup({ id: selectedGateway.id, name: selectedGateway.name });
+    }
+  }, [phoneId, settingUpNow, sendableNow, selectedGateway]);
+  const finishedSetupName = finishedSetup && finishedSetup.id === phoneId ? finishedSetup.name : undefined;
+  const finishedSetupHint = finishedSetupName ? formatCopy(peppyCopy.gateway_presence_finished_setup, finishedSetupName) : undefined;
+  const presenceHint = finishedSetupHint ?? (selectedGateway && (availabilityProblem(selectedGateway) ?? (selectedAvailability === "unknown" ? `${selectedGateway.name}'s status is unknown.` : undefined)));
   const rcsStatus = rcsStatusPresentation(rcsBlock);
   return (
-    <section id="gateway-selector" aria-label="Phone and SIM" aria-describedby={presenceHint ? "gateway-presence-hint" : undefined} data-route-state={problem ? "blocked" : selectedAvailability === "delayed" ? "delayed" : "ready"}>
+    <section id="gateway-selector" aria-label="Phone and SIM" aria-describedby={presenceHint ? "gateway-presence-hint" : undefined} data-route-state={problem ? "blocked" : selectedAvailability === "delayed" ? "delayed" : "ready"} data-route-reason={selectedSettingUp ? "setting-up" : undefined}>
       <GatewayPicker
         options={[
-          ...(route.kind === "stale"
+          ...(route.kind === "stale" && !settingUpGatewayFor(route, gateways)
             ? [{
                 value,
                 name: "Unavailable route",
@@ -722,11 +759,13 @@ function GatewaySelector({
           ...gateways.map((item) => ({
             value: routeKey(item.id, item.simId),
             name: item.name,
-            simLabel: simLabel(item),
+            simLabel: isSettingUp(item) ? undefined : simLabel(item),
             statusLabel: availabilityLabel(item, accountReadOnly),
             simulated: item.simulated,
             availability: gatewayAvailability(item),
-            disabled: gatewayAvailability(item) === "unsupported_platform",
+            // A setting-up phone is listed and explained, but cannot be chosen (ux-design 6.1, ruling R13).
+            disabled: isSettingUp(item) || gatewayAvailability(item) === "unsupported_platform",
+            disabledReason: isSettingUp(item) ? formatCopy(peppyCopy.gateway_problem_setting_up, item.name) : undefined,
             gatewayId: item.id,
             simId: item.simId,
           })),
@@ -745,11 +784,12 @@ function GatewaySelector({
 
 const seenText = (gateway: GatewayView) => gateway.lastSeenAgeSeconds === undefined ? "Last seen" : `Seen ${formatAge(gateway.lastSeenAgeSeconds)} ago`;
 
-function headRoutePresentation(route: RouteChoice, gateways: GatewayView[], accountReadOnly = false): { sim?: string; state: string; label: string } {
+export function headRoutePresentation(route: RouteChoice, gateways: GatewayView[], accountReadOnly = false): { sim?: string; state: string; label: string } {
   if (route.kind === "none") {
     const state = gateways.length ? "No SIM chosen" : "No phone";
     return { state, label: state };
   }
+  if (liveSettingUpGatewayFor(route, gateways)) return { state: peppyCopy.gateway_status_setting_up, label: peppyCopy.gateway_status_setting_up };
   if (route.kind === "stale") return { state: "SIM unavailable", label: "SIM unavailable" };
   const simLabel = simLabels(gateways).get(routeKey(route.gateway.id, route.gateway.simId)) ?? route.gateway.simId;
   if (gatewayAvailability(route.gateway) === "no_sms_sim") return { state: "No SMS SIM", label: "No SMS SIM" };
@@ -768,13 +808,19 @@ function HeadRoutePill({ content, gateways, accountReadOnly = false, rcsBlock = 
   const { sim, state, label } = headRoutePresentation(route, gateways, accountReadOnly);
   const rcsStatus = rcsStatusPresentation(rcsBlock);
   const shownState = rcsStatus?.label ?? state;
-  const tooltip = rcsStatus?.message ?? (route.kind === "route"
+  // Live wording comes from availability: an importing phone whose presence is offline or delayed is
+  // presented by that presence, while its send refusal still holds (settingUpRoute.ts).
+  const liveSetup = liveSettingUpGatewayFor(route, gateways);
+  // A setting-up phone is not a route choice: its tooltip and description state the setup, not "choose".
+  const settingUpMessage = liveSetup ? formatCopy(peppyCopy.gateway_problem_setting_up, liveSetup.name) : undefined;
+  const tooltip = settingUpMessage ?? rcsStatus?.message ?? (route.kind === "route"
     ? `${route.gateway.name}: choose this phone and SIM in the main window.`
     : "Choose a phone and SIM in the main window.");
-  const description = route.kind === "route"
+  const description = settingUpMessage ?? (route.kind === "route"
     ? `${route.gateway.name}, ${sim ?? shownState}. ${rcsStatus?.message ?? "Phone and SIM are selected in the main window."}`
-    : "Choose a phone and SIM in the main window.";
-  return <section id="head-panel-route-section" aria-label="Phone and SIM" aria-describedby="head-panel-route-description" data-route-state={route.kind === "route" ? gatewayAvailability(route.gateway) : route.kind}>
+    : "Choose a phone and SIM in the main window.");
+  const routeState = liveSetup ? "setting_up" : route.kind === "route" ? gatewayAvailability(route.gateway) : route.kind;
+  return <section id="head-panel-route-section" aria-label="Phone and SIM" aria-describedby="head-panel-route-description" data-route-state={routeState}>
     <span id="head-panel-route" className="head-panel-route" title={tooltip} data-gateway-availability={route.kind === "route" ? gatewayAvailability(route.gateway) : undefined}>{sim && <span data-head-route-sim data-route-badge="sim">{sim}</span>}<span data-head-route-state data-route-badge="status" data-route-send-state={rcsStatus ? "blocked" : undefined} data-gateway-availability={route.kind === "route" ? gatewayAvailability(route.gateway) : undefined}>{shownState}</span></span>
     <span id="head-panel-route-description" className="visually-hidden">{description}</span>
     <span className="visually-hidden" role="status" aria-live="polite">{rcsStatus ? `${sim ?? "Phone and SIM"}, ${shownState}. ${rcsStatus.message}` : label}</span>
@@ -1402,7 +1448,7 @@ function MessageList({
 }
 
 /** Only an enrolled owner can add a phone; joined devices keep the normal conversation view. */
-function ownerWithoutPhone(snapshot: DesktopSnapshot) {
+export function ownerWithoutPhone(snapshot: DesktopSnapshot) {
   return snapshot.connection.state === "connected" && snapshot.encryption.state === "unlocked" && snapshot.gateways.length === 0 && snapshot.deviceRole === "owner";
 }
 const phoneDeferredKey = (origin: string | undefined) => origin ? `peppy.setup.phoneDeferred:${origin}` : "";
@@ -1536,7 +1582,7 @@ function SettingsView({
   typingShare?: boolean;
   typingShareError?: boolean;
   onTypingShare(enabled: boolean): void;
-  requestedSection?: "notifications" | "notification-apps" | "devices";
+  requestedSection?: "notifications" | "notification-apps" | "devices" | "updates";
   onRequestedSectionConsumed?(): void;
   onAddDevice?(): void;
   onAccountDeleted(result: { outcome: "deleted" | "pending"; provider: BillingProvider }): void;
@@ -2305,7 +2351,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const notificationsLocked = snapshot?.encryption.state !== "unlocked";
   const dismissibleNotificationsCount = dismissibleNotifications(snapshot?.notifications ?? [], snapshot?.appFilters ?? [], notificationsLocked).length;
   const contactsOpen = !revoked && activeView === "contacts";
-  const [settingsSectionRequested, setSettingsSectionRequested] = useState<"notifications" | "notification-apps" | "devices">();
+  const [settingsSectionRequested, setSettingsSectionRequested] = useState<"notifications" | "notification-apps" | "devices" | "updates">();
   const [notificationAppFilter, setNotificationAppFilter] = useState<string | null>(null);
   const notificationSearchRequestId = useRef(0);
   const dismissingNotificationsRef = useRef(false);
@@ -5426,7 +5472,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         : mmsHeaderSize(estimateBytes, mmsLimitBytes)
     : undefined;
   const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : groupLeft ? peppyCopy.group_composer_reason_left : draftSendBlock ?? problem ?? rcsBlockReason;
-  const mainWindowRouteRecovery = headPanel && !effectivePendingRecipient && (
+  const mainWindowRouteRecovery = headPanel && !effectivePendingRecipient && !settingUpGatewayFor(route, gateways) && (
     (route.kind === "none" && gateways.length > 0) || route.kind === "stale"
   );
   const composerUnavailableReason = mainWindowRouteRecovery
@@ -5499,6 +5545,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     draftSendBlock,
     draftBlockKind,
     routeProblem: problem,
+    routeProblemKind: settingUpGatewayFor(route, gateways) ? "setting-up" : undefined,
     rcsBlock,
     mainWindowRecovery: mainWindowRouteRecovery,
     groupItems: groupStatusItems,

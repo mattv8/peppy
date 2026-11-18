@@ -32,6 +32,30 @@ describe("composerStatusItems", () => {
     expect(items[0]).toMatchObject({ id: "unavailable-hint", message: "Finish adding the recipient before sending." });
   });
 
+  it("gives a setting-up route blocker its detail, warning tone and block hook, and the unavailable hint id", () => {
+    const [item] = composerStatusItems({
+      ...input(),
+      routeProblem: "Pixel 8 is still setting up. It can send when that finishes.",
+      routeProblemKind: "setting-up",
+    });
+
+    expect(item).toMatchObject({
+      id: "unavailable-hint",
+      key: "route-problem",
+      tone: "warning",
+      message: "Pixel 8 is still setting up. It can send when that finishes.",
+      detail: "It is importing your message history, which can take several minutes. Your draft is saved.",
+      hooks: { "data-route-block": "setting-up" },
+    });
+  });
+
+  it("keeps other route problems without the setting-up detail or hook", () => {
+    const [item] = composerStatusItems({ ...input(), routeProblem: "choose a phone and SIM" });
+
+    expect(item.detail).toBeUndefined();
+    expect(item.hooks).toBeUndefined();
+  });
+
   it("formats main-window reasons after adding the suffix", () => {
     const [item] = composerStatusItems({ ...input(), routeProblem: "choose a phone and SIM", mainWindowRecovery: true });
 

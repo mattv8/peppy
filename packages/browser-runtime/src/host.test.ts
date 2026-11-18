@@ -2875,6 +2875,51 @@ describe("browser host RPC", () => {
     expect(attached.messages).toContainEqual({ id: 1, ok: true, value: { currentDeviceId: "00000000-0000-0000-0000-000000000001", devices: [{ id: "00000000-0000-0000-0000-000000000002", name: "Pixel 8", kind: "android", role: "owner", revoked: false, presence: { state: "seen", last_seen_age_seconds: 300 }, wakeRoute: true }] } });
   });
 
+  it("marks only the importing device as setting up in the browser roster", async () => {
+    const session = new FakeSession();
+    const host = new BrowserWorkerHost({
+      locks: locks(), boot: async () => session,
+      network: {
+        start: async () => undefined, stop: async () => undefined,
+        listDevices: async () => ({ devices: [
+          { device_id: "00000000-0000-0000-0000-000000000002", name: "Pixel 8", kind: "android", role: "gateway", revoked: false, presence: { state: "connected", last_seen_age_seconds: 0 } },
+          { device_id: "00000000-0000-0000-0000-000000000003", name: "Galaxy", kind: "android", role: "gateway", revoked: false, presence: { state: "connected", last_seen_age_seconds: 0 } },
+        ] }),
+        listCapabilities: async () => ({ capabilities: [
+          { device_id: "00000000-0000-0000-0000-000000000002", simulator: false, capabilities: { sims: [], setup: { state: "importing" } } },
+          { device_id: "00000000-0000-0000-0000-000000000003", simulator: false, capabilities: { sims: [], setup: { state: "ready" } } },
+        ] }),
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "list_devices", args: {} });
+    await eventually(() => attached.messages.some(message => (message as { id?: number }).id === 1));
+    const roster = attached.messages.find(message => (message as { id?: number }).id === 1) as { value: { devices: { id: string; settingUp?: boolean }[] } };
+    expect(roster.value.devices.find(device => device.id === "00000000-0000-0000-0000-000000000002")?.settingUp).toBe(true);
+    expect(roster.value.devices.find(device => device.id === "00000000-0000-0000-0000-000000000003")?.settingUp).toBeUndefined();
+  });
+
+  it("keeps the browser roster loaded when the capabilities read fails", async () => {
+    const session = new FakeSession();
+    const host = new BrowserWorkerHost({
+      locks: locks(), boot: async () => session,
+      network: {
+        start: async () => undefined, stop: async () => undefined,
+        listDevices: async () => ({ devices: [{ device_id: "00000000-0000-0000-0000-000000000002", name: "Pixel 8", kind: "android", role: "gateway", revoked: false }] }),
+        listCapabilities: async () => { throw new TransportError("status", 500, "server"); },
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "list_devices", args: {} });
+    await eventually(() => attached.messages.some(message => (message as { id?: number }).id === 1));
+    const roster = attached.messages.find(message => (message as { id?: number }).id === 1) as { ok: boolean; value: { devices: { id: string; settingUp?: boolean }[] } };
+    expect(roster.ok).toBe(true);
+    expect(roster.value.devices).toHaveLength(1);
+    expect(roster.value.devices[0].settingUp).toBeUndefined();
+  });
+
   it("drops an unrecognized optional presence state while retaining the roster", async () => {
     const session = new FakeSession();
     const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: { start: async () => undefined, stop: async () => undefined, listDevices: async () => ({ devices: [{ device_id: "00000000-0000-0000-0000-000000000002", name: "Pixel 8", kind: "android", role: "owner", revoked: false, presence: { state: "future", last_seen_age_seconds: 1 } }] }) } as unknown as import("./host.js").BrowserNetwork });
