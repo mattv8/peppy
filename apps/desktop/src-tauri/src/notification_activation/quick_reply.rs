@@ -111,7 +111,8 @@ fn select_route(
     let [gateway] = gateways else {
         return None;
     };
-    if !known {
+    // A setting-up phone has no SIM route and must never become the implicit RCS or SMS route.
+    if !known || gateway.setting_up {
         return None;
     }
     let gateway_device_id = gateway.id.parse().ok()?;
@@ -749,6 +750,7 @@ mod tests {
             supports_sms: sms,
             supports_mms: mms,
             availability: Default::default(),
+            setting_up: false,
             last_seen_age_seconds: None,
             presence: None,
             wake_route: false,
@@ -773,6 +775,13 @@ mod tests {
         ];
 
         assert_eq!(select_route(&gateways, true, Some(&route)), Some(route));
+    }
+
+    #[test]
+    fn setting_up_phone_is_never_the_implicit_reply_route() {
+        let mut placeholder = gateway(&uuid::Uuid::new_v4().to_string(), "", false, false);
+        placeholder.setting_up = true;
+        assert!(select_route(&[placeholder], true, None).is_none());
     }
 
     #[test]

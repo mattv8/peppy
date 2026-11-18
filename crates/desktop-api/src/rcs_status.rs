@@ -229,6 +229,7 @@ mod tests {
             supports_sms: true,
             supports_mms: true,
             availability: crate::GatewayAvailability::Connected,
+            setting_up: false,
             last_seen_age_seconds: None,
             presence: None,
             wake_route: false,

@@ -26,6 +26,8 @@ struct ManagedDeviceView {
     #[serde(skip_serializing_if = "Option::is_none")]
     presence: Option<peppy_hosted_api::DevicePresence>,
     wake_route: bool,
+    #[serde(default)]
+    setting_up: bool,
 }
 
 pub async fn list(session: &Session) -> BridgeResult<DeviceRosterView> {
@@ -34,6 +36,12 @@ pub async fn list(session: &Session) -> BridgeResult<DeviceRosterView> {
         .get_json("/v1/devices", MAX_JSON_BYTES)
         .await
         .map_err(roster_error)?;
+    // Setup state is decoration: an unreadable capabilities list must not hide the roster or its actions.
+    let capabilities: Option<peppy_desktop_api::gateways::CapabilitiesResponse> = session
+        .api
+        .get_json("/v1/capabilities", MAX_JSON_BYTES)
+        .await
+        .ok();
     Ok(DeviceRosterView {
         current_device_id: session.binding.device_id.clone(),
         devices: roster
@@ -47,8 +55,22 @@ pub async fn list(session: &Session) -> BridgeResult<DeviceRosterView> {
                 revoked: device.revoked,
                 presence: device.presence,
                 wake_route: device.wake_route,
+                setting_up: setting_up_for(capabilities.as_ref(), &device.device_id.to_string()),
             })
             .collect(),
+    })
+}
+
+/// Whether a device's capability report says it is importing history. Missing reports read as not importing.
+fn setting_up_for(
+    capabilities: Option<&peppy_desktop_api::gateways::CapabilitiesResponse>,
+    device_id: &str,
+) -> bool {
+    capabilities.is_some_and(|capabilities| {
+        capabilities.capabilities.iter().any(|capability| {
+            capability.device_id == device_id
+                && peppy_desktop_api::gateways::setting_up(&capability.capabilities)
+        })
     })
 }
 
@@ -95,5 +117,28 @@ fn roster_error(error: NetError) -> BridgeError {
             }),
         },
         error => error.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn unreadable_capabilities_drop_only_the_setup_badge() {
+        assert!(!setting_up_for(None, "phone"));
+    }
+
+    #[test]
+    fn importing_capability_marks_only_its_device() {
+        let capabilities: peppy_desktop_api::gateways::CapabilitiesResponse =
+            serde_json::from_value(json!({"capabilities":[{
+                "device_id":"phone","simulator":false,
+                "capabilities":{"sims":[],"setup":{"state":"importing"}}
+            }]}))
+            .unwrap();
+        assert!(setting_up_for(Some(&capabilities), "phone"));
+        assert!(!setting_up_for(Some(&capabilities), "other"));
     }
 }

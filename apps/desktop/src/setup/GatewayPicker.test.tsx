@@ -187,6 +187,42 @@ describe("GatewayPicker", () => {
     expect(trigger.querySelector('[data-route-badge="sim"]')).not.toBeInTheDocument();
   });
 
+  it("keeps a blocked option focusable and announced with its reason, but never selectable", () => {
+    const blocked: GatewayPickerOption = {
+      value: "nexus:",
+      name: "Nexus",
+      statusLabel: "Setting up",
+      availability: "setting_up",
+      disabled: true,
+      disabledReason: "Nexus is still setting up. It can send when that finishes.",
+      gatewayId: "nexus",
+      simId: "",
+    };
+    const { onChange, trigger } = renderPicker({ options: [options[0], blocked] });
+
+    fireEvent.click(trigger);
+    const option = screen.getByRole("option", { name: /Nexus/ });
+    expect(option).toHaveAttribute("aria-disabled", "true");
+    expect(option).toHaveAccessibleDescription("Nexus is still setting up. It can send when that finishes.");
+    expect(option.querySelector('[data-route-badge="status"]')).toHaveTextContent("Setting up");
+
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    expect(screen.getByRole("option", { name: /Nexus/ })).toHaveAttribute("data-active");
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    fireEvent.click(screen.getByRole("option", { name: /Nexus/ }));
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("badges a setting-up phone with a spinner and no SIM badge", () => {
+    const settingUp = { ...options[0], simLabel: undefined, statusLabel: "Setting up", availability: "setting_up" as const };
+    const { trigger } = renderPicker({ options: [settingUp], value: settingUp.value });
+
+    const status = trigger.querySelector('[data-route-badge="status"][data-gateway-availability="setting_up"]');
+    expect(status).toHaveTextContent("Setting up");
+    expect(status?.querySelector(".busy-indicator-icon")).toBeInTheDocument();
+    expect(trigger.querySelector('[data-route-badge="sim"]')).not.toBeInTheDocument();
+  });
+
   it("keeps the active descendant valid when choices change while open", () => {
     const onChange = vi.fn();
     const { rerender } = render(

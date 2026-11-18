@@ -123,6 +123,8 @@ export interface BrowserNetwork {
   enrollmentApproveVaultRequest(requestId: string): Promise<void>;
   enrollmentDenyVaultRequest(requestId: string): Promise<void>;
   listDevices(): Promise<unknown>;
+  /** Server capability reports; setup state is decoration, so a failed read only drops that badge. */
+  listCapabilities?(): Promise<unknown>;
   revokeDevice(deviceId: string): Promise<void>;
   mcpStatus(): Promise<McpDeviceStatus>;
   mcpEnable(): Promise<McpDeviceStatus>;
@@ -1563,7 +1565,10 @@ export class BrowserWorkerHost {
       if (request.command === "list_devices") {
         const identity = object(await this.owner!.owner.query("_worker_identity_metadata", {}));
         currentDeviceId = requiredDeviceId(identity.deviceId);
-        return { id: request.id, ok: true, value: deviceRoster(await network.listDevices(), currentDeviceId) };
+        const devices = await network.listDevices();
+        let capabilities: unknown;
+        try { capabilities = await network.listCapabilities?.(); } catch { capabilities = undefined; }
+        return { id: request.id, ok: true, value: deviceRoster(devices, currentDeviceId, capabilities) };
       }
       const deviceId = requiredDeviceId(request.args.deviceId);
       const identity = object(await this.owner!.owner.query("_worker_identity_metadata", {}));
@@ -1652,9 +1657,23 @@ function mediaSyncRequestAccepted(value: unknown): boolean {
     && (value as { requested: unknown[] }).requested.length > 0;
 }
 
-function deviceRoster(value: unknown, currentDeviceId: string): Record<string, unknown> {
+/** Device ids whose capability report says they are importing history (same rule as the native host). */
+function importingDeviceIds(capabilities: unknown): Set<string> {
+  const ids = new Set<string>();
+  const rows = objectOrUndefined(capabilities)?.capabilities;
+  if (!Array.isArray(rows)) return ids;
+  for (const row of rows) {
+    const report = objectOrUndefined(row);
+    const setup = objectOrUndefined(objectOrUndefined(report?.capabilities)?.setup);
+    if (typeof report?.device_id === "string" && setup?.state === "importing") ids.add(report.device_id);
+  }
+  return ids;
+}
+
+function deviceRoster(value: unknown, currentDeviceId: string, capabilities?: unknown): Record<string, unknown> {
   const roster = object(value);
   if (!Array.isArray(roster.devices)) throw new TransportError("invalid");
+  const importing = importingDeviceIds(capabilities);
   const devices = roster.devices.map(device => {
     const row = object(device);
     const id = requiredDeviceId(row.device_id);
@@ -1669,6 +1688,7 @@ function deviceRoster(value: unknown, currentDeviceId: string): Record<string, u
       revoked: row.revoked,
       ...(presence ? { presence } : {}),
       ...(wakeRoute === undefined ? {} : { wakeRoute }),
+      ...(importing.has(id) ? { settingUp: true } : {}),
     };
   });
   return { currentDeviceId, devices };
@@ -2012,6 +2032,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
        async enrollmentApproveVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.approveVaultRequest(requestId); },
         async enrollmentDenyVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.denyVaultRequest(requestId); },
         async listDevices() { if (!publicTransport) throw new TransportError("invalid"); return publicTransport.json("/v1/devices", { method: "GET" }); },
+        async listCapabilities() { if (!publicTransport) throw new TransportError("invalid"); return publicTransport.json("/v1/capabilities", { method: "GET" }); },
        async revokeDevice(deviceId) { if (!publicTransport) throw new TransportError("invalid"); await publicTransport.discard(`/v1/devices/${deviceId}/revoke`, { method: "POST" }); },
        async mcpStatus() { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpStatus(); },
        async mcpEnable() { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpEnable(); },

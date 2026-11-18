@@ -327,6 +327,7 @@ fn rcs_media_never_receives_a_carrier_mms_split_plan() {
             supports_sms: true,
             supports_mms: true,
             availability: crate::GatewayAvailability::Connected,
+            setting_up: false,
             last_seen_age_seconds: None,
             presence: None,
             wake_route: false,

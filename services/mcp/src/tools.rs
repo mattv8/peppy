@@ -519,10 +519,12 @@ fn select_route_from_views(
                 && view.sim_id.len() <= 256
                 && view.supports_sms
                 && (!mms || view.supports_mms)
+                && !view.setting_up
                 && !matches!(
                     view.availability,
                     GatewayAvailability::Offline
                         | GatewayAvailability::NeverConnected
+                        | GatewayAvailability::SettingUp
                         | GatewayAvailability::NoSmsSim
                         | GatewayAvailability::SmsUnavailable
                         | GatewayAvailability::UnsupportedPlatform
@@ -537,14 +539,28 @@ fn select_route_from_views(
             .into_iter()
             .find(|view| view.id == id && view.sim_id == sim)
             .ok_or_else(|| {
-                error_result("no_gateway", "The selected gateway route is not eligible.")
+                if views.iter().any(|view| {
+                    view.id == id && view.availability == GatewayAvailability::SettingUp
+                }) {
+                    error_result(
+                        "no_gateway",
+                        "The selected phone is still setting up; choose another route.",
+                    )
+                } else {
+                    error_result("no_gateway", "The selected gateway route is not eligible.")
+                }
             })?,
         (None, None) if eligible.len() == 1 => eligible[0],
         (None, None) if eligible.is_empty() => {
-            return Err(error_result(
-                "no_gateway",
-                "No current SMS/MMS gateway route is available.",
-            ));
+            let message = if views
+                .iter()
+                .any(|view| view.availability == GatewayAvailability::SettingUp)
+            {
+                "A phone is still setting up, so no SMS/MMS gateway route is available yet."
+            } else {
+                "No current SMS/MMS gateway route is available."
+            };
+            return Err(error_result("no_gateway", message));
         }
         _ => {
             let routes: Vec<_> = eligible.iter().take(MAX_ROUTE_CHOICES).map(|view| {
@@ -1047,6 +1063,64 @@ mod tests {
         let detail: Value =
             serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(detail["code"], "no_gateway");
+    }
+
+    #[test]
+    fn setting_up_gateway_is_never_selected_and_the_error_says_why() {
+        let setting_up_id = Uuid::new_v4().to_string();
+        let setting_up: GatewayView = serde_json::from_value(json!({
+            "id":setting_up_id,"name":"private phone name","simId":"","online":true,
+            "simulated":false,"supportsSms":false,"supportsMms":false,
+            "availability":"setting_up","settingUp":true
+        }))
+        .unwrap();
+        let delayed_setting_up: GatewayView = serde_json::from_value(json!({
+            "id":Uuid::new_v4().to_string(),"name":"private phone name","simId":"sim-7","online":false,
+            "simulated":false,"supportsSms":true,"supportsMms":true,
+            "availability":"delayed","settingUp":true
+        }))
+        .unwrap();
+        let result = select_route_from_views(&[delayed_setting_up], &json!({}), false).unwrap_err();
+        let detail: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(detail["code"], "no_gateway");
+
+        let only_setting_up = vec![setting_up.clone()];
+        let result = select_route_from_views(&only_setting_up, &json!({}), false).unwrap_err();
+        let detail: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(detail["code"], "no_gateway");
+        assert!(detail["message"].as_str().unwrap().contains("setting up"));
+        assert!(!result.to_string().contains("private phone name"));
+
+        let ready = gateway(Uuid::new_v4().to_string(), "sim-1", true);
+        let mixed = vec![setting_up.clone(), ready.clone()];
+        let Ok(GatewayRoute::Carrier {
+            gateway_device_id,
+            subscription_id,
+        }) = select_route_from_views(&mixed, &json!({}), true)
+        else {
+            panic!("the single ready route should be selected");
+        };
+        assert_eq!(gateway_device_id.to_string(), ready.id);
+        assert_eq!(subscription_id, "sim-1");
+
+        let result = select_route_from_views(
+            &mixed,
+            &json!({"gateway_id": setting_up_id, "sim_id": ""}),
+            true,
+        )
+        .unwrap_err();
+        let detail: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(detail["code"], "no_gateway");
+        assert!(
+            detail["message"]
+                .as_str()
+                .unwrap()
+                .contains("still setting up")
+        );
+        assert!(!result.to_string().contains("private phone name"));
     }
 
     fn png(width: u32, height: u32) -> Vec<u8> {

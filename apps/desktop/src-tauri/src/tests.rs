@@ -197,6 +197,7 @@ pub(crate) fn gateway(id: &str, sms: bool, mms: bool) -> GatewayView {
         supports_sms: sms,
         supports_mms: mms,
         availability: peppy_desktop_api::GatewayAvailability::Unknown,
+        setting_up: false,
         last_seen_age_seconds: None,
         presence: None,
         wake_route: false,
