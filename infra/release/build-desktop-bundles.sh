@@ -131,7 +131,7 @@ package_app_store() {
   decode_base64 "$APPLE_MAS_INSTALLER_CERTIFICATE" > "$installer_certificate"
   security cms -D -i "$profile" > "$profile_xml"
   team_id=$(plutil -extract 'Entitlements.com\.apple\.developer\.team-identifier' raw -o - "$profile_xml")
-  application_identifier=$(plutil -extract 'Entitlements.application-identifier' raw -o - "$profile_xml")
+  application_identifier=$(plutil -extract 'Entitlements.com\.apple\.application-identifier' raw -o - "$profile_xml")
   [ -n "$team_id" ] || { echo 'App Store provisioning profile does not declare a team identifier' >&2; return 1; }
   [ "$application_identifier" = "$team_id.org.peppy.desktop" ] || { echo "App Store provisioning profile application identifier must equal $team_id.org.peppy.desktop" >&2; return 1; }
   security create-keychain -p "$keychain_password" "$keychain"
