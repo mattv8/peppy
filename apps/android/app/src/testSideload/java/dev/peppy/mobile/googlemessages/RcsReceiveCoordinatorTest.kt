@@ -25,6 +25,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import uniffi.peppy_mobile_bindings.NativeRcsContextExpectation
+import uniffi.peppy_mobile_bindings.NativeRcsReactionEntry
 import uniffi.peppy_mobile_bindings.NativeRcsIngestOutcome
 import uniffi.peppy_mobile_bindings.NativeRcsObservationProvenance
 import uniffi.peppy_mobile_bindings.NativeRcsReceiveContext
@@ -44,6 +45,30 @@ class RcsReceiveCoordinatorTest {
         coordinator.receive(liveRecord("google-a"))
         coordinator.resume(FakeGoogle(emptyMap()))
         assertEquals(0, core.contextsCalls.get())
+    }
+
+    @Test fun `projected reactions are ingested as the full set and records without the field are not`() {
+        val core = FakeCore(listOf(conv("core-a", "google-a")))
+        val coordinator = coordinator(core)
+        val reacted = JSONObject(liveRecord("google-a", messageId = "m-1")).apply {
+            getJSONObject("record").put("reactions", JSONArray()
+                .put(JSONObject().put("emoji", "👍").put("is_self", true).put("addresses", JSONArray().put("+15551234567")).put("unresolved_actors", 2))
+                .put(JSONObject().put("emoji", "😂").put("is_self", false).put("addresses", JSONArray()).put("unresolved_actors", 0)))
+        }.toString()
+        coordinator.receive(reacted)
+        coordinator.receive(liveRecord("google-a", messageId = "m-2"))
+
+        assertEquals(1, core.reactionIngests.size)
+        val ingest = core.reactionIngests.single()
+        assertEquals("google-a", ingest.googleConversationId)
+        assertEquals("m-1", ingest.googleMessageId)
+        assertEquals(
+            listOf(
+                NativeRcsReactionEntry("👍", true, listOf("+15551234567"), 2u),
+                NativeRcsReactionEntry("😂", false, emptyList(), 0u),
+            ),
+            ingest.reactions,
+        )
     }
 
     @Test fun `resume contains a failed context enumeration`() {
@@ -1177,6 +1202,7 @@ private class FakeCore(initial: List<Conv>) : RcsReceiveCore {
     val completions = Collections.synchronizedList(mutableListOf<Pair<String, Long>>())
     val clears = AtomicInteger()
     val invalidations = Collections.synchronizedList(mutableListOf<Pair<String, Long?>>())
+    val reactionIngests = Collections.synchronizedList(mutableListOf<ReactionIngest>())
 
     fun conversation(conversationId: String): Conv = conversations.single { it.conversationId == conversationId }
 
@@ -1227,6 +1253,11 @@ private class FakeCore(initial: List<Conv>) : RcsReceiveCore {
         clearRejection?.let { return@used "rejected:$it" }
         conversation(context.conversationId).apply { hint = null; incomplete = true }
         "recorded"
+    }
+
+    override fun ingestReactions(googleConversationId: String, googleMessageId: String, reactions: List<NativeRcsReactionEntry>, observedAtMs: Long): Boolean = used {
+        reactionIngests += ReactionIngest(googleConversationId, googleMessageId, reactions)
+        true
     }
 
     override fun invalidate(context: NativeRcsReceiveContext, googleId: String, eventAtMs: Long?): Boolean = used {
@@ -1360,6 +1391,8 @@ private fun groupRecord(googleId: String, senderAddress: String? = null, senderU
             if (senderUnknown) put("sender_unknown", true)
         })
     .toString()
+
+private data class ReactionIngest(val googleConversationId: String, val googleMessageId: String, val reactions: List<NativeRcsReactionEntry>)
 
 private fun liveRecord(googleId: String, sentAtMs: Long = BASE, messageId: String = "message-1") = JSONObject()
     .put("code", "ok")

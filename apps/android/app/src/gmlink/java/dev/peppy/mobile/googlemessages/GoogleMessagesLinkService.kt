@@ -100,6 +100,9 @@ class GoogleMessagesLinkService : Service() {
     private val carrierHandoffRequested = AtomicBoolean(false)
     private lateinit var mediaRcsSendWork: RcsNativeSendWork
     private lateinit var mediaRcsReceiveWork: RcsNativeSendWork
+    private lateinit var reactionWork: RcsNativeSendWork
+    /** Written only on the notification executor, so reads and writes never race. */
+    private var publishedReactionCapability: Boolean? = null
     private lateinit var mediaFiles: RcsMediaPrivateFiles
     private lateinit var mediaQueue: RcsMediaTransferQueue
     private lateinit var typingBridge: TypingBridge
@@ -195,6 +198,13 @@ class GoogleMessagesLinkService : Service() {
             current = { isCurrent(lifecycleGeneration) },
             executor = NATIVE_RCS_SEND_EXECUTOR,
         )
+        reactionWork = RcsNativeSendWork(
+            enabled = ::reactionsEnabled,
+            candidates = { if (reactionsEnabled()) listOf(REACTION_PASS) else emptyList() },
+            execute = { runReactionPass() },
+            current = { isCurrent(lifecycleGeneration) },
+            executor = NATIVE_RCS_SEND_EXECUTOR,
+        )
         typingBridge = testHooks.typingBridgeFactory(applicationContext)
         TypingReceiveSinkRegistry.sink = typingBridge
         lifecycleGeneration = replaceActive(this)
@@ -216,6 +226,7 @@ class GoogleMessagesLinkService : Service() {
             if (worker == null || worker?.isAlive != true) startWorkerLocked(requestedGeneration)
         }
         nativeRcsSendWork.start()
+        reactionWork.start()
         mediaRcsSendWork.start()
         mediaRcsReceiveWork.start()
         return START_NOT_STICKY
@@ -230,6 +241,7 @@ class GoogleMessagesLinkService : Service() {
         if (RemoteMessagingRuntime.peersListener === runtimePeersListener) RemoteMessagingRuntime.peersListener = null
         blockedSendRetry.stop()
         nativeRcsSendWork.stop()
+        reactionWork.stop()
         mediaRcsSendWork.stop()
         mediaRcsReceiveWork.stop()
         mediaQueue.stop()
@@ -475,6 +487,7 @@ class GoogleMessagesLinkService : Service() {
         targetedBootstrap.drainNow()
         sweepOwnedConversations(generation)
         nativeRcsSendWork.start()
+        reactionWork.start()
         mediaRcsSendWork.start()
         mediaRcsReceiveWork.start()
     }
@@ -710,6 +723,8 @@ class GoogleMessagesLinkService : Service() {
             if (receiveSweepCurrent(request)) {
                 runCatching { testHooks.receiveSweep(request.lease, request.cancelled) }
                     .onFailure { recordGoogleMessagesLinkEvent("link", "rcs_receive_sweep_failed", 0) }
+                // Reactions run after receive so facts from this sweep are ingested before requests act on them.
+                reactionWork.start()
             }
             synchronized(receiveSweepLock) {
                 if (runningReceiveSweep === request) runningReceiveSweep = null
@@ -821,7 +836,29 @@ class GoogleMessagesLinkService : Service() {
 
     private fun publishStatus(status: LinkStatus) {
         val generation = lifecycleGeneration
-        testHooks.notificationExecutor.execute { publishStatusNow(status, generation) }
+        testHooks.notificationExecutor.execute {
+            publishStatusNow(status, generation)
+            publishReactionCapability(status)
+        }
+    }
+
+    /** Advertises reactions only while the feature is enabled and the link is running. Runs off the main thread. */
+    private fun publishReactionCapability(status: LinkStatus) {
+        val supported = NATIVE_RCS_REACTIONS_ENABLED && status.state == "linked" && status.running
+        if (supported == publishedReactionCapability) return
+        runCatching {
+            val client = NativeGateway.open(applicationContext) ?: return
+            client.publishReactionCapability(supported)
+            publishedReactionCapability = supported
+        }.onFailure { recordGoogleMessagesLinkEvent("reaction", "capability_failed", 0) }
+    }
+
+    private fun reactionsEnabled(): Boolean = NATIVE_RCS_REACTIONS_ENABLED && nativeRcsEnabled()
+
+    /** One serialized pass over pending reaction jobs, off the main thread. */
+    private fun runReactionPass() {
+        val lease = LinkRuntime.handleLease(this) ?: return
+        RcsReactionCoordinator(RcsReactionGoAdapter(lease), RcsReactionCoreAdapter(applicationContext)).drain()
     }
 
     private fun publishStatusNow(status: LinkStatus, generation: Long) {
@@ -993,6 +1030,9 @@ class GoogleMessagesLinkService : Service() {
                 NotificationManagerCompat.from(context).areNotificationsEnabled()
         private const val SERVICE_STOP_JOIN_MS = 2_000L
         private const val NATIVE_RCS_ENABLED = true
+        /** Dark until the linked-phone gate passes: no capability is advertised and no reaction job runs. */
+        private const val NATIVE_RCS_REACTIONS_ENABLED = false
+        private val REACTION_PASS = RcsNativeCommand("reactions", "", "")
         private val NATIVE_RCS_SEND_EXECUTOR = Executors.newSingleThreadExecutor()
         private val BLOCKED_SEND_RETRY_SCHEDULER = Executors.newSingleThreadScheduledExecutor()
         /** Never run Go media I/O on a gmlink callback thread. Shared with future receive transfers. */

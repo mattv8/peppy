@@ -20,6 +20,8 @@ private class GoLinkHandle(private val link: Link) : LinkHandle {
     override fun acceptsStreamOutput(generation: Long, revision: Long, streamEpoch: Long): Boolean =
         link.acceptsStreamOutput(generation, revision, streamEpoch)
     override fun prepareNativeRcs(requestJson: String): String = link.prepareNativeRcs(requestJson)
+    override fun prepareReaction(requestJson: String): String = link.prepareReaction(requestJson)
+    override fun commitPreparedReaction(requestJson: String): String = link.commitPreparedReaction(requestJson)
     override fun bindNativeRcsRoute(ticketId: String, linkGeneration: Long, sessionGeneration: Long, contextRevision: Long, mappingRevision: Long, observedAtMs: Long): String =
         link.bindNativeRcsRoute(ticketId, linkGeneration, sessionGeneration, contextRevision, mappingRevision, observedAtMs)
     override fun withNativeRcsTargetClassification(ticketId: String, classifier: NativeRcsTargetClassifier): Boolean =
