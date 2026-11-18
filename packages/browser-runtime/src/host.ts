@@ -256,6 +256,8 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   load_message_window: { coreCommand: "load_message_window", mutation: false },
   retry_rcs_media_download: { coreCommand: "retry_rcs_media_download", mutation: true },
   media_sync_request: { coreCommand: "media_sync_request", mutation: true },
+  react_to_message: { coreCommand: "react_to_message", mutation: true },
+  dismiss_reaction_request: { coreCommand: "dismiss_reaction_request", mutation: true },
 };
 
 const HISTORY_COMMANDS = new Set(["get_history_search", "start_history_search", "cancel_history_search"]);
@@ -488,10 +490,17 @@ function coreArgs(command: string, args: Record<string, unknown>): Record<string
   const wrapper = command === "save_draft" || command === "send_draft" || command === "discard_draft" || command === "submit_contact_edit" ? "input"
     : command === "set_notification_preferences" ? "preferences" : undefined;
   if (command === "media_sync_request") return { attachmentIds: mediaSyncAttachmentIds(args) };
+  if (command === "react_to_message") return reactionArgs(args);
+  if (command === "dismiss_reaction_request") return { requestId: boundedString(args.requestId, 128) };
   if (!wrapper) return args;
   const value = args[wrapper];
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw { code: "invalid-request" };
   return value as Record<string, unknown>;
+}
+
+/** A reaction carries one message ID and either one emoji or null (remove). Core validates the emoji. */
+function reactionArgs(args: Record<string, unknown>): Record<string, unknown> {
+  return { messageId: boundedString(args.messageId, 128), emoji: nullableBoundedString(args.emoji, 64) };
 }
 
 function mediaSyncAttachmentIds(args: Record<string, unknown>): string[] {

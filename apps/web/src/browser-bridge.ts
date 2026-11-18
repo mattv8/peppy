@@ -6,7 +6,7 @@ import type {
   MessageWindowRequest, NotificationCheck, NotificationPreferences, NotificationTarget, OneTimeCodeTarget, PublicCopy,
   RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, SendResultView, StartHistorySearchInput,
   BillingSummaryView, HostedSignInProvider, PurchaseOptions, StartupStatus, StoreProduct,
-  AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder, NotificationPersistence, NotificationPersistenceSettings, PastedImage,
+  AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder, NotificationPersistence, NotificationPersistenceSettings, PastedImage, ReactionSubmitView,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { DEFAULT_NOTIFICATION_PERSISTENCE, notificationPersistence } from "@peppy/desktop-ui/bridge-contracts";
 import { MCP_ENABLE_TIMEOUT_MS } from "@peppy/browser-runtime/enrollment-deadlines";
@@ -561,6 +561,16 @@ export class BrowserBridge implements DesktopBridge {
     return this.call("set_conversation_folder", { conversationId, folder });
   }
   public request_sender_unblock(conversationId: string): Promise<void> { return this.call("request_sender_unblock", { conversationId }); }
+  /** Route, presence and text composition are decided by the host and core; the renderer sends only the target and emoji. */
+  public react_to_message(input: { messageId: string; emoji: string | null }): Promise<ReactionSubmitView> {
+    if (typeof input.messageId !== "string" || input.messageId.length === 0) return Promise.reject(new BrowserBridgeError("invalid-request", "Invalid message ID."));
+    if (input.emoji !== null && typeof input.emoji !== "string") return Promise.reject(new BrowserBridgeError("invalid-request", "Invalid reaction."));
+    return this.call<ReactionSubmitView>("react_to_message", { messageId: input.messageId, emoji: input.emoji });
+  }
+  public dismiss_reaction_request(input: { requestId: string }): Promise<void> {
+    if (typeof input.requestId !== "string" || input.requestId.length === 0) return Promise.reject(new BrowserBridgeError("invalid-request", "Invalid reaction request."));
+    return this.call("dismiss_reaction_request", { requestId: input.requestId });
+  }
   public set_conversation_tone(seed: string, paletteIndex: number | null): Promise<void> { return this.call("set_conversation_tone", { seed, paletteIndex }); }
   public dismiss_notification(target: NotificationTarget): Promise<void> { return this.call("dismiss_notification", { target }); }
   public dismiss_all_notifications(): Promise<void> { return this.call("dismiss_all_notifications"); }
