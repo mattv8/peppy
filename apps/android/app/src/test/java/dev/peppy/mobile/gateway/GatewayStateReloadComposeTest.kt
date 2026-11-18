@@ -15,6 +15,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import dev.peppy.mobile.testing.ComposeTestActivityRule
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.junit.Assert.assertNull
@@ -48,7 +49,7 @@ class GatewayStateReloadComposeTest : GatewayTestBase() {
         scheduled.clear()
         SetupFinishTracker.resetForTest()
         compose.mainClock.autoAdvance = false
-        compose.setContent { MaterialTheme { StatusHost(context) { reloads++ } } }
+        compose.setContent { MaterialTheme { StatusHost(context, onReload = { reloads++ }) } }
         pumpUntil { textShown(count(42_000, 108_882)) }
         awaitWatcher(store)
 
@@ -66,12 +67,63 @@ class GatewayStateReloadComposeTest : GatewayTestBase() {
         assertNull(GatewayStateStore(context).setupProgress)
     }
 
+    /**
+     * The final LIVE write lands after the screen read its status and before the watcher registers its listener.
+     * The gate holds registration until the write is done, so the ordering is fixed rather than timing-dependent.
+     */
+    @Test
+    fun finalLiveWriteInTheRegistrationGapStillReachesTheScreen() {
+        enrollAndUnlock()
+        val store = GatewayStateStore(context)
+        store.setDownloading(42_000uL, 108_882uL)
+        scheduled.clear()
+        SetupFinishTracker.resetForTest()
+        val registrationGate = CompletableDeferred<Unit>()
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            MaterialTheme { StatusHost(context, beforeRegistration = { registrationGate.await() }, onReload = { reloads++ }) }
+        }
+        pumpUntil { textShown(count(42_000, 108_882)) }
+
+        store.advance(SyncPhase.LIVE)
+        registrationGate.complete(Unit)
+
+        pumpUntil { textShown("Other devices can now send through this phone.") }
+        assertTrue("the gap write is picked up by the registration signal", reloads >= 1)
+        assertTrue(scheduled.isEmpty())
+    }
+
+    @Test
+    fun tooLargeWriteInTheRegistrationGapStillReachesTheScreen() {
+        enrollAndUnlock()
+        val store = GatewayStateStore(context)
+        store.setDownloading(98_000uL, 108_882uL)
+        scheduled.clear()
+        val registrationGate = CompletableDeferred<Unit>()
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            MaterialTheme { StatusHost(context, beforeRegistration = { registrationGate.await() }, onReload = { reloads++ }) }
+        }
+        pumpUntil { textShown(count(98_000, 108_882)) }
+
+        store.recordHistoryTooLarge(nowMs = 1_000L, kind = HistoryTooLargeKind.DOWNLOAD_BYTE_CAP)
+        registrationGate.complete(Unit)
+
+        pumpUntil { tagShown("host-too-large") }
+        assertTrue("the too-large state hides the card", compose.onAllNodesWithTag("sync-setup-card", useUnmergedTree = true).fetchSemanticsNodes().isEmpty())
+        assertTrue(scheduled.isEmpty())
+    }
+
     /** Mirrors the SMS screen wiring in MainActivity: the same effects, no refresh button. */
     @Composable
-    private fun StatusHost(context: Context, onReload: () -> Unit) {
+    private fun StatusHost(
+        context: Context,
+        beforeRegistration: suspend () -> Unit = {},
+        onReload: () -> Unit,
+    ) {
         var status by remember { mutableStateOf<GatewayStatus?>(null) }
         LaunchedEffect(Unit) { status = withContext(Dispatchers.IO) { NativeGateway.status(context) } }
-        GatewayStateReloadEffect(context) {
+        GatewayStateReloadEffect(context, beforeRegistration) {
             onReload()
             status = withContext(Dispatchers.IO) { NativeGateway.status(context) }
         }

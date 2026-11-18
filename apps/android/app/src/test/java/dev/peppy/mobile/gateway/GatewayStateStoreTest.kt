@@ -189,6 +189,29 @@ class GatewayStateStoreTest {
         collector.cancel()
     }
 
+    @Test
+    fun changesEmitAnInitialSignalOnceRegistered() = runBlocking {
+        val signals = mutableListOf<Unit>()
+        val collector = launch(Dispatchers.Unconfined) { state.changes().collect { signals += Unit } }
+
+        assertEquals("the registration signal needs no write", 1, signals.size)
+        collector.cancel()
+    }
+
+    @Test
+    fun aWriteBeforeRegistrationIsCoveredByTheInitialSignal() = runBlocking {
+        var phaseAtFirstSignal: SyncPhase? = null
+        val collector = launch(Dispatchers.Unconfined) {
+            // The seam runs before registration: this write is the gap the screen must not miss.
+            state.changes(beforeRegistration = { state.advance(SyncPhase.LIVE) }).collect {
+                if (phaseAtFirstSignal == null) phaseAtFirstSignal = state.phase
+            }
+        }
+
+        assertEquals("the first signal is delivered after the gap write", SyncPhase.LIVE, phaseAtFirstSignal)
+        collector.cancel()
+    }
+
     private fun rawSetupPhase(): String? =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString("setup-phase.v1", null)
 

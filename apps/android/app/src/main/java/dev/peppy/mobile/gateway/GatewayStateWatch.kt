@@ -33,7 +33,11 @@ internal fun historyTooLargeRibbonVisible(status: GatewayStatus?): Boolean =
  * must be a status read and nothing else (it must not enqueue gateway work).
  */
 @Composable
-internal fun GatewayStateReloadEffect(context: Context, reload: suspend () -> Unit) {
+internal fun GatewayStateReloadEffect(
+    context: Context,
+    beforeRegistration: suspend () -> Unit = {},
+    reload: suspend () -> Unit,
+) {
     val owner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val currentReload by rememberUpdatedState(reload)
@@ -41,7 +45,9 @@ internal fun GatewayStateReloadEffect(context: Context, reload: suspend () -> Un
         var watching: Job? = null
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> watching = scope.launch { watchGatewayState(context) { currentReload() } }
+                Lifecycle.Event.ON_START -> watching = scope.launch {
+                    watchGatewayState(context, beforeRegistration) { currentReload() }
+                }
                 Lifecycle.Event.ON_STOP -> {
                     watching?.cancel()
                     watching = null
@@ -57,10 +63,11 @@ internal fun GatewayStateReloadEffect(context: Context, reload: suspend () -> Un
     }
 }
 
-private suspend fun watchGatewayState(context: Context, reload: suspend () -> Unit) {
+private suspend fun watchGatewayState(context: Context, beforeRegistration: suspend () -> Unit, reload: suspend () -> Unit) {
     // Opening the preferences can touch disk: keep it off the main thread.
     val store = withContext(Dispatchers.IO) { GatewayStateStore(context) }
-    coalescedReloads(store.changes(), GATEWAY_STATUS_RELOAD_MS, reload)
+    // The flow registers before its first signal, so a write made before registration still reaches the screen.
+    coalescedReloads(store.changes(beforeRegistration), GATEWAY_STATUS_RELOAD_MS, reload)
 }
 
 /**
