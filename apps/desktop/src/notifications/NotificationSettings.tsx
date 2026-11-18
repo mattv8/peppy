@@ -390,7 +390,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
         </section>}
       </NotificationSettingsGroup>}
       {error && <p id="notification-settings-action-error" role="alert" aria-label="Notification settings action failed">{error}</p>}
-      <NotificationSettingsGroup id="notification-apps-group" title="Mirrored apps" badge={apps.length ? `${apps.length} apps${apps.filter(app => app.muted).length ? `, ${apps.filter(app => app.muted).length} muted` : ""}` : undefined} help={<NotificationSettingsHelp id="notification-apps-help" title="Mirrored apps"><p>Apps are mirrored by default. Changes apply on the phone&apos;s next sync.</p><p>Notification history shares the vault&apos;s 100,000-record recovery limit. Mute noisy apps to limit storage growth.</p></NotificationSettingsHelp>}>
+      <NotificationSettingsGroup id="notification-apps-group" title="Mirrored apps" badge={apps.length ? `${apps.length} apps${apps.filter(app => app.muted).length ? `, ${apps.filter(app => app.muted).length} muted` : ""}` : undefined} help={<NotificationSettingsHelp id="notification-apps-help" title="Mirrored apps"><p>Apps are mirrored by default. Changes apply on the phone&apos;s next sync.</p><p>Notification history counts toward the vault&apos;s 100,000-record history import budget. Mute noisy apps to limit storage growth.</p></NotificationSettingsHelp>}>
       {apps.length ? (
         <NotificationSettingsApps apps={apps} notifications={notifications} sources={sources} busy={busy} onMute={filter => void save(() => onMute(filter))} />
       ) : <p id="notification-apps-empty-state">No apps observed yet. Enable mirroring in the Android companion to begin.</p>}
