@@ -87,6 +87,14 @@ This reference records non-obvious Peppy domain constraints.
   keys. Old epochs become decrypt-only; never-attempted older-epoch commands
   retire as `FailedBeforeSubmission`, while attempted commands keep their
   recorded outcomes. See [cutover tests](../crates/client-core/tests/c3_additions.rs).
+- A gateway retires commands it received only as snapshot history, never
+  attempted, and never reported on as `FailedBeforeSubmission`, in bounded
+  batches, outside the restore guard and outside an import. Send again is an
+  explicit user action that creates a new command with its own ids; the link
+  to the original is local to the device that sent it. Hosts offer it only for
+  a carrier message that was not sent or whose target gateway is revoked, never
+  for RCS, and never send it automatically. See
+  [stranded command tests](../crates/client-core/tests/stranded_commands.rs).
 - Core cannot detect a database rollback. If restore recovers an outbox envelope
   ID with conflicting bytes, quarantine the conflict rather than resealing or
   uploading it; preserve the local capture. See
