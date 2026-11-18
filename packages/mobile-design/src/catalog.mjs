@@ -1041,7 +1041,10 @@ export const catalog = Object.freeze({
   sync_too_large_body: "Update Peppy to continue. Nothing is lost.",
   toggle_android_sync_too_large_body: "Update Peppy to finish setting up this phone. Nothing is lost.",
   toggle_android_sync_too_large_recheck: "Peppy checks again every 6 hours and after an update.",
+  toggle_android_sync_too_large_live_body: "Update Peppy to catch up on your history. Nothing is lost.",
+  toggle_android_sync_too_large_recheck_weekly: "Peppy checks again every 7 days and after an update.",
   toggle_android_sync_too_large_play: "Open Google Play",
+  toggle_android_sync_too_large_play_failed: "Couldn't open Google Play.",
   toggle_ios_sync_too_large_body: "Open the App Store and update Peppy. Nothing is lost.",
   toggle_ios_check_history_too_large: "Too large for this version",
 });

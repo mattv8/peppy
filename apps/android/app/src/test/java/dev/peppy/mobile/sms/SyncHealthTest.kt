@@ -159,12 +159,32 @@ class SyncHealthTest {
     }
 
     @Test
-    fun pausedHistoryDuringNonLiveSyncIsProgressWithoutAProblem() {
+    fun pausedHistoryDuringImportShowsImportingWithoutAProblem() {
         val health = health(history = SmsHistoryState.PAUSED, syncPhase = SyncPhase.BOOTSTRAP_DRAINING)
 
         assertEquals(0, health.problemCount)
         assertFalse(health.actionNeeded)
-        assertEquals(SyncSummaryState.PROGRESS, health.summaryState)
+        assertEquals(SyncSummaryState.IMPORTING, health.summaryState)
+    }
+
+    @Test
+    fun tooLargeHistoryOutranksImportingAndOff() {
+        assertEquals(SyncSummaryState.TOO_LARGE, health(historyTooLarge = true).summaryState)
+        assertEquals(SyncSummaryState.TOO_LARGE, health(historyTooLarge = true, syncPhase = SyncPhase.BOOTSTRAP).summaryState)
+        assertEquals(SyncSummaryState.TOO_LARGE, health(historyTooLarge = true, smsSyncOn = false).summaryState)
+    }
+
+    @Test
+    fun importingShowsBeforeSmsOffWithoutOutrankingAttention() {
+        assertEquals(SyncSummaryState.IMPORTING, health(syncPhase = SyncPhase.BOOTSTRAP, smsSyncOn = false).summaryState)
+        assertEquals(SyncSummaryState.ATTENTION, health(syncPhase = SyncPhase.BOOTSTRAP, databaseOpen = false).summaryState)
+    }
+
+    @Test
+    fun attentionOutranksTooLargeAndSmsOff() {
+        assertEquals(SyncSummaryState.ATTENTION, health(historyTooLarge = true, databaseOpen = false).summaryState)
+        assertEquals(SyncSummaryState.ATTENTION, health(smsSyncOn = false, outboxRejection = "x").summaryState)
+        assertEquals(SyncSummaryState.ATTENTION, health(smsSyncOn = false, databaseOpen = false).summaryState)
     }
 
     @Test
@@ -206,8 +226,12 @@ class SyncHealthTest {
         outboxRejection: String? = null,
         softRejection: SoftRejection? = null,
         reachability: ServerReachability = ServerReachability.AVAILABLE,
+        historyTooLarge: Boolean = false,
     ) = syncHealth(
-        GatewayStatus(true, null, databaseOpen, true, syncPhase, outboxRejection = outboxRejection, softRejection = softRejection),
+        GatewayStatus(
+            true, null, databaseOpen, true, syncPhase,
+            outboxRejection = outboxRejection, softRejection = softRejection, historyTooLarge = historyTooLarge,
+        ),
         receiveGranted,
         sendGranted,
         readGranted = readGranted,

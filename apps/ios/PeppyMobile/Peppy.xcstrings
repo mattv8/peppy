@@ -10281,12 +10281,42 @@
         }
       }
     },
+    "peppy.toggle_android_sync_too_large_live_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update Peppy to catch up on your history. Nothing is lost."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_too_large_recheck_weekly": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy checks again every 7 days and after an update."
+          }
+        }
+      }
+    },
     "peppy.toggle_android_sync_too_large_play": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "Open Google Play"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_too_large_play_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't open Google Play."
           }
         }
       }

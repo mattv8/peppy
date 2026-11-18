@@ -38,6 +38,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -63,6 +64,7 @@ import dev.peppy.mobile.gateway.GatewayPolicyHost
 import dev.peppy.mobile.gateway.GatewayStatus
 import dev.peppy.mobile.gateway.ServerReachability
 import dev.peppy.mobile.gateway.ServerReachabilityState
+import dev.peppy.mobile.gateway.SyncPhase
 import dev.peppy.mobile.granted
 import dev.peppy.mobile.mms.MmsSettings
 import dev.peppy.mobile.mms.RestrictedMessageAccess
@@ -74,6 +76,8 @@ import dev.peppy.mobile.advanced.showNewFeatureHint
 import dev.peppy.mobile.restrictedsetup.restrictedSetupAvailable
 import dev.peppy.mobile.restrictedsetup.RestrictedSetupEntry
 import dev.peppy.mobile.googlemessages.GoogleMessagesLink
+import dev.peppy.mobile.billing.isPlayDistribution
+import dev.peppy.mobile.gateway.SetupProgressCard
 import dev.peppy.mobile.phoneread.PhoneReadSettings
 import dev.peppy.mobile.syncMessage
 import dev.peppy.mobile.ui.ConsentSheet
@@ -298,6 +302,8 @@ internal fun SmsTab(
                         "sms-gateway-sync-status",
                         currentHealth.connected,
                         when {
+                            currentHealth.historyTooLarge -> stringResource(R.string.peppy_toggle_android_check_history_too_large)
+                            currentHealth.summaryState == SyncSummaryState.IMPORTING -> stringResource(R.string.peppy_toggle_android_check_setting_up)
                             currentHealth.stopped || currentHealth.softRejected -> syncMessage(it)
                             else -> when (currentHealth.reachability) {
                                 ServerReachability.AVAILABLE -> stringResource(R.string.peppy_toggle_android_check_connected)
@@ -305,6 +311,7 @@ internal fun SmsTab(
                                 ServerReachability.UNAVAILABLE -> stringResource(R.string.peppy_toggle_android_sync_connection_unavailable)
                             }
                         },
+                        pending = currentHealth.summaryState == SyncSummaryState.IMPORTING,
                     )
                 }
             }
@@ -353,6 +360,7 @@ internal fun SmsTab(
             "sms-hero",
         )
         dev.peppy.mobile.ui.ScreenBody("sms-tab-body") {
+        SetupProgressCard(gatewayStatus)
         GoogleMessagesLink.Entry(
             onChanged = onChanged,
             notice = linkNotice,
@@ -403,7 +411,15 @@ internal fun SmsTab(
                 }
             }
         }
-         DetailsNavigationRow("sms-details-row", stringResource(R.string.peppy_toggle_android_sync_details), if (health?.actionNeeded == true) stringResource(R.string.peppy_toggle_android_sync_needs_attention) else null) { detailsOpen = true }
+         DetailsNavigationRow(
+             "sms-details-row",
+             stringResource(R.string.peppy_toggle_android_sync_details),
+             when {
+                 health?.historyTooLarge == true -> stringResource(R.string.peppy_toggle_android_sync_update_needed)
+                 health?.actionNeeded == true -> stringResource(R.string.peppy_toggle_android_sync_needs_attention)
+                 else -> null
+             },
+         ) { detailsOpen = true }
         }
     }
     if (consent.phase == ConsentPhase.DISCLOSURE) ConsentSheet(
@@ -449,14 +465,17 @@ internal fun SmsTab(
 
 private const val ANDROID_GUIDE_URL = "https://peppy.pro/docs/android"
 
+/** Only the text merges for TalkBack; the Play button stays a separate control. */
 @Composable
-private fun SyncSummary(health: SyncHealth?) {
+internal fun SyncSummary(health: SyncHealth?, playUpdateAvailable: Boolean = isPlayDistribution()) {
     val colors = if (isSystemInDarkTheme()) PeppyTokens.Dark else PeppyTokens.Light
+    var playOpenFailed by remember { mutableStateOf(false) }
+    var guideOpenFailed by remember { mutableStateOf(false) }
     Surface(
-        modifier = Modifier.fillMaxWidth().testTag("sms-sync-summary").semantics(mergeDescendants = true) {},
+        modifier = Modifier.fillMaxWidth().testTag("sms-sync-summary"),
         shape = RoundedCornerShape(12.dp),
         color = when (health?.summaryState) {
-            SyncSummaryState.ATTENTION -> colors.warningSurface
+            SyncSummaryState.ATTENTION, SyncSummaryState.TOO_LARGE -> colors.warningSurface
             SyncSummaryState.HEALTHY -> colors.success.copy(alpha = 0.12f)
             else -> MaterialTheme.colorScheme.surfaceVariant
         },
@@ -466,18 +485,23 @@ private fun SyncSummary(health: SyncHealth?) {
                 Text(stringResource(R.string.peppy_toggle_android_sync_checking))
             } else {
                 val problem = health.summaryState == SyncSummaryState.ATTENTION
+                val state = health.summaryState
+                val warning = problem || state == SyncSummaryState.TOO_LARGE
+                val context = LocalContext.current
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val state = health.summaryState
                     Text(
-                        if (problem) "⚠" else if (state == SyncSummaryState.HEALTHY) "✓" else "•",
+                        if (warning) "⚠" else if (state == SyncSummaryState.HEALTHY) "✓" else "•",
                         modifier = Modifier.clearAndSetSemantics {},
-                        color = if (problem) colors.warningText else if (state == SyncSummaryState.HEALTHY) colors.success else MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (warning) colors.warningText else if (state == SyncSummaryState.HEALTHY) colors.success else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Column {
+                        Column(Modifier.semantics(mergeDescendants = true) {}) {
                         Text(
                             stringResource(
                                 when (state) {
                                     SyncSummaryState.ATTENTION -> R.string.peppy_toggle_android_sync_needs_attention
+                                    SyncSummaryState.TOO_LARGE -> R.string.peppy_sync_too_large_title
+                                    SyncSummaryState.IMPORTING -> R.string.peppy_sync_setup_title
                                     SyncSummaryState.HEALTHY -> R.string.peppy_toggle_android_sync_all_good_title
                                     SyncSummaryState.OFF -> R.string.peppy_toggle_android_sync_off_title
                                     SyncSummaryState.RETRYING -> R.string.peppy_toggle_android_sync_retrying_title
@@ -496,6 +520,10 @@ private fun SyncSummary(health: SyncHealth?) {
                             else stringResource(
                                 when (state) {
                                     SyncSummaryState.HEALTHY -> R.string.peppy_toggle_android_sync_all_good_body
+                                    SyncSummaryState.TOO_LARGE ->
+                                        if (health.syncPhase == SyncPhase.LIVE) R.string.peppy_toggle_android_sync_too_large_live_body
+                                        else R.string.peppy_toggle_android_sync_too_large_body
+                                    SyncSummaryState.IMPORTING -> R.string.peppy_toggle_android_sync_setup_body
                                     SyncSummaryState.OFF -> R.string.peppy_toggle_android_sync_off_body
                                     SyncSummaryState.RETRYING -> R.string.peppy_toggle_android_sync_retrying_body
                                     SyncSummaryState.CHECKING -> R.string.peppy_toggle_android_sync_checking
@@ -506,11 +534,67 @@ private fun SyncSummary(health: SyncHealth?) {
                             ),
                             style = MaterialTheme.typography.bodyMedium,
                         )
+                        // Same slot and tag for both kinds: the wait differs (6 hours or 7 days), so the copy follows the kind.
+                        if (state == SyncSummaryState.TOO_LARGE) Text(
+                            stringResource(
+                                if (health.historyTooLargeByteCap) R.string.peppy_toggle_android_sync_too_large_recheck_weekly
+                                else R.string.peppy_toggle_android_sync_too_large_recheck,
+                            ),
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.testTag("sms-sync-too-large-recheck"),
+                        )
+                        }
+                        if (state == SyncSummaryState.TOO_LARGE && playUpdateAvailable) {
+                            TextButton(
+                                onClick = { playOpenFailed = !openPlayListing(context) },
+                                modifier = Modifier.heightIn(min = 48.dp).testTag("sync-too-large-update"),
+                            ) { Text(stringResource(R.string.peppy_toggle_android_sync_too_large_play)) }
+                            if (playOpenFailed) Text(
+                                stringResource(R.string.peppy_toggle_android_sync_too_large_play_failed),
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.testTag("sync-too-large-update-error").semantics { liveRegion = LiveRegionMode.Polite },
+                            )
+                        } else if (state == SyncSummaryState.TOO_LARGE) {
+                            // Sideload and other builds have no store listing: the guide is the way to update.
+                            TextButton(
+                                onClick = { guideOpenFailed = !openAndroidGuide(context) },
+                                modifier = Modifier.heightIn(min = 48.dp).testTag("sync-too-large-guide"),
+                            ) { Text(stringResource(R.string.peppy_android_guide)) }
+                            if (guideOpenFailed) Text(
+                                stringResource(R.string.peppy_guide_open_failed),
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.testTag("sync-too-large-guide-error").semantics { liveRegion = LiveRegionMode.Polite },
+                            )
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/** Market app first, then the https listing when no store app can open the market link. False when neither opened. */
+private fun openPlayListing(context: Context): Boolean {
+    val packageName = context.packageName
+    return try {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$packageName")))
+        true
+    } catch (_: ActivityNotFoundException) {
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=$packageName")))
+            true
+        } catch (_: ActivityNotFoundException) {
+            false
+        }
+    }
+}
+
+/** Opens the Android guide (the same link as the details page). False when no app can open it. */
+private fun openAndroidGuide(context: Context): Boolean = try {
+    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(ANDROID_GUIDE_URL)))
+    true
+} catch (_: ActivityNotFoundException) {
+    false
 }
 
 @Composable
@@ -519,13 +603,22 @@ private fun CheckRow(
     ok: Boolean,
     label: String,
     action: (@Composable () -> Unit)? = null,
+    /** Setup in progress: neutral, not drawn as a warning. */
+    pending: Boolean = false,
 ) {
     val colors = if (isSystemInDarkTheme()) PeppyTokens.Dark else PeppyTokens.Light
     Row(
         Modifier.fillMaxWidth().heightIn(min = 40.dp).testTag(tag),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(if (ok) "✓" else "⚠", color = if (ok) colors.success else colors.warningText)
+        Text(
+            if (pending) "•" else if (ok) "✓" else "⚠",
+            color = when {
+                pending -> MaterialTheme.colorScheme.onSurfaceVariant
+                ok -> colors.success
+                else -> colors.warningText
+            },
+        )
         Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f)) {
             Text(label, style = MaterialTheme.typography.bodyMedium)
