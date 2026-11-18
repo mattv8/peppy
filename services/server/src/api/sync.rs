@@ -5,6 +5,7 @@
 //! `cursor + Envelope`; clients stage-import them and never execute historical
 //! commands from a snapshot.
 
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use axum::{
@@ -978,8 +979,10 @@ const COMPACTION_ROOT_LIMIT: i64 = 100_000;
 /// much stable time instead of a full `COMPACTION_INTERVAL`, so a busy vault
 /// drains its backlog while snapshot imports still get hour-long windows.
 const COMPACTION_BACKLOG_RETRY: &str = "1 hour";
-/// Bound on the forward walk to a retained representative.
-const MAX_CHAIN_DEPTH: usize = 64;
+/// Supersession edges the expired-root ancestry walks may follow per pass, summed
+/// over all roots: four edge pages. One root's walk follows each edge at most
+/// once, so only roots whose ancestries overlap can reach this bound.
+const MAX_ANCESTRY_EDGES: usize = 4 * COMPACTION_EDGE_LIMIT as usize;
 
 /// Retained records sharing a root's grouping key, read for the expiry guard.
 const COMPACTION_SAME_KEY_LIMIT: i64 = 1_024;
@@ -1015,10 +1018,18 @@ enum Target {
 /// Chooses records to delete from one vault's supersession graph.
 ///
 /// A target is removed only when (a) it is replay-pruned and not a young
-/// terminal, (b) a forward walk along valid supersessions reaches a record no
-/// valid supersession targets (a retained representative), and (c) every valid
-/// target it supersedes itself is removed in the same pass, so no ancestor is
-/// stranded without its superseder. Cycles have no representative and remain.
+/// terminal, its own rows are complete, and no pending reference holds it;
+/// (b) a valid supersession path from it reaches a record that no valid
+/// supersession targets (a retained representative), at any distance; and
+/// (c) every valid target it supersedes is itself removed in the same pass, so
+/// no ancestor is stranded without its superseder. Rule (c) keeps the greatest
+/// set closed under supersession. Cycles have no representative and remain.
+///
+/// There is no depth limit. Rules (a) and (b) take one reverse walk from the
+/// representatives, rule (c) a worklist, and root safety one forward
+/// propagation. Each follows every supersession reference at most a constant
+/// number of times; the chosen set is ordered, so rule (c) is O((V + E) log V)
+/// with V records and E references.
 ///
 /// `expired_roots` are replay-pruned terminal records at least
 /// `TERMINAL_RETENTION` old. One that no valid reference targets expires
@@ -1028,136 +1039,223 @@ enum Target {
 /// retained record with the same grouping key outside that ancestry also keeps
 /// the root (the key is a hint for this guard, never deletion authority).
 /// Non-terminal roots (the latest state) never expire.
+///
+/// Ancestries are collected with a visited set, and ancestries of different
+/// roots can overlap. Together the walks of one pass follow at most
+/// `MAX_ANCESTRY_EDGES` supersession edges. When that bound is reached, the
+/// root being walked and every later root are kept for this pass, so an
+/// incomplete walk never expires anything.
 fn select_compaction(
     edges: &[Edge],
     expired_roots: &[ExpiredRoot],
     incomplete_from: Option<i64>,
     batch: usize,
 ) -> Vec<i64> {
-    use std::collections::{BTreeSet, HashMap, HashSet};
-    let mut successors: HashMap<i64, Vec<i64>> = HashMap::new();
-    let mut supersedes: HashMap<i64, Vec<i64>> = HashMap::new();
-    let mut deletable: HashMap<i64, bool> = HashMap::new();
-    let mut held: HashSet<i64> = HashSet::new();
-    // Replacements with a reference that cannot be resolved by deletion.
-    let mut unresolved: HashSet<i64> = HashSet::new();
-    for edge in edges {
-        match edge.target {
-            Target::Valid {
-                cursor,
-                deletable: ok,
-            } => {
-                successors.entry(cursor).or_default().push(edge.replacement);
-                supersedes.entry(edge.replacement).or_default().push(cursor);
-                deletable.insert(cursor, ok);
-            }
-            Target::Pending => {
-                held.insert(edge.replacement);
-                unresolved.insert(edge.replacement);
-            }
-            Target::Protected => {
-                unresolved.insert(edge.replacement);
-            }
-            Target::Resolved => {}
-        }
-    }
-    let reaches_representative = |start: i64| {
-        let mut seen = HashSet::from([start]);
-        let mut frontier = vec![start];
-        for _ in 0..MAX_CHAIN_DEPTH {
-            let mut next = Vec::new();
-            for node in frontier {
-                for &replacement in successors.get(&node).into_iter().flatten() {
-                    if !successors.contains_key(&replacement) {
-                        return true;
-                    }
-                    if seen.insert(replacement) {
-                        next.push(replacement);
-                    }
-                }
-            }
-            if next.is_empty() {
-                return false;
-            }
-            frontier = next;
-        }
-        false
-    };
+    select_compaction_within(
+        edges,
+        expired_roots,
+        incomplete_from,
+        batch,
+        MAX_ANCESTRY_EDGES,
+    )
+}
+
+/// `select_compaction` with an explicit ancestry bound; tests use small bounds.
+fn select_compaction_within(
+    edges: &[Edge],
+    expired_roots: &[ExpiredRoot],
+    incomplete_from: Option<i64>,
+    batch: usize,
+    ancestry_edges: usize,
+) -> Vec<i64> {
+    let graph = SupersessionGraph::new(edges);
     // A node whose own outgoing rows may be truncated is never removed.
     let complete = |cursor: i64| incomplete_from.is_none_or(|cut| cursor < cut);
-    let mut chosen: BTreeSet<i64> = deletable
+    let reaching = graph.reaching_representative();
+    let mut chosen: BTreeSet<i64> = graph
+        .deletable
         .iter()
         .filter(|&(&cursor, &ok)| {
-            ok && complete(cursor) && !held.contains(&cursor) && reaches_representative(cursor)
+            ok && complete(cursor) && !graph.held.contains(&cursor) && reaching.contains(&cursor)
         })
         .map(|(&cursor, _)| cursor)
         .collect();
-    for expired in expired_roots {
-        let root = expired.cursor;
-        if expired.same_key_truncated {
-            continue;
+    chosen.extend(graph.expired_ancestries(expired_roots, &complete, ancestry_edges));
+    graph.close(&mut chosen);
+    if chosen.len() > batch {
+        chosen = chosen.into_iter().take(batch).collect();
+        graph.close(&mut chosen);
+    }
+    chosen.into_iter().collect()
+}
+
+/// One pass's supersession edges, indexed in both directions.
+#[derive(Default)]
+struct SupersessionGraph {
+    /// Valid target -> replacements that supersede it.
+    successors: HashMap<i64, Vec<i64>>,
+    /// Replacement -> valid targets it supersedes.
+    supersedes: HashMap<i64, Vec<i64>>,
+    /// Valid target -> whether it may be removed (replay-pruned, not a young terminal).
+    deletable: HashMap<i64, bool>,
+    /// Replacements whose own pending reference holds them.
+    held: HashSet<i64>,
+    /// Replacements with a pending or protected reference; their roots never expire.
+    unresolved: HashSet<i64>,
+}
+
+impl SupersessionGraph {
+    fn new(edges: &[Edge]) -> Self {
+        let mut graph = Self::default();
+        for edge in edges {
+            match edge.target {
+                Target::Valid {
+                    cursor,
+                    deletable: ok,
+                } => {
+                    graph
+                        .successors
+                        .entry(cursor)
+                        .or_default()
+                        .push(edge.replacement);
+                    graph
+                        .supersedes
+                        .entry(edge.replacement)
+                        .or_default()
+                        .push(cursor);
+                    graph.deletable.insert(cursor, ok);
+                }
+                Target::Pending => {
+                    graph.held.insert(edge.replacement);
+                    graph.unresolved.insert(edge.replacement);
+                }
+                Target::Protected => {
+                    graph.unresolved.insert(edge.replacement);
+                }
+                Target::Resolved => {}
+            }
         }
-        if successors.contains_key(&root) || !complete(root) || unresolved.contains(&root) {
-            continue;
-        }
-        let mut ancestry = vec![root];
-        let mut seen = HashSet::from([root]);
-        let mut safe = true;
-        let mut frontier = vec![root];
-        for depth in 0..=MAX_CHAIN_DEPTH {
-            let mut next = Vec::new();
-            for node in frontier {
-                for &target in supersedes.get(&node).into_iter().flatten() {
-                    if !seen.insert(target) {
-                        continue;
-                    }
-                    if deletable.get(&target) != Some(&true)
-                        || !complete(target)
-                        || unresolved.contains(&target)
-                    {
-                        safe = false;
-                    }
-                    ancestry.push(target);
-                    next.push(target);
+        graph
+    }
+
+    /// Targets with a valid supersession path to a retained representative: a
+    /// reverse walk from the representatives, O(V + E).
+    fn reaching_representative(&self) -> HashSet<i64> {
+        let mut reaching = HashSet::new();
+        let mut stack: Vec<i64> = self
+            .supersedes
+            .keys()
+            .copied()
+            .filter(|record| !self.successors.contains_key(record))
+            .collect();
+        while let Some(record) = stack.pop() {
+            for &target in self.supersedes.get(&record).into_iter().flatten() {
+                if reaching.insert(target) {
+                    stack.push(target);
                 }
             }
-            if next.is_empty() || !safe {
-                break;
-            }
-            if depth == MAX_CHAIN_DEPTH {
-                safe = false;
-            }
-            frontier = next;
         }
-        if safe && expired.same_key.iter().all(|cursor| seen.contains(cursor)) {
-            chosen.extend(ancestry);
-        }
+        reaching
     }
-    let close = |chosen: &mut BTreeSet<i64>| loop {
-        let stranded: Vec<i64> = chosen
+
+    /// Records with an ancestor that cannot expire (not deletable, incomplete or
+    /// unresolved): one forward propagation along successors, O(V + E).
+    fn tainted(&self, complete: &impl Fn(i64) -> bool) -> HashSet<i64> {
+        let mut tainted = HashSet::new();
+        let mut stack: Vec<i64> = self
+            .deletable
+            .keys()
+            .copied()
+            .filter(|&target| {
+                !(self.deletable[&target] && complete(target) && !self.unresolved.contains(&target))
+            })
+            .collect();
+        while let Some(record) = stack.pop() {
+            for &replacement in self.successors.get(&record).into_iter().flatten() {
+                if tainted.insert(replacement) {
+                    stack.push(replacement);
+                }
+            }
+        }
+        tainted
+    }
+
+    /// `root` and every record with a supersession path to it. `None` when the
+    /// walk would follow more than `budget` supersession edges in total.
+    fn ancestry(&self, root: i64, followed: &mut usize, budget: usize) -> Option<HashSet<i64>> {
+        let mut seen = HashSet::from([root]);
+        let mut stack = vec![root];
+        while let Some(record) = stack.pop() {
+            for &target in self.supersedes.get(&record).into_iter().flatten() {
+                *followed += 1;
+                if *followed > budget {
+                    return None;
+                }
+                if seen.insert(target) {
+                    stack.push(target);
+                }
+            }
+        }
+        Some(seen)
+    }
+
+    /// Ancestries of the expired roots that may expire, in the given order.
+    /// Stops at the first walk that exceeds the budget: that root and the rest are kept.
+    fn expired_ancestries(
+        &self,
+        roots: &[ExpiredRoot],
+        complete: &impl Fn(i64) -> bool,
+        budget: usize,
+    ) -> Vec<i64> {
+        let tainted = self.tainted(complete);
+        let mut followed = 0;
+        let mut expired = Vec::new();
+        for root in roots {
+            let cursor = root.cursor;
+            if root.same_key_truncated
+                || self.successors.contains_key(&cursor)
+                || !complete(cursor)
+                || self.unresolved.contains(&cursor)
+                || tainted.contains(&cursor)
+            {
+                continue;
+            }
+            let Some(ancestry) = self.ancestry(cursor, &mut followed, budget) else {
+                break;
+            };
+            if root.same_key.iter().all(|key| ancestry.contains(key)) {
+                expired.extend(ancestry);
+            }
+        }
+        expired
+    }
+
+    /// Rule (c) as a greatest fixed point: drops each chosen record that
+    /// supersedes a valid target outside the set, then whatever that strands.
+    /// A dropped record re-examines only the chosen records that supersede it.
+    fn close(&self, chosen: &mut BTreeSet<i64>) {
+        let mut work: Vec<i64> = chosen
             .iter()
             .copied()
-            .filter(|cursor| {
-                supersedes
-                    .get(cursor)
+            .filter(|&record| {
+                self.supersedes
+                    .get(&record)
                     .into_iter()
                     .flatten()
                     .any(|target| !chosen.contains(target))
             })
             .collect();
-        if stranded.is_empty() {
-            break;
+        while let Some(record) = work.pop() {
+            if !chosen.remove(&record) {
+                continue;
+            }
+            for &replacement in self.successors.get(&record).into_iter().flatten() {
+                if chosen.contains(&replacement) {
+                    work.push(replacement);
+                }
+            }
         }
-        for cursor in stranded {
-            chosen.remove(&cursor);
-        }
-    };
-    close(&mut chosen);
-    if chosen.len() > batch {
-        chosen = chosen.into_iter().take(batch).collect();
-        close(&mut chosen);
     }
-    chosen.into_iter().collect()
 }
 
 /// Physically removes superseded, replay-pruned records (see
@@ -1365,6 +1463,7 @@ pub(super) fn spawn_maintenance(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn roots(cursors: &[i64]) -> Vec<ExpiredRoot> {
         cursors
@@ -1510,6 +1609,563 @@ mod tests {
             vec![1, 2]
         );
         assert!(select_compaction(&[], &guarded(vec![], true), None, 100).is_empty());
+    }
+
+    /// `1 <- 2 <- ... <- len`: each record supersedes its predecessor.
+    fn chain(len: i64) -> Vec<Edge> {
+        (1..len).map(|cursor| valid(cursor + 1, cursor)).collect()
+    }
+
+    #[test]
+    fn chains_of_any_length_keep_only_the_newest_record() {
+        for len in [2, 64, 65, 66, 67, 200, 5_201] {
+            assert_eq!(
+                select_compaction(&chain(len), &[], None, COMPACTION_BATCH_ROWS),
+                (1..len).collect::<Vec<_>>(),
+                "chain of {len} records"
+            );
+        }
+    }
+
+    #[test]
+    fn long_chain_keeps_the_record_at_a_young_held_or_incomplete_position_and_newer_ones() {
+        const LEN: i64 = 200;
+        const AT: i64 = 100;
+        let older: Vec<i64> = (1..AT).collect();
+        // Young terminal AT: its superseder names a target that may not be removed yet.
+        let young: Vec<Edge> = (1..LEN)
+            .map(|cursor| Edge {
+                replacement: cursor + 1,
+                target: Target::Valid {
+                    cursor,
+                    deletable: cursor != AT,
+                },
+            })
+            .collect();
+        assert_eq!(
+            select_compaction(&young, &[], None, COMPACTION_BATCH_ROWS),
+            older,
+            "young terminal at {AT}"
+        );
+        // AT itself holds a pending reference.
+        let mut held = chain(LEN);
+        held.push(Edge {
+            replacement: AT,
+            target: Target::Pending,
+        });
+        assert_eq!(
+            select_compaction(&held, &[], None, COMPACTION_BATCH_ROWS),
+            older,
+            "held replacement at {AT}"
+        );
+        // Rows from AT on may be incomplete.
+        assert_eq!(
+            select_compaction(&chain(LEN), &[], Some(AT), COMPACTION_BATCH_ROWS),
+            older,
+            "incomplete rows from {AT}"
+        );
+    }
+
+    #[test]
+    fn long_cycles_remain_without_an_exit_and_collapse_into_an_exit() {
+        const LEN: i64 = 300;
+        let mut edges = chain(LEN);
+        edges.push(valid(1, LEN));
+        assert!(select_compaction(&edges, &[], None, COMPACTION_BATCH_ROWS).is_empty());
+        edges.push(valid(LEN + 1, 1));
+        assert_eq!(
+            select_compaction(&edges, &[], None, COMPACTION_BATCH_ROWS),
+            (1..=LEN).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn batch_truncation_on_a_long_chain_removes_the_oldest_records() {
+        assert_eq!(
+            select_compaction(&chain(500), &[], None, 10),
+            (1..=10).collect::<Vec<_>>()
+        );
+        assert_eq!(select_compaction(&chain(500), &[], None, 1), vec![1]);
+    }
+
+    #[test]
+    fn expired_root_under_a_deep_chain_expires_with_its_whole_ancestry() {
+        for len in [65, 200] {
+            assert_eq!(
+                select_compaction(&chain(len), &roots(&[len]), None, COMPACTION_BATCH_ROWS),
+                (1..=len).collect::<Vec<_>>(),
+                "root under a chain of {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn deep_unsafe_ancestor_keeps_the_expired_root_and_the_ordinary_rule_still_applies() {
+        const LEN: i64 = 200;
+        // Ancestor 10 is 190 supersessions below the root 200.
+        const DEEP: i64 = 10;
+        let mut not_deletable = chain(LEN);
+        not_deletable.retain(|edge| edge.replacement != DEEP + 1);
+        not_deletable.push(Edge {
+            replacement: DEEP + 1,
+            target: Target::Valid {
+                cursor: DEEP,
+                deletable: false,
+            },
+        });
+        assert_eq!(
+            select_compaction(&not_deletable, &roots(&[LEN]), None, COMPACTION_BATCH_ROWS),
+            (1..DEEP).collect::<Vec<_>>(),
+            "not deletable ancestor"
+        );
+        let mut pending = chain(LEN);
+        pending.push(Edge {
+            replacement: DEEP,
+            target: Target::Pending,
+        });
+        assert_eq!(
+            select_compaction(&pending, &roots(&[LEN]), None, COMPACTION_BATCH_ROWS),
+            (1..DEEP).collect::<Vec<_>>(),
+            "pending ancestor"
+        );
+        let mut protected = chain(LEN);
+        protected.push(Edge {
+            replacement: DEEP,
+            target: Target::Protected,
+        });
+        assert_eq!(
+            select_compaction(&protected, &roots(&[LEN]), None, COMPACTION_BATCH_ROWS),
+            (1..LEN).collect::<Vec<_>>(),
+            "protected ancestor: the ordinary rule still removes 1..=199"
+        );
+    }
+
+    #[test]
+    fn ancestry_budget_keeps_the_walked_root_and_every_later_root() {
+        // 2001 <- ... <- 2020: the root 2020 needs 19 supersession edges.
+        let edges: Vec<Edge> = (2001..2020)
+            .map(|cursor| valid(cursor + 1, cursor))
+            .collect();
+        let expired = roots(&[1000, 2020, 3000]);
+        // Budget 10: the walk of 2020 stops, so 2020 and the later root 3000 are kept.
+        assert_eq!(
+            select_compaction_within(&edges, &expired, None, COMPACTION_BATCH_ROWS, 10),
+            [vec![1000], (2001..2020).collect()].concat()
+        );
+        // Budget 19: exactly enough for the walk of 2020, so every root expires.
+        assert_eq!(
+            select_compaction_within(&edges, &expired, None, COMPACTION_BATCH_ROWS, 19),
+            [vec![1000], (2001..=2020).collect(), vec![3000]].concat()
+        );
+    }
+
+    #[test]
+    fn quarter_million_record_chains_complete_in_one_pass() {
+        const LEN: i64 = 250_000;
+        assert_eq!(
+            select_compaction(&chain(LEN), &[], None, usize::MAX),
+            (1..LEN).collect::<Vec<_>>()
+        );
+        // The oldest target is not deletable: every superseder is stranded in turn.
+        let mut young = chain(LEN);
+        young[0] = Edge {
+            replacement: 2,
+            target: Target::Valid {
+                cursor: 1,
+                deletable: false,
+            },
+        };
+        assert!(select_compaction(&young, &[], None, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn one_target_with_thousands_of_expired_replacements_completes() {
+        const REPLACEMENTS: i64 = 5_000;
+        let edges: Vec<Edge> = (2..=REPLACEMENTS + 1)
+            .map(|replacement| valid(replacement, 1))
+            .collect();
+        let expired: Vec<i64> = (2..=REPLACEMENTS + 1).collect();
+        assert_eq!(
+            select_compaction(&edges, &roots(&expired), None, usize::MAX),
+            (1..=REPLACEMENTS + 1).collect::<Vec<_>>()
+        );
+    }
+
+    /// Records reachable from `start` through `next`, excluding `start` unless it is reached again.
+    fn reachable(start: i64, next: impl Fn(i64) -> Vec<i64>) -> BTreeSet<i64> {
+        let mut seen = BTreeSet::new();
+        let mut frontier = vec![start];
+        while let Some(node) = frontier.pop() {
+            for reached in next(node) {
+                if seen.insert(reached) {
+                    frontier.push(reached);
+                }
+            }
+        }
+        seen
+    }
+
+    /// Brute-force reference written from the documented rules only: naive
+    /// reachability per record, a naive fixed point, a naive ancestry per root,
+    /// no depth cap. It shares no code with `select_compaction`.
+    fn reference_selection(
+        edges: &[Edge],
+        roots: &[ExpiredRoot],
+        incomplete_from: Option<i64>,
+        batch: usize,
+    ) -> Vec<i64> {
+        // (replacement, target) of every valid reference.
+        let valid_refs: Vec<(i64, i64)> = edges
+            .iter()
+            .filter_map(|edge| match edge.target {
+                Target::Valid { cursor, .. } => Some((edge.replacement, cursor)),
+                _ => None,
+            })
+            .collect();
+        let targets: BTreeSet<i64> = valid_refs.iter().map(|&(_, target)| target).collect();
+        let deletable = |x: i64| {
+            edges.iter().any(|edge| {
+                matches!(edge.target, Target::Valid { cursor, deletable: true } if cursor == x)
+            })
+        };
+        let held = |x: i64| {
+            edges
+                .iter()
+                .any(|edge| edge.replacement == x && matches!(edge.target, Target::Pending))
+        };
+        let unresolved = |x: i64| {
+            edges.iter().any(|edge| {
+                edge.replacement == x && matches!(edge.target, Target::Pending | Target::Protected)
+            })
+        };
+        let complete = |x: i64| incomplete_from.is_none_or(|cut| x < cut);
+        // Records that supersede `x`, directly or through a chain of valid references.
+        let superseders = |x: i64| {
+            reachable(x, |node| {
+                valid_refs
+                    .iter()
+                    .filter(|&&(_, target)| target == node)
+                    .map(|&(by, _)| by)
+                    .collect()
+            })
+        };
+        // Records that `x` supersedes, directly or through a chain of valid references.
+        let superseded = |x: i64| {
+            reachable(x, |node| {
+                valid_refs
+                    .iter()
+                    .filter(|&&(by, _)| by == node)
+                    .map(|&(_, target)| target)
+                    .collect()
+            })
+        };
+
+        // Rule (a) and (b): deletable, complete, not held, and a representative is reachable.
+        let mut chosen: BTreeSet<i64> = targets
+            .iter()
+            .copied()
+            .filter(|&target| {
+                deletable(target)
+                    && complete(target)
+                    && !held(target)
+                    && superseders(target)
+                        .iter()
+                        .any(|record| !targets.contains(record))
+            })
+            .collect();
+        // Expired roots: whole ancestry, when every part of it may go.
+        for root in roots {
+            let cursor = root.cursor;
+            if root.same_key_truncated
+                || targets.contains(&cursor)
+                || !complete(cursor)
+                || unresolved(cursor)
+            {
+                continue;
+            }
+            let ancestry = superseded(cursor);
+            let safe = ancestry
+                .iter()
+                .all(|&record| deletable(record) && complete(record) && !unresolved(record));
+            let same_key_inside = root.same_key.iter().all(|key| ancestry.contains(key));
+            if safe && same_key_inside {
+                chosen.insert(cursor);
+                chosen.extend(ancestry);
+            }
+        }
+        // Rule (c): a record stays only while every valid target it supersedes stays.
+        let close = |mut kept: BTreeSet<i64>| loop {
+            let next: BTreeSet<i64> = kept
+                .iter()
+                .copied()
+                .filter(|&record| {
+                    valid_refs
+                        .iter()
+                        .all(|&(by, target)| by != record || kept.contains(&target))
+                })
+                .collect();
+            if next.len() == kept.len() {
+                return next;
+            }
+            kept = next;
+        };
+        let mut chosen = close(chosen);
+        if chosen.len() > batch {
+            chosen = close(chosen.into_iter().take(batch).collect());
+        }
+        chosen.into_iter().collect()
+    }
+
+    /// Small seeded xorshift generator: the tests need no randomness crate.
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        /// A value in `0..bound`; `bound` must be positive.
+        fn below(&mut self, bound: u64) -> u64 {
+            self.next_u64() % bound
+        }
+
+        fn chance(&mut self, percent: u64) -> bool {
+            self.below(100) < percent
+        }
+
+        fn record(&mut self, nodes: i64) -> i64 {
+            1 + self.below(nodes as u64) as i64
+        }
+    }
+
+    /// A random graph for `seed`: valid, not-deletable, pending, protected and
+    /// resolved references, cycles, truncated rows, batch limits and expired
+    /// roots with same-key lists. Every eighth graph holds a chain deeper than
+    /// the old walk cap; the reference has no cap.
+    fn random_graph(seed: u64) -> (Vec<Edge>, Vec<ExpiredRoot>, Option<i64>, usize) {
+        let mut rng = Rng::new(seed);
+        let deep = seed.is_multiple_of(8);
+        let nodes = (if deep {
+            66 + rng.below(25)
+        } else {
+            1 + rng.below(12)
+        }) as i64;
+        let deletable: Vec<bool> = (0..=nodes).map(|_| rng.chance(80)).collect();
+        let incomplete_from = rng.chance(25).then(|| rng.record(nodes));
+        let mut edges = Vec::new();
+        if deep {
+            // Mostly one long supersession chain, deeper than the old walk cap.
+            for cursor in 1..nodes {
+                if rng.chance(98) {
+                    edges.push(Edge {
+                        replacement: cursor + 1,
+                        target: Target::Valid {
+                            cursor,
+                            deletable: deletable[cursor as usize],
+                        },
+                    });
+                }
+            }
+        }
+        for _ in 0..rng.below(3 * nodes as u64 + 1) {
+            let replacement = rng.record(nodes);
+            let target = match rng.below(100) {
+                0..=69 => {
+                    let cursor = if replacement > 1 && rng.chance(60) {
+                        replacement - 1
+                    } else {
+                        rng.record(nodes)
+                    };
+                    if cursor == replacement {
+                        Target::Protected
+                    } else {
+                        Target::Valid {
+                            cursor,
+                            deletable: deletable[cursor as usize],
+                        }
+                    }
+                }
+                70..=79 => Target::Pending,
+                80..=89 => Target::Protected,
+                _ => Target::Resolved,
+            };
+            edges.push(Edge {
+                replacement,
+                target,
+            });
+        }
+        let mut expired = Vec::new();
+        for cursor in 1..=nodes {
+            if !rng.chance(35) {
+                continue;
+            }
+            let mut same_key: Vec<i64> = (0..rng.below(3))
+                .map(|_| rng.record(nodes))
+                .filter(|&key| key != cursor)
+                .collect();
+            same_key.sort_unstable();
+            same_key.dedup();
+            expired.push(ExpiredRoot {
+                cursor,
+                same_key,
+                same_key_truncated: rng.chance(5),
+            });
+        }
+        let batch = if rng.chance(40) {
+            1 + rng.below(nodes as u64 + 1) as usize
+        } else {
+            COMPACTION_BATCH_ROWS
+        };
+        (edges, expired, incomplete_from, batch)
+    }
+
+    #[test]
+    fn selection_matches_a_brute_force_reference_on_random_graphs() {
+        for seed in 1..=6_000 {
+            let (edges, expired, incomplete_from, batch) = random_graph(seed);
+            assert_eq!(
+                select_compaction(&edges, &expired, incomplete_from, batch),
+                reference_selection(&edges, &expired, incomplete_from, batch),
+                "selection differs from the reference at seed {seed}"
+            );
+        }
+    }
+
+    /// Edges, expired roots, `incomplete_from`, batch, and the expected selection.
+    type DocumentedCase = (Vec<Edge>, Vec<ExpiredRoot>, Option<i64>, usize, Vec<i64>);
+
+    #[test]
+    fn reference_agrees_with_every_documented_example() {
+        let guarded = |same_key: Vec<i64>, same_key_truncated: bool| {
+            vec![ExpiredRoot {
+                cursor: 2,
+                same_key,
+                same_key_truncated,
+            }]
+        };
+        let young_1 = || Edge {
+            replacement: 2,
+            target: Target::Valid {
+                cursor: 1,
+                deletable: false,
+            },
+        };
+        let pending_at = |replacement| Edge {
+            replacement,
+            target: Target::Pending,
+        };
+        let protected_at = |replacement| Edge {
+            replacement,
+            target: Target::Protected,
+        };
+        let resolved_2 = || Edge {
+            replacement: 2,
+            target: Target::Resolved,
+        };
+        // (edges, roots, incomplete_from, batch, expected)
+        let cases: Vec<DocumentedCase> = vec![
+            (
+                vec![valid(2, 1), valid(3, 2)],
+                vec![],
+                None,
+                100,
+                vec![1, 2],
+            ),
+            (vec![valid(2, 1), valid(1, 2)], vec![], None, 100, vec![]),
+            (
+                vec![valid(2, 1), valid(1, 2), valid(3, 1)],
+                vec![],
+                None,
+                100,
+                vec![1, 2],
+            ),
+            (vec![young_1(), valid(3, 2)], vec![], None, 100, vec![]),
+            (vec![valid(2, 1), valid(3, 2)], vec![], None, 1, vec![1]),
+            (
+                vec![valid(2, 1), pending_at(2), valid(3, 2)],
+                vec![],
+                None,
+                100,
+                vec![1],
+            ),
+            (
+                vec![protected_at(2), valid(3, 2)],
+                vec![],
+                None,
+                100,
+                vec![2],
+            ),
+            (
+                vec![valid(2, 1), valid(3, 2)],
+                vec![],
+                Some(2),
+                100,
+                vec![1],
+            ),
+            (vec![valid(2, 1)], roots(&[2]), None, 100, vec![1, 2]),
+            (vec![], roots(&[5]), None, 100, vec![5]),
+            (vec![resolved_2()], roots(&[2]), None, 100, vec![2]),
+            (
+                vec![valid(2, 1), pending_at(2)],
+                roots(&[2]),
+                None,
+                100,
+                vec![1],
+            ),
+            (
+                vec![valid(2, 1), protected_at(2)],
+                roots(&[2]),
+                None,
+                100,
+                vec![1],
+            ),
+            (vec![young_1()], roots(&[2]), None, 100, vec![]),
+            (
+                vec![valid(2, 1), pending_at(1)],
+                roots(&[2]),
+                None,
+                100,
+                vec![],
+            ),
+            (vec![valid(3, 2)], roots(&[2]), None, 100, vec![2]),
+            (vec![], roots(&[5]), Some(5), 100, vec![]),
+            (
+                vec![valid(2, 1)],
+                guarded(vec![1, 9], false),
+                None,
+                100,
+                vec![1],
+            ),
+            (
+                vec![valid(2, 1)],
+                guarded(vec![1], false),
+                None,
+                100,
+                vec![1, 2],
+            ),
+            (vec![], guarded(vec![], true), None, 100, vec![]),
+        ];
+        for (index, (edges, expired, incomplete_from, batch, expected)) in
+            cases.into_iter().enumerate()
+        {
+            assert_eq!(
+                reference_selection(&edges, &expired, incomplete_from, batch),
+                expected,
+                "reference, documented example {index}"
+            );
+            assert_eq!(
+                select_compaction(&edges, &expired, incomplete_from, batch),
+                expected,
+                "production, documented example {index}"
+            );
+        }
     }
 
     #[test]
