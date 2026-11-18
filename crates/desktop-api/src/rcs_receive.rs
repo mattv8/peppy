@@ -1,7 +1,11 @@
-use crate::{AttachmentView, MessageView, SendCancellationView, message_view as base_message_view};
+use crate::{
+    AttachmentView, MessageView, SendCancellationView, message_view as base_message_view,
+    send_recovery_view,
+};
 use peppy_client_core::{
     Client, Direction, Error, Message, RcsMessageStatus, SendCancellationState, Transport,
 };
+use std::collections::HashSet;
 
 const MAX_RCS_MEDIA_ATTACHMENTS: u32 = 10;
 
@@ -110,10 +114,12 @@ impl OutgoingMediaOutcome {
     }
 }
 
+/// `revoked_devices` is the host's verified roster of revoked device ids (see `send_recovery`).
 pub fn message_view(
     client: &Client,
     message: &Message,
     mut attachments: Vec<AttachmentView>,
+    revoked_devices: &HashSet<String>,
 ) -> Result<MessageView, Error> {
     let is_rcs = message.payload.transport == Transport::Rcs;
     let message_id = message.payload.record.message_id;
@@ -170,6 +176,7 @@ pub fn message_view(
     }
     let mut view = base_message_view(message, attachments);
     view.send_cancellation = send_cancellation_view(client, message)?;
+    view.send_recovery = send_recovery_view(client, message, revoked_devices)?;
     if !is_rcs && !has_outgoing_rcs_media && !has_rcs_evidence {
         return Ok(view);
     }
@@ -247,7 +254,7 @@ mod tests {
         let mut message = rcs_message(None);
         message.payload.direction = Direction::Incoming;
 
-        let view = message_view(&client, &message, vec![]).unwrap();
+        let view = message_view(&client, &message, vec![], &HashSet::new()).unwrap();
 
         assert!(view.send_cancellation.is_none());
     }
@@ -302,7 +309,8 @@ mod tests {
             ),
             (peppy_client_core::SendState::OutcomeUnknown, "unknown"),
         ] {
-            let view = message_view(&client, &rcs_message(Some(state)), vec![]).unwrap();
+            let view =
+                message_view(&client, &rcs_message(Some(state)), vec![], &HashSet::new()).unwrap();
             assert_eq!(view.transport, Some("rcs"));
             assert_eq!(view.status, Some(expected));
             assert_eq!(view.status_at.as_deref(), Some("2"));
@@ -312,7 +320,7 @@ mod tests {
 
     #[test]
     fn outgoing_mms_without_rcs_media_status_stays_mms() {
-        let view = message_view(&client(), &mms_message(), vec![]).unwrap();
+        let view = message_view(&client(), &mms_message(), vec![], &HashSet::new()).unwrap();
 
         assert_eq!(view.transport, Some("mms"));
         assert!(!view.rcs_reported);
@@ -442,7 +450,7 @@ mod tests {
                     )
                 })
                 .collect();
-            message_view(&self.client, &message, attachments).unwrap()
+            message_view(&self.client, &message, attachments, &HashSet::new()).unwrap()
         }
 
         fn base(&self) -> MessageView {

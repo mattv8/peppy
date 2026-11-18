@@ -66,7 +66,9 @@ export type SendCancellationView = {
   requiresGatewayUpdate: boolean;
 };
 export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; draftState?: DraftAttachmentState; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView; remoteState?: "available" | "removed_by_storage_policy"; localAvailable?: boolean; rcsState?: RcsAttachmentState; rcsSendStatus?: RcsSendStatus; index?: number };
-export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms" | "rcs"; subject?: string; participants?: string[]; rcsReported?: boolean; oneTimeCode?: string; groupHint?: "members_changed" | "update_required" | "withdrawn" | "create_unknown" | "create_not_rcs"; sendCancellation?: SendCancellationView };
+export type SendRecoveryKind = "not-sent" | "unconfirmed-removed" | "unconfirmed-removed-cancel";
+export type SendRecovery = { kind: SendRecoveryKind; canSendAgain: boolean; sentAgain?: { messageId: string } };
+export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms" | "rcs"; subject?: string; participants?: string[]; rcsReported?: boolean; oneTimeCode?: string; groupHint?: "members_changed" | "update_required" | "withdrawn" | "create_unknown" | "create_not_rcs"; sendCancellation?: SendCancellationView; sendRecovery?: SendRecovery };
 export type MessageWindow = GeneratedMessageWindow<MessageView>;
 export type MediaCursor = { sortAtMs: string; localOrder: string; messageId: string; attachmentPosition: number };
 export type MediaMetadataView = { width?: number; height?: number; durationMs?: string; thumbnail?: AttachmentView; previewUnavailable?: "thumbnail_unavailable" };
@@ -252,6 +254,8 @@ export interface DesktopBridge {
   /** `accepted` means durably queued in the local encrypted outbox; `revision` is the stored draft revision afterwards. */
   send_draft(input: SendDraftInput): Promise<SendResultView>;
   cancel_send?(input: { messageId: string }): Promise<SendCancellationView>;
+  /** Creates a new outgoing message for the original's content on the given carrier route. Never automatic. Rejects with `already-sent-again`, `route-unavailable`, `attachments-unavailable` or `offline`. */
+  send_again(input: { messageId: string; gatewayId: string; simId: string }): Promise<{ messageId: string }>;
   mark_seen(visibleMessageIds: string[]): Promise<void>;
   copy_one_time_code(target: OneTimeCodeTarget, code: string): Promise<void>;
   /** Actual number changed, encoded as a canonical unsigned decimal string. */

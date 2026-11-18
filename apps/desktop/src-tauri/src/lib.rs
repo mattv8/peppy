@@ -228,6 +228,7 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "open_external_url",
     "save_draft",
     "send_draft",
+    "send_again",
     "cancel_send",
     "send_typing",
     "set_typing_sharing",
@@ -256,6 +257,19 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "resolve_draft_conflict",
     "acknowledge_draft_notice",
 ];
+
+#[cfg(test)]
+#[test]
+fn send_again_is_acl_granted_to_main_and_composer_windows() {
+    const APP_MANIFEST: &str = include_str!("../build.rs");
+    const MAIN_CAPABILITY: &str = include_str!("../capabilities/default.json");
+    const COMPOSER_CAPABILITY: &str = include_str!("../capabilities/composer.json");
+
+    assert!(APP_MANIFEST.contains("\"send_again\","));
+    assert!(MAIN_CAPABILITY.contains("\"allow-send-again\""));
+    assert!(COMPOSER_CAPABILITY.contains("\"allow-send-again\""));
+    assert!(COMPOSER_COMMANDS.contains(&"send_again"));
+}
 
 #[cfg(test)]
 #[test]
@@ -2984,6 +2998,55 @@ async fn send_draft(
     result
 }
 
+/// Explicit copy of a stranded send. Nothing calls it automatically; the popover sends the route
+/// the user chose. A composer window may only copy messages in its own conversation.
+#[tauri::command]
+async fn send_again(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    input: compose::SendAgainInput,
+) -> BridgeResult<compose::SendAgainResultView> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    let conversation = if window.label() == tray::MAIN {
+        None
+    } else {
+        let source = tray::composer_conversation(window.label()).ok_or_else(window_error)?;
+        effective_composer_conversation(
+            &state,
+            window.label(),
+            &session,
+            Some(&source.to_string()),
+        )?
+    };
+    let request_session = session.clone();
+    let result = blocking(move || send_again_scoped(&request_session, &input, conversation)).await?;
+    session.notify();
+    Ok(result)
+}
+
+fn send_again_scoped(
+    session: &Session,
+    input: &compose::SendAgainInput,
+    conversation: Option<ConversationId>,
+) -> BridgeResult<compose::SendAgainResultView> {
+    if let Some(conversation) = conversation {
+        let message_id = MessageId::from_str(&input.message_id)
+            .map_err(|_| BridgeError::new("invalid-request", "This message cannot be sent again."))?;
+        let belongs = session
+            .client
+            .messages_belong_to_conversation(conversation, &[message_id])
+            .map_err(core_error)?;
+        if !belongs {
+            return Err(BridgeError::new(
+                "window-context",
+                "A composer window can only send again messages in its own conversation.",
+            ));
+        }
+    }
+    session.send_again(input)
+}
+
 #[tauri::command]
 async fn cancel_send(
     window: tauri::WebviewWindow,
@@ -3051,6 +3114,37 @@ fn request_send_cancellation_scoped(
 #[cfg(test)]
 mod cancellation_command_tests {
     use super::*;
+    use peppy_client_core::DeviceId;
+
+    #[test]
+    fn send_again_session_guard_rejects_a_message_outside_the_composer_window() {
+        let fixture = crate::tests::fixture();
+        let session = crate::tests::open(&fixture, &fixture.binding, &[]);
+        let input = compose::SendAgainInput {
+            message_id: MessageId::new().to_string(),
+            gateway_id: DeviceId::new().to_string(),
+            sim_id: "sim-1".into(),
+        };
+
+        let error = send_again_scoped(&session, &input, Some(ConversationId::new())).unwrap_err();
+
+        assert_eq!(error.code, "window-context");
+    }
+
+    #[test]
+    fn send_again_refuses_an_unknown_message_with_the_generic_code() {
+        let fixture = crate::tests::fixture();
+        let session = crate::tests::open(&fixture, &fixture.binding, &[]);
+        let input = compose::SendAgainInput {
+            message_id: MessageId::new().to_string(),
+            gateway_id: DeviceId::new().to_string(),
+            sim_id: "sim-1".into(),
+        };
+
+        let error = send_again_scoped(&session, &input, None).unwrap_err();
+
+        assert_eq!(error.code, "invalid-request");
+    }
 
     #[test]
     fn cancellation_session_guard_rejects_a_message_outside_the_composer_window() {
@@ -6918,6 +7012,7 @@ pub fn run() {
         resolve_draft_conflict,
         acknowledge_draft_notice,
         send_draft,
+        send_again,
         cancel_send,
         live_typing::send_typing,
         live_typing::set_typing_sharing,

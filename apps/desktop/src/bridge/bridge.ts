@@ -190,6 +190,11 @@ const fixtureReactionMessages: MessageView[] = [
 ];
 const fixtureChatNotificationIcon = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAaUlEQVR42mPQrPz/fyAxw6gDkDmXXiAwLg3UUoMzBOjtCAZaWkCMGgZaW0BIDd5ESA9HEMwFtHYEUdmQ2o7Amw3p4QiC5QC9yoDRgmi0IBotiEYLotGCaLQgGi2IRguiwVcQjfYNBwIDAAwPd9Z4B+yXAAAAAElFTkSuQmCC";
 const fixtureMailNotificationIcon = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAaUlEQVR42mP4nx3+fyAxw6gDUAQe3kJgXJqopQZnCNDZEQw0tYAINQw09yUBNfgTIR0cQTgX0NgRxGVDajsCbzakhyMIlgN0KgNGC6LRgmi0IBotiEYLotGCaLQgGi2IBmFBNNo3HAAMAKbz3HgryQcuAAAAAElFTkSuQmCC";
+/** Tests only: adds a message (for example one in a send-recovery state) to a fixture conversation. Not used by the app. */
+export function addFixtureMessageForTests(conversationId: string, message: MessageView): void {
+  fixtureSnapshot.conversations.find((conversation) => conversation.id === conversationId)?.messages.push(message);
+}
+
 const fixtureSnapshot: DesktopSnapshot = { version: "1", mode: "fixture", connection: { state: "connected", origin: "https://push.example.com" }, encryption: { state: "unlocked" }, gateways: [{ id: "gateway-pixel8", name: "Pixel 8", simId: "sim-1", online: true, simulated: true, supportsSms: true, supportsMms: true, mmsContentVersion: 2, mmsMaxBytes: 300 * 1024, mmsLimitSource: "fallback", mmsMaxRecipients: 20 }], conversations: [{ id: "conv-aurora", name: "Aurora Chen", preview: "Can you send over the estimate?", unread: 2, messages: fixtureMessages }, { id: "conv-river", name: "River Park", preview: "Attachment received", unread: 0, participants: ["River Park", "Mina Torres"], messages: [{ id: "message-river-1", revision: "1", sender: "other", body: "Attachment received", timestamp: "1788348060000", transport: "mms", subject: "Estimate", attachments: [{ id: "attachment-river-1", name: "estimate.pdf", mediaType: "application/pdf", byteSize: 182000, state: "ready", transfer: "download", retryable: true }] }] }, { id: "conv-short-code", name: "5556", preview: "Short code", unread: 0, messages: [] }, { id: "conv-unresolved-number", name: "+18015551234", preview: "Unresolved number", unread: 0, participants: ["+18015551234"], messages: [] }, { id: "conv-group-numbers", name: "+18015551234, +15555550199", preview: "Group conversation", unread: 0, participants: ["+18015551234", "+15555550199"], messages: [] }], activeConversationId: "conv-aurora", draft: undefined, head: { enabled: true, capability: "supported" }, deviceRole: "owner", pendingCount: 1, quarantineCount: 0, notifications: [{ target: { sourceDeviceId: "gateway-pixel8", notificationKey: "chat-42", lifetime: "1" }, packageName: "com.example.chat", appName: "Chat", appIconPngBase64: fixtureChatNotificationIcon, title: "Morgan", text: "Are we still meeting after lunch?", postedAt: Date.now() - 120000, dismissible: true, seen: false, dismissalPending: false }, { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "chat-43", lifetime: "1" }, packageName: "com.example.chat", appName: "Chat", appIconPngBase64: fixtureChatNotificationIcon, title: "Verification", text: "Your verification code is 839201.", oneTimeCode: "839201", postedAt: Date.now() - 180000, dismissible: true, seen: false, dismissalPending: false }, { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "mail-7", lifetime: "1" }, packageName: "com.example.mail", appName: "Mail", appIconPngBase64: fixtureMailNotificationIcon, title: "Project update", text: "A detailed update is ready for your review.", postedAt: Date.now() - 3600000, dismissible: true, seen: false, dismissalPending: false }], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full", muteWithHeads: true } };
 fixtureSnapshot.notifications.push(
   { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "slack-1", lifetime: "1" }, packageName: "com.slack", appName: "Slack", title: "Design", text: "Alex mentioned you in #product.", postedAt: Date.now() - 900000, dismissible: true, seen: false, dismissalPending: false },
@@ -408,6 +413,22 @@ export const fixtureBridge: DesktopBridge = {
       return sendCancellation;
     }
     return { state: "unknown", canCancel: false, requiresGatewayUpdate: false };
+  },
+  send_again: async ({ messageId }) => {
+    for (const conversation of fixtureSnapshot.conversations) {
+      const index = conversation.messages.findIndex(message => message.id === messageId);
+      if (index < 0) continue;
+      const original = conversation.messages[index];
+      if (!original.sendRecovery) throw fixtureError("invalid-request", "This message can't be sent again.");
+      if (original.sendRecovery.sentAgain) throw fixtureError("already-sent-again", "This message was already sent again.");
+      if (!original.sendRecovery.canSendAgain) throw fixtureError("invalid-request", "This message can't be sent again.");
+      const newMessageId = `${messageId}-sent-again`;
+      conversation.messages[index] = { ...original, sendRecovery: { ...original.sendRecovery, canSendAgain: false, sentAgain: { messageId: newMessageId } } };
+      const timestamp = String(Date.now());
+      conversation.messages.push({ id: newMessageId, revision: "1", sender: "self", body: original.body, timestamp, status: "queued-local", statusAt: timestamp, attachments: original.attachments, transport: original.transport, subject: original.subject, participants: original.participants });
+      return { messageId: newMessageId };
+    }
+    throw fixtureError("not-found", "The requested stored item was not found.");
   },
   open_external_url: async url => { if (!/^(https?:\/\/|cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?)/.test(url)) throw fixtureError("invalid-request", "The URL is invalid."); },
   open_mcp_oauth_redirect: async url => { if (!/^(?:https?:\/\/|(?:vscode|vscode-insiders|cursor|windsurf|jetbrains):\/\/[^/?#@]+(?:[/?]|$))/.test(url)) throw fixtureError("invalid-request", "The URL is invalid."); },
@@ -788,6 +809,7 @@ export const tauriBridge: DesktopBridge = {
   set_typing_sharing: ({ enabled }) => invoke("set_typing_sharing", { enabled }),
   set_conversation_tone: (seed, paletteIndex) => invoke("set_conversation_tone", { seed, paletteIndex }),
   cancel_send: ({ messageId }) => invoke("cancel_send", { messageId }),
+  send_again: input => invoke("send_again", { input }),
   async window(action) { const w = (await import("@tauri-apps/api/window")).getCurrentWindow(); if (action === "minimize") await w.minimize(); else if (action === "maximize") await w.toggleMaximize(); else await w.close(); },
 };
 

@@ -535,6 +535,7 @@ export class BrowserBridge implements DesktopBridge {
   public save_draft(input: DraftInput): Promise<Draft> { return callChecked(() => this.call<Draft>("save_draft", { input: { ...input, ...groupDraftFields(input) } })); }
   public send_draft(input: SendDraftInput): Promise<SendResultView> { return callChecked(() => this.call<unknown>("send_draft", { input: { ...input, ...groupDraftFields(input) } }).then(parseSendResult)); }
   public discard_draft(input: { id: string; conversationId: string; expectedRevision: string }): Promise<void> { return this.call("discard_draft", { input }); }
+  public send_again(input: { messageId: string; gatewayId: string; simId: string }): Promise<{ messageId: string }> { return this.call("send_again", input); }
   public mark_seen(visibleMessageIds: string[]): Promise<void> { return this.call("mark_seen", { visibleMessageIds }); }
   /** Copies first; the read mark runs only after the clipboard accepts the code. */
   public async copy_one_time_code(target: OneTimeCodeTarget, code: string): Promise<void> {
