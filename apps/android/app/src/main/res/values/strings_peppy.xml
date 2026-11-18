@@ -1011,4 +1011,25 @@
     <string name="peppy_enrollment_error_vault_request_limited">Too many requests from this device. Wait a moment and try again.</string>
     <string name="peppy_enrollment_error_create_vault_limited">Too many vault creation attempts. Wait a moment and try again.</string>
     <string name="peppy_enrollment_error_manual_owner_limited">Too many connection attempts. Wait a moment and try again.</string>
+    <string name="peppy_sync_setup_title">Setting up</string>
+    <string name="peppy_sync_setup_phase_checking">Checking history</string>
+    <string name="peppy_sync_setup_phase_downloading">Downloading history</string>
+    <string name="peppy_sync_setup_phase_organizing">Organizing history</string>
+    <string name="peppy_sync_setup_count_downloading">%1$s of %2$s items</string>
+    <string name="peppy_sync_setup_count_organizing">%1$s items left</string>
+    <string name="peppy_sync_setup_done_title">Setup finished</string>
+    <string name="peppy_toggle_android_sync_setup_body">Importing your message history. This can take several minutes and continues in the background.</string>
+    <string name="peppy_toggle_android_sync_setup_others_wait">Other devices can\'t send through this phone until this finishes.</string>
+    <string name="peppy_toggle_android_sync_setup_done_body">Other devices can now send through this phone.</string>
+    <string name="peppy_toggle_android_check_setting_up">Setting up</string>
+    <string name="peppy_toggle_android_check_history_too_large">History too large</string>
+    <string name="peppy_toggle_android_sync_update_needed">Update needed</string>
+    <string name="peppy_toggle_ios_sync_setup_body">Importing your message history. Keep Peppy open to continue. Progress is saved.</string>
+    <string name="peppy_sync_too_large_title">History too large for this version</string>
+    <string name="peppy_sync_too_large_body">Update Peppy to continue. Nothing is lost.</string>
+    <string name="peppy_toggle_android_sync_too_large_body">Update Peppy to finish setting up this phone. Nothing is lost.</string>
+    <string name="peppy_toggle_android_sync_too_large_recheck">Peppy checks again every 6 hours and after an update.</string>
+    <string name="peppy_toggle_android_sync_too_large_play">Open Google Play</string>
+    <string name="peppy_toggle_ios_sync_too_large_body">Open the App Store and update Peppy. Nothing is lost.</string>
+    <string name="peppy_toggle_ios_check_history_too_large">Too large for this version</string>
 </resources>

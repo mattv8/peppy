@@ -10100,6 +10100,216 @@
           }
         }
       }
+    },
+    "peppy.sync_setup_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setting up"
+          }
+        }
+      }
+    },
+    "peppy.sync_setup_phase_checking": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking history"
+          }
+        }
+      }
+    },
+    "peppy.sync_setup_phase_downloading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Downloading history"
+          }
+        }
+      }
+    },
+    "peppy.sync_setup_phase_organizing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Organizing history"
+          }
+        }
+      }
+    },
+    "peppy.sync_setup_count_downloading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ of %2$@ items"
+          }
+        }
+      }
+    },
+    "peppy.sync_setup_count_organizing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ items left"
+          }
+        }
+      }
+    },
+    "peppy.sync_setup_done_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setup finished"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_setup_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importing your message history. This can take several minutes and continues in the background."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_setup_others_wait": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Other devices can't send through this phone until this finishes."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_setup_done_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Other devices can now send through this phone."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_check_setting_up": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setting up"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_check_history_too_large": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "History too large"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_update_needed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update needed"
+          }
+        }
+      }
+    },
+    "peppy.toggle_ios_sync_setup_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importing your message history. Keep Peppy open to continue. Progress is saved."
+          }
+        }
+      }
+    },
+    "peppy.sync_too_large_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "History too large for this version"
+          }
+        }
+      }
+    },
+    "peppy.sync_too_large_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update Peppy to continue. Nothing is lost."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_too_large_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update Peppy to finish setting up this phone. Nothing is lost."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_too_large_recheck": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy checks again every 6 hours and after an update."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_sync_too_large_play": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Google Play"
+          }
+        }
+      }
+    },
+    "peppy.toggle_ios_sync_too_large_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open the App Store and update Peppy. Nothing is lost."
+          }
+        }
+      }
+    },
+    "peppy.toggle_ios_check_history_too_large": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too large for this version"
+          }
+        }
+      }
     }
   },
   "version": "1.0"
