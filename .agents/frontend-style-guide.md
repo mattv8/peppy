@@ -295,6 +295,16 @@ notification previews and floating heads.
 - The row renders only when the list ends at the live tail: not in detached history, empty threads, read-only groups, loading, or other tabs. The existing near-bottom stick reveals it above the composer overlay and never moves a reader of older history.
 - Typing announcements stay in the sr-only `#typing-announcer` outside the log. The composer toolbar keeps only its spacer and the `data-typing-send` attribute for the user's own typing.
 
+## Message reactions
+
+- The reaction bar is the one hover-revealed control in the message list. Hover only reveals it: the same bar opens from the roving message tab stop (Enter or R), from a tap on a text bubble, and from a long-press on media. Nothing in it is available by hover alone. Code lives in `apps/desktop/src/reactions/`.
+- One `#message-reaction-layer` is portaled outside `role="log"` with `position: fixed`, so opening it never changes row height or width (read visibility and scroll anchoring depend on row geometry). It clamps to the list top and the composer top. Touch bars sit above the bubble and flip below; they never straddle it.
+- Announcements go to the persistent `#reaction-announcer` (polite) and `#reaction-alert` (assertive) outside the log, not to live regions inside it.
+- The quick set is fixed (👍 ❤️ 😂 😮 😢 🙏) plus More. More opens a capture field and, only on desktop and only after the field has focus, the OS emoji panel through `open_emoji_picker`. The OS panel returns nothing, so the field takes the first emoji typed into it and always shows the platform shortcut. Accept only what `packages/contracts/fixtures/reaction-emoji.json` accepts.
+- Only the user's own native reaction chip is a button. Other people's chips are images with names in their accessible label; `title` is not the disclosure. Pending, removing, not sent and unknown states differ by border style and icon, not colour alone.
+- SMS/MMS chats show a "Text" segment in the bar, because the reaction is sent as an ordinary message that cannot be taken back.
+- Approved mockups and the full interaction spec are not in the repository; screenshot-compare any visual change against the shipped fixture states (`fixtureReactionConversations` in `apps/desktop/src/bridge/bridge.ts`).
+
 ## Floating recipient rail
 
 - For a new conversation, `RecipientPanel` is a separate overlay in
