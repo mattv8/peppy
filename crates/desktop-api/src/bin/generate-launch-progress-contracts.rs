@@ -35,7 +35,10 @@ mod tests {
 
     #[test]
     fn launch_progress_typescript_matches_frozen_shape() {
-        assert_eq!(LaunchPhase::decl(), "type LaunchPhase = \"starting\" | \"unlocking\" | \"opening\" | \"updating\" | \"loading\" | \"ready\";");
+        assert_eq!(
+            LaunchPhase::decl(),
+            "type LaunchPhase = \"starting\" | \"unlocking\" | \"opening\" | \"updating\" | \"loading\" | \"ready\";"
+        );
         assert_eq!(
             LaunchStep::decl(),
             "type LaunchStep = { phase: LaunchPhase, durationMs: number, };"
@@ -44,7 +47,10 @@ mod tests {
             LaunchUpdate::decl(),
             "type LaunchUpdate = { completed: number, total: number, };"
         );
-        assert_eq!(LaunchProgress::decl(), "type LaunchProgress = { phase: LaunchPhase, elapsedMs: number, steps: Array<LaunchStep>, update?: LaunchUpdate, };");
+        assert_eq!(
+            LaunchProgress::decl(),
+            "type LaunchProgress = { phase: LaunchPhase, elapsedMs: number, steps: Array<LaunchStep>, update?: LaunchUpdate, };"
+        );
     }
 
     #[test]
