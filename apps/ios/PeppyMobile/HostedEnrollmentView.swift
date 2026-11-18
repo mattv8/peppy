@@ -38,6 +38,7 @@ struct HostedEnrollmentView: View {
     @State private var taskGeneration = 0
     @State private var sensitiveContentHidden = false
     @State private var refreshWhenActive = false
+    @State private var passphrasePasswordSaveState = PassphrasePasswordSaveState()
     
     var body: some View {
         NavigationStack {
@@ -175,18 +176,71 @@ struct HostedEnrollmentView: View {
     private var passphraseView: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("peppy.passphrase_create_headline", tableName: "Peppy").font(.title.bold())
+                Text("peppy.passphrase_create_headline", tableName: "Peppy")
+                    .font(.title.bold())
+                    .accessibilityAddTraits(.isHeader)
                 InfoButton(topic: String(localized: "peppy.passphrase_create_headline", table: "Peppy"), title: String(localized: "peppy.passphrase_create_headline", table: "Peppy"), body: String(localized: "peppy.passphrase_create_body", table: "Peppy"), id: "info-passphrase-create")
             }
             Text("peppy.passphrase_irrecoverable_warn", tableName: "Peppy").font(.footnote)
             
-            passphraseField("passphrase_field", text: $generatedPassphrase, locked: pendingSecretProtected)
+            passphraseField("passphrase_field", text: passphraseBinding, locked: pendingSecretProtected)
+
+            if passphrasePasswordSaveState.status == .saved {
+                Label {
+                    Text("peppy.passphrase_saved_password_manager", tableName: "Peppy")
+                } icon: {
+                    Image(systemName: "checkmark")
+                }
+                .accessibilityIdentifier("enrollment-passphrase-saved-password-manager")
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Button {
+                        let phrase = generatedPassphrase
+                        let username = String(localized: "peppy.passphrase_password_manager_username", table: "Peppy")
+                        launchTask {
+                            await passphrasePasswordSaveState.save(
+                                username: username,
+                                phrase: phrase,
+                                using: SystemPassphrasePasswordSaver()
+                            )
+                        }
+                    } label: {
+                        HStack {
+                            if passphrasePasswordSaveState.status == .saving {
+                                ProgressView()
+                            }
+                            Text("peppy.passphrase_save_password_manager", tableName: "Peppy")
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("enrollment-passphrase-save-password-manager")
+                    .disabled(!isValidPassphrase() || task != nil)
+
+                    Text("peppy.passphrase_save_password_manager_note", tableName: "Peppy")
+                        .font(.footnote)
+                        .foregroundStyle(colors.TextSecondary)
+                        .accessibilityIdentifier("enrollment-passphrase-save-password-manager-note")
+
+                    if passphrasePasswordSaveState.status == .failed {
+                        Label {
+                            Text("peppy.passphrase_save_password_manager_failed", tableName: "Peppy")
+                        } icon: {
+                            Image(systemName: "exclamationmark.circle")
+                        }
+                        .foregroundStyle(colors.Error)
+                        .accessibilityIdentifier("enrollment-passphrase-save-password-manager-failed")
+                    }
+                }
+            }
             
             Button {
                 generatedPassphrase = generateHostedPassphrase()
                 customPassphrase = ""
                 acknowledgement = false
                 localError = nil
+                passphrasePasswordSaveState.reset()
             } label: {
                 Text("peppy.passphrase_generate_cta", tableName: "Peppy")
             }
@@ -236,6 +290,16 @@ struct HostedEnrollmentView: View {
             switchAccountButton
         }
         .accessibilityIdentifier("enrollment-passphrase-screen")
+        .onChange(of: passphrasePasswordSaveState.status) { _, status in
+            switch status {
+            case .saved:
+                AccessibilityNotification.Announcement(String(localized: "peppy.passphrase_saved_password_manager", table: "Peppy")).post()
+            case .failed:
+                AccessibilityNotification.Announcement(String(localized: "peppy.passphrase_save_password_manager_failed", table: "Peppy")).post()
+            case .idle, .saving:
+                break
+            }
+        }
     }
     
     private var confirmView: some View {
@@ -360,6 +424,17 @@ struct HostedEnrollmentView: View {
         .textFieldStyle(.roundedBorder)
             .accessibilityIdentifier(key == "passphrase_confirm_field" ? "enrollment-confirm-passphrase-field" : "enrollment-passphrase-field")
         .disabled(task != nil || locked)
+    }
+
+    private var passphraseBinding: Binding<String> {
+        Binding(
+            get: { generatedPassphrase },
+            set: { value in
+                guard value != generatedPassphrase else { return }
+                generatedPassphrase = value
+                passphrasePasswordSaveState.reset()
+            }
+        )
     }
     
     // MARK: - Logic
@@ -580,6 +655,7 @@ struct HostedEnrollmentView: View {
         acknowledgement = false
         revealPassphrase = false
         pendingSecretProtected = false
+        passphrasePasswordSaveState.reset()
     }
     
     private func isValidPassphrase() -> Bool {
