@@ -37,6 +37,7 @@ mutate.call('literal-desktop-runner', workflow_change: ->(text) { text.sub('desk
 mutate.call('duplicate-windows-leg', scope_change: ->(text) { text.sub('"index":4,"count":4', '"index":3,"count":4') })
 mutate.call('duplicate-updater-windows', scope_change: ->(text) { text.sub("DESKTOP_OS_MATRIX='[\"ubuntu-24.04\",\"macos-15\",\"windows-2025\"]'", "DESKTOP_OS_MATRIX='[\"ubuntu-24.04\",\"macos-15\",\"windows-2025\",\"windows-2025\"]'") })
 mutate.call('missing-gate-need', workflow_change: ->(text) { text.sub(', frontend, desktop', ', desktop') })
+mutate.call('timing-report-before-gate', workflow_change: ->(text) { text.sub("  timing-report:\n    needs: [gate]", "  timing-report:\n    needs: [changes]") })
 mutate.call('missing-gate-env', workflow_change: ->(text) { text.sub("          FRONTEND_RESULT: ${{ needs.frontend.result }}\n", '') })
 mutate.call('missing-gate-job', gate_change: ->(text) { text.sub(' frontend', '') })
 mutate.call('frontend-overwrite', workflow_change: ->(text) { text.sub("          overwrite: true\n", '') })

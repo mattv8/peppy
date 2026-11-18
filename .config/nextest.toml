@@ -7,3 +7,6 @@ retries = 0
 fail-fast = false
 failure-output = "immediate-final"
 slow-timeout = { period = "60s" }
+
+[profile.ci.junit]
+path = "junit.xml"

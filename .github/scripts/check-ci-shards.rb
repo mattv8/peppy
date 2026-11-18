@@ -30,7 +30,8 @@ def scope_output(scope, environment)
 end
 
 jobs = YAML.safe_load(File.read(options[:workflow]), aliases: true).fetch('jobs')
-fail!('CI job inventory changed without topology classification') unless jobs.keys.sort == (VALIDATION_JOBS + ['gate'] + PUBLICATION_JOBS).sort
+fail!('CI job inventory changed without topology classification') unless jobs.keys.sort == (VALIDATION_JOBS + %w[gate timing-report] + PUBLICATION_JOBS).sort
+fail!('timing-report must follow gate') unless jobs.fetch('timing-report').fetch('needs') == ['gate']
 integration = jobs.fetch('integration')
 fail!('root integration must use fail-fast false') unless integration.dig('strategy', 'fail-fast') == false
 fail!('root integration matrix must have only shard coverage') unless integration.fetch('strategy').fetch('matrix').keys == ['shard']

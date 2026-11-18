@@ -271,6 +271,10 @@ Use `just integration-test` for Compose-backed persistence coverage. `just audit
 
 Run final checks with `--locked`. Do not hand-edit `Cargo.lock`; only Cargo may resolve it. The root Cargo manifest and lockfile are shared integration files, so do not regenerate the root lockfile concurrently with another package change. Document verification precisely: name the command and platform, and mark unrun hardware, carrier, simulator, or native click-through steps. Keep reusable instructions in tracked documentation rather than session scratch files.
 
+### CI timing
+
+Rust and Android test job summaries show the slowest tests. The CI timing-report job summary shows job queue and run times. To inspect any run locally, authenticate `gh` and run `python3 .github/scripts/ci-timing-report.py run --repo mattv8/peppy-platform --run-id <id>`.
+
 ## Dependency management
 
 Declare shared JavaScript versions in the `catalog` in `pnpm-workspace.yaml` and use `catalog:` in package dependency declarations. Keep package-specific dependencies in their owning manifest and retain the root `pnpm-lock.yaml`. Catalog updates to React and react-dom change peer contracts; verify that `packages/desktop-ui/package.json` peer ranges remain compatible after catalog updates.

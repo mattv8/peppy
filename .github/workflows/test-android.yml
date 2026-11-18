@@ -156,6 +156,9 @@ jobs:
       - name: Run Android debug unit tests
         working-directory: apps/android
         run: ../../.github/scripts/run-with-jvm-watchdog.sh 180 780 -- ./gradlew --console=plain --dependency-verification=strict :app:testDebugUnitTest
+      - name: Report debug test timing
+        if: ${{ always() }}
+        run: python3 .github/scripts/ci-timing-report.py junit --title "Android debug tests" apps/android/app/build/test-results/testDebugUnitTest || echo "::warning::Timing report failed"
       - name: Preserve Android debug unit test failure reports
         if: ${{ failure() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -213,6 +216,9 @@ jobs:
           test -s "$PEPPY_NATIVE_RCS_KOTLIN_FIXTURE_DIR/SubscriptionManagerPhoneNumber.json"
           test -s "$PEPPY_NATIVE_RCS_KOTLIN_FIXTURE_DIR/TelephonyLine1Number.json"
           ./gradlew --console=plain --dependency-verification=strict :libadb:testDebugUnitTest :app:verifyReleaseRestrictedSetupExclusionFixtures
+      - name: Report sideload test timing
+        if: ${{ always() }}
+        run: python3 .github/scripts/ci-timing-report.py junit --title "Android sideload tests" apps/android/app/build/test-results/testSideloadUnitTest apps/android/libadb/build/test-results/testDebugUnitTest || echo "::warning::Timing report failed"
       - name: Verify Kotlin carrier bindings against native Go preparation
         working-directory: apps/android/googlemessages
         env:
@@ -273,6 +279,9 @@ jobs:
       - name: Verify release SMS diagnostics policy
         working-directory: apps/android
         run: ./gradlew --console=plain --dependency-verification=strict :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest
+      - name: Report release test timing
+        if: ${{ always() }}
+        run: python3 .github/scripts/ci-timing-report.py junit --title "Android release tests" apps/android/app/build/test-results/testReleaseUnitTest || echo "::warning::Timing report failed"
 
   android-aggregate:
     if: ${{ always() }}

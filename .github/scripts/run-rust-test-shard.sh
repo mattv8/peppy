@@ -56,7 +56,32 @@ nextest_arguments=(
 )
 
 if [[ $lane == workspace ]]; then
-    cargo "${nextest_arguments[@]:0:2}" --workspace "${nextest_arguments[@]:2}"
+    target_dir=${CARGO_TARGET_DIR:-"$repository_root/target"}
 else
-    cargo "${nextest_arguments[@]:0:2}" --manifest-path "$repository_root/apps/desktop/src-tauri/Cargo.toml" "${nextest_arguments[@]:2}"
+    target_dir=${CARGO_TARGET_DIR:-"$repository_root/apps/desktop/src-tauri/target"}
 fi
+
+junit_path="$target_dir/nextest/ci/junit.xml"
+report_safe=true
+rm -f "$junit_path" || { echo "::warning::Could not remove stale JUnit report"; report_safe=false; }
+status=0
+if [[ $lane == workspace ]]; then
+    cargo "${nextest_arguments[@]:0:2}" --workspace "${nextest_arguments[@]:2}" || status=$?
+else
+    cargo "${nextest_arguments[@]:0:2}" --manifest-path "$repository_root/apps/desktop/src-tauri/Cargo.toml" "${nextest_arguments[@]:2}" || status=$?
+fi
+
+if [[ -n ${GITHUB_STEP_SUMMARY:-} && $report_safe == true ]]; then
+    if python3 -c '' >/dev/null 2>&1; then
+        python=python3
+    elif python -c '' >/dev/null 2>&1; then
+        python=python
+    else
+        python=
+        echo "::notice::Python unavailable; skipping timing report"
+    fi
+    if [[ -n $python ]]; then
+        "$python" "$script_dir/ci-timing-report.py" junit --title "$lane shard $index/$count" "$junit_path" || echo "::warning::Timing report failed"
+    fi
+fi
+exit "$status"
