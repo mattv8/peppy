@@ -234,6 +234,61 @@ assert.call(stable.fetch('concurrency').fetch('group') == 'stable-release', 'aut
 assert.call(stable.fetch('with') == { 'bump' => 'auto', 'version' => '', 'dry_run' => false }, 'automatic release must use the safe automatic inputs')
 
 release = load_workflow.call('release.yml')
+play = load_workflow.call('play-publish.yml')
+assert.call(play.fetch(true).key?('workflow_call'), 'Play publisher must be reusable by stable release')
+play_call = release.fetch('jobs')['publish-play']
+assert.call(!play_call.nil?, 'stable release must invoke Play after Android publication')
+assert.call(play_call.fetch('needs').sort == %w[prepare publish-android signing], 'Play must wait for preparation, signing and Android publication')
+assert.call(play_call.fetch('uses') == './.github/workflows/play-publish.yml', 'Play must use the verified publisher')
+assert.call(play_call.fetch('permissions') == { 'contents' => 'read', 'attestations' => 'read' } && !play_call.key?('secrets'), 'Play call must grant read permissions without passing secrets')
+assert.call(play_call.fetch('with') == { 'release_tag' => 'android-v${{ needs.prepare.outputs.android_version }}', 'track' => 'internal' }, 'Play must publish the prepared Android tag to internal')
+play_context = {
+  event: 'push', ref: 'refs/heads/production', cancelled: false, implicit_success: false,
+  results: { 'prepare' => 'success', 'signing' => 'success', 'publish-android' => 'success' },
+  outputs: { 'signing.ready' => true }
+}
+play_condition = play_call.fetch('if')
+%w[push workflow_dispatch].each do |event|
+  assert.call(condition_allows.call(play_condition, **play_context.merge(event: event)), "Play must run after Android publication for #{event}")
+end
+%w[prepare signing publish-android].each do |job|
+  %w[failure skipped cancelled].each do |result|
+    assert.call(!condition_allows.call(play_condition, **play_context.merge(results: play_context.fetch(:results).merge(job => result))), "Play must block #{job} #{result}")
+  end
+end
+assert.call(!condition_allows.call(play_condition, **play_context.merge(cancelled: true)), 'Play must block cancellation')
+assert.call(!condition_allows.call(play_condition, **play_context.merge(inputs: { 'dry_run' => true })), 'Play must block dry runs')
+assert.call(!condition_allows.call(play_condition, **play_context.merge(outputs: { 'signing.ready' => true, 'prepare.skip' => true })), 'Play must block skipped releases')
+assert.call(!condition_allows.call(play_condition, **play_context.merge(outputs: {})), 'Play must require signing readiness')
+assert.call(play.fetch('concurrency') == { 'group' => 'play-publish', 'cancel-in-progress' => false }, 'all Play edits must share a non-cancelling lock')
+play_inputs = play.fetch(true).fetch('workflow_call').fetch('inputs')
+assert.call(play_inputs.fetch('release_tag') == { 'required' => true, 'type' => 'string' } && play_inputs.fetch('track') == { 'required' => false, 'type' => 'string', 'default' => 'internal' }, 'reusable Play inputs must validate the tag and default to internal')
+assert.call(!play.fetch(true).fetch('workflow_call').key?('secrets'), 'Play credential must not be passed through workflow_call')
+dispatch_inputs = play.fetch(true).fetch('workflow_dispatch').fetch('inputs')
+assert.call(dispatch_inputs.fetch('track').fetch('options') == %w[internal alpha] && dispatch_inputs.fetch('track').fetch('default') == 'internal', 'manual Play track options and default must remain unchanged')
+play_prepare = play.fetch('jobs').fetch('prepare')
+assert.call(play_prepare.fetch('permissions') == { 'contents' => 'read', 'attestations' => 'read' }, 'Play verification must have read-only provenance access')
+play_steps = play_prepare.fetch('steps')
+play_guard = play_steps.find { |step| step['name'] == 'Require production release event' }
+assert.call(!play_guard.nil? && play_steps.index(play_guard) < play_steps.index { |step| step['uses']&.start_with?('actions/checkout@') }, 'Play context guard must precede checkout')
+%w[push workflow_dispatch pull_request].product(%w[production staging]).each do |event, branch|
+  _, _, status = Open3.capture3({ 'GITHUB_EVENT_NAME' => event, 'GITHUB_REF' => "refs/heads/#{branch}" }, 'bash', '-e', '-c', play_guard.fetch('run'))
+  assert.call(status.success? == (%w[push workflow_dispatch].include?(event) && branch == 'production'), "Play context guard rejected or admitted #{event} on #{branch} incorrectly")
+end
+play_plan = play_steps.find { |step| step['id'] == 'plan' }.fetch('run')
+Dir.mktmpdir('peppy-play-plan') do |fixture|
+  %w[internal alpha invalid].each do |track|
+    output = File.join(fixture, track)
+    _, _, status = Open3.capture3({ 'RELEASE_TAG' => 'android-v1.2.3', 'TRACK' => track, 'GITHUB_OUTPUT' => output }, 'bash', '-e', '-c', play_plan)
+    assert.call(status.success? == (track != 'invalid'), "Play must validate track #{track}")
+    assert.call(File.read(output).include?("status=#{track == 'alpha' ? 'draft' : 'completed'}\n"), "Play track #{track} status changed") if status.success?
+  end
+end
+verify_play = play_steps.find { |step| step['name'] == 'Download and verify the release AAB' }.fetch('run')
+assert.call(verify_play.include?('gpg --batch --status-fd 1 --verify') && verify_play.include?('sha256sum -c -') && verify_play.include?('gh attestation verify') && verify_play.include?('--source-ref refs/heads/production'), 'Play must verify signed checksums, AAB digest and production build provenance')
+play_publish = play.fetch('jobs').fetch('publish')
+assert.call(play_publish.fetch('environment') == 'play-store' && !play_publish.key?('if'), 'Play upload must always use its protected environment')
+assert.call(play_publish.fetch('steps').last.dig('with', 'serviceAccountJsonPlainText') == '${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}', 'Play credential must come from the protected environment')
 assert.call(release.fetch(true).key?('workflow_call'), 'release must be reusable')
 assert.call(release.fetch('concurrency').fetch('cancel-in-progress') == false, 'release serialization must not cancel publication')
 prepare = release.fetch('jobs').fetch('prepare')

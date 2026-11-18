@@ -355,6 +355,16 @@ jobs:
     secrets:
       PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
       PEPPY_RELEASE_GPG_PASSPHRASE: ${{ secrets.PEPPY_RELEASE_GPG_PASSPHRASE }}
+  publish-play:
+    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true' && needs.signing.result == 'success' && needs.signing.outputs.ready == 'true' && needs.publish-android.result == 'success' }}
+    needs: [prepare, signing, publish-android]
+    permissions:
+      contents: read
+      attestations: read
+    uses: ./.github/workflows/play-publish.yml
+    with:
+      release_tag: android-v${{ needs.prepare.outputs.android_version }}
+      track: internal
   publish-server-image:
     if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.desktop_existing != 'true' && needs.signing.result == 'success' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' }}
     needs: [prepare, signing, artifacts]
