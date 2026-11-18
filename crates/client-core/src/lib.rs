@@ -252,6 +252,34 @@ pub const MAX_REPLAY_PAGE: usize = 200;
 pub const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 /// Obsolete staging rows removed per maintenance step.
 const SNAPSHOT_GC_BATCH: i64 = 2_000;
+
+/// Most rows one staging append may delete as garbage, and most reuse-prefix rows it may trim
+/// (R15b). Four manifest pages: the staged-row target of a page is four times its size.
+const SNAPSHOT_GC_MAX_ROWS_PER_APPEND: i64 = 4 * MAX_SNAPSHOT_MANIFEST_PAGE as i64;
+
+/// Statements of the snapshot staging, reuse and garbage-collection paths, kept here so the
+/// query-plan unit test runs exactly the SQL the client executes.
+pub(crate) mod snapshot_sql {
+    /// Oldest dead generation outside the reuse exemption (`?` = exempt generation or minimum).
+    pub const DEAD_GENERATION: &str = "SELECT generation FROM snapshot_generations WHERE state IN ('failed','obsolete') AND generation<>? ORDER BY generation LIMIT 1";
+    /// Rows and bytes of one garbage batch of a generation (`?` = generation, batch size).
+    pub const BATCH_TOTALS: &str = "SELECT COUNT(*),COALESCE(SUM(LENGTH(wire)),0) FROM (SELECT wire FROM snapshot_records WHERE generation=? ORDER BY cursor LIMIT ?)";
+    /// Deletes one garbage batch of a generation (`?` = generation, generation, batch size).
+    pub const BATCH_DELETE: &str = "DELETE FROM snapshot_records WHERE generation=? AND cursor IN (SELECT cursor FROM snapshot_records WHERE generation=? ORDER BY cursor LIMIT ?)";
+    /// The reuse source's row at one cursor (`?` = source generation, cursor).
+    pub const REUSE_LOOKUP: &str =
+        "SELECT wire FROM snapshot_records WHERE generation=? AND cursor=?";
+    /// Moves a verified reuse row into the successor (`?` = successor, source, cursor).
+    pub const REUSE_MOVE: &str =
+        "UPDATE snapshot_records SET generation=? WHERE generation=? AND cursor=?";
+    /// Drops up to a per-append cap of reuse rows the successor has passed, in cursor order
+    /// (`?` = source generation, source generation, last cursor, cap).
+    pub const REUSE_PREFIX_DELETE: &str = "DELETE FROM snapshot_records WHERE generation=? AND cursor IN (SELECT cursor FROM snapshot_records WHERE generation=? AND cursor<=? ORDER BY cursor LIMIT ?)";
+    /// Copies a journal row into a generation (`?1` = generation, `?2` = cursor).
+    pub const JOURNAL_COPY: &str = "INSERT INTO snapshot_records(generation,cursor,wire) SELECT ?1,cursor,wire FROM journal WHERE cursor=?2";
+    /// Removes one row after it is drained into the journal (`?` = generation, cursor).
+    pub const DRAIN_DELETE: &str = "DELETE FROM snapshot_records WHERE generation=? AND cursor=?";
+}
 /// Upper bound applied to `apply_pending(limit)`.
 pub const MAX_APPLY_BATCH: usize = 1_000;
 /// Outbox rows sealed implicitly by enqueue/unlock/import/upload; use `seal_pending_batch` for more.
@@ -7529,6 +7557,7 @@ impl Client {
                 "previous snapshot is still draining; call apply_pending",
             ));
         }
+        let previous_staging = active_generation(&tx)?.filter(|generation| !generation.published);
         tx.execute(
             "UPDATE snapshot_generations SET state='obsolete' WHERE state='staging'",
             [],
@@ -7541,10 +7570,25 @@ impl Client {
         set_meta(&tx, "snapshot_generation", &generation.to_string())?;
         if manifest {
             set_meta(&tx, "snapshot_manifest_generation", &generation.to_string())?;
-            set_meta(&tx, "snapshot_manifest_verified", "0")?;
+            tx.execute(
+                "DELETE FROM metadata WHERE k='snapshot_manifest_verified'",
+                [],
+            )?;
+            if let Some(previous) = previous_staging {
+                set_meta(
+                    &tx,
+                    "snapshot_reuse_generation",
+                    &previous.number.to_string(),
+                )?;
+            } else {
+                tx.execute(
+                    "DELETE FROM metadata WHERE k='snapshot_reuse_generation'",
+                    [],
+                )?;
+            }
         } else {
             tx.execute(
-                "DELETE FROM metadata WHERE k IN ('snapshot_manifest_generation','snapshot_manifest_verified')",
+                "DELETE FROM metadata WHERE k IN ('snapshot_manifest_generation','snapshot_manifest_verified','snapshot_reuse_generation')",
                 [],
             )?;
         }
@@ -7669,18 +7713,11 @@ impl Client {
         current.received += staged.verified;
         current.received_bytes += staged.bytes;
         current.overlap += staged.verified;
+        current.overlap -= staged.reused;
         current.last_cursor = staged.last_cursor;
         write_generation_counters(&tx, &current)?;
-        let prior_verified = get_meta(&tx, "snapshot_manifest_verified")?
-            .map(|value| value.parse::<i64>().map_err(|_| Error::Database))
-            .transpose()?
-            .unwrap_or(0);
-        set_meta(
-            &tx,
-            "snapshot_manifest_verified",
-            &(prior_verified + staged.verified).to_string(),
-        )?;
-        collect_snapshot_staging_garbage(&tx)?;
+        discard_reuse_prefix(&tx, current.number, current.last_cursor)?;
+        collect_snapshot_staging_garbage_paced(&tx, staged.verified, staged.bytes)?;
         let progress = current.progress()?;
         tx.commit()?;
         Ok(SnapshotManifestProgress {
@@ -7705,6 +7742,7 @@ impl Client {
                 params![current.number],
             )?;
             attachment_retention::mark_restore_generation(&tx, generation, "failed")?;
+            clear_snapshot_reuse_source(&tx)?;
             tx.commit()?;
             return Err(Error::SnapshotMismatch);
         }
@@ -7727,6 +7765,7 @@ impl Client {
                 params![current.number],
             )?;
         }
+        clear_snapshot_reuse_source(&tx)?;
         snapshot_projection::on_publish(
             &tx,
             current.number,
@@ -7822,6 +7861,7 @@ impl Client {
                 params![current.number],
             )?;
             attachment_retention::mark_restore_generation(&tx, generation, "failed")?;
+            clear_snapshot_reuse_source(&tx)?;
             tx.commit()?;
             return Err(if exceeds_byte_limit {
                 Error::SnapshotTooLarge
@@ -7841,7 +7881,8 @@ impl Client {
         current.overlap += overlap;
         current.last_cursor = last;
         write_generation_counters(&tx, &current)?;
-        collect_snapshot_staging_garbage(&tx)?;
+        discard_reuse_prefix(&tx, current.number, current.last_cursor)?;
+        collect_snapshot_staging_garbage_paced(&tx, page.len() as i64, page_bytes)?;
         tx.commit()?;
         current.progress()
     }
@@ -7999,6 +8040,7 @@ fn journal_record(
                     "UPDATE snapshot_generations SET state='failed' WHERE generation=?",
                     params![generation.number],
                 )?;
+                clear_snapshot_reuse_source(tx)?;
             }
             _ => {}
         }
@@ -8562,6 +8604,7 @@ fn current_staging(conn: &Connection, generation: u64) -> Result<Option<Generati
 /// What one manifest page staged inside its transaction.
 struct ManifestStaging {
     verified: i64,
+    reused: i64,
     bytes: i64,
     last_cursor: i64,
     missing: u32,
@@ -8592,17 +8635,17 @@ fn stage_manifest_entries(
     }
     let mut staged = ManifestStaging {
         verified: 0,
+        reused: 0,
         bytes: 0,
         last_cursor: current.last_cursor,
         missing: 0,
     };
-    let mut copy = tx.prepare(
-        "INSERT INTO snapshot_records(generation,cursor,wire) SELECT ?1,cursor,wire FROM journal WHERE cursor=?2",
-    )?;
+    let reuse_source = snapshot_reuse_source(tx, current.number)?;
+    let mut copy = tx.prepare(snapshot_sql::JOURNAL_COPY)?;
     for (index, entry) in entries.iter().enumerate() {
-        let Some(length) = verified_journal_length(tx, entry)? else {
+        let Some(source) = manifest_entry_source(tx, reuse_source, entry)? else {
             for entry in &entries[index..] {
-                if verified_journal_length(tx, entry)?.is_some() {
+                if manifest_entry_source(tx, reuse_source, entry)?.is_some() {
                     break;
                 }
                 staged.missing += 1;
@@ -8610,13 +8653,28 @@ fn stage_manifest_entries(
             return Ok(Ok(staged));
         };
         let cursor = to_i64(entry.cursor.0)?;
+        let length = source.length();
         if current.received + staged.verified + 1 > current.expected {
             return Ok(Err(ManifestStageError::Mismatch));
         }
         if current.received_bytes + staged.bytes + length > MAX_SNAPSHOT_BYTES as i64 {
             return Ok(Err(ManifestStageError::TooLarge));
         }
-        copy.execute(params![current.number, cursor])?;
+        match source {
+            EntrySource::Journal(_) => {
+                copy.execute(params![current.number, cursor])?;
+            }
+            EntrySource::Reuse(_) => {
+                let moved = tx.execute(
+                    snapshot_sql::REUSE_MOVE,
+                    params![current.number, reuse_source, cursor],
+                )?;
+                if moved != 1 {
+                    return Ok(Err(ManifestStageError::Mismatch));
+                }
+                staged.reused += 1;
+            }
+        }
         staged.verified += 1;
         staged.bytes += length;
         staged.last_cursor = cursor;
@@ -8624,17 +8682,59 @@ fn stage_manifest_entries(
     Ok(Ok(staged))
 }
 
-/// The byte length of the journal copy at the entry's cursor when the entry verifies: neither
-/// flag is set, the copy parses with neither `compaction` nor `origin_tag`, and its digest equals
-/// the entry digest. The digest does not cover those two headers, so flagged records are never
-/// verified and always go through the byte comparison of `append_wires`.
-fn verified_journal_length(
-    conn: &Connection,
-    entry: &SnapshotManifestEntry,
-) -> Result<Option<i64>, Error> {
-    if entry.has_compaction || entry.has_origin_tag {
-        return Ok(None);
+/// Where a verified manifest entry's bytes come from.
+#[derive(Clone, Copy)]
+enum EntrySource {
+    /// The journal copy at the entry's cursor verifies; it is copied.
+    Journal(i64),
+    /// The reuse source's row at the entry's cursor verifies; it is moved.
+    Reuse(i64),
+}
+
+impl EntrySource {
+    fn length(self) -> i64 {
+        match self {
+            Self::Journal(length) | Self::Reuse(length) => length,
+        }
     }
+}
+
+/// The entry's source. Reuse is considered only where no journal row exists at the cursor: a
+/// journal row that does not verify is a live conflict (or unverifiable history), so the entry
+/// stays missing and its download meets the conflict check of the records page.
+fn manifest_entry_source(
+    conn: &Connection,
+    reuse_source: Option<i64>,
+    entry: &SnapshotManifestEntry,
+) -> Result<Option<EntrySource>, Error> {
+    match journal_check(conn, entry)? {
+        JournalCheck::Verified(length) => Ok(Some(EntrySource::Journal(length))),
+        JournalCheck::Unverified => Ok(None),
+        JournalCheck::Absent => match reuse_source {
+            Some(source) => {
+                Ok(verified_snapshot_length(conn, source, entry)?.map(EntrySource::Reuse))
+            }
+            None => Ok(None),
+        },
+    }
+}
+
+/// What the journal holds at an entry's cursor.
+#[derive(Clone, Copy)]
+enum JournalCheck {
+    /// No journal row exists at the cursor.
+    Absent,
+    /// The journal copy verifies against the entry, with this stored length.
+    Verified(i64),
+    /// A journal row exists but does not verify (flagged entry, flagged or divergent copy).
+    Unverified,
+}
+
+/// Classifies the journal row at the entry's cursor. A verified copy has neither flag, parses
+/// with neither `compaction` nor `origin_tag`, and has a digest equal to the entry's. The digest
+/// does not cover those two headers, so flagged records are never verified: they are `Unverified`
+/// when a row exists and always go through the byte comparison of `append_wires`.
+fn journal_check(conn: &Connection, entry: &SnapshotManifestEntry) -> Result<JournalCheck, Error> {
     let wire: Option<Vec<u8>> = conn
         .query_row(
             "SELECT wire FROM journal WHERE cursor=?",
@@ -8642,23 +8742,45 @@ fn verified_journal_length(
             |row| row.get(0),
         )
         .optional()?;
-    let Some(wire) = wire else {
+    Ok(match wire {
+        None => JournalCheck::Absent,
+        Some(_) if entry.has_compaction || entry.has_origin_tag => JournalCheck::Unverified,
+        Some(wire) => match verified_wire_length(entry, &wire) {
+            Some(length) => JournalCheck::Verified(length),
+            None => JournalCheck::Unverified,
+        },
+    })
+}
+
+fn verified_snapshot_length(
+    conn: &Connection,
+    generation: i64,
+    entry: &SnapshotManifestEntry,
+) -> Result<Option<i64>, Error> {
+    if entry.has_compaction || entry.has_origin_tag {
         return Ok(None);
-    };
-    let verifies = parse_wire(&wire).is_some_and(|envelope| {
+    }
+    let wire: Option<Vec<u8>> = conn
+        .query_row(
+            snapshot_sql::REUSE_LOOKUP,
+            params![generation, to_i64(entry.cursor.0)?],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(wire
+        .as_deref()
+        .and_then(|wire| verified_wire_length(entry, wire)))
+}
+
+fn verified_wire_length(entry: &SnapshotManifestEntry, wire: &[u8]) -> Option<i64> {
+    let verifies = parse_wire(wire).is_some_and(|envelope| {
         envelope.compaction.is_none()
             && envelope.origin_tag.is_none()
             && envelope
                 .wire_digest()
                 .is_ok_and(|digest| digest == entry.digest)
     });
-    if verifies {
-        Ok(Some(
-            i64::try_from(wire.len()).map_err(|_| Error::Database)?,
-        ))
-    } else {
-        Ok(None)
-    }
+    verifies.then(|| i64::try_from(wire.len()).ok()).flatten()
 }
 
 /// Writes a generation's staging counters after rows were added to `snapshot_records`.
@@ -8689,7 +8811,8 @@ fn fail_snapshot_generation(conn: &Connection, generation: u64, number: i64) -> 
         "UPDATE snapshot_generations SET state='failed' WHERE generation=?",
         params![number],
     )?;
-    attachment_retention::mark_restore_generation(conn, generation, "failed")
+    attachment_retention::mark_restore_generation(conn, generation, "failed")?;
+    clear_snapshot_reuse_source(conn)
 }
 /// Moves up to `limit` published records into the journal (classified like live ingest, marked
 /// historical; own-echo acknowledgments happen only here, after publication). Returns the last
@@ -8715,8 +8838,7 @@ fn drain_snapshot(
     let mut insert_journal = conn.prepare(
         "INSERT INTO journal(cursor,envelope_id,key_epoch,wire,status,reason,historical) VALUES(?,?,?,?,?,?,1)",
     )?;
-    let mut delete_record =
-        conn.prepare("DELETE FROM snapshot_records WHERE generation=? AND cursor=?")?;
+    let mut delete_record = conn.prepare(snapshot_sql::DRAIN_DELETE)?;
     let mut drained = 0i64;
     // Compaction generations record every retained compactable cursor, journaled or not.
     let projected = snapshot_projection::is_draining(conn, generation.number)?;
@@ -8824,14 +8946,125 @@ fn collect_snapshot_garbage(conn: &Connection) -> Result<(), Error> {
     snapshot_projection::collect_garbage(conn)
 }
 
-/// Removes a bounded batch of obsolete/failed snapshot staging rows.
+/// Fixed-batch garbage collection for `begin` and `apply_pending`: the paced collection with no
+/// staged volume. It stops once `SNAPSHOT_GC_BATCH` rows are removed or garbage is exhausted. A
+/// call that crosses dead generations can remove up to 3,999 rows (one short of two batches);
+/// no call removes more than `SNAPSHOT_GC_MAX_ROWS_PER_APPEND`.
 fn collect_snapshot_staging_garbage(conn: &Connection) -> Result<(), Error> {
+    collect_snapshot_staging_garbage_paced(conn, SNAPSHOT_GC_BATCH / 4, 0)
+}
+
+/// Deletes non-exempt obsolete/failed staging rows in batches of at most `SNAPSHOT_GC_BATCH`.
+/// It continues until at least `max(SNAPSHOT_GC_BATCH, 4 x staged_rows)` rows and `4 x
+/// staged_bytes` have been deleted, eligible garbage is exhausted, or
+/// `SNAPSHOT_GC_MAX_ROWS_PER_APPEND` rows have been deleted in this call. The reuse source is
+/// excluded while its successor is staging.
+///
+/// Storage invariant (R15c): when the cuts involved have records of comparable size, all staging
+/// rows together stay within two generations' caps (the live generation and its reuse source)
+/// plus one collection batch. A pathological size mix or disjoint cuts can exceed that
+/// transiently; later appends, `apply_pending` and `begin` catch up. Each generation alone
+/// stays within its own caps. Per call, one staging append deletes at most
+/// `SNAPSHOT_GC_MAX_ROWS_PER_APPEND` garbage rows plus at most the same number of reuse-prefix
+/// rows.
+fn collect_snapshot_staging_garbage_paced(
+    conn: &Connection,
+    staged_rows: i64,
+    staged_bytes: i64,
+) -> Result<(), Error> {
+    let minimum_rows = (staged_rows * 4).max(SNAPSHOT_GC_BATCH);
+    let minimum_bytes = staged_bytes.saturating_mul(4);
+    let exempt = snapshot_reuse_source_for_gc(conn)?;
+    let mut removed_rows = 0;
+    let mut removed_bytes = 0;
+    while removed_rows < SNAPSHOT_GC_MAX_ROWS_PER_APPEND {
+        let dead: Option<i64> = conn
+            .query_row(
+                snapshot_sql::DEAD_GENERATION,
+                [exempt.unwrap_or(i64::MIN)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(generation) = dead else { break };
+        let limit = SNAPSHOT_GC_BATCH.min(SNAPSHOT_GC_MAX_ROWS_PER_APPEND - removed_rows);
+        let batch: (i64, i64) = conn.query_row(
+            snapshot_sql::BATCH_TOTALS,
+            params![generation, limit],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if batch.0 == 0 {
+            conn.execute(
+                "DELETE FROM snapshot_generations WHERE generation=?",
+                [generation],
+            )?;
+            continue;
+        }
+        conn.execute(
+            snapshot_sql::BATCH_DELETE,
+            params![generation, generation, limit],
+        )?;
+        removed_rows += batch.0;
+        removed_bytes += batch.1;
+        if removed_rows >= minimum_rows && removed_bytes >= minimum_bytes {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn snapshot_reuse_source_for_gc(conn: &Connection) -> Result<Option<i64>, Error> {
+    let source = get_meta(conn, "snapshot_reuse_generation")?
+        .map(|value| value.parse::<i64>().map_err(|_| Error::Database))
+        .transpose()?;
+    let successor = get_meta(conn, "snapshot_manifest_generation")?
+        .map(|value| value.parse::<i64>().map_err(|_| Error::Database))
+        .transpose()?;
+    let valid = successor
+        .map(|generation| {
+            conn.query_row(
+                "SELECT state='staging' FROM snapshot_generations WHERE generation=?",
+                [generation],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+        })
+        .transpose()?
+        .flatten()
+        .unwrap_or(false);
+    Ok(valid.then_some(source).flatten())
+}
+
+fn snapshot_reuse_source(conn: &Connection, successor: i64) -> Result<Option<i64>, Error> {
+    let source = get_meta(conn, "snapshot_reuse_generation")?
+        .map(|value| value.parse().map_err(|_| Error::Database))
+        .transpose()?;
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    let active = get_meta(conn, "snapshot_manifest_generation")?
+        .map(|value| value.parse().map_err(|_| Error::Database))
+        .transpose()?;
+    if active == Some(successor) && source < successor {
+        Ok(Some(source))
+    } else {
+        Ok(None)
+    }
+}
+
+fn discard_reuse_prefix(conn: &Connection, successor: i64, last_cursor: i64) -> Result<(), Error> {
+    let Some(source) = snapshot_reuse_source(conn, successor)? else {
+        return Ok(());
+    };
     conn.execute(
-        "DELETE FROM snapshot_records WHERE rowid IN (SELECT r.rowid FROM snapshot_records r JOIN snapshot_generations g ON g.generation=r.generation WHERE g.state IN ('failed','obsolete') LIMIT ?)",
-        params![SNAPSHOT_GC_BATCH],
+        snapshot_sql::REUSE_PREFIX_DELETE,
+        params![source, source, last_cursor, SNAPSHOT_GC_MAX_ROWS_PER_APPEND],
     )?;
+    Ok(())
+}
+
+fn clear_snapshot_reuse_source(conn: &Connection) -> Result<(), Error> {
     conn.execute(
-        "DELETE FROM snapshot_generations WHERE state IN ('failed','obsolete') AND NOT EXISTS (SELECT 1 FROM snapshot_records r WHERE r.generation=snapshot_generations.generation)",
+        "DELETE FROM metadata WHERE k='snapshot_reuse_generation'",
         [],
     )?;
     Ok(())
@@ -22050,5 +22283,106 @@ mod tests {
                 0xf0, 0xb5, 0x4e, 0x51,
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_query_plan_tests {
+    use super::*;
+    use peppy_crypto::create_vault_check_header;
+
+    const DEAD_ROWS: u64 = 5_000;
+    const LIVE_ROWS: u64 = 3_000;
+
+    /// Inserts `count` one-byte rows at cursors 1..=count for `generation`.
+    fn insert_rows(conn: &Connection, generation: i64, count: u64) {
+        conn.execute_batch(&format!(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<{count}) \
+             INSERT INTO snapshot_records(generation,cursor,wire) SELECT {generation}, i, x'00' FROM n;"
+        ))
+        .unwrap();
+    }
+
+    /// Detail lines of `EXPLAIN QUERY PLAN` for `sql`, with every parameter bound to a dummy.
+    fn plan(conn: &Connection, sql: &str) -> Vec<String> {
+        let parameters = conn.prepare(sql).unwrap().parameter_count();
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        statement
+            .query_map(rusqlite::params_from_iter(vec![1i64; parameters]), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    #[test]
+    fn snapshot_gc_and_reuse_statements_search_the_primary_key() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("query-plans.db"),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[94; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+
+        // Generation 1 becomes dead when generation 2 begins. Generation 2 is the reuse source of
+        // the staging generation 3 and stays exempt; generation 1 is ordinary garbage.
+        let dead = client
+            .begin_snapshot(Cursor(DEAD_ROWS), DEAD_ROWS, SnapshotPurpose::Resync)
+            .unwrap();
+        insert_rows(
+            &client.lock().unwrap().conn,
+            dead.generation as i64,
+            DEAD_ROWS,
+        );
+        let source = client
+            .begin_snapshot(Cursor(LIVE_ROWS), LIVE_ROWS, SnapshotPurpose::Resync)
+            .unwrap();
+        insert_rows(
+            &client.lock().unwrap().conn,
+            source.generation as i64,
+            LIVE_ROWS,
+        );
+        let staging = client
+            .begin_snapshot_with_manifest(Cursor(LIVE_ROWS), LIVE_ROWS, None)
+            .unwrap();
+        insert_rows(
+            &client.lock().unwrap().conn,
+            staging.generation as i64,
+            LIVE_ROWS,
+        );
+
+        let guard = client.lock().unwrap();
+        let statements = [
+            ("dead-generation selection", snapshot_sql::DEAD_GENERATION),
+            ("batch COUNT/SUM", snapshot_sql::BATCH_TOTALS),
+            ("batch DELETE", snapshot_sql::BATCH_DELETE),
+            ("reuse lookup", snapshot_sql::REUSE_LOOKUP),
+            ("reuse move", snapshot_sql::REUSE_MOVE),
+            ("prefix delete", snapshot_sql::REUSE_PREFIX_DELETE),
+            ("journal copy", snapshot_sql::JOURNAL_COPY),
+            ("drain delete", snapshot_sql::DRAIN_DELETE),
+        ];
+        for (name, sql) in statements {
+            let steps = plan(&guard.conn, sql);
+            eprintln!("{name}: {steps:?}");
+            assert!(
+                !steps
+                    .iter()
+                    .any(|step| step.starts_with("SCAN") && step.contains("snapshot_records")),
+                "{name} scans snapshot_records: {steps:?}"
+            );
+        }
     }
 }
