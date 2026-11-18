@@ -44,6 +44,7 @@ object SimRoutes {
         mmsEnabled: Boolean = false,
         mmsReceivePermissionGranted: Boolean = false,
         mmsContentVersion: UInt? = null,
+        setupState: String? = null,
         limits: (Int) -> MmsLimits = { MmsLimits(MmsLimits.FALLBACK_PDU_BYTES, 20, true, MmsLimits.Source.FALLBACK) },
     ): JSONObject {
         val sims = JSONArray()
@@ -64,7 +65,12 @@ object SimRoutes {
             if (mmsEnabled && mmsContentVersion != null) report.put("mms_content_version", mmsContentVersion.toLong())
             sims.put(report)
         }
-        return JSONObject().put("simulator", false).put("capabilities", JSONObject().put("sims", sims))
+        return JSONObject().put("simulator", false).put(
+            "capabilities",
+            JSONObject().put("sims", sims).apply {
+                setupState?.let { put("setup", JSONObject().put("state", it)) }
+            },
+        )
     }
 
     private const val MAX_SIMS = 8

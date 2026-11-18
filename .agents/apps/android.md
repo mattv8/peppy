@@ -31,6 +31,8 @@ The line format is `event=<code> session=<process-token> timestamp_ms=<elapsed> 
 
 Event and field codes are in [`SyncDiagnostics.kt`](../../apps/android/app/src/main/java/dev/peppy/mobile/diagnostics/SyncDiagnostics.kt). Stable gateway phase codes are in [`GatewayWork.kt`](../../apps/android/app/src/main/java/dev/peppy/mobile/GatewayWork.kt). `SOURCE` is event-specific:
 
+- Failed `GATEWAY_PHASE` records carry `CORE_ERROR` as the fixed `gateway_phase_core_error` kind from the diagnostics export header; it never carries exception text.
+
 | Event | Source values |
 | --- | --- |
 | Capture enqueue/start | 0 default, 1 observer, 2 continuation, 3 unknown |
