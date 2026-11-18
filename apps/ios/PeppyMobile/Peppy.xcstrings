@@ -7721,6 +7721,16 @@
         }
       }
     },
+    "peppy.hosted_check_none": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No Peppy subscription was found for this account or on this Google Play account."
+          }
+        }
+      }
+    },
     "peppy.play_pending_title": {
       "localizations": {
         "en": {
@@ -7877,6 +7887,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Google Play didn't confirm an active subscription for this purchase. Try Restore purchases, or check the subscription in Google Play."
+          }
+        }
+      }
+    },
+    "peppy.play_not_active_body_check": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google Play didn't confirm an active subscription for this purchase. Check it in Google Play, then tap Check subscription."
           }
         }
       }
