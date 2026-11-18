@@ -1,5 +1,6 @@
 import {
   Component,
+  useContext,
   useEffect,
   useLayoutEffect,
   useReducer,
@@ -28,6 +29,7 @@ import {
   ConversationList,
   ExternalLink,
   FileText,
+  History,
   Image,
   Lock,
   LockKeyhole,
@@ -160,8 +162,9 @@ import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, re
 import { MmsGroupBadge, RcsBadge } from "./rcs/RcsBadge";
 import { ConversationRcsNotice } from "./rcs/ConversationRcsNotice";
 import { RcsMessageMeta } from "./rcs/RcsMessageMeta";
-import { SEND_RECOVERY_STATUS, SendRecoveryNotice } from "./messages/SendAgain";
+import { SEND_RECOVERY_REASON, SEND_RECOVERY_STATUS, SendAgainStoreContext, SendRecoveryNotice } from "./messages/SendAgain";
 import { SendAgainHost } from "./messages/SendAgainHost";
+import { registerResendRows, resendChains, type ResendChain } from "./messages/resendChains";
 import type { SendAgainRouteLabeler } from "./messages/SendAgainRouteList";
 import { currentRcsRoute, rcsDownloadRetryBlock, rcsSendBlock } from "./rcs/rcsRoute";
 import { canRetryRcsDownload, rcsAttachmentIndex, rcsDirection, rcsOutcomeStatus, rcsPlaceholderState } from "./rcs/rcsMediaState";
@@ -785,7 +788,14 @@ type RowRegistry = (id: string, row: HTMLElement | null) => void;
 /** Per-send options the group refusal actions use. Omitted = the latest group revision, no duplicate confirmation. */
 type GroupSendOptions = { expectedMemberRevision?: string; groupCreateConfirmDuplicate?: boolean };
 
-export function MessageMeta({ message: source, hideTime = false, onEditResend, onCreateAgain }: { message: MessageView; hideTime?: boolean; onEditResend?(): void; onCreateAgain?(): void }) {
+export function MessageMeta({ message: source, hideTime = false, onEditResend, onCreateAgain, resend }: { message: MessageView; hideTime?: boolean; onEditResend?(): void; onCreateAgain?(): void; resend?: ResendChain }) {
+  const [dialog, setDialog] = useState<"details" | "history">();
+  const detailsOpener = useRef<HTMLButtonElement>(null);
+  const historyOpener = useRef<HTMLButtonElement>(null);
+  const store = useContext(SendAgainStoreContext);
+  useLayoutEffect(() => {
+    if (resend?.attempts.slice(0, -1).some((attempt) => store?.consumeDoneFocus(attempt.id))) historyOpener.current?.focus();
+  }, [resend, store]);
   const message = rcsOutcomeStatus(source);
   const { displayedTime, deliveryTimeFallback, deliveryTimeUnavailable } = messageTime(message);
   const formattedTime = formatDateTime(displayedTime);
@@ -796,6 +806,7 @@ export function MessageMeta({ message: source, hideTime = false, onEditResend, o
   const phoneHistory = !rcsMessage && message.sender === "self" && !message.status && Boolean(formattedTime);
   const compactStatus = message.status && ["gateway-persisted", "preparing", "submitted", "sent"].includes(message.status);
   const recovery = message.sendRecovery;
+  const sentAgain = message.sentAgain?.messageId ?? recovery?.sentAgain?.messageId ?? store?.sentAgainFor(message.id);
   const statusLabel = recovery ? SEND_RECOVERY_STATUS[recovery.kind].label : message.status ? STATUS_LABEL[message.status] : undefined;
   const validTime = Boolean(formattedTime && isoTime);
   const showTime = validTime && !hideTime;
@@ -810,17 +821,32 @@ export function MessageMeta({ message: source, hideTime = false, onEditResend, o
   const showTextStatus = !read && !deliveryConfirmed && Boolean(statusLabel) && (Boolean(recovery) || !compactStatus || !validTime);
   const showCompactStatus = !deliveryConfirmed && !recovery && Boolean(compactStatus && validTime);
   const hasRcsMediaIssues = rcsMessage && (message.attachments.some((attachment) => ["not_sent", "send_failed", "outcome_unknown", "members_changed"].includes(attachment.rcsSendStatus ?? "")) || message.attachments.filter((attachment) => canRetryRcsDownload(attachment.rcsState)).length >= 2);
-  if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory && !read && !message.groupHint && !hasRcsMediaIssues && !recovery) return null;
+  if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory && !read && !message.groupHint && !hasRcsMediaIssues && !recovery && !sentAgain && !resend) return null;
+  const historyButton = resend && <button ref={historyOpener} type="button" className={`message-meta-action ${deliveryConfirmed ? "message-meta-delivered-action" : "message-meta-text-action"}`} id={`message-send-history-${message.id}`} aria-haspopup="dialog" aria-label={formatCopy(deliveryConfirmed ? peppyCopy.message_send_history_delivered_label : peppyCopy.message_send_history_label, String(resend.attempts.length))} title={deliveryConfirmed ? "Delivery confirmed" : undefined} onClick={() => setDialog("history")}>{deliveryConfirmed ? <CheckCheck size={10} aria-hidden /> : <><History size={12} aria-hidden />{peppyCopy.message_send_history_action}</>}</button>;
+  const closeDialog = () => setDialog(undefined);
   return <div className="message-meta" data-message-meta={message.id} data-status={message.status} aria-live={rcsMessage ? "off" : undefined}>
+    {resend && deliveryConfirmed ? historyButton : <>
     {showTextStatus && <span className="message-meta-status" data-recovery-tone={recovery ? SEND_RECOVERY_STATUS[recovery.kind].tone : undefined}>{recovery ? (recovery.kind === "not-sent" ? <X size={10} aria-hidden /> : <TriangleAlert size={10} aria-hidden />) : ["failed-before-submit", "failed-confirmed"].includes(message.status!) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : statusIcon}{statusLabel}</span>}
+    {recovery && <button ref={detailsOpener} type="button" className="message-meta-action" id={`message-send-details-${message.id}`} aria-haspopup="dialog" aria-label={formatCopy(peppyCopy.message_send_details_label, statusLabel ?? "")} onClick={() => setDialog("details")}><Info size={12} aria-hidden /></button>}
     {read && <RcsMessageMeta messageId={message.id} status={message.status} statusLabel={STATUS_LABEL[message.status!]} groupHint={message.groupHint} attachments={message.attachments} />}
-    {(showTextStatus || read) && showTime && <span className="message-meta-separator" aria-hidden>·</span>}
+    {!recovery && !resend && (showTextStatus || read) && showTime && <span className="message-meta-separator" aria-hidden>·</span>}
     {showTime && <time dateTime={isoTime}>{formattedTime}</time>}
     {showCompactStatus && <span className="message-meta-status" role="img" aria-label={statusLabel} title={statusLabel}>{statusIcon}</span>}
     {deliveryConfirmed && <span className="message-meta-status" role="img" aria-label={deliveryLabel} title={deliveryLabel}><CheckCheck size={10} aria-hidden /></span>}
     {phoneHistory && <span className="message-meta-status" role="img" aria-label="From phone history" title="From phone history" data-message-phone-icon={message.id}><Smartphone size={10} aria-hidden /></span>}
     {(rcsMessage || message.groupHint) && !read && <RcsMessageMeta messageId={message.id} status={message.status} rcsReported={message.rcsReported} statusLabel={message.status ? STATUS_LABEL[message.status] : ""} groupHint={message.groupHint} onEditResend={onEditResend} onCreateAgain={onCreateAgain} attachments={message.attachments} />}
-    {recovery && <SendRecoveryNotice message={message} />}
+    {resend && <><span className="message-sent-again-fact">{peppyCopy.message_send_again_sent}</span>{historyButton}</>}
+    {(recovery || sentAgain) && <SendRecoveryNotice message={message} />}
+    {resend && resend.earlierRisk !== "none" && <span className="message-resend-warning"><TriangleAlert size={12} aria-hidden />{resend.earlierRisk === "sent" ? peppyCopy.message_send_earlier_was_sent : peppyCopy.message_send_earlier_may_have_sent}</span>}
+    </>}
+    {dialog === "details" && recovery && <Modal id={`send-details-${message.id}`} title={statusLabel} opener={detailsOpener} onDismiss={closeDialog} actions={<button type="button" className="secondary-button" onClick={closeDialog}>{peppyCopy.message_send_history_close}</button>}><p>{SEND_RECOVERY_REASON[recovery.kind]}</p></Modal>}
+    {dialog === "history" && resend && <Modal id={`send-history-${message.id}`} title={peppyCopy.message_send_history_title} opener={historyOpener} onDismiss={closeDialog} actions={<button type="button" className="secondary-button" onClick={closeDialog}>{peppyCopy.message_send_history_close}</button>}><ul className="message-send-history">{[...resend.attempts].reverse().map((attempt, index) => {
+      const time = messageTime(attempt).displayedTime;
+      const label = attempt.sendRecovery ? SEND_RECOVERY_STATUS[attempt.sendRecovery.kind].label : attempt.status ? STATUS_LABEL[attempt.status] : undefined;
+      const tone = attempt.sendRecovery ? SEND_RECOVERY_STATUS[attempt.sendRecovery.kind].tone : attempt.status === "failed-before-submit" || attempt.status === "failed-confirmed" ? "error" : attempt.status === "unknown" ? "warning" : undefined;
+      const icon = tone === "error" ? <X size={10} aria-hidden /> : tone === "warning" ? <TriangleAlert size={10} aria-hidden /> : attempt.status === "delivery-confirmed" || attempt.status === "read" ? <CheckCheck size={10} aria-hidden /> : attempt.status === "sent" ? <Check size={10} aria-hidden /> : <Clock size={10} aria-hidden />;
+      return <li key={attempt.id} data-send-attempt={attempt.id}><div className="message-history-heading"><strong>{index === 0 ? peppyCopy.message_send_history_latest : formatCopy(peppyCopy.message_send_history_attempt, String(resend.attempts.length - index))}</strong>{formatDateTime(time) && <time dateTime={isoDateTime(time)}>{formatDateTime(time)}</time>}</div>{label && <span className="message-meta-status" data-recovery-tone={tone}>{icon}{label}</span>}{attempt.sendRecovery && <p>{SEND_RECOVERY_REASON[attempt.sendRecovery.kind]}</p>}</li>;
+    })}</ul></Modal>}
   </div>;
 }
 
@@ -1040,6 +1066,7 @@ function MessageList({
   attachmentViews: Record<string, AttachmentView>;
   typingRow?: TypingRowData;
 }) {
+  const sendAgainStore = useContext(SendAgainStoreContext);
   const reactions = useMemo(() => showReactions && conversation ? linkReactions(conversation.messages) : NO_REACTIONS, [showReactions, conversation?.messages]);
   const [focusedNoticeId, setFocusedNoticeId] = useState<string>();
   const reactionsEnabled = Boolean(bridge.react_to_message) && Boolean(conversation);
@@ -1336,18 +1363,31 @@ function MessageList({
       attachments: [],
     })),
   ];
+  const chains = resendChains(visualMessages, {
+    transientLink: (id) => sendAgainStore?.sentAgainFor(id),
+    keepVisible: (message) => Boolean(badgesFor(message)?.length || message.ownReactionRequest ||
+      reactions.notices.has(message.id) || hasCancellationAction(message) || cancellationState(message) ||
+      (message.sendCancellation && message.sendCancellation.state !== "none") ||
+      message.id === searchTargetId || pendingById.has(message.id)),
+  });
+  const shownMessages = visualMessages.filter((message) => !chains.hidden.has(message.id));
+  const registerMessageRow = (message: MessageView, row: HTMLElement | null) => {
+    registerRow(message.id, row);
+    const chain = chains.byLatest.get(message.id);
+    registerResendRows(chain, row, registerRow);
+  };
   const timeIsShown = (message: MessageView) => {
     const displayedTime = messageTime(message).displayedTime;
     return Boolean(formatDateTime(displayedTime) && isoDateTime(displayedTime));
   };
   const hiddenTimes = compactTimestamps
-    ? hiddenTimeIds(visualMessages, (message) => timeIsShown(message) && !(reactions.notices.has(message.id) && !showsReactionNoticeMeta(message)))
+    ? hiddenTimeIds(shownMessages, (message) => timeIsShown(message) && !(reactions.notices.has(message.id) && !showsReactionNoticeMeta(message)))
     : new Set<string>();
   const hiddenTimeTitle = (message: MessageView) => hiddenTimes.has(message.id)
     ? formatDateTime(messageTime(message).displayedTime) ?? undefined
     : undefined;
   const isGroup = Boolean(conversation.group) || (conversation.participants?.length ?? 0) > 1;
-  const messageGroups = groupMessages(visualMessages);
+  const messageGroups = groupMessages(shownMessages);
   const timeline = interleaveGroupNotices(messageGroups, groupNoticeItems(conversation.group?.notices));
   const senderEdges = isGroup
     ? senderRunEdges(timeline, {
@@ -1425,7 +1465,7 @@ function MessageList({
             if (onEditRcsUnsent && candidate.attachments.some((attachment) => attachment.rcsSendStatus === "not_sent")) return () => onEditRcsUnsent(candidate);
             return undefined;
           };
-          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} reactable={reactionEligible} renderBadges={(candidate) => badgeElement(candidate, "overlay-bottom-start")} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} onEditResend={resendFor(candidate)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} hasMessageAction={hasCancellationAction} renderMessageAction={(candidate) => cancellationState(candidate) === "requested" ? <SendCancellationPending messageId={candidate.id} waitingForPhone /> : cancellationState(candidate) === "too-late" || cancellationState(candidate) === "unknown" || cancellationState(candidate) === "failed" ? <span data-message-cancellation-notice={candidate.id} role="status">{cancellationState(candidate) === "too-late" ? "Cancellation was too late." : cancellationState(candidate) === "unknown" ? "Cancellation status is unknown." : "Could not request cancellation."}</span> : candidate.sender === "self" && candidate.sendCancellation?.canCancel && !candidate.sendRecovery && bridge.cancel_send ? <CancelSendControl messageId={candidate.id} disabled={cancellingMessageIds.has(candidate.id)} onCancel={() => void requestSendCancellation(candidate)} /> : undefined} isMessagePending={(candidate) => cancellationState(candidate) === "requested"} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
+          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} reactable={reactionEligible} renderBadges={(candidate) => badgeElement(candidate, "overlay-bottom-start")} renderMessageMeta={(candidate) => <MessageMeta message={candidate} resend={chains.byLatest.get(candidate.id)} hideTime={hiddenTimes.has(candidate.id)} onEditResend={resendFor(candidate)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} hasMessageAction={hasCancellationAction} renderMessageAction={(candidate) => cancellationState(candidate) === "requested" ? <SendCancellationPending messageId={candidate.id} waitingForPhone /> : cancellationState(candidate) === "too-late" || cancellationState(candidate) === "unknown" || cancellationState(candidate) === "failed" ? <span data-message-cancellation-notice={candidate.id} role="status">{cancellationState(candidate) === "too-late" ? "Cancellation was too late." : cancellationState(candidate) === "unknown" ? "Cancellation status is unknown." : "Could not request cancellation."}</span> : candidate.sender === "self" && candidate.sendCancellation?.canCancel && !candidate.sendRecovery && bridge.cancel_send ? <CancelSendControl messageId={candidate.id} disabled={cancellingMessageIds.has(candidate.id)} onCancel={() => void requestSendCancellation(candidate)} /> : undefined} isMessagePending={(candidate) => cancellationState(candidate) === "requested"} messageRef={(candidate) => (row) => registerMessageRow(candidate, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
           if (reactionNotice) return <ReactionNotice key={message.id} reaction={message} notice={reactionNotice} actorName={actorName} rowRef={(row) => registerRow(message.id, row)} onOpen={onOpenReactionTarget} busy={pendingReactionId === message.id} feedback={reactionFeedback?.reactionId === message.id ? reactionFeedback.message : undefined} meta={showsReactionNoticeMeta(message) ? <MessageMeta message={message} /> : undefined} />;
           const badges = badgesFor(message);
           const chromeless = message.attachments.length > 0 && message.attachments.every((attachment) => attachment.mediaType.startsWith("video/")) && !message.attachments.some((attachment) => rcsPlaceholderState(attachment));
@@ -1444,8 +1484,9 @@ function MessageList({
           ].filter(Boolean).join(" ") || undefined;
           const bubble = (
             <article
-              ref={(row) => registerRow(message.id, row)}
+              ref={(row) => registerMessageRow(message, row)}
               data-message-id={message.id}
+              data-resend-attempts={chains.byLatest.get(message.id)?.attempts.map((attempt) => attempt.id).join(" ")}
               data-search-target={searchTargetId === message.id || undefined}
               aria-describedby={describedBy}
               data-reaction-ok={reactionEligible(message) ? "" : undefined}
@@ -1571,7 +1612,7 @@ function MessageList({
               {sender?.labelNode}
               {sender ? <div className="message-sender-line" data-sender-line>{sender.avatar ?? (showSenderAvatars && <span className="message-sender-gutter" aria-hidden="true" />)}{bubble}</div> : bubble}
               {badgeElement(message, "row")}
-              <MessageMeta message={message} hideTime={hiddenTimes.has(message.id)} onEditResend={resendFor(message)} onCreateAgain={onCreateGroupAgain ? () => onCreateGroupAgain(message) : undefined} />
+              <MessageMeta message={message} resend={chains.byLatest.get(message.id)} hideTime={hiddenTimes.has(message.id)} onEditResend={resendFor(message)} onCreateAgain={onCreateGroupAgain ? () => onCreateGroupAgain(message) : undefined} />
             </div>
           );
         })}

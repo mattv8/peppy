@@ -285,6 +285,23 @@ fixtureSnapshot.conversations.push(
 fixtureSnapshot.conversations.find(conversation => conversation.id === "conv-group-numbers")!.group = { members: ["+18015551234", "+15555550199"], state: "unlinked", memberRevision: "1", canCreate: true, createNeedsConfirmation: false };
 // RCS media UX states (incoming placeholders and outgoing send statuses); see rcsMediaFixtures.ts.
 fixtureSnapshot.conversations.push({ id: "conv-rcs-media", name: "Google Messages media", preview: "Ten files from the trip", unread: 0, participants: ["+15555550142"], messages: fixtureRcsMediaMessages });
+// Send-again UX states (resend-ux spec, Fixtures). Chains link only through sentAgain; ids are fixture-only.
+const fixtureResendParticipants = ["+15555550188"];
+const fixtureResendMessages: MessageView[] = [
+  { id: "fixture-resend-not-sent", revision: "1", sender: "self", body: "Running 10 minutes late", timestamp: "1788436000000", transport: "sms", participants: fixtureResendParticipants, status: "failed-before-submit", statusAt: "1788436030000", attachments: [], sendRecovery: { kind: "not-sent", canSendAgain: true } },
+  { id: "fixture-resend-unconfirmed", revision: "1", sender: "self", body: "Can you bring the charger?", timestamp: "1788436060000", transport: "sms", participants: fixtureResendParticipants, status: "gateway-persisted", statusAt: "1788436090000", attachments: [], sendRecovery: { kind: "unconfirmed-removed", canSendAgain: true } },
+  { id: "fixture-resend-pair-a", revision: "1", sender: "self", body: "Did the parcel arrive?", timestamp: "1788436120000", transport: "sms", participants: fixtureResendParticipants, status: "gateway-persisted", statusAt: "1788436150000", attachments: [], sendRecovery: { kind: "unconfirmed-removed", canSendAgain: false, sentAgain: { messageId: "fixture-resend-pair-b" } }, sentAgain: { messageId: "fixture-resend-pair-b" } },
+  { id: "fixture-resend-pair-b", revision: "1", sender: "self", body: "Did the parcel arrive?", timestamp: "1788436180000", transport: "sms", participants: fixtureResendParticipants, status: "server-accepted", statusAt: "1788436200000", attachments: [] },
+  { id: "fixture-resend-delivered-a", revision: "1", sender: "self", body: "Table for four at 7?", timestamp: "1788436240000", transport: "sms", participants: fixtureResendParticipants, status: "gateway-persisted", statusAt: "1788436270000", attachments: [], sendRecovery: { kind: "unconfirmed-removed", canSendAgain: false, sentAgain: { messageId: "fixture-resend-delivered-b" } }, sentAgain: { messageId: "fixture-resend-delivered-b" } },
+  { id: "fixture-resend-delivered-b", revision: "1", sender: "self", body: "Table for four at 7?", timestamp: "1788436300000", transport: "sms", participants: fixtureResendParticipants, status: "delivery-confirmed", statusAt: "1788436330000", attachments: [] },
+  { id: "fixture-resend-triple-a", revision: "1", sender: "self", body: "Bring the blue folder.", timestamp: "1788436360000", transport: "sms", participants: fixtureResendParticipants, status: "gateway-persisted", statusAt: "1788436390000", attachments: [], sendRecovery: { kind: "unconfirmed-removed", canSendAgain: false, sentAgain: { messageId: "fixture-resend-triple-b" } }, sentAgain: { messageId: "fixture-resend-triple-b" } },
+  { id: "fixture-resend-triple-b", revision: "1", sender: "self", body: "Bring the blue folder.", timestamp: "1788436420000", transport: "sms", participants: fixtureResendParticipants, status: "failed-before-submit", statusAt: "1788436450000", attachments: [], sendRecovery: { kind: "not-sent", canSendAgain: false, sentAgain: { messageId: "fixture-resend-triple-c" } }, sentAgain: { messageId: "fixture-resend-triple-c" } },
+  { id: "fixture-resend-triple-c", revision: "1", sender: "self", body: "Bring the blue folder.", timestamp: "1788436480000", transport: "sms", participants: fixtureResendParticipants, status: "failed-before-submit", statusAt: "1788436510000", attachments: [], sendRecovery: { kind: "not-sent", canSendAgain: true } },
+  { id: "fixture-resend-gap-a", revision: "1", sender: "self", body: "Is the 3pm still on?", timestamp: "1788436540000", transport: "sms", participants: fixtureResendParticipants, status: "gateway-persisted", statusAt: "1788436570000", attachments: [], sendRecovery: { kind: "unconfirmed-removed", canSendAgain: false, sentAgain: { messageId: "fixture-resend-gap-copy" } }, sentAgain: { messageId: "fixture-resend-gap-copy" } },
+  { id: "fixture-resend-gap-reply", revision: "1", sender: "other", senderAddress: "+15555550188", body: "Yes, see you then.", timestamp: "1788436600000", transport: "sms", attachments: [] },
+  { id: "fixture-resend-gap-copy", revision: "1", sender: "self", body: "Is the 3pm still on?", timestamp: "1788436660000", transport: "sms", participants: fixtureResendParticipants, status: "server-accepted", statusAt: "1788436690000", attachments: [] },
+];
+fixtureSnapshot.conversations.push({ id: "conv-resend", name: "Resend states", preview: "Is the 3pm still on?", unread: 0, participants: fixtureResendParticipants, messages: fixtureResendMessages });
 
 /** Fixture drafts keyed by conversation ID; mirrors the native compose-draft save contract (session.rs). */
 const fixtureDrafts = new Map<string, Draft>();
@@ -469,7 +486,7 @@ export const fixtureBridge: DesktopBridge = {
       if (original.sendRecovery.sentAgain) throw fixtureError("already-sent-again", "This message was already sent again.");
       if (!original.sendRecovery.canSendAgain) throw fixtureError("invalid-request", "This message can't be sent again.");
       const newMessageId = `${messageId}-sent-again`;
-      conversation.messages[index] = { ...original, sendRecovery: { ...original.sendRecovery, canSendAgain: false, sentAgain: { messageId: newMessageId } } };
+      conversation.messages[index] = { ...original, sendRecovery: { ...original.sendRecovery, canSendAgain: false, sentAgain: { messageId: newMessageId } }, sentAgain: { messageId: newMessageId } };
       const timestamp = String(Date.now());
       conversation.messages.push({ id: newMessageId, revision: "1", sender: "self", body: original.body, timestamp, status: "queued-local", statusAt: timestamp, attachments: original.attachments, transport: original.transport, subject: original.subject, participants: original.participants });
       return { messageId: newMessageId };

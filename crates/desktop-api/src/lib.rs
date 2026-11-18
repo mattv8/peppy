@@ -309,6 +309,9 @@ pub struct MessageView {
     /// Recovery state of a carrier send that may not have reached the carrier (see `send_recovery`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub send_recovery: Option<SendRecoveryView>,
+    /// This device's explicit "Send again" copy of this message, independent of the recovery state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sent_again: Option<SentAgainView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reactions: Option<Vec<MessageReactionView>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -810,6 +813,7 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
         rcs_reported: false,
         send_cancellation: None,
         send_recovery: None,
+        sent_again: None,
         reactions: reactions::reactions_view(&message.reactions),
         own_reaction_request: message
             .own_reaction_request

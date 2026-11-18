@@ -746,9 +746,29 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
 .message-meta [data-message-route-hint] { margin: 0; flex: 1 0 100%; }
 .message-meta-status[data-recovery-tone="error"] { color: var(--peppy-error-text); }
 .message-meta-status[data-recovery-tone="warning"] { color: var(--peppy-warning-text); }
-.message-meta [data-message-recovery] { display: flex; flex: 1 0 100%; flex-wrap: wrap; align-items: center; gap: 6px; }
-.message-meta [data-message-recovery] > p { margin: 0; }
+.message-meta [data-message-recovery] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .message-meta [data-message-send-again-done] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.message-meta:has(.message-meta-action), .message-meta:has([data-message-recovery] button) { align-items: center; }
+.message-row.self .message-meta:has(.message-resend-warning) { justify-content: flex-end; }
+.message-row.self .message-resend-warning { justify-content: flex-end; }
+.message-meta-action { display: inline-flex; min-width: 28px; min-height: 28px; align-items: center; justify-content: center; gap: 3px; padding: 2px; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.message-meta-text-action { text-decoration: underline; text-underline-offset: 2px; }
+.message-meta-text-action:hover { color: var(--peppy-text-primary); }
+.message-meta-delivered-action { border-radius: var(--peppy-radius-sm); }
+.message-meta-delivered-action:hover, .message-meta-delivered-action:active { background: var(--peppy-surface-hover); }
+.message-sent-again-fact { margin-inline-start: 6px; }
+.message-meta-action:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
+.message-resend-warning { display: flex; flex: 1 0 100%; align-items: center; gap: 4px; color: var(--peppy-warning-text); }
+.message-send-history { display: grid; gap: 8px; padding: 0; list-style: none; }
+.message-send-history li { display: grid; gap: 4px; }
+.message-history-heading { display: flex; flex-wrap: wrap; gap: 6px; }
+.message-history-heading time, .message-send-history p { color: var(--peppy-text-secondary); font-size: 12px; }
+.message-send-history p { margin: 0; }
+@media (pointer: coarse) { .message-meta .message-meta-action, .message-meta [data-message-recovery] button { min-width: 44px; min-height: 44px; } }
+@media (forced-colors: active) {
+  .message-meta-action, .message-resend-warning { color: CanvasText; }
+  .message-meta-action:focus-visible { outline-color: Highlight; }
+}
 
 /* Send again popover: the same floating surface as [data-inline-status-popover] (styles.css), opaque Tier 3. */
 [data-send-again-popover] { position: fixed; z-index: 20; display: grid; gap: 8px; box-sizing: border-box; padding: 10px; overflow: auto; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-control-radius); background: var(--peppy-surface-panel); box-shadow: var(--peppy-shadow-floating); color: var(--peppy-text-primary); font-size: var(--peppy-font-size, 13px); line-height: normal; white-space: normal; }

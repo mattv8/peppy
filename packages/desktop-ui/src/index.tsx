@@ -115,6 +115,7 @@ export {
   ExternalLink,
   FileText,
   FlaskConical,
+  History,
   Image,
   Info,
   ImageDown,
