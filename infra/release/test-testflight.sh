@@ -23,16 +23,18 @@ for version in 1000.0.0 1.1000.0 1.2.1000 1.2.3-beta 01.2.3; do
   fi
 done
 touch "$tmp/app.pkg"
-for args in '' "$tmp/app.pkg 1.2.3 1002003"; do
-  # Deliberate word splitting supplies the tested argument list.
-  if bash "$upload" $args >/dev/null 2>&1; then
-    echo 'upload accepted missing arguments or credentials' >&2
-    exit 1
-  fi
-done
+if bash "$upload" >/dev/null 2>&1; then
+  echo 'upload accepted missing arguments' >&2
+  exit 1
+fi
+if bash "$upload" "$tmp/app.pkg" 1.2.3 1002003 >/dev/null 2>&1; then
+  echo 'upload accepted missing credentials' >&2
+  exit 1
+fi
 openssl ecparam -name prime256v1 -genkey -noout -out "$tmp/test.p8" 2>/dev/null
 export APPLE_ASC_KEY_ID=TESTKEY APPLE_ASC_ISSUER_ID=test-issuer
-export APPLE_ASC_PRIVATE_KEY="$(cat "$tmp/test.p8")" TEST_DIR="$tmp"
+APPLE_ASC_PRIVATE_KEY="$(cat "$tmp/test.p8")"
+export APPLE_ASC_PRIVATE_KEY TEST_DIR="$tmp"
 cat > "$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
