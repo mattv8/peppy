@@ -614,7 +614,7 @@ it("opens the moved banner and app help", () => {
   expect(screen.getByRole("dialog")).toHaveTextContent("System notification permission is set on each device.");
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   fireEvent.click(screen.getByRole("button", { name: "About mirrored apps" }));
-  expect(screen.getByRole("dialog")).toHaveTextContent("100,000-record recovery limit");
+  expect(screen.getByRole("dialog")).toHaveTextContent("100,000-record history import budget");
 });
 
 it("removes Linux legacy options after saving and restores them after a failed save", async () => {
