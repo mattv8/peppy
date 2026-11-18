@@ -142,6 +142,7 @@ mod tests {
             target_gateway_id: Some(DeviceId::new()),
             send_cancel_requested: false,
             sent_again_message_id: None,
+            send_route: None,
         }
     }
 

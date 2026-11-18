@@ -177,19 +177,20 @@ fn raw_command_with_a_ledger_row_but_no_commands_row_is_never_retired() {
 }
 
 #[test]
-fn retirement_candidate_plan_is_recorded_for_the_bounded_query() {
+fn retirement_scan_is_a_primary_key_range_search_not_a_full_scan() {
     let directory = TempDir::new().unwrap();
     let (client, device) = open_unlocked(&directory, DeviceId::new());
     let guard = client.lock().unwrap();
     let mut statement = guard
         .conn
-        .prepare(&format!("EXPLAIN QUERY PLAN {SWALLOWED_CANDIDATES_SQL}"))
+        .prepare(&format!("EXPLAIN QUERY PLAN {SWALLOWED_SCAN_SQL}"))
         .unwrap();
     let plan: Vec<String> = statement
         .query_map(
             params![
                 device.to_string(),
-                RETIRE_SWALLOWED_BATCH as i64,
+                0_i64,
+                RETIRE_SWALLOWED_SCAN as i64,
                 rcs_group::SEND_REASON_PREFIX
             ],
             |row| row.get::<_, String>(3),
@@ -197,13 +198,18 @@ fn retirement_candidate_plan_is_recorded_for_the_bounded_query() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    // Pinned plan: the query scans the ledger (`SCAN l`) and probes each row's other tables by
-    // index. There is no ledger index on `historical` and no schema change is allowed, so the
-    // scan is bounded by `LIMIT` and skipped entirely once the retirement watermark is set.
-    assert!(plan.iter().any(|line| line == "SCAN l"), "plan: {plan:?}");
     assert!(
         plan.iter()
-            .filter(|line| line.starts_with("SEARCH"))
+            .any(|line| line.contains("SEARCH l USING INTEGER PRIMARY KEY (rowid>?)")),
+        "the scan starts at the saved position by primary key: {plan:?}"
+    );
+    assert!(
+        !plan.iter().any(|line| line == "SCAN l"),
+        "no full ledger scan: {plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .filter(|line| line.starts_with("SEARCH") && !line.contains("rowid>?"))
             .all(|line| line.contains("USING")),
         "every per-row probe is indexed: {plan:?}"
     );
@@ -236,7 +242,7 @@ fn a_window_resolves_send_again_markers_with_one_lookup() {
     client.send_again(message_ids[5], route.clone()).unwrap();
     let _ = device;
 
-    SENT_AGAIN_LOOKUPS.with(|count| count.set(0));
+    READ_EVIDENCE_STATEMENTS.with(|count| count.set(0));
     let window = client
         .load_message_window(MessageWindowRequest::Around {
             conversation_id: conversation.to_string(),
@@ -249,7 +255,7 @@ fn a_window_resolves_send_again_markers_with_one_lookup() {
         "the window holds several messages"
     );
     assert_eq!(
-        SENT_AGAIN_LOOKUPS.with(|count| count.get()),
+        READ_EVIDENCE_STATEMENTS.with(|count| count.get()),
         1,
         "one batched marker lookup per window, never one per message"
     );
@@ -355,6 +361,172 @@ fn media_original_recorded_on_an_rcs_link_is_refused_by_its_route() {
     };
     assert_eq!(
         client.send_again(queued.message_id, carrier),
+        Err(Error::SendAgainNotAllowed)
+    );
+}
+
+/// One vault's key profile and check header. Every device of a vault must share the same profile.
+fn vault_profile(vault_id: VaultId) -> (KeyProfile, VaultCheckHeader) {
+    let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+    let root = derive_root_key(PASSPHRASE, &profile).unwrap();
+    let header = create_vault_check_header(&root, profile.clone()).unwrap();
+    (profile, header)
+}
+
+/// Opens one more client on an existing vault, so two devices can share one vault in a test.
+fn open_client(
+    directory: &TempDir,
+    name: &str,
+    vault_id: VaultId,
+    profile: &KeyProfile,
+    header: &VaultCheckHeader,
+    device: DeviceId,
+) -> Client {
+    let client = Client::open(
+        ClientConfig {
+            database_path: directory.path().join(format!("{name}.db")),
+            vault_id,
+            device_id: device,
+        },
+        DatabaseKey::new(&[42; 32]).unwrap(),
+    )
+    .unwrap();
+    client.unlock(profile, header, PASSPHRASE).unwrap();
+    client.set_server_compaction_state(true, true).unwrap();
+    client
+}
+
+/// A ledger row and its command row, as the ingest path leaves them. `historical` decides whether the
+/// row is a snapshot import (eligible for retirement) or a live command (never eligible).
+fn insert_ledger_row(conn: &Connection, gateway: DeviceId, historical: bool) {
+    let command = CommandId::new();
+    conn.execute(
+        "INSERT INTO commands(command_id,message_id,gateway_device_id) VALUES(?,?,?)",
+        params![
+            command.to_string(),
+            MessageId::new().to_string(),
+            gateway.to_string()
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,retired,historical) VALUES(?,1,'sim','{}',0,?)",
+        params![command.to_string(), historical],
+    )
+    .unwrap();
+}
+
+fn scan_position(client: &Client) -> i64 {
+    client
+        .lock()
+        .unwrap()
+        .conn
+        .query_row(
+            "SELECT v FROM metadata WHERE k='swallowed_retirement_position_v1'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn retirement_examines_at_most_the_scan_bound_per_call_and_covers_a_long_ledger() {
+    let directory = TempDir::new().unwrap();
+    let (client, device) = open_unlocked(&directory, DeviceId::new());
+    {
+        let guard = client.lock().unwrap();
+        for _ in 0..2_000 {
+            insert_ledger_row(&guard.conn, device, false);
+        }
+        for _ in 0..3 {
+            insert_ledger_row(&guard.conn, device, true);
+        }
+    }
+
+    // Each call examines at most the bound (1,000 rows) and stores where it stopped.
+    assert_eq!(client.retire_swallowed_commands().unwrap(), 0);
+    assert_eq!(scan_position(&client), RETIRE_SWALLOWED_SCAN as i64);
+    assert!(client.swallowed_retirement_more_remains().unwrap());
+
+    assert_eq!(client.retire_swallowed_commands().unwrap(), 0);
+    assert_eq!(scan_position(&client), 2 * RETIRE_SWALLOWED_SCAN as i64);
+    assert!(client.swallowed_retirement_more_remains().unwrap());
+
+    // The last call reaches the three eligible rows and the end of the ledger.
+    assert_eq!(client.retire_swallowed_commands().unwrap(), 3);
+    assert_eq!(scan_position(&client), 2_003);
+    assert!(!client.swallowed_retirement_more_remains().unwrap());
+
+    // Nothing left: later calls examine nothing and retire nothing.
+    assert_eq!(client.retire_swallowed_commands().unwrap(), 0);
+    assert_eq!(scan_position(&client), 2_003);
+}
+
+#[test]
+fn a_command_ingested_without_route_records_has_no_route_and_cannot_be_copied() {
+    let directory = TempDir::new().unwrap();
+    let vault_id = VaultId::new();
+    let (profile, header) = vault_profile(vault_id);
+    let author = open_client(
+        &directory,
+        "author",
+        vault_id,
+        &profile,
+        &header,
+        DeviceId::new(),
+    );
+    let gateway = DeviceId::new();
+    let carrier = GatewayRoute::Carrier {
+        gateway_device_id: gateway,
+        subscription_id: "sim-1".into(),
+    };
+    let queued = author
+        .queue_send(
+            OutgoingSms {
+                conversation_id: ConversationId::new(),
+                recipients: vec!["+15555550100".into()],
+                body: "authored elsewhere".into(),
+            },
+            carrier.clone(),
+        )
+        .unwrap();
+    let envelope = author
+        .pending_outbox()
+        .unwrap()
+        .into_iter()
+        .find(|envelope| envelope.command_id == Some(queued.command_id))
+        .unwrap();
+
+    // A non-authoring device applies the command, then loses its route record, as a device that
+    // ingested before route records existed would have.
+    let peer = open_client(
+        &directory,
+        "peer",
+        vault_id,
+        &profile,
+        &header,
+        DeviceId::new(),
+    );
+    assert_eq!(
+        peer.ingest(&envelope, Cursor(1)).unwrap(),
+        IngestResult::Journaled
+    );
+    peer.apply_pending(usize::MAX).unwrap();
+    peer.lock()
+        .unwrap()
+        .conn
+        .execute(
+            "DELETE FROM metadata WHERE k=?",
+            [command_route_key(queued.command_id)],
+        )
+        .unwrap();
+
+    let shown = peer.message_by_id(queued.message_id).unwrap().unwrap();
+    assert_eq!(shown.send_route, None, "unknown, not guessed");
+    assert_eq!(
+        peer.send_again(queued.message_id, carrier),
         Err(Error::SendAgainNotAllowed)
     );
 }

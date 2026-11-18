@@ -1202,6 +1202,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func snapshotProjectionStatus() throws  -> NativeSnapshotProjectionStatus?
     
+    /**
+     * Whether the last retirement stopped at a bound, so a later pass should retire again.
+     */
+    func swallowedRetirementMoreRemains() throws  -> Bool
+    
     func unlock(profileJson: String, headerJson: String, passphrase: String) throws 
     
     /**
@@ -3557,6 +3562,18 @@ open func snapshotProjectionStatus()throws  -> NativeSnapshotProjectionStatus?  
     return try  FfiConverterOptionTypeNativeSnapshotProjectionStatus.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_snapshot_projection_status(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Whether the last retirement stopped at a bound, so a later pass should retire again.
+     */
+open func swallowedRetirementMoreRemains()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_swallowed_retirement_more_remains(
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
@@ -20839,6 +20856,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_snapshot_projection_status() != 18121) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_swallowed_retirement_more_remains() != 34404) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_unlock() != 27497) {

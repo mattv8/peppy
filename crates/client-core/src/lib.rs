@@ -1019,6 +1019,19 @@ pub struct Message {
     pub send_cancel_requested: bool,
     /// The "Send again" copy of this message, when this device holds that copy.
     pub sent_again_message_id: Option<MessageId>,
+    /// The route the original command was authored for, for an outgoing send. `None` when this device
+    /// has neither a route record for the command nor the outbox row of its own command (unknown).
+    /// "Send again" is offered and accepted only for `Some(SendRouteKind::Carrier)`.
+    pub send_route: Option<SendRouteKind>,
+}
+
+/// The route kind of a send command, as hosts see it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendRouteKind {
+    /// A carrier gateway route (SMS/MMS through a SIM).
+    Carrier,
+    /// The RCS link route.
+    Rcs,
 }
 /// A chronological, bounded conversation-history window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2985,14 +2998,17 @@ impl Client {
     }
 
     /// Gateway side: retires commands that a snapshot imported as history and that this device never
-    /// reported on. Each gets one `FailedBeforeSubmission` status with no refusal reason, so peers
-    /// stop showing "Server accepted" for a command that never runs.
+    /// reported on. Each gets one `FailedBeforeSubmission` status with no refusal reason, so peers stop
+    /// showing "Server accepted" for a command that never runs.
     ///
-    /// Bounded: at most `RETIRE_SWALLOWED_BATCH` commands per call, in one immediate transaction. A
-    /// full batch means more may remain, and the caller should call again. Changes nothing under the
-    /// restore guard or while a snapshot generation is staging or published but undrained. Once a
-    /// call finds nothing left, a metadata watermark makes later calls return 0 without scanning the
-    /// ledger; starting or publishing a snapshot generation clears the watermark.
+    /// The ledger is scanned in local order from a durable position (`metadata`). One call examines at
+    /// most `RETIRE_SWALLOWED_SCAN` rows and retires at most `RETIRE_SWALLOWED_BATCH` of them, in one
+    /// immediate transaction, and stores the position of the last row it examined. Every examined row
+    /// is either retired or permanently ineligible (argued at `SWALLOWED_SCAN_SQL`), so no row is
+    /// examined twice and rows applied later, which get larger `local_order`, are found without any
+    /// invalidation. Changes nothing (and keeps the position) under the restore guard or while a
+    /// snapshot generation is staging or draining. Returns the number retired;
+    /// `swallowed_retirement_more_remains` says whether a later call can find more.
     ///
     /// What it cannot know: a database copied or restored without the restore guard can lose the
     /// attempts it recorded. A command attempted only in such a copy has no attempt here, so it can
@@ -3001,38 +3017,65 @@ impl Client {
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if restore_guarded(&tx)?
-            || active_generation(&tx)?.is_some()
-            || get_meta(&tx, SWALLOWED_RETIREMENT_COMPLETE)?.is_some()
-        {
+        if restore_guarded(&tx)? || active_generation(&tx)?.is_some() {
+            set_meta(&tx, SWALLOWED_RETIREMENT_MORE, "0")?;
+            tx.commit()?;
             return Ok(0);
         }
         let self_id = ctx.device_id.to_string();
-        let candidates: Vec<String> = {
-            let mut query = tx.prepare(SWALLOWED_CANDIDATES_SQL)?;
+        let position = match get_meta(&tx, SWALLOWED_SCAN_POSITION)? {
+            Some(value) => value.parse::<i64>().map_err(|_| Error::Database)?,
+            None => 0,
+        };
+        let rows: Vec<SwallowedScanRow> = {
+            let mut query = tx.prepare(SWALLOWED_SCAN_SQL)?;
             query
                 .query_map(
                     params![
                         self_id,
-                        to_i64(RETIRE_SWALLOWED_BATCH as u64)?,
+                        position,
+                        to_i64(RETIRE_SWALLOWED_SCAN as u64)?,
                         rcs_group::SEND_REASON_PREFIX
                     ],
-                    |row| row.get(0),
+                    SwallowedScanRow::from_row,
                 )?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        for id in &candidates {
-            tx.execute(
-                "UPDATE command_ledger SET retired=1 WHERE command_id=?",
-                params![id],
-            )?;
-            emit_status(&tx, &ctx, parse(id)?, SendState::FailedBeforeSubmission)?;
+        let mut retired = 0_usize;
+        let mut last = None;
+        for row in &rows {
+            last = Some(row.local_order);
+            if row.eligible(&self_id) {
+                tx.execute(
+                    "UPDATE command_ledger SET retired=1 WHERE command_id=?",
+                    params![row.command_id],
+                )?;
+                emit_status(
+                    &tx,
+                    &ctx,
+                    parse(&row.command_id)?,
+                    SendState::FailedBeforeSubmission,
+                )?;
+                retired += 1;
+                if retired == RETIRE_SWALLOWED_BATCH {
+                    break;
+                }
+            }
         }
-        if candidates.len() < RETIRE_SWALLOWED_BATCH {
-            set_meta(&tx, SWALLOWED_RETIREMENT_COMPLETE, "1")?;
+        if let Some(last) = last {
+            set_meta(&tx, SWALLOWED_SCAN_POSITION, &last.to_string())?;
         }
+        let more = retired == RETIRE_SWALLOWED_BATCH || rows.len() == RETIRE_SWALLOWED_SCAN;
+        set_meta(&tx, SWALLOWED_RETIREMENT_MORE, if more { "1" } else { "0" })?;
         tx.commit()?;
-        u32::try_from(candidates.len()).map_err(|_| Error::Database)
+        u32::try_from(retired).map_err(|_| Error::Database)
+    }
+
+    /// Whether the last `retire_swallowed_commands` stopped at a bound with ledger rows left to examine
+    /// or retire. A host keeps retiring on later passes while this is true. False before any call.
+    pub fn swallowed_retirement_more_remains(&self) -> Result<bool, Error> {
+        let store = self.lock()?;
+        Ok(get_meta(&store.conn, SWALLOWED_RETIREMENT_MORE)?.as_deref() == Some("1"))
     }
 
     /// Clears process-only typing state when the host locks its session. Restarting also creates
@@ -4338,34 +4381,94 @@ fn is_mms_only_address(address: &str) -> bool {
     address.contains('@')
 }
 
-/// Most commands one `retire_swallowed_commands` call retires; a full batch asks for another call.
+/// Most commands one `retire_swallowed_commands` call retires; a full batch means more may remain.
 pub const RETIRE_SWALLOWED_BATCH: usize = 200;
-/// Watermark: nothing swallowed is left to retire. Cleared when a snapshot generation begins or
-/// publishes, the only ways a historical ledger row can appear.
-const SWALLOWED_RETIREMENT_COMPLETE: &str = "swallowed_retirement_complete_v1";
+/// Most ledger rows one `retire_swallowed_commands` call examines, retired or not.
+pub const RETIRE_SWALLOWED_SCAN: usize = 1_000;
+/// Metadata: the local order of the last ledger row the retirement scan examined.
+const SWALLOWED_SCAN_POSITION: &str = "swallowed_retirement_position_v1";
+/// Metadata: whether the last retirement call stopped at a bound with rows left.
+const SWALLOWED_RETIREMENT_MORE: &str = "swallowed_retirement_more_v1";
 
-/// Retirement candidates, at most `?2` rows. `?1` is this gateway, `?3` the group-refusal key prefix.
-/// Group refusals are excluded here, so a refused command never occupies a batch slot.
-const SWALLOWED_CANDIDATES_SQL: &str = "SELECT l.command_id FROM command_ledger l JOIN commands c ON c.command_id=l.command_id
-    WHERE l.historical=1 AND l.retired=0 AND c.gateway_device_id=?1
-    AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.command_id=l.command_id)
-    AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id)
-    AND NOT EXISTS(SELECT 1 FROM metadata g WHERE g.k=(?3||l.command_id))
-    AND NOT EXISTS(SELECT 1 FROM send_status s WHERE s.command_id=l.command_id AND s.producer_device_id=?1)
-    AND NOT EXISTS(SELECT 1 FROM send_status s WHERE s.command_id=l.command_id AND s.state NOT IN ('queued_local','accepted_server','persisted_gateway'))
-    ORDER BY l.local_order LIMIT ?2";
+/// One page of the retirement scan: ledger rows after `?2` in local order, at most `?3`. `?1` is this
+/// gateway and `?4` the group-refusal metadata prefix.
+///
+/// Why passing an examined row is sound (each exclusion can never stop holding once it holds):
+/// - `historical` is written once, at insert, and never updated. A live row stays live.
+/// - `retired` is only ever set to 1. A retired row stays retired.
+/// - `attempts` rows are inserted and never deleted, so an attempted command stays attempted.
+/// - `rcs_media_send_ledger` rows are inserted and never deleted.
+/// - `commands` rows are inserted by `record_command` in the same transaction that inserts the ledger
+///   row, and are never updated or deleted. A ledger row without a `commands` row therefore cannot
+///   appear, and if one is seen it is ineligible for good (`gateway_device_id` is NULL).
+/// - A command addressed to another device keeps that gateway id forever (`commands` is immutable).
+/// - `send_status` rows are never deleted, so this device's own status stays once written.
+/// - A non-waiting status stays non-waiting. A producer's waiting state (`persisted_gateway`) is written
+///   once, at the gateway's first live ingest, before any attempt; later statuses from that producer have
+///   higher sequence and are non-waiting. `gateway_reportable` refuses `queued_local`, `accepted_server`
+///   and `attempt_recorded` from peers, so no producer can re-enter a waiting state.
+/// - A group refusal reason (`rcs_group_send_reason_v1/`) is written and never removed.
+///
+/// An examined row that is eligible is retired at once, so the scan never has to revisit it.
+const SWALLOWED_SCAN_SQL: &str = "SELECT l.local_order, l.command_id, c.gateway_device_id, l.historical, l.retired,
+    EXISTS(SELECT 1 FROM attempts a WHERE a.command_id=l.command_id),
+    EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id),
+    EXISTS(SELECT 1 FROM send_status s WHERE s.command_id=l.command_id AND s.producer_device_id=?1),
+    EXISTS(SELECT 1 FROM send_status s WHERE s.command_id=l.command_id AND s.state NOT IN ('queued_local','accepted_server','persisted_gateway')),
+    EXISTS(SELECT 1 FROM metadata g WHERE g.k=(?4||l.command_id))
+    FROM command_ledger l LEFT JOIN commands c ON c.command_id=l.command_id
+    WHERE l.local_order>?2 ORDER BY l.local_order LIMIT ?3";
 
-fn clear_swallowed_retirement_watermark(conn: &Connection) -> Result<(), Error> {
-    conn.execute(
-        "DELETE FROM metadata WHERE k=?",
-        params![SWALLOWED_RETIREMENT_COMPLETE],
-    )?;
-    Ok(())
+/// One examined ledger row of the retirement scan.
+struct SwallowedScanRow {
+    local_order: i64,
+    command_id: String,
+    gateway_device_id: Option<String>,
+    historical: bool,
+    retired: bool,
+    attempted: bool,
+    media: bool,
+    self_status: bool,
+    non_waiting: bool,
+    group_refusal: bool,
 }
+
+impl SwallowedScanRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            local_order: row.get(0)?,
+            command_id: row.get(1)?,
+            gateway_device_id: row.get(2)?,
+            historical: row.get(3)?,
+            retired: row.get(4)?,
+            attempted: row.get(5)?,
+            media: row.get(6)?,
+            self_status: row.get(7)?,
+            non_waiting: row.get(8)?,
+            group_refusal: row.get(9)?,
+        })
+    }
+
+    /// Eligible now: a snapshot-imported command addressed to this gateway that has no attempt, no RCS
+    /// media row, no status from this gateway, no non-waiting status and no group refusal.
+    fn eligible(&self, self_id: &str) -> bool {
+        self.historical
+            && !self.retired
+            && self.gateway_device_id.as_deref() == Some(self_id)
+            && !self.attempted
+            && !self.media
+            && !self.self_status
+            && !self.non_waiting
+            && !self.group_refusal
+    }
+}
+
+/// Metadata prefix of the device-local link from an original message to its "Send again" copy.
+const SEND_AGAIN_PREFIX: &str = "send_again:";
 
 /// Metadata key of the device-local link from an original message to its "Send again" copy.
 fn send_again_key(original: &str) -> String {
-    format!("send_again:{original}")
+    format!("{SEND_AGAIN_PREFIX}{original}")
 }
 
 /// Whether this device's recorded copy of `original` still exists. A marker whose copy is gone is
@@ -4385,7 +4488,32 @@ fn send_again_copy_exists(conn: &Connection, original: MessageId) -> Result<bool
 const COMMAND_ROUTE_PREFIX: &str = "command_route_v1/";
 
 fn command_route_key(command_id: CommandId) -> String {
-    format!("{COMMAND_ROUTE_PREFIX}{command_id}")
+    command_route_key_str(&command_id.to_string())
+}
+
+fn command_route_key_str(command: &str) -> String {
+    format!("{COMMAND_ROUTE_PREFIX}{command}")
+}
+
+fn send_route_kind(route: &GatewayRoute) -> SendRouteKind {
+    match route {
+        GatewayRoute::Carrier { .. } => SendRouteKind::Carrier,
+        GatewayRoute::RcsLink { .. } => SendRouteKind::Rcs,
+    }
+}
+
+/// The one route precedence for a command: the route recorded with it, else the outbox row of a
+/// command this device authored. Both `send_again` and `Message.send_route` resolve through this.
+fn route_from_evidence(
+    recorded: Option<String>,
+    authored: Option<String>,
+) -> Result<Option<GatewayRoute>, Error> {
+    match recorded.or(authored) {
+        Some(json) => serde_json::from_str(&json)
+            .map(Some)
+            .map_err(|_| Error::Database),
+        None => Ok(None),
+    }
 }
 
 /// Records the route a command was authored for. Written once, on every device that records the
@@ -4402,27 +4530,18 @@ fn record_command_route(
     Ok(())
 }
 
-/// The route a command was authored for, from durable local evidence: the route recorded with the
-/// command, else the outbox row of a command this device authored. `None` when neither exists.
+/// The route a command was authored for, from durable local evidence (see `route_from_evidence`).
 fn command_route(conn: &Connection, command_id: CommandId) -> Result<Option<GatewayRoute>, Error> {
-    if let Some(value) = get_meta(conn, &command_route_key(command_id))? {
-        return serde_json::from_str(&value)
-            .map(Some)
-            .map_err(|_| Error::Database);
-    }
-    let outbox: Option<Option<String>> = conn
+    let recorded = get_meta(conn, &command_route_key(command_id))?;
+    let authored: Option<String> = conn
         .query_row(
             "SELECT route FROM outbox WHERE command_id=? AND purpose='command'",
             params![command_id.to_string()],
-            |row| row.get(0),
+            |row| row.get::<_, Option<String>>(0),
         )
-        .optional()?;
-    match outbox.flatten() {
-        Some(value) => serde_json::from_str(&value)
-            .map(Some)
-            .map_err(|_| Error::Database),
-        None => Ok(None),
-    }
+        .optional()?
+        .flatten();
+    route_from_evidence(recorded, authored)
 }
 
 /// Whether the command has any RCS send or RCS media row. Such a command never has a carrier copy.
@@ -7928,7 +8047,6 @@ impl Client {
             "INSERT INTO snapshot_generations(generation,high_water,expected,received,received_bytes,overlap,last_cursor,state,server_compaction_generation) VALUES(?,?,?,0,0,0,0,'staging',?)",
             params![to_i64(generation)?, high, to_i64(record_count)?, server_compaction_generation.map(|v| v.to_string())],
         )?;
-        clear_swallowed_retirement_watermark(&tx)?;
         if purpose == SnapshotPurpose::Restore {
             attachment_retention::bind_restore_generation(&tx, generation)?;
         }
@@ -8088,7 +8206,6 @@ impl Client {
                 "UPDATE snapshot_generations SET state='published' WHERE generation=?",
                 params![current.number],
             )?;
-            clear_swallowed_retirement_watermark(&tx)?;
         }
         clear_snapshot_reuse_source(&tx)?;
         snapshot_projection::on_publish(
@@ -8577,7 +8694,8 @@ macro_rules! message_select {
             "EXISTS(SELECT 1 FROM commands c WHERE c.message_id=m.id), ",
             "(SELECT c.gateway_device_id FROM commands c WHERE c.message_id=m.id ORDER BY c.rowid LIMIT 1), ",
             "EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id), ",
-            "m.id ",
+            "m.id, ",
+            "(SELECT c.command_id FROM commands c WHERE c.message_id=m.id ORDER BY c.rowid LIMIT 1) ",
             "FROM messages m LEFT JOIN send_status selected_status ON selected_status.rowid=(SELECT st.rowid FROM commands c JOIN send_status st ON st.command_id=c.command_id AND st.producer_device_id=c.gateway_device_id WHERE c.message_id=m.id ORDER BY c.rowid LIMIT 1) ",
             $suffix,
         )
@@ -8786,8 +8904,15 @@ fn stage_cancellation_result(
     )? != 0)
 }
 
-/// Message columns, then the first command's gateway id, whether a cancellation exists, and the
-/// message id (the key of its device-local "Send again" marker).
+// Test probe: statements run by the batched read-evidence lookup on this thread. A read runs at most
+// two (metadata, then the outbox fallback only when a command has no recorded route).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static READ_EVIDENCE_STATEMENTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Message columns, then the first command's gateway id, whether a cancellation exists, the message
+/// id (the key of its device-local "Send again" marker), and the first command id (its route evidence).
 type StoredMessage = (
     String,
     bool,
@@ -8799,6 +8924,7 @@ type StoredMessage = (
     Option<String>,
     bool,
     String,
+    Option<String>,
 );
 
 fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
@@ -8813,43 +8939,46 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
         row.get(7)?,
         row.get(8)?,
         row.get(9)?,
+        row.get(10)?,
     ))
 }
 
-// Test probe: how many batched marker lookups ran on this thread. A read must run exactly one.
-#[cfg(test)]
-thread_local! {
-    pub(crate) static SENT_AGAIN_LOOKUPS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+/// Per-read evidence for the message rows, resolved by one batched statement (plus one outbox
+/// statement only when a command has no recorded route).
+#[derive(Default)]
+struct ReadEvidence {
+    /// "Send again" copies that exist here, keyed by the original message id.
+    copies: HashMap<String, MessageId>,
+    /// Route kind per command id (`None` when no evidence exists).
+    routes: HashMap<String, SendRouteKind>,
 }
 
-/// Builds messages from one read, with one batched lookup for their "Send again" markers.
+/// Builds messages from one read, with one batched evidence lookup for the whole read.
 fn messages_from_rows(conn: &Connection, rows: Vec<StoredMessage>) -> Result<Vec<Message>, Error> {
-    let copies = sent_again_copies(conn, &rows)?;
+    let evidence = read_evidence(conn, &rows)?;
     rows.into_iter()
-        .map(|row| message_from_row(conn, row, &copies))
+        .map(|row| message_from_row(conn, row, &evidence))
         .collect()
 }
 
 fn message_from_stored(conn: &Connection, row: StoredMessage) -> Result<Message, Error> {
-    let copies = sent_again_copies(conn, std::slice::from_ref(&row))?;
-    message_from_row(conn, row, &copies)
+    let evidence = read_evidence(conn, std::slice::from_ref(&row))?;
+    message_from_row(conn, row, &evidence)
 }
 
-/// The "Send again" copies of the given messages that exist on this device, keyed by the
-/// original's message id. One statement covers the whole read.
-fn sent_again_copies(
-    conn: &Connection,
-    rows: &[StoredMessage],
-) -> Result<HashMap<String, MessageId>, Error> {
-    #[cfg(test)]
-    SENT_AGAIN_LOOKUPS.with(|count| count.set(count.get() + 1));
+fn read_evidence(conn: &Connection, rows: &[StoredMessage]) -> Result<ReadEvidence, Error> {
     if rows.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(ReadEvidence::default());
     }
-    let keys = rows
-        .iter()
-        .map(|row| send_again_key(&row.9))
-        .collect::<Vec<_>>();
+    let mut keys = Vec::with_capacity(rows.len() * 2);
+    for row in rows {
+        keys.push(send_again_key(&row.9));
+        if let Some(command) = row.10.as_deref() {
+            keys.push(command_route_key_str(command));
+        }
+    }
+    #[cfg(test)]
+    READ_EVIDENCE_STATEMENTS.with(|count| count.set(count.get() + 1));
     let json = serde_json::to_string(&keys).map_err(|_| Error::Database)?;
     let mut query = conn.prepare(
         "SELECT k,v,EXISTS(SELECT 1 FROM messages x WHERE x.id=metadata.v) FROM metadata WHERE k IN (SELECT value FROM json_each(?1))",
@@ -8863,20 +8992,75 @@ fn sent_again_copies(
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    found
-        .into_iter()
-        .filter(|(_, _, exists)| *exists)
-        .map(|(key, copy, _)| Ok((key, parse::<MessageId>(&copy)?)))
-        .collect()
+    let mut evidence = ReadEvidence::default();
+    let mut recorded: HashMap<String, String> = HashMap::new();
+    for (key, value, exists) in found {
+        if let Some(original) = key.strip_prefix(SEND_AGAIN_PREFIX) {
+            if exists {
+                evidence
+                    .copies
+                    .insert(original.to_owned(), parse::<MessageId>(&value)?);
+            }
+        } else if key.starts_with(COMMAND_ROUTE_PREFIX) {
+            recorded.insert(key, value);
+        }
+    }
+    let missing: Vec<String> = rows
+        .iter()
+        .filter_map(|row| row.10.as_deref())
+        .filter(|command| !recorded.contains_key(&command_route_key_str(command)))
+        .map(str::to_owned)
+        .collect();
+    let mut authored: HashMap<String, String> = HashMap::new();
+    if !missing.is_empty() {
+        #[cfg(test)]
+        READ_EVIDENCE_STATEMENTS.with(|count| count.set(count.get() + 1));
+        let json = serde_json::to_string(&missing).map_err(|_| Error::Database)?;
+        let mut query = conn.prepare(
+            "SELECT command_id,route FROM outbox WHERE purpose='command' AND route IS NOT NULL AND command_id IN (SELECT value FROM json_each(?1))",
+        )?;
+        for row in query.query_map([json], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (command, route) = row?;
+            authored.insert(command, route);
+        }
+    }
+    for row in rows {
+        let Some(command) = row.10.as_deref() else {
+            continue;
+        };
+        let route = route_from_evidence(
+            recorded.get(&command_route_key_str(command)).cloned(),
+            authored.get(command).cloned(),
+        )?;
+        if let Some(route) = route {
+            evidence
+                .routes
+                .insert(command.to_owned(), send_route_kind(&route));
+        }
+    }
+    Ok(evidence)
 }
 
 fn message_from_row(
     conn: &Connection,
     row: StoredMessage,
-    copies: &HashMap<String, MessageId>,
+    evidence: &ReadEvidence,
 ) -> Result<Message, Error> {
-    let (payload, seen, status, status_at_ms, refusal, outbox, is_command, gateway, cancel, id) =
-        row;
+    let (
+        payload,
+        seen,
+        status,
+        status_at_ms,
+        refusal,
+        outbox,
+        is_command,
+        gateway,
+        cancel,
+        id,
+        command,
+    ) = row;
     let send_state = if !is_command {
         None
     } else if let Some(status) = status {
@@ -8895,7 +9079,10 @@ fn message_from_row(
         send_refusal: refusal.as_deref().map(refusal_from_code).transpose()?,
         target_gateway_id: gateway.as_deref().map(parse).transpose()?,
         send_cancel_requested: cancel,
-        sent_again_message_id: copies.get(&send_again_key(&id)).copied(),
+        sent_again_message_id: evidence.copies.get(&id).copied(),
+        send_route: command
+            .as_deref()
+            .and_then(|command| evidence.routes.get(command).copied()),
     })
 }
 

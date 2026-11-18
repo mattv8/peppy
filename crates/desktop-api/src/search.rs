@@ -403,6 +403,7 @@ mod tests {
             target_gateway_id: None,
             send_cancel_requested: false,
             sent_again_message_id: None,
+            send_route: None,
         };
         let source = MessageWindow {
             conversation_id: message.payload.record.conversation_id.to_string(),
