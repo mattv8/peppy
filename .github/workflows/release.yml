@@ -322,6 +322,22 @@ jobs:
       PEPPY_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD }}
       PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
       PEPPY_RELEASE_GPG_PASSPHRASE: ${{ secrets.PEPPY_RELEASE_GPG_PASSPHRASE }}
+  dispatch-testflight:
+    needs: [prepare, publish]
+    if: ${{ !inputs.dry_run && needs.publish.result == 'success' && needs.prepare.outputs.desktop_existing != 'true' }}
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch TestFlight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: gh workflow run testflight.yml --ref production -f "version=$VERSION" -f "ref=$SHA"
   publish-android:
     if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.android_skip != 'true' && needs.prepare.outputs.android_existing != 'true' && needs.signing.result == 'success' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' && (needs.publish.result == 'success' || (needs.publish.result == 'skipped' && needs.prepare.outputs.desktop_existing == 'true' && needs.signing.outputs.desktop_verified == 'true')) }}
     needs: [prepare, signing, artifacts, publish]

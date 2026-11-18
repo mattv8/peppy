@@ -757,7 +757,7 @@ jobs:
     needs: [gate, version, publish-production-server, publish-production-relay, publish-production-mcp]
     permissions:
       contents: write
-      actions: read
+      actions: write
       attestations: write
       id-token: write
     concurrency:

@@ -42,6 +42,11 @@ on:
         required: false
         type: string
         default: ''
+      macos_build_number:
+        description: Mac App Store CFBundleVersion; required for app-store builds, unique and increasing per app record
+        required: false
+        type: string
+        default: ''
       android_firebase_app_config:
         description: Public Firebase Android app configuration JSON for the official Android artifact
         required: false
@@ -357,22 +362,40 @@ jobs:
         env:
           CHANNEL: ${{ inputs.macos_distribution == 'app-store' && 'stable' || inputs.update_channel }}
           REQUESTED_REF: ${{ inputs.ref }}
+          DISTRIBUTION: ${{ inputs.macos_distribution }}
         run: |
-          [ "$REQUESTED_REF" = "$GITHUB_SHA" ] || { echo 'trusted updater build ref must equal the triggering SHA' >&2; exit 1; }
+          if [ "$DISTRIBUTION" != app-store ]; then
+            [ "$REQUESTED_REF" = "$GITHUB_SHA" ] || { echo 'trusted updater build ref must equal the triggering SHA' >&2; exit 1; }
+          fi
           case "$GITHUB_EVENT_NAME:$GITHUB_REF:$CHANNEL" in
             workflow_dispatch:refs/heads/production:stable|push:refs/heads/production:stable|push:refs/heads/staging:staging) ;;
             *) echo 'trusted updater builds require a production stable dispatch/push or staging push' >&2; exit 1 ;;
           esac
+      - if: inputs.macos_distribution == 'app-store'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - if: inputs.macos_distribution == 'app-store'
+        shell: bash
+        run: cp .github/scripts/release-context-guard.sh "$RUNNER_TEMP/app-store-context-guard.sh"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: ${{ fromJSON(inputs.macos_distribution == 'app-store' && '0' || '1') }}
       - name: Verify checked-out trusted updater context
         if: inputs.trusted_update_build || inputs.macos_distribution == 'app-store'
         shell: bash
         env:
           CHANNEL: ${{ inputs.macos_distribution == 'app-store' && 'stable' || inputs.update_channel }}
           REQUESTED_SHA: ${{ inputs.ref }}
-        run: bash .github/scripts/release-context-guard.sh
+          RELEASE_CONTEXT_MODE: ${{ inputs.macos_distribution == 'app-store' && 'production-ancestor' || '' }}
+        run: |
+          if [ "$RELEASE_CONTEXT_MODE" = production-ancestor ]; then
+            bash "$RUNNER_TEMP/app-store-context-guard.sh"
+          else
+            bash .github/scripts/release-context-guard.sh
+          fi
       - name: Validate protected signing policy
         if: inputs.trusted_update_build
         shell: bash

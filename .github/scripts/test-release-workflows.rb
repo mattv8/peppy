@@ -226,7 +226,10 @@ end
 stable = ci_jobs.fetch('stable-release')
 assert.call(stable.fetch('needs').sort == %w[gate publish-production-mcp publish-production-relay publish-production-server version], 'stable release must wait for the gate and all three edge publishers')
 assert.call(ci_jobs.fetch('notify-hosted-production').fetch('needs').sort == %w[gate publish-production-mcp publish-production-relay publish-production-server], 'hosted dispatch must keep its server and relay payload contract and wait for the MCP image')
-assert.call(stable.fetch('permissions') == { 'contents' => 'write', 'actions' => 'read', 'attestations' => 'write', 'id-token' => 'write' }, 'stable release must grant its nested publisher provenance permissions')
+assert.call(stable.fetch('permissions') == { 'contents' => 'write', 'actions' => 'write', 'attestations' => 'write', 'id-token' => 'write' }, 'stable release must grant its nested publisher provenance permissions and the TestFlight dispatch')
+testflight_dispatch = load_workflow.('release.yml').fetch('jobs').fetch('dispatch-testflight')
+assert.call(testflight_dispatch.fetch('permissions') == { 'actions' => 'write', 'contents' => 'read' }, 'TestFlight dispatch must request only actions: write, which the stable-release caller grants')
+assert.call(testflight_dispatch.fetch('continue-on-error') == true, 'a TestFlight dispatch failure must not fail the release')
 assert.call(stable.fetch('concurrency').fetch('group') == 'stable-release', 'automatic stable release must serialize with manual release')
 assert.call(stable.fetch('with') == { 'bump' => 'auto', 'version' => '', 'dry_run' => false }, 'automatic release must use the safe automatic inputs')
 
