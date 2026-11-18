@@ -513,7 +513,9 @@ mod tests {
         unread_total, ApplyFence, RefreshState, TrayBadge, MAX_BUSY_RETRIES,
     };
     use crate::session::{encryption_state, EncryptionState, VaultSummary};
-    use peppy_client_core::{Conversation, ConversationFolder, ConversationId, KeyStatus};
+    use peppy_client_core::{
+        Conversation, ConversationFolder, ConversationId, KeyStatus, ReactionSupport,
+    };
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -564,6 +566,8 @@ mod tests {
             folder_reason: None,
             unblock: None,
             can_unblock: false,
+            reaction_support: ReactionSupport::None,
+            reaction_gateway_id: None,
         }
     }
 

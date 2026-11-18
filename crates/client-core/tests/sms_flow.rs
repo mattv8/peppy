@@ -249,6 +249,8 @@ fn read_before_arrival_out_of_order_buffering_and_duplicate_replay() {
             folder_reason: None,
             unblock: None,
             can_unblock: false,
+            reaction_support: ReactionSupport::Text,
+            reaction_gateway_id: None,
         }]
     );
 

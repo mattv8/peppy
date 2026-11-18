@@ -66,10 +66,25 @@ pub mod one_time_code;
 mod quick_reply;
 mod rcs_group;
 mod rcs_group_create;
+mod reaction_validation;
+mod reactions;
 #[cfg(test)]
 mod send_cancellation_decoder_recovery_tests;
 #[cfg(test)]
 mod send_cancellation_validation_tests;
+pub use reactions::{
+    OwnReactionRequest, OwnReactionState, RcsReactionEntry, ReactionRoute, ReactionSubmit,
+    ReactionSupport, ReactionSupportView, SubmitRefusal, compose_reaction_text,
+};
+use reactions::{reaction_refusal_code, store_message_reactions};
+#[cfg(test)]
+mod reaction_jobs_tests;
+#[cfg(test)]
+mod reaction_requester_tests;
+#[cfg(test)]
+mod reaction_snapshot_tests;
+#[cfg(test)]
+mod reaction_tests;
 mod sender_blocklist;
 #[cfg(test)]
 mod stranded_command_tests;
@@ -158,8 +173,8 @@ pub use peppy_crypto::{KeyProfile, VaultCheckHeader};
 use peppy_domain::RcsMediaNotSentReason;
 pub use peppy_domain::{
     AttachmentId, AttachmentReference, CommandId, ConversationId, Cursor, DeviceId, DraftId,
-    EnvelopeId, MessageId, MessageRecord, RcsMediaSyncState, SendRefusalReason, SendState,
-    SourceSequence, VaultId,
+    EnvelopeId, MessageId, MessageRecord, RcsMediaSyncState, ReactionRequestId, SendRefusalReason,
+    SendState, SourceSequence, VaultId,
 };
 pub use peppy_protocol::{
     CompactionMetadata, CompactionReference, Envelope, EnvelopePurpose, EphemeralSignalV1,
@@ -219,7 +234,7 @@ pub use vault_identity::{
 };
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 60;
+const SCHEMA_VERSION: i64 = 63;
 const PENDING_COMMAND_ELIGIBILITY: &str = "a.command_id IS NULL AND l.historical=0 AND l.retired=0 AND l.subscription_id<>'' AND l.key_epoch=? AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id) AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.command_id=l.command_id AND x.target_gateway_id=? AND x.state IN ('requested','confirmed'))";
 #[cfg(test)]
 thread_local! {
@@ -650,6 +665,30 @@ pub enum PrivatePayload {
     SendCancellationCapability {
         supported: bool,
     },
+    ReactionRequest {
+        request_id: ReactionRequestId,
+        message_id: MessageId,
+        conversation_id: ConversationId,
+        target_gateway_id: DeviceId,
+        emoji: Option<String>,
+        requested_at_ms: i64,
+    },
+    ReactionResult {
+        request_id: ReactionRequestId,
+        message_id: MessageId,
+        target_gateway_id: DeviceId,
+        state: ReactionResultState,
+    },
+    ReactionCapability {
+        supported: bool,
+    },
+    MessageReactions {
+        message_id: MessageId,
+        conversation_id: ConversationId,
+        gateway_id: DeviceId,
+        observed_at_ms: i64,
+        reactions: Vec<MessageReaction>,
+    },
     ReadState {
         message_id: MessageId,
     },
@@ -1023,6 +1062,12 @@ pub struct Message {
     /// has neither a route record for the command nor the outbox row of its own command (unknown).
     /// "Send again" is offered and accepted only for `Some(SendRouteKind::Carrier)`.
     pub send_route: Option<SendRouteKind>,
+    /// The stored reaction set for this message, one entry per emoji. Empty when none is known.
+    pub reactions: Vec<MessageReaction>,
+    /// This device's open reaction request for the message, if any.
+    pub own_reaction_request: Option<OwnReactionRequest>,
+    /// The route a reaction to this message would use; `None` when it is not reactable.
+    pub reactable: Option<ReactionRoute>,
 }
 
 /// The route kind of a send command, as hosts see it.
@@ -1081,6 +1126,10 @@ pub struct Conversation {
     pub folder_reason: Option<ConversationFolderReason>,
     pub unblock: Option<SenderUnblockStatus>,
     pub can_unblock: bool,
+    /// Reaction route support for this conversation (see `Client::reaction_support`).
+    pub reaction_support: ReactionSupport,
+    /// Gateway the native route uses; `None` for text and unsupported conversations.
+    pub reaction_gateway_id: Option<DeviceId>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1147,6 +1196,72 @@ pub struct SendCancellationView {
     pub state: SendCancellationState,
     pub can_request: bool,
     pub requires_gateway_update: bool,
+}
+
+pub const NATIVE_REACTIONS_RELEASED: bool = false;
+pub const REACTION_REQUEST_TTL_MS: i64 = 600_000;
+const REACTION_REQUEST_SKEW_MS: i64 = sender_blocklist::REQUEST_SKEW_MS;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReactionActor {
+    pub is_self: bool,
+    pub address: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageReaction {
+    pub emoji: String,
+    pub actors: Vec<ReactionActor>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionRefusal {
+    Expired,
+    MessageUnavailable,
+    NotRcs,
+    LinkUnavailable,
+    Rejected,
+    Busy,
+    InvalidEmoji,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionResultState {
+    Sent,
+    NotSent { reason: ReactionRefusal },
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReactionJob {
+    pub request_id: ReactionRequestId,
+    pub message_id: MessageId,
+    pub conversation_id: ConversationId,
+    pub emoji: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReactionAction {
+    Add,
+    Switch,
+    Remove,
+    Noop,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReactionAttemptDecision {
+    Permit {
+        request_id: ReactionRequestId,
+        google_conversation_id: String,
+        google_message_id: String,
+        action: ReactionAction,
+        emoji: String,
+    },
+    Refused {
+        reason: ReactionRefusal,
+    },
 }
 /// A received send command awaiting route-neutral automatic admission.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3686,6 +3801,24 @@ fn capture_in(
         conversation_id,
         duplicate: false,
     })
+}
+
+impl Store {
+    /// Adds the reaction facts a UI message carries (set, own open request, reactable route).
+    pub(crate) fn project_reactions(&self, message: &mut Message) -> Result<(), Error> {
+        reactions::project_message(
+            &self.conn,
+            self.config.device_id,
+            self.active_epoch,
+            message,
+        )
+    }
+
+    pub(crate) fn project_reactions_all(&self, messages: &mut [Message]) -> Result<(), Error> {
+        messages
+            .iter_mut()
+            .try_for_each(|message| self.project_reactions(message))
+    }
 }
 
 impl Client {
@@ -6875,6 +7008,7 @@ impl Client {
                 let folder = ConversationFolder::from_db(&folder)?;
                 let (folder_reason, unblock, can_unblock) =
                     folder_context.state(&s.conn, conversation_id, folder)?;
+                let reactions = reactions::support_view(&s.conn, s.active_epoch, conversation_id)?;
                 Ok(Conversation {
                     conversation_id,
                     unread_count: u64::try_from(unread).map_err(|_| Error::Database)?,
@@ -6883,6 +7017,8 @@ impl Client {
                     folder_reason,
                     unblock,
                     can_unblock,
+                    reaction_support: reactions.support,
+                    reaction_gateway_id: reactions.gateway_id,
                 })
             })
             .collect()
@@ -6894,7 +7030,9 @@ impl Client {
         let rows = query
             .query_map(params![conversation_id.to_string()], message_row)?
             .collect::<Result<Vec<_>, _>>()?;
-        messages_from_rows(&s.conn, rows)
+        let mut messages = messages_from_rows(&s.conn, rows)?;
+        s.project_reactions_all(&mut messages)?;
+        Ok(messages)
     }
 
     /// Whether every requested message belongs to the conversation. Empty input is in scope.
@@ -6943,17 +7081,21 @@ impl Client {
     ) -> Result<Option<Message>, Error> {
         let s = self.lock()?;
         let mut query = s.conn.prepare(LATEST_MESSAGE_SELECT)?;
-        query
+        let mut latest = query
             .query_row(params![conversation_id.to_string()], message_row)
             .optional()?
             .map(|row| message_from_stored(&s.conn, row))
-            .transpose()
+            .transpose()?;
+        if let Some(message) = latest.as_mut() {
+            s.project_reactions(message)?;
+        }
+        Ok(latest)
     }
 
     /// Returns one validated, decrypted message by its durable ID.
     pub fn message_by_id(&self, message_id: MessageId) -> Result<Option<Message>, Error> {
         let store = self.lock()?;
-        store
+        let Some(mut message) = store
             .conn
             .query_row(
                 MESSAGE_BY_ID_SELECT,
@@ -6962,7 +7104,12 @@ impl Client {
             )
             .optional()?
             .map(|row| message_from_stored(&store.conn, row))
-            .transpose()
+            .transpose()?
+        else {
+            return Ok(None);
+        };
+        store.project_reactions(&mut message)?;
+        Ok(Some(message))
     }
 
     /// Returns up to `limit` newest messages, chronologically, before an optional durable anchor.
@@ -6993,10 +7140,9 @@ impl Client {
             )?
             .collect::<Result<Vec<_>, _>>()?;
         let has_more = rows.len() > limit;
-        let messages = messages_from_rows(&s.conn, rows.into_iter().take(limit).collect())?
-            .into_iter()
-            .rev()
-            .collect();
+        let mut messages = messages_from_rows(&s.conn, rows.into_iter().take(limit).collect())?;
+        s.project_reactions_all(&mut messages)?;
+        let messages = messages.into_iter().rev().collect();
         Ok(MessagePage { messages, has_more })
     }
 
@@ -7098,7 +7244,9 @@ impl Client {
                 message_row,
             )?
             .collect::<Result<Vec<_>, _>>()?;
-        messages_from_rows(&s.conn, rows)
+        let mut messages = messages_from_rows(&s.conn, rows)?;
+        s.project_reactions_all(&mut messages)?;
+        Ok(messages)
     }
 
     /// Marks one displayed incoming message seen and queues an encrypted `ReadState`.
@@ -9083,6 +9231,9 @@ fn message_from_row(
         send_route: command
             .as_deref()
             .and_then(|command| evidence.routes.get(command).copied()),
+        reactions: Vec::new(),
+        own_reaction_request: None,
+        reactable: None,
     })
 }
 
@@ -10520,6 +10671,54 @@ CREATE TABLE rcs_media_send_status_60(
 );
 ";
 
+/// Version 61 -> 62: message reaction sets that arrive before their link ownership proof.
+const REACTION_STAGING_MIGRATION_62: &str = "
+CREATE TABLE IF NOT EXISTS reaction_sets_staged(
+ message_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, gateway_id TEXT NOT NULL,
+ observed_at_ms INTEGER NOT NULL, producer_sequence INTEGER NOT NULL, reactions_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS reaction_sets_staged_owner ON reaction_sets_staged(conversation_id, gateway_id);
+";
+
+/// Version 62 -> 63: staged reaction sets are keyed per (message, producer), not per message, so
+/// two gateways' staged sets for one message do not overwrite each other. Existing rows are kept.
+const REACTION_STAGING_MIGRATION_63: &str = "
+DROP INDEX IF EXISTS reaction_sets_staged_owner;
+ALTER TABLE reaction_sets_staged RENAME TO reaction_sets_staged_v62;
+CREATE TABLE reaction_sets_staged(
+ message_id TEXT NOT NULL, conversation_id TEXT NOT NULL, gateway_id TEXT NOT NULL,
+ observed_at_ms INTEGER NOT NULL, producer_sequence INTEGER NOT NULL, reactions_json TEXT NOT NULL,
+ PRIMARY KEY(message_id, gateway_id)
+);
+INSERT INTO reaction_sets_staged(message_id,conversation_id,gateway_id,observed_at_ms,producer_sequence,reactions_json)
+ SELECT message_id,conversation_id,gateway_id,observed_at_ms,producer_sequence,reactions_json FROM reaction_sets_staged_v62;
+DROP TABLE reaction_sets_staged_v62;
+CREATE INDEX reaction_sets_staged_owner ON reaction_sets_staged(conversation_id, gateway_id);
+";
+
+const REACTION_MIGRATION_61: &str = "
+CREATE TABLE IF NOT EXISTS reaction_requests(
+ request_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+ target_gateway_id TEXT NOT NULL, emoji TEXT, requested_at_ms INTEGER NOT NULL,
+ requester_device_id TEXT NOT NULL, key_epoch INTEGER NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('sending','sent','not_sent','unknown','dismissed')),
+ refusal TEXT CHECK(refusal IS NULL OR refusal IN ('expired','message_unavailable','not_rcs','link_unavailable','rejected','busy','invalid_emoji')),
+ updated_at_ms INTEGER NOT NULL, from_snapshot INTEGER NOT NULL DEFAULT 0 CHECK(from_snapshot IN (0,1))
+);
+CREATE TABLE IF NOT EXISTS reaction_capabilities(
+ device_id TEXT PRIMARY KEY, supported INTEGER NOT NULL CHECK(supported IN (0,1)),
+ key_epoch INTEGER NOT NULL, producer_sequence INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS message_reactions(
+ message_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, gateway_id TEXT NOT NULL,
+ observed_at_ms INTEGER NOT NULL, producer_sequence INTEGER NOT NULL, reactions_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reaction_attempts(
+ request_id TEXT PRIMARY KEY, begun_at_ms INTEGER NOT NULL, finished_at_ms INTEGER, outcome TEXT
+);
+CREATE INDEX IF NOT EXISTS rcs_message_identities_message_id ON rcs_message_identities(message_id);
+";
+
 fn apply_rcs_media_send_status_migration_60(conn: &Connection) -> Result<(), Error> {
     let mut statement = conn.prepare(
         "SELECT sql FROM sqlite_master WHERE tbl_name='rcs_media_send_status' AND type IN ('index','trigger') AND sql IS NOT NULL",
@@ -10653,7 +10852,7 @@ fn repair_notification_reply_spike(conn: &mut Connection) -> Result<(), Error> {
 }
 /// Decoder revision seven replays applied LWW events after older clients consumed them as unknown.
 // Revision 8 reprojects retained control wires that older clients consumed as unknown.
-const DECODER_REVISION: &str = "12";
+const DECODER_REVISION: &str = "13";
 
 fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error> {
     let mut hex = Zeroizing::new(String::with_capacity(64));
@@ -10770,6 +10969,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(RCS_MEDIA_DEFERRED_STATE_MIGRATION_57)?;
             tx.execute_batch(SEND_CANCELLATION_MIGRATION_58)?;
             apply_rcs_media_send_status_migration_60(&tx)?;
+            tx.execute_batch(REACTION_MIGRATION_61)?;
+            tx.execute_batch(REACTION_STAGING_MIGRATION_62)?;
+            tx.execute_batch(REACTION_STAGING_MIGRATION_63)?;
             tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
@@ -10779,7 +10981,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=59)) => {
+        Some(version @ (4..=60)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -10924,8 +11126,24 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
                 apply_send_cancellation_migration_59(&tx)?;
             }
             apply_rcs_media_send_status_migration_60(&tx)?;
+            tx.execute_batch(REACTION_MIGRATION_61)?;
+            tx.execute_batch(REACTION_STAGING_MIGRATION_62)?;
+            tx.execute_batch(REACTION_STAGING_MIGRATION_63)?;
             tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             attachment_retention::initialize(&tx)?;
+            tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
+            tx.commit()?;
+        }
+        Some(62) => {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(REACTION_STAGING_MIGRATION_63)?;
+            tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
+            tx.commit()?;
+        }
+        Some(61) => {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(REACTION_STAGING_MIGRATION_62)?;
+            tx.execute_batch(REACTION_STAGING_MIGRATION_63)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
@@ -11083,6 +11301,10 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                 PrivatePayload::SendCancellationCapability { .. }
                     | PrivatePayload::SendCancellationRequest { .. }
                     | PrivatePayload::SendCancellationResult { .. }
+                    | PrivatePayload::ReactionCapability { .. }
+                    | PrivatePayload::ReactionRequest { .. }
+                    | PrivatePayload::ReactionResult { .. }
+                    | PrivatePayload::MessageReactions { .. }
             ) && !storage_sequence_fits(envelope.producer_sequence.0)
             {
                 conn.execute(
@@ -11522,6 +11744,20 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                         conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", [cursor])?;
                     }
                 }
+                // Reaction events an older decoder left unknown (or quarantined) are re-applied as
+                // history. A recovered request is never actionable on a phone (`historical`).
+                (
+                    _,
+                    PrivatePayload::ReactionRequest { .. }
+                    | PrivatePayload::ReactionResult { .. }
+                    | PrivatePayload::ReactionCapability { .. }
+                    | PrivatePayload::MessageReactions { .. },
+                ) => {
+                    conn.execute(
+                        "UPDATE journal SET status='pending',reason=NULL,historical=1 WHERE cursor=?",
+                        params![cursor],
+                    )?;
+                }
                 // Commands, notification effects, unknown/malformed records, and foreign identities
                 // are deliberately unchanged by decoder recovery.
                 _ => {}
@@ -11764,6 +12000,10 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "send_cancellation_request"
             | "send_cancellation_result"
             | "send_cancellation_capability"
+            | "reaction_request"
+            | "reaction_result"
+            | "reaction_capability"
+            | "message_reactions"
             | "read_state"
             | "notification_posted"
             | "notification_removed"
@@ -11902,6 +12142,11 @@ fn apply_record(
             )? {
                 return Ok(Some(Q::InvalidPayload));
             }
+            reactions::settle_staged_message_reactions(
+                conn,
+                eligibility.eligibility.conversation_id,
+                eligibility.eligibility.gateway_device_id,
+            )?;
         }
         (EnvelopePurpose::Event, PrivatePayload::SendCancellationCapability { supported }) => {
             apply_cancellation_capability(
@@ -11982,6 +12227,109 @@ fn apply_record(
                 bound,
             )? {
                 return Ok(Some(Q::PayloadConflict));
+            }
+        }
+        (EnvelopePurpose::Event, PrivatePayload::ReactionCapability { supported }) => {
+            let key_epoch = envelope.key_epoch;
+            let producer_sequence = envelope.producer_sequence.0 as i64;
+            conn.execute(
+                "INSERT INTO reaction_capabilities(device_id,supported,key_epoch,producer_sequence) \
+                 VALUES(?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET \
+                 supported=excluded.supported,key_epoch=excluded.key_epoch, \
+                 producer_sequence=excluded.producer_sequence \
+                 WHERE excluded.key_epoch > reaction_capabilities.key_epoch \
+                 OR (excluded.key_epoch = reaction_capabilities.key_epoch \
+                 AND excluded.producer_sequence > reaction_capabilities.producer_sequence)",
+                params![producer.to_string(), supported, key_epoch, producer_sequence],
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::ReactionRequest {
+                request_id,
+                message_id,
+                conversation_id,
+                target_gateway_id,
+                emoji,
+                requested_at_ms,
+            },
+        ) => {
+            if emoji
+                .as_deref()
+                .is_some_and(|value| !reaction_validation::valid_emoji(value))
+            {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            conn.execute(
+                "INSERT INTO reaction_requests(request_id,message_id,conversation_id,target_gateway_id,emoji,requested_at_ms,requester_device_id,key_epoch,state,updated_at_ms,from_snapshot)
+                 VALUES(?,?,?,?,?,?,?,?, 'sending', ?, ?) ON CONFLICT(request_id) DO NOTHING",
+                params![request_id.to_string(), message_id.to_string(), conversation_id.to_string(), target_gateway_id.to_string(), emoji,
+                    requested_at_ms, producer.to_string(), envelope.key_epoch, notifications::now_ms(), historical],
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::ReactionResult {
+                request_id,
+                message_id,
+                target_gateway_id,
+                state,
+            },
+        ) => {
+            if producer != target_gateway_id {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            let (code, refusal) = match &state {
+                ReactionResultState::Sent => ("sent", None),
+                ReactionResultState::Unknown => ("unknown", None),
+                ReactionResultState::NotSent { reason } => {
+                    ("not_sent", Some(reaction_refusal_code(reason)))
+                }
+            };
+            conn.execute(
+                "UPDATE reaction_requests SET state=?,refusal=?,updated_at_ms=? WHERE request_id=? AND message_id=? AND target_gateway_id=? AND state='sending'",
+                params![code, refusal, notifications::now_ms(), request_id.to_string(), message_id.to_string(), target_gateway_id.to_string()],
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::MessageReactions {
+                message_id,
+                conversation_id,
+                gateway_id,
+                observed_at_ms,
+                reactions,
+            },
+        ) => {
+            if !reaction_validation::valid_message_reactions(&reactions) {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            if producer != gateway_id {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            // Ownership is a fact at apply time, not a validity rule: a well-formed set from a
+            // gateway whose projection does not (yet) say it owns the link is kept staged, and is
+            // published when an eligible proof arrives. Only the producer check refuses a set.
+            if reactions::link_owner(conn, conversation_id, gateway_id)? {
+                store_message_reactions(
+                    conn,
+                    message_id,
+                    conversation_id,
+                    gateway_id,
+                    observed_at_ms,
+                    envelope.producer_sequence.0,
+                    &reactions,
+                )?;
+            } else {
+                reactions::stage_message_reactions(
+                    conn,
+                    message_id,
+                    conversation_id,
+                    gateway_id,
+                    observed_at_ms,
+                    envelope.producer_sequence.0,
+                    &reactions,
+                )?;
             }
         }
         (
@@ -13098,6 +13446,11 @@ fn publish_rcs_capability_payload(
                 ctx.device_id,
                 sequence,
             )?;
+            reactions::settle_staged_message_reactions(
+                conn,
+                eligibility.eligibility.conversation_id,
+                eligibility.eligibility.gateway_device_id,
+            )?;
             rcs_capability::record_observed_at(
                 conn,
                 eligibility.eligibility.gateway_device_id,
@@ -13923,6 +14276,21 @@ fn compaction_group(
             b"sender-unblock-result",
             vec![request_id.to_string().into_bytes()],
             true,
+        ),
+        PrivatePayload::ReactionRequest { request_id, .. } => (
+            b"reaction-request",
+            vec![request_id.to_string().into_bytes()],
+            true,
+        ),
+        PrivatePayload::ReactionResult { request_id, .. } => (
+            b"reaction-result",
+            vec![request_id.to_string().into_bytes()],
+            true,
+        ),
+        PrivatePayload::MessageReactions { message_id, .. } => (
+            b"message-reactions",
+            vec![message_id.to_string().into_bytes()],
+            false,
         ),
         PrivatePayload::ConversationTone { seed, .. } => {
             (b"conversation-tone", vec![seed.as_bytes().to_vec()], false)
@@ -20389,6 +20757,10 @@ mod tests {
         for kind in [
             "rcs_message_status",
             "rcs_message_reported",
+            "reaction_request",
+            "reaction_result",
+            "reaction_capability",
+            "message_reactions",
             "future_unknown_event",
         ] {
             let mut envelope = Envelope {

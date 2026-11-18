@@ -15,7 +15,7 @@ pub(crate) const MAX_NUMBER_BYTES: usize = 64;
 /// An unanswered unblock request is actionable for a week, like contact edit requests.
 const REQUEST_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// Tolerated clock skew for authenticated writer timestamps, matching contact requests.
-const REQUEST_SKEW_MS: i64 = 5 * 60 * 1000;
+pub(crate) const REQUEST_SKEW_MS: i64 = 5 * 60 * 1000;
 
 pub(crate) struct RequestFreshness {
     pub historical: bool,

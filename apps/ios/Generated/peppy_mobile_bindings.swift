@@ -692,6 +692,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func beginMmsAcquisitionOutcome(input: NativeMmsAcquisitionInput) throws  -> NativeMmsBeginOutcome
     
+    func beginReactionAttempt(requestId: String) throws  -> NativeReactionAttemptDecision
+    
     /**
      * A carrier API may be invoked only when this returns NativePermitState::Permit.
      */
@@ -876,6 +878,12 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func ingestRaw(envelopeJson: Data, cursor: String) throws  -> NativeIngestResult
     
+    /**
+     * Publishes this gateway's reaction set for one RCS message when it changed. Returns whether
+     * a `MessageReactions` event was published.
+     */
+    func ingestRcsMessageReactions(googleConversationId: String, googleMessageId: String, reactions: [NativeRcsReactionEntry], observedAtMs: Int64) throws  -> Bool
+    
     func initialReplayCaughtUp() throws  -> Bool
     
     func installDownloadedAttachment(attachmentId: String, downloadedPath: String) throws 
@@ -1004,6 +1012,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func pendingPhoneReadEffects(nowMs: Int64, limit: UInt32) throws  -> [NativePhoneReadEffect]
     
+    func pendingReactionJobs() throws  -> [NativeReactionJob]
+    
     func pendingSenderUnblocks() throws  -> [NativeSenderUnblockWork]
     
     func pendingUploads() throws  -> [NativeCipherObject]
@@ -1039,6 +1049,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      * them to the protocol's decimal control generation.
      */
     func publishMessageHistoryCaptureSource(facts: NativeMessageHistorySourceFacts) throws  -> String
+    
+    func publishReactionCapability(supported: Bool) throws 
     
     func publishSendCancellationCapability(supported: Bool) throws 
     
@@ -1078,6 +1090,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      * Records the local Google Messages lifecycle and publishes its content-free status.
      */
     func recordRcsLinkLifecycle(state: NativeRcsLinkState, availability: Bool, health: Bool, phoneResponsive: Bool, observedAtMs: Int64, nowMs: Int64) throws 
+    
+    func recordReactionOutcome(requestId: String, outcome: NativeReactionOutcome, reason: NativeReactionRefusal?) throws 
     
     func recordRecoverySnapshotCapacity(highWaterCursor: String, recordCount: UInt64) throws 
     
@@ -1588,6 +1602,16 @@ open func beginMmsAcquisitionOutcome(input: NativeMmsAcquisitionInput)throws  ->
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_mms_acquisition_outcome(
             self.uniffiCloneHandle(),
         FfiConverterTypeNativeMmsAcquisitionInput_lower(input),uniffiCallStatus
+    )
+})
+}
+    
+open func beginReactionAttempt(requestId: String)throws  -> NativeReactionAttemptDecision  {
+    return try  FfiConverterTypeNativeReactionAttemptDecision_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_reaction_attempt(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(requestId),uniffiCallStatus
     )
 })
 }
@@ -2253,6 +2277,23 @@ open func ingestRaw(envelopeJson: Data, cursor: String)throws  -> NativeIngestRe
 })
 }
     
+    /**
+     * Publishes this gateway's reaction set for one RCS message when it changed. Returns whether
+     * a `MessageReactions` event was published.
+     */
+open func ingestRcsMessageReactions(googleConversationId: String, googleMessageId: String, reactions: [NativeRcsReactionEntry], observedAtMs: Int64)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_ingest_rcs_message_reactions(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(googleConversationId),
+        FfiConverterString.lower(googleMessageId),
+        FfiConverterSequenceTypeNativeRcsReactionEntry.lower(reactions),
+        FfiConverterInt64.lower(observedAtMs),uniffiCallStatus
+    )
+})
+}
+    
 open func initialReplayCaughtUp()throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2747,6 +2788,15 @@ open func pendingPhoneReadEffects(nowMs: Int64, limit: UInt32)throws  -> [Native
 })
 }
     
+open func pendingReactionJobs()throws  -> [NativeReactionJob]  {
+    return try  FfiConverterSequenceTypeNativeReactionJob.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_reaction_jobs(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
 open func pendingSenderUnblocks()throws  -> [NativeSenderUnblockWork]  {
     return try  FfiConverterSequenceTypeNativeSenderUnblockWork.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2891,6 +2941,15 @@ open func publishMessageHistoryCaptureSource(facts: NativeMessageHistorySourceFa
 })
 }
     
+open func publishReactionCapability(supported: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_reaction_capability(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(supported),uniffiCallStatus
+    )
+}
+}
+    
 open func publishSendCancellationCapability(supported: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_send_cancellation_capability(
@@ -3024,6 +3083,17 @@ open func recordRcsLinkLifecycle(state: NativeRcsLinkState, availability: Bool, 
         FfiConverterBool.lower(phoneResponsive),
         FfiConverterInt64.lower(observedAtMs),
         FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+}
+}
+    
+open func recordReactionOutcome(requestId: String, outcome: NativeReactionOutcome, reason: NativeReactionRefusal?)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_reaction_outcome(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(requestId),
+        FfiConverterTypeNativeReactionOutcome_lower(outcome),
+        FfiConverterOptionTypeNativeReactionRefusal.lower(reason),uniffiCallStatus
     )
 }
 }
@@ -11208,6 +11278,71 @@ public func FfiConverterTypeNativeRcsProviderRoute_lower(_ value: NativeRcsProvi
 }
 
 
+/**
+ * One reaction entry as the RCS link reported it, before core canonicalises the addresses.
+ */
+public struct NativeRcsReactionEntry: Equatable, Hashable {
+    public var emoji: String
+    public var isSelf: Bool
+    public var addresses: [String]
+    public var unresolvedActors: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(emoji: String, isSelf: Bool, addresses: [String], unresolvedActors: UInt32) {
+        self.emoji = emoji
+        self.isSelf = isSelf
+        self.addresses = addresses
+        self.unresolvedActors = unresolvedActors
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeRcsReactionEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeRcsReactionEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeRcsReactionEntry {
+        return
+            try NativeRcsReactionEntry(
+                emoji: FfiConverterString.read(from: &buf), 
+                isSelf: FfiConverterBool.read(from: &buf), 
+                addresses: FfiConverterSequenceString.read(from: &buf), 
+                unresolvedActors: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeRcsReactionEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.emoji, into: &buf)
+        FfiConverterBool.write(value.isSelf, into: &buf)
+        FfiConverterSequenceString.write(value.addresses, into: &buf)
+        FfiConverterUInt32.write(value.unresolvedActors, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsReactionEntry_lift(_ buf: RustBuffer) throws -> NativeRcsReactionEntry {
+    return try FfiConverterTypeNativeRcsReactionEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeRcsReactionEntry_lower(_ value: NativeRcsReactionEntry) -> RustBuffer {
+    return FfiConverterTypeNativeRcsReactionEntry.lower(value)
+}
+
+
 public struct NativeRcsReceiveContext: Equatable, Hashable {
     public var conversationId: String
     public var googleConversationId: String
@@ -11413,6 +11548,142 @@ public func FfiConverterTypeNativeRcsUnlinkCutoverGenerations_lift(_ buf: RustBu
 #endif
 public func FfiConverterTypeNativeRcsUnlinkCutoverGenerations_lower(_ value: NativeRcsUnlinkCutoverGenerations) -> RustBuffer {
     return FfiConverterTypeNativeRcsUnlinkCutoverGenerations.lower(value)
+}
+
+
+public struct NativeReactionAttemptDecision: Equatable, Hashable {
+    public var permitted: Bool
+    public var requestId: String?
+    public var googleConversationId: String?
+    public var googleMessageId: String?
+    public var action: NativeReactionAction?
+    public var emoji: String?
+    public var reason: NativeReactionRefusal?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(permitted: Bool, requestId: String?, googleConversationId: String?, googleMessageId: String?, action: NativeReactionAction?, emoji: String?, reason: NativeReactionRefusal?) {
+        self.permitted = permitted
+        self.requestId = requestId
+        self.googleConversationId = googleConversationId
+        self.googleMessageId = googleMessageId
+        self.action = action
+        self.emoji = emoji
+        self.reason = reason
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeReactionAttemptDecision: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeReactionAttemptDecision: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeReactionAttemptDecision {
+        return
+            try NativeReactionAttemptDecision(
+                permitted: FfiConverterBool.read(from: &buf), 
+                requestId: FfiConverterOptionString.read(from: &buf), 
+                googleConversationId: FfiConverterOptionString.read(from: &buf), 
+                googleMessageId: FfiConverterOptionString.read(from: &buf), 
+                action: FfiConverterOptionTypeNativeReactionAction.read(from: &buf), 
+                emoji: FfiConverterOptionString.read(from: &buf), 
+                reason: FfiConverterOptionTypeNativeReactionRefusal.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeReactionAttemptDecision, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.permitted, into: &buf)
+        FfiConverterOptionString.write(value.requestId, into: &buf)
+        FfiConverterOptionString.write(value.googleConversationId, into: &buf)
+        FfiConverterOptionString.write(value.googleMessageId, into: &buf)
+        FfiConverterOptionTypeNativeReactionAction.write(value.action, into: &buf)
+        FfiConverterOptionString.write(value.emoji, into: &buf)
+        FfiConverterOptionTypeNativeReactionRefusal.write(value.reason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeReactionAttemptDecision_lift(_ buf: RustBuffer) throws -> NativeReactionAttemptDecision {
+    return try FfiConverterTypeNativeReactionAttemptDecision.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeReactionAttemptDecision_lower(_ value: NativeReactionAttemptDecision) -> RustBuffer {
+    return FfiConverterTypeNativeReactionAttemptDecision.lower(value)
+}
+
+
+public struct NativeReactionJob: Equatable, Hashable {
+    public var requestId: String
+    public var messageId: String
+    public var conversationId: String
+    public var emoji: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(requestId: String, messageId: String, conversationId: String, emoji: String?) {
+        self.requestId = requestId
+        self.messageId = messageId
+        self.conversationId = conversationId
+        self.emoji = emoji
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeReactionJob: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeReactionJob: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeReactionJob {
+        return
+            try NativeReactionJob(
+                requestId: FfiConverterString.read(from: &buf), 
+                messageId: FfiConverterString.read(from: &buf), 
+                conversationId: FfiConverterString.read(from: &buf), 
+                emoji: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeReactionJob, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.requestId, into: &buf)
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterOptionString.write(value.emoji, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeReactionJob_lift(_ buf: RustBuffer) throws -> NativeReactionJob {
+    return try FfiConverterTypeNativeReactionJob.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeReactionJob_lower(_ value: NativeReactionJob) -> RustBuffer {
+    return FfiConverterTypeNativeReactionJob.lower(value)
 }
 
 
@@ -16957,6 +17228,260 @@ public func FfiConverterTypeNativeRcsTargetDecision_lower(_ value: NativeRcsTarg
 
 
 
+public enum NativeReactionAction: Equatable, Hashable {
+    
+    case add
+    case `switch`
+    case remove
+    case noop
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeReactionAction: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeReactionAction: FfiConverterRustBuffer {
+    typealias SwiftType = NativeReactionAction
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeReactionAction {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .add
+        
+        case 2: return .`switch`
+        
+        case 3: return .remove
+        
+        case 4: return .noop
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeReactionAction, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .add:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .`switch`:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .remove:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .noop:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeReactionAction_lift(_ buf: RustBuffer) throws -> NativeReactionAction {
+    return try FfiConverterTypeNativeReactionAction.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeReactionAction_lower(_ value: NativeReactionAction) -> RustBuffer {
+    return FfiConverterTypeNativeReactionAction.lower(value)
+}
+
+
+
+
+public enum NativeReactionOutcome: Equatable, Hashable {
+    
+    case sent
+    case unknown
+    case notSent
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeReactionOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeReactionOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = NativeReactionOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeReactionOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .sent
+        
+        case 2: return .unknown
+        
+        case 3: return .notSent
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeReactionOutcome, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .sent:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .notSent:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeReactionOutcome_lift(_ buf: RustBuffer) throws -> NativeReactionOutcome {
+    return try FfiConverterTypeNativeReactionOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeReactionOutcome_lower(_ value: NativeReactionOutcome) -> RustBuffer {
+    return FfiConverterTypeNativeReactionOutcome.lower(value)
+}
+
+
+
+
+public enum NativeReactionRefusal: Equatable, Hashable {
+    
+    case expired
+    case messageUnavailable
+    case notRcs
+    case linkUnavailable
+    case rejected
+    case busy
+    case invalidEmoji
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeReactionRefusal: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeReactionRefusal: FfiConverterRustBuffer {
+    typealias SwiftType = NativeReactionRefusal
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeReactionRefusal {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .expired
+        
+        case 2: return .messageUnavailable
+        
+        case 3: return .notRcs
+        
+        case 4: return .linkUnavailable
+        
+        case 5: return .rejected
+        
+        case 6: return .busy
+        
+        case 7: return .invalidEmoji
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeReactionRefusal, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .expired:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .messageUnavailable:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .notRcs:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .linkUnavailable:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .rejected:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .busy:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .invalidEmoji:
+            writeInt(&buf, Int32(7))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeReactionRefusal_lift(_ buf: RustBuffer) throws -> NativeReactionRefusal {
+    return try FfiConverterTypeNativeReactionRefusal.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeReactionRefusal_lower(_ value: NativeReactionRefusal) -> RustBuffer {
+    return FfiConverterTypeNativeReactionRefusal.lower(value)
+}
+
+
+
+
 public enum NativeRemoteAttachmentState: Equatable, Hashable {
     
     case available
@@ -18489,6 +19014,54 @@ fileprivate struct FfiConverterOptionTypeNativeRcsProviderRouteReason: FfiConver
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeNativeReactionAction: FfiConverterRustBuffer {
+    typealias SwiftType = NativeReactionAction?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNativeReactionAction.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNativeReactionAction.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeNativeReactionRefusal: FfiConverterRustBuffer {
+    typealias SwiftType = NativeReactionRefusal?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNativeReactionRefusal.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNativeReactionRefusal.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeNativeStorageCleanupUnavailableReason: FfiConverterRustBuffer {
     typealias SwiftType = NativeStorageCleanupUnavailableReason?
 
@@ -19137,6 +19710,31 @@ fileprivate struct FfiConverterSequenceTypeNativeRcsOwnerUnlinkCutoverCandidate:
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeNativeRcsReactionEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [NativeRcsReactionEntry]
+
+    public static func write(_ value: [NativeRcsReactionEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNativeRcsReactionEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NativeRcsReactionEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NativeRcsReactionEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNativeRcsReactionEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeNativeRcsReceiveContext: FfiConverterRustBuffer {
     typealias SwiftType = [NativeRcsReceiveContext]
 
@@ -19154,6 +19752,31 @@ fileprivate struct FfiConverterSequenceTypeNativeRcsReceiveContext: FfiConverter
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeNativeRcsReceiveContext.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeNativeReactionJob: FfiConverterRustBuffer {
+    typealias SwiftType = [NativeReactionJob]
+
+    public static func write(_ value: [NativeReactionJob], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNativeReactionJob.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NativeReactionJob] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NativeReactionJob]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNativeReactionJob.read(from: &buf))
         }
         return seq
     }
@@ -20330,6 +20953,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_mms_acquisition_outcome() != 53880) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_reaction_attempt() != 44924) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_send_attempt() != 43275) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20501,6 +21127,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ingest_raw() != 45413) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ingest_rcs_message_reactions() != 47343) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_initial_replay_caught_up() != 37136) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20642,6 +21271,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_phone_read_effects() != 55700) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_reaction_jobs() != 22692) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_sender_unblocks() != 42922) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20678,6 +21310,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_message_history_capture_source() != 6609) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_reaction_capability() != 30354) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_send_cancellation_capability() != 8795) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20709,6 +21344,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_rcs_link_lifecycle() != 61306) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_reaction_outcome() != 716) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_recovery_snapshot_capacity() != 22677) {

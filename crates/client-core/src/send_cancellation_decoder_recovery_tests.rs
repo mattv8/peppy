@@ -133,7 +133,7 @@ fn decoder_revision_recovers_applied_cancellation_events_without_reopening_comma
         get_meta(&store.conn, "decoder_revision:1")
             .unwrap()
             .as_deref(),
-        Some("12")
+        Some(DECODER_REVISION)
     );
 }
 

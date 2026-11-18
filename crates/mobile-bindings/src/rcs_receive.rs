@@ -224,6 +224,10 @@ struct GoReceiveRecord {
     /// Other ids Google gives the same message; `omitempty` on the Go side.
     #[serde(default)]
     alternate_message_ids: Vec<String>,
+    /// Reaction facts, `omitempty` on the Go side. The host passes them to
+    /// `ingest_rcs_message_reactions` separately, so the message record ignores them.
+    #[serde(default, rename = "reactions")]
+    _reactions: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Deserialize)]
@@ -317,6 +321,9 @@ mod tests {
             send_cancel_requested: false,
             sent_again_message_id: None,
             send_route: None,
+            reactions: Vec::new(),
+            own_reaction_request: None,
+            reactable: None,
         }
     }
 
