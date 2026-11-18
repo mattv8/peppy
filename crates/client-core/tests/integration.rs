@@ -68,6 +68,7 @@ mod sms_flow;
 mod sms_repair;
 mod snapshot_manifest;
 mod snapshot_projection;
+mod snapshot_restart;
 
 mod schema_upgrade_matrix;
 mod vault_identity_behaviour;

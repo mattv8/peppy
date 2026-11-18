@@ -11,14 +11,14 @@ use tempfile::TempDir;
 
 const OVERSIZE_JSON: usize = 2 * 1024 * 1024 + 1;
 
-fn raw(config: &ClientConfig) -> rusqlite::Connection {
+pub(crate) fn raw(config: &ClientConfig) -> rusqlite::Connection {
     let conn = rusqlite::Connection::open(&config.database_path).unwrap();
     conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", "07".repeat(32)))
         .unwrap();
     conn
 }
 
-fn entry(cursor: u64, envelope: &Envelope) -> SnapshotManifestEntry {
+pub(crate) fn entry(cursor: u64, envelope: &Envelope) -> SnapshotManifestEntry {
     SnapshotManifestEntry {
         cursor: Cursor(cursor),
         digest: envelope.wire_digest().unwrap(),
@@ -27,10 +27,10 @@ fn entry(cursor: u64, envelope: &Envelope) -> SnapshotManifestEntry {
     }
 }
 
-fn served_json(_: u64, envelope: &Envelope) -> Vec<u8> {
+pub(crate) fn served_json(_: u64, envelope: &Envelope) -> Vec<u8> {
     serde_json::to_vec(envelope).unwrap()
 }
-fn untampered(_: u64, _: &mut SnapshotManifestEntry) {}
+pub(crate) fn untampered(_: u64, _: &mut SnapshotManifestEntry) {}
 
 /// What `raw_wire` stores for an over-limit record: the marker and the digest of the bytes.
 fn oversize_marker(json: &[u8]) -> Vec<u8> {
@@ -74,7 +74,7 @@ fn stage_full(
 /// The host's manifest loop. `tamper` edits entries before they are sent, `served` gives the bytes
 /// the records page returns for a downloaded record. Returns the generation and the `missing`
 /// value of every manifest page.
-fn stage_manifest(
+pub(crate) fn stage_manifest(
     client: &Client,
     retained: &[SnapshotRecord],
     high: u64,
@@ -120,14 +120,14 @@ fn stage_manifest(
 }
 
 #[derive(Debug, PartialEq)]
-struct Staged {
-    rows: Vec<(i64, Vec<u8>)>,
+pub(crate) struct Staged {
+    pub(crate) rows: Vec<(i64, Vec<u8>)>,
     received: i64,
     received_bytes: i64,
     overlap: i64,
     last_cursor: i64,
 }
-fn staged(config: &ClientConfig, generation: u64) -> Staged {
+pub(crate) fn staged(config: &ClientConfig, generation: u64) -> Staged {
     let conn = raw(config);
     let mut stmt = conn
         .prepare("SELECT cursor,wire FROM snapshot_records WHERE generation=? ORDER BY cursor")
@@ -152,7 +152,7 @@ fn staged(config: &ClientConfig, generation: u64) -> Staged {
         last_cursor,
     }
 }
-fn staged_count(config: &ClientConfig, generation: u64) -> i64 {
+pub(crate) fn staged_count(config: &ClientConfig, generation: u64) -> i64 {
     raw(config)
         .query_row(
             "SELECT COUNT(*) FROM snapshot_records WHERE generation=?",
@@ -163,7 +163,7 @@ fn staged_count(config: &ClientConfig, generation: u64) -> i64 {
 }
 
 #[derive(Debug, PartialEq)]
-struct Published {
+pub(crate) struct Published {
     journal: Vec<(i64, String, Option<String>, Vec<u8>)>,
     receive_cursor: Cursor,
     projection: Option<(SnapshotProjectionState, Option<String>)>,
@@ -174,7 +174,7 @@ struct Published {
     restores: Vec<(String, i64, String)>,
     restore_records: Vec<(i64, i64)>,
 }
-fn published(config: &ClientConfig, client: &Client) -> Published {
+pub(crate) fn published(config: &ClientConfig, client: &Client) -> Published {
     let conn = raw(config);
     let journal = {
         let mut stmt = conn
@@ -401,7 +401,7 @@ fn equivalence_pending_history_added_above_cursor_matches_full_import() {
 }
 
 /// Owner-side log with one origin-tagged SMS, one untagged SMS and one compacted contact upsert.
-fn verification_log(dir: &TempDir, vault: &Vault) -> Vec<Envelope> {
+pub(crate) fn verification_log(dir: &TempDir, vault: &Vault) -> Vec<Envelope> {
     let cfg = config(dir, "verify-source", vault);
     let source = unlocked(&cfg, vault);
     source.set_server_compaction_supported(false).unwrap();
@@ -694,7 +694,7 @@ fn manifest_origin_tag_flag_mismatch_in_both_directions_is_missing_then_fails_at
 }
 
 /// Owner-side log of `n` plain (untagged, uncompacted) SMS records.
-fn plain_log(dir: &TempDir, vault: &Vault, n: usize) -> Vec<Envelope> {
+pub(crate) fn plain_log(dir: &TempDir, vault: &Vault, n: usize) -> Vec<Envelope> {
     let cfg = config(dir, "plain-source", vault);
     let source = unlocked(&cfg, vault);
     source.set_server_origin_tags_supported(false).unwrap();
@@ -709,14 +709,14 @@ fn plain_log(dir: &TempDir, vault: &Vault, n: usize) -> Vec<Envelope> {
     server.log
 }
 
-fn raw_record(cursor: u64, log: &[Envelope]) -> RawSnapshotRecord {
+pub(crate) fn raw_record(cursor: u64, log: &[Envelope]) -> RawSnapshotRecord {
     RawSnapshotRecord {
         cursor: Cursor(cursor),
         envelope_json: serde_json::to_vec(&log[cursor as usize - 1]).unwrap(),
     }
 }
 
-fn all_entries(log: &[Envelope]) -> Vec<SnapshotManifestEntry> {
+pub(crate) fn all_entries(log: &[Envelope]) -> Vec<SnapshotManifestEntry> {
     log.iter()
         .enumerate()
         .map(|(i, e)| entry(i as u64 + 1, e))
@@ -1149,33 +1149,6 @@ fn plain_begin_obsoletes_a_manifest_generation_and_clears_the_marker() {
     assert_eq!(
         device.append_snapshot_manifest(manifest.generation, &all_entries(&log)),
         Err(Error::InvalidRequest("snapshot manifest generation"))
-    );
-}
-
-#[test]
-fn manifest_begin_resets_the_verified_counter() {
-    let dir = TempDir::new().unwrap();
-    let vault = Vault::new();
-    let log = plain_log(&dir, &vault, 2);
-    let cfg = config(&dir, "reset", &vault);
-    let device = unlocked(&cfg, &vault);
-    ingest_all(&device, &log);
-    let first = device
-        .begin_snapshot_with_manifest(Cursor(2), 2, None)
-        .unwrap();
-    device
-        .append_snapshot_manifest(first.generation, &all_entries(&log))
-        .unwrap();
-    assert_eq!(
-        manifest_metadata(&cfg, "snapshot_manifest_verified").as_deref(),
-        Some("2")
-    );
-    device
-        .begin_snapshot_with_manifest(Cursor(2), 2, None)
-        .unwrap();
-    assert_eq!(
-        manifest_metadata(&cfg, "snapshot_manifest_verified").as_deref(),
-        Some("0")
     );
 }
 
