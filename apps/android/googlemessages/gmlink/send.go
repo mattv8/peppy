@@ -116,7 +116,7 @@ func (link *Link) PrepareRcs(requestJSON string) string {
 		link.clearPreparedTicketLocked()
 	}
 	link.expireNativeTicketLocked(now)
-	if link.preparedTicket != nil || link.nativeTicket != nil || link.nativeInFlight != nil || link.sendAdmissionInFlight {
+	if link.preparedTicket != nil || link.preparedReactionTicket != nil || link.nativeTicket != nil || link.nativeInFlight != nil || link.sendAdmissionInFlight {
 		return sendJSON(rcsSendResult{Code: "busy"})
 	}
 	if link.closed || !link.hasSendVerificationLocked() || link.runGeneration != link.generation {
@@ -277,7 +277,10 @@ func (link *Link) CancelPreparedRcs(ticketID string) string {
 	return sendJSON(rcsSendResult{Code: "cancelled"})
 }
 
-func (link *Link) clearPreparedTicketLocked() { link.preparedTicket = nil }
+func (link *Link) clearPreparedTicketLocked() {
+	link.preparedTicket = nil
+	link.preparedReactionTicket = nil
+}
 
 func (link *Link) nowForTicketLocked() time.Time {
 	if link.ticketNow != nil {
@@ -293,6 +296,8 @@ func decodeFixedJSON(input string, output any) bool {
 		maxBytes, fields = maxPrepareJSONBytes, requiredJSONFields("tmp_id", "google_conversation_id", "snapshot_token", "content")
 	case *commitRcsPermit:
 		maxBytes, fields = maxCommitJSONBytes, requiredJSONFields("command_id", "tmp_id", "google_conversation_id", "snapshot_token", "mapping_revision", "proof_digest", "content")
+	case *reactionRequest:
+		maxBytes, fields = maxReactionJSONBytes, requiredJSONFields("request_id", "google_conversation_id", "google_message_id", "action", "emoji", "owner_generation")
 	default:
 		return false
 	}

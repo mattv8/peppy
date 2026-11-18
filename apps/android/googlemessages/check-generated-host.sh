@@ -32,3 +32,11 @@ grep -Eq 'ownerGeneration\(\)' "$signature" || {
 	printf '%s\n' 'generated Link.ownerGeneration is missing' >&2
 	return 1 2>/dev/null || exit 1
 }
+grep -Eq 'prepareReaction\(java\.lang\.String\)' "$signature" || {
+	printf '%s\n' 'generated Link.prepareReaction is missing' >&2
+	return 1 2>/dev/null || exit 1
+}
+grep -Eq 'commitPreparedReaction\(java\.lang\.String\)' "$signature" || {
+	printf '%s\n' 'generated Link.commitPreparedReaction is missing' >&2
+	return 1 2>/dev/null || exit 1
+}

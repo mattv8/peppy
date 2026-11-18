@@ -8,6 +8,7 @@ import (
 	"errors"
 	"slices"
 	"time"
+	"unicode/utf8"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
@@ -29,7 +30,15 @@ type rcsReceiveRecord struct {
 	Attachments          *[]rcsMediaAttachment `json:"attachments,omitempty"`
 	// The other ids Google gives this message. The copy of the message in the phone's
 	// message store carries one of the message's ids.
-	AlternateMessageIDs *[]string `json:"alternate_message_ids,omitempty"`
+	AlternateMessageIDs *[]string      `json:"alternate_message_ids,omitempty"`
+	Reactions           *[]rcsReaction `json:"reactions,omitempty"`
+}
+
+type rcsReaction struct {
+	Emoji            string   `json:"emoji"`
+	IsSelf           bool     `json:"is_self"`
+	Addresses        []string `json:"addresses"`
+	UnresolvedActors uint32   `json:"unresolved_actors"`
 }
 
 type rcsMediaAttachment struct {
@@ -45,6 +54,7 @@ type rcsProjection struct {
 	Code                 string            `json:"code"`
 	GoogleConversationID string            `json:"google_conversation_id,omitempty"`
 	Record               *rcsReceiveRecord `json:"record,omitempty"`
+	Diagnostic           string            `json:"-"`
 }
 
 type rcsPageProjection struct {
@@ -55,7 +65,8 @@ type rcsPageProjection struct {
 	HasMore    bool               `json:"has_more"`
 	NewestMS   int64              `json:"newest_ms"`
 	// Skipped counts history records withheld because they are not supported one-to-one text.
-	Skipped int `json:"skipped"`
+	Skipped             int `json:"skipped"`
+	ReactionDiagnostics int `json:"-"`
 }
 
 type rcsPageSignal struct {
@@ -145,7 +156,82 @@ func projectRcsMessage(wrapped *libgm.WrappedMessage, conversation *gmproto.Conv
 			record.SenderUnknown = true
 		}
 	}
+	if reactions, ok := projectReceiveReactions(message, conversation); ok {
+		record.Reactions = &reactions
+	} else {
+		return rcsProjection{Code: "ok", Record: record, Diagnostic: "reaction_projection_unverified"}
+	}
 	return rcsProjection{Code: "ok", Record: record}
+}
+
+func projectReceiveReactions(message *gmproto.Message, conversation *gmproto.Conversation) ([]rcsReaction, bool) {
+	entries := message.GetReactions()
+	if len(entries) > 32 {
+		return nil, false
+	}
+	participants := make(map[string]*gmproto.Participant, len(conversation.GetParticipants()))
+	for _, participant := range conversation.GetParticipants() {
+		if participant == nil || participant.GetID().GetParticipantID() == "" {
+			continue
+		}
+		participants[participant.GetID().GetParticipantID()] = participant
+	}
+	reactions := make([]rcsReaction, 0, len(entries))
+	emojis := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		data := entry.GetData()
+		if entry == nil || data == nil {
+			return nil, false
+		}
+		if data.GetCustomEmoji() != nil {
+			continue
+		}
+		emoji := data.GetUnicode()
+		if !validReactionEmoji(emoji) || !knownReactionEmoji(data.GetType()) || len(entry.GetParticipantIDs()) == 0 || len(entry.GetParticipantIDs()) > 100 {
+			return nil, false
+		}
+		if _, duplicate := emojis[emoji]; duplicate {
+			return nil, false
+		}
+		emojis[emoji] = struct{}{}
+		reaction := rcsReaction{Emoji: emoji, Addresses: []string{}}
+		actors := make(map[string]struct{}, len(entry.GetParticipantIDs()))
+		addresses := make(map[string]struct{}, len(entry.GetParticipantIDs()))
+		for _, participantID := range entry.GetParticipantIDs() {
+			if participantID == "" || !utf8.ValidString(participantID) || len(participantID) > 256 {
+				return nil, false
+			}
+			if _, duplicate := actors[participantID]; duplicate {
+				return nil, false
+			}
+			actors[participantID] = struct{}{}
+			participant := participants[participantID]
+			if participant == nil {
+				reaction.UnresolvedActors++
+				continue
+			}
+			if participant.GetIsMe() {
+				reaction.IsSelf = true
+				continue
+			}
+			address, ok := canonicalGoogleNumber(participant.GetID().GetNumber(), participant.GetFormattedNumber())
+			if !ok {
+				reaction.UnresolvedActors++
+				continue
+			}
+			if _, duplicate := addresses[address]; !duplicate {
+				addresses[address] = struct{}{}
+				reaction.Addresses = append(reaction.Addresses, address)
+			}
+		}
+		reactions = append(reactions, reaction)
+	}
+	return reactions, true
+}
+
+func knownReactionEmoji(value gmproto.EmojiType) bool {
+	_, known := gmproto.EmojiType_name[int32(value)]
+	return known && value != gmproto.EmojiType_REACTION_TYPE_UNSPECIFIED
 }
 
 func groupMessageSender(message *gmproto.Message, conversation *gmproto.Conversation) (string, bool) {
@@ -197,6 +283,9 @@ func projectRcsPage(page *gmproto.ListMessagesResponse, conversation *gmproto.Co
 			result.NewestMS = messageMS
 		}
 		projection := projectRcsMessage(&libgm.WrappedMessage{Message: message}, conversation)
+		if projection.Diagnostic != "" {
+			result.ReactionDiagnostics++
+		}
 		switch projection.Code {
 		case "ok":
 			result.Records = append(result.Records, *projection.Record)
@@ -419,6 +508,9 @@ func (link *Link) projectRcsEventFor(queued queuedEvent, wrapped *libgm.WrappedM
 			projection = projectRcsMessage(wrapped, conversation)
 		}
 	}
+	if projection.Diagnostic != "" {
+		link.emit("receive", "reaction_projection_unverified", 0)
+	}
 	encoded, _ := json.Marshal(projection)
 	link.enqueueOutput(hostOutput{
 		rcsRecord:         string(encoded),
@@ -516,7 +608,11 @@ func (link *Link) FetchRcsGap(googleConversationID, pageToken string) string {
 	if conversation == nil {
 		return encodeRcsPage(rcsPageFailure("conversation_unsupported"))
 	}
-	return encodeRcsPage(projectRcsPage(page, conversation))
+	projected := projectRcsPage(page, conversation)
+	if projected.ReactionDiagnostics != 0 {
+		link.emit("receive", "reaction_projection_unverified", 0)
+	}
+	return encodeRcsPage(projected)
 }
 
 func rcsPageFailure(code string) rcsPageProjection {

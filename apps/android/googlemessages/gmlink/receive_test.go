@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +76,7 @@ func TestRcsProjectionProjectsOnlyApprovedTextFields(t *testing.T) {
 	if got.Record == nil {
 		t.Fatal("record is nil")
 	}
+	reactions := []rcsReaction{}
 	want := rcsReceiveRecord{
 		GoogleMessageID:      "message-1",
 		GoogleConversationID: "conversation-1",
@@ -83,15 +86,16 @@ func TestRcsProjectionProjectsOnlyApprovedTextFields(t *testing.T) {
 		Status:               "delivered",
 		TmpID:                "tmp-1",
 		RcsReported:          true,
+		Reactions:            &reactions,
 	}
-	if *got.Record != want {
+	if !reflect.DeepEqual(*got.Record, want) {
 		t.Fatalf("record = %#v, want %#v", *got.Record, want)
 	}
 	encoded, err := json.Marshal(got)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(encoded) != `{"code":"ok","record":{"google_message_id":"message-1","google_conversation_id":"conversation-1","direction":"outgoing","body":"synthetic body","sent_at_ms":1735689600123,"status":"delivered","tmp_id":"tmp-1","rcs_reported":true}}` {
+	if string(encoded) != `{"code":"ok","record":{"google_message_id":"message-1","google_conversation_id":"conversation-1","direction":"outgoing","body":"synthetic body","sent_at_ms":1735689600123,"status":"delivered","tmp_id":"tmp-1","rcs_reported":true,"reactions":[]}}` {
 		t.Fatalf("JSON = %s", encoded)
 	}
 }
@@ -134,6 +138,83 @@ func TestRcsProjectionReportsTheOtherIDsOfAMessage(t *testing.T) {
 		if !strings.Contains(string(encoded), test.want) {
 			t.Fatalf("%s: JSON = %s, want %s", name, encoded, test.want)
 		}
+	}
+}
+
+func TestRcsProjectionMapsReactionParticipantsAndFailsClosed(t *testing.T) {
+	message := textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE)
+	message.Message.Reactions = []*gmproto.ReactionEntry{
+		{Data: gmproto.MakeReactionData("🙏"), ParticipantIDs: []string{"self", "other", "missing"}},
+		{Data: &gmproto.ReactionData{Unicode: "custom", Type: gmproto.EmojiType_CUSTOM, CustomEmoji: &gmproto.CustomEmojiData{}}, ParticipantIDs: []string{"other"}},
+	}
+	conversation := &gmproto.Conversation{
+		ConversationID: message.Message.GetConversationID(),
+		Type:           gmproto.ConversationType_RCS,
+		Participants: []*gmproto.Participant{
+			{ID: &gmproto.SmallInfo{ParticipantID: "self"}, IsMe: true},
+			{ID: &gmproto.SmallInfo{ParticipantID: "other", Number: "+15551234567"}},
+		},
+	}
+	projected := projectRcsMessage(message, conversation)
+	if projected.Code != "ok" || projected.Diagnostic != "" || projected.Record == nil || projected.Record.Reactions == nil {
+		t.Fatalf("projection = %#v", projected)
+	}
+	want := []rcsReaction{{Emoji: "🙏", IsSelf: true, Addresses: []string{"+15551234567"}, UnresolvedActors: 1}}
+	if !reflect.DeepEqual(*projected.Record.Reactions, want) {
+		t.Fatalf("reactions = %#v, want %#v", *projected.Record.Reactions, want)
+	}
+
+	message.Message.Reactions[0].ParticipantIDs = []string{"other", "other"}
+	projected = projectRcsMessage(message, conversation)
+	if projected.Code != "ok" || projected.Diagnostic != "reaction_projection_unverified" || projected.Record == nil || projected.Record.Reactions != nil {
+		t.Fatalf("invalid projection = %#v", projected)
+	}
+}
+
+func TestRcsProjectionKeepsExtendedPictographicReaction(t *testing.T) {
+	message := textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE)
+	message.Message.Reactions = []*gmproto.ReactionEntry{{Data: gmproto.MakeReactionData("‼️"), ParticipantIDs: []string{"self"}}}
+	conversation := &gmproto.Conversation{
+		ConversationID: message.Message.GetConversationID(),
+		Type:           gmproto.ConversationType_RCS,
+		Participants:   []*gmproto.Participant{{ID: &gmproto.SmallInfo{ParticipantID: "self"}, IsMe: true}},
+	}
+	projected := projectRcsMessage(message, conversation)
+	if projected.Code != "ok" || projected.Diagnostic != "" || projected.Record == nil || projected.Record.Reactions == nil {
+		t.Fatalf("projection = %#v", projected)
+	}
+	want := []rcsReaction{{Emoji: "‼️", IsSelf: true, Addresses: []string{}}}
+	if !reflect.DeepEqual(*projected.Record.Reactions, want) {
+		t.Fatalf("reactions = %#v, want %#v", *projected.Record.Reactions, want)
+	}
+}
+
+func TestMalformedReactionsRetainGroupSenderFacts(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		status     gmproto.MessageStatusType
+		wantSelf   bool
+		wantSender string
+	}{
+		{name: "incoming", status: gmproto.MessageStatusType_INCOMING_COMPLETE, wantSender: "+15551234567"},
+		{name: "outgoing", status: gmproto.MessageStatusType_OUTGOING_COMPLETE, wantSelf: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			message := textMessage(test.status)
+			message.Message.ParticipantID = "other"
+			message.Message.Reactions = []*gmproto.ReactionEntry{{Data: gmproto.MakeReactionData("👍"), ParticipantIDs: []string{"other", "other"}}}
+			conversation := &gmproto.Conversation{
+				ConversationID: message.Message.GetConversationID(), Type: gmproto.ConversationType_RCS, IsGroupChat: true,
+				Participants: []*gmproto.Participant{{ID: &gmproto.SmallInfo{ParticipantID: "other", Number: "+15551234567"}, IsVisible: true}},
+			}
+			projected := projectRcsMessage(message, conversation)
+			if projected.Code != "ok" || projected.Diagnostic != "reaction_projection_unverified" || projected.Record == nil {
+				t.Fatalf("projection = %#v", projected)
+			}
+			if projected.Record.Reactions != nil || projected.Record.SelfSent != test.wantSelf || projected.Record.SenderAddress != test.wantSender || projected.Record.SenderUnknown {
+				t.Fatalf("record = %#v", projected.Record)
+			}
+		})
 	}
 }
 
@@ -948,5 +1029,47 @@ func TestRcsPageProjectionFailuresUseEmptyArrayEnvelope(t *testing.T) {
 				t.Fatalf("envelope = %s", encoded)
 			}
 		})
+	}
+}
+
+func TestReactionProjectionMatchesGoldenRecords(t *testing.T) {
+	type goldenRecord struct {
+		Name      string        `json:"name"`
+		Reactions []rcsReaction `json:"reactions"`
+	}
+	encoded, err := os.ReadFile("testdata/reaction_records.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []goldenRecord
+	if err := json.Unmarshal(encoded, &want); err != nil {
+		t.Fatal(err)
+	}
+	self := &gmproto.Participant{ID: &gmproto.SmallInfo{ParticipantID: "self"}, IsMe: true}
+	other := &gmproto.Participant{ID: &gmproto.SmallInfo{ParticipantID: "other", Number: "+15551234567"}}
+	otherTwo := &gmproto.Participant{ID: &gmproto.SmallInfo{ParticipantID: "other-two", Number: "+15557654321"}}
+	cases := []struct {
+		name         string
+		reaction     *gmproto.ReactionEntry
+		participants []*gmproto.Participant
+	}{
+		{"self_only", &gmproto.ReactionEntry{Data: gmproto.MakeReactionData("👍"), ParticipantIDs: []string{"self"}}, []*gmproto.Participant{self}},
+		{"unresolved_only", &gmproto.ReactionEntry{Data: gmproto.MakeReactionData("🙏"), ParticipantIDs: []string{"missing"}}, nil},
+		{"mixed", &gmproto.ReactionEntry{Data: gmproto.MakeReactionData("❤️"), ParticipantIDs: []string{"self", "other", "missing"}}, []*gmproto.Participant{self, other}},
+		{"custom_with_unicode", &gmproto.ReactionEntry{Data: gmproto.MakeReactionData("👨‍👩‍👧"), ParticipantIDs: []string{"other-two"}}, []*gmproto.Participant{otherTwo}},
+	}
+	got := make([]goldenRecord, 0, len(cases))
+	for _, test := range cases {
+		message := textMessage(gmproto.MessageStatusType_INCOMING_COMPLETE)
+		message.Message.Reactions = []*gmproto.ReactionEntry{test.reaction}
+		conversation := &gmproto.Conversation{ConversationID: message.Message.GetConversationID(), Type: gmproto.ConversationType_RCS, Participants: test.participants}
+		projected := projectRcsMessage(message, conversation)
+		if projected.Code != "ok" || projected.Diagnostic != "" || projected.Record == nil || projected.Record.Reactions == nil {
+			t.Fatalf("%s projection = %#v", test.name, projected)
+		}
+		got = append(got, goldenRecord{Name: test.name, Reactions: *projected.Record.Reactions})
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reaction records = %#v, want %#v", got, want)
 	}
 }

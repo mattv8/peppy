@@ -109,10 +109,12 @@ type Link struct {
 	streamSource                 libgm.StreamSource
 	streamOpen                   bool
 	preparedTicket               *preparedRcsTicket
+	preparedReactionTicket       *preparedReactionTicket
 	sendAdmissionInFlight        bool
 	beforeSendAdmission          func()
 	ticketNow                    func() time.Time
 	sendMessage                  func(context.Context, *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error)
+	sendReaction                 func(context.Context, *gmproto.SendReactionRequest) (*gmproto.SendReactionResponse, error)
 	activateSession              func(context.Context) error
 	sessionActivatedGeneration   uint64
 	sessionEvidenceRequestedAt   time.Time
