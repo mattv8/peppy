@@ -1,6 +1,10 @@
-use crate::{Client, Error, Message, Store, message_from_row, message_row};
+use crate::{
+    Client, Error, MESSAGE_IDS_SELECT, Message, MessageId, Store, message_row, messages_from_rows,
+    parse,
+};
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fmt::Write;
 
 pub const DEFAULT_SEARCH_LIMIT: usize = 6;
@@ -892,13 +896,7 @@ fn message_window(store: &Store, request: MessageWindowRequest) -> Result<Messag
                 })?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        let messages = ids
-            .iter()
-            .map(|id| {
-                load_message(store, &conversation_id, id)
-                    .and_then(|message| message.ok_or(Error::Database))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let messages = load_messages(store, &conversation_id, &ids)?;
         let (has_older, has_newer) = message_edge_flags(store, &conversation_id, &ids)?;
         return Ok(MessageWindow {
             conversation_id,
@@ -965,13 +963,7 @@ fn message_window(store: &Store, request: MessageWindowRequest) -> Result<Messag
         let newer = store.conn.prepare("SELECT id FROM messages WHERE conversation_id=?1 AND (sort_at_ms>?2 OR (sort_at_ms=?2 AND local_order>?3)) ORDER BY sort_at_ms,local_order LIMIT ?4")?.query_map(params![conversation_id, sort_at_ms, local_order, (HISTORY_WINDOW_LIMIT - ids.len()) as i64], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         ids.extend(newer);
     }
-    let messages = ids
-        .iter()
-        .map(|id| {
-            load_message(store, &conversation_id, id)
-                .and_then(|message| message.ok_or(Error::Database))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let messages = load_messages(store, &conversation_id, &ids)?;
     let (has_older, has_newer) = message_edge_flags(store, &conversation_id, &ids)?;
     Ok(MessageWindow {
         conversation_id,
@@ -1009,8 +1001,32 @@ fn message_edge_flags(
     Ok((has_older, has_newer))
 }
 
-fn load_message(store: &Store, conversation_id: &str, id: &str) -> Result<Option<Message>, Error> {
-    store.conn.query_row("SELECT m.payload,m.seen,selected_status.state,selected_status.status_at_ms,selected_status.refusal_reason,(SELECT o.state FROM commands c JOIN outbox o ON o.command_id=c.command_id WHERE c.message_id=m.id),EXISTS(SELECT 1 FROM commands c WHERE c.message_id=m.id) FROM messages m LEFT JOIN send_status selected_status ON selected_status.rowid=(SELECT st.rowid FROM commands c JOIN send_status st ON st.command_id=c.command_id AND st.producer_device_id=c.gateway_device_id WHERE c.message_id=m.id ORDER BY c.rowid LIMIT 1) WHERE m.id=? AND m.conversation_id=?", params![id, conversation_id], message_row).optional()?.map(|row| message_from_row(&store.conn, row)).transpose()
+/// The window's messages in window order: one statement reads the rows, and one batched lookup
+/// resolves their "Send again" markers. Missing rows are a database error, as before.
+fn load_messages(
+    store: &Store,
+    conversation_id: &str,
+    ids: &[String],
+) -> Result<Vec<Message>, Error> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let json = serde_json::to_string(ids).map_err(|_| Error::Database)?;
+    let rows = store
+        .conn
+        .prepare(MESSAGE_IDS_SELECT)?
+        .query_map(params![conversation_id, json], message_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut by_id: HashMap<MessageId, Message> = messages_from_rows(&store.conn, rows)?
+        .into_iter()
+        .map(|message| (message.payload.record.message_id, message))
+        .collect();
+    ids.iter()
+        .map(|id| {
+            let id = parse::<MessageId>(id)?;
+            by_id.remove(&id).ok_or(Error::Database)
+        })
+        .collect()
 }
 
 #[cfg(test)]

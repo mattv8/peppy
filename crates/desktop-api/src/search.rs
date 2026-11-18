@@ -400,6 +400,9 @@ mod tests {
             send_state: None,
             status_at_ms: None,
             send_refusal: None,
+            target_gateway_id: None,
+            send_cancel_requested: false,
+            sent_again_message_id: None,
         };
         let source = MessageWindow {
             conversation_id: message.payload.record.conversation_id.to_string(),

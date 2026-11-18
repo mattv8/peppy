@@ -813,7 +813,7 @@ pub(crate) fn is_group_conversation(
     )
 }
 
-const SEND_REASON_PREFIX: &str = "rcs_group_send_reason_v1/";
+pub(crate) const SEND_REASON_PREFIX: &str = "rcs_group_send_reason_v1/";
 
 fn send_reason_key(command_id: CommandId) -> String {
     format!("{SEND_REASON_PREFIX}{command_id}")

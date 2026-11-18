@@ -1130,6 +1130,9 @@ mod tests {
             send_state: Some(SendState::Sent),
             status_at_ms: Some(1_725_363_180_000),
             send_refusal: None,
+            target_gateway_id: None,
+            send_cancel_requested: false,
+            sent_again_message_id: None,
         };
 
         let view = message_view(&message, vec![]);
@@ -1175,6 +1178,9 @@ mod tests {
             send_state: None,
             status_at_ms: None,
             send_refusal: None,
+            target_gateway_id: None,
+            send_cancel_requested: false,
+            sent_again_message_id: None,
         }
     }
 

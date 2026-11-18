@@ -130,6 +130,16 @@ pub(crate) fn core(error: CoreError) -> Failure {
         CoreError::NotFound => {
             Failure::new("not-found", "The requested stored item was not found.")
         }
+        CoreError::SendAgainNotAllowed => {
+            Failure::new("invalid-request", "This message cannot be sent again.")
+        }
+        CoreError::AlreadySentAgain => {
+            Failure::new("already-sent-again", "This message was already sent again.")
+        }
+        CoreError::SendAgainAttachmentsUnavailable => Failure::new(
+            "attachments-unavailable",
+            "The attachments for this message are not available on this device.",
+        ),
         CoreError::StaleDraft { current_revision } => Failure {
             code: "stale-draft",
             message: "The draft changed elsewhere.".into(),

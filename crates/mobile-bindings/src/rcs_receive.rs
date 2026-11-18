@@ -313,6 +313,9 @@ mod tests {
             send_state: None,
             status_at_ms: Some(2),
             send_refusal: None,
+            target_gateway_id: None,
+            send_cancel_requested: false,
+            sent_again_message_id: None,
         }
     }
 

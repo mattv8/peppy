@@ -1159,6 +1159,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_restore_contact_json(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_retire_swallowed_commands(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_save_compose_draft(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_seal_typing_signal_v2(
@@ -1769,6 +1771,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_restore_contact_json(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_retire_swallowed_commands(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_save_compose_draft(`ptr`: Long,`draftId`: RustBuffer.ByValue,`expectedRevision`: Long,`update`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_seal_typing_signal_v2(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`gatewayDeviceId`: RustBuffer.ByValue,`origin`: RustBuffer.ByValue,`participant`: RustBuffer.ByValue,`state`: RustBuffer.ByValue,`clock`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -3042,6 +3046,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_restore_contact_json() and 0xFFFF) != 61758) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_retire_swallowed_commands() and 0xFFFF) != 18107) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_save_compose_draft() and 0xFFFF) != 5300) {
@@ -4387,6 +4394,11 @@ public interface NativeClientInterface {
     fun `requestSendCancellation`(`messageId`: kotlin.String): NativeSendCancellationView
     
     fun `restoreContactJson`(`input`: kotlin.String): kotlin.String
+    
+    /**
+     * Retires commands a snapshot swallowed as history on this gateway. Returns how many.
+     */
+    fun `retireSwallowedCommands`(): kotlin.UInt
     
     fun `saveComposeDraft`(`draftId`: kotlin.String, `expectedRevision`: kotlin.ULong, `update`: NativeComposeDraftUpdate): NativeComposeDraft
     
@@ -7362,6 +7374,23 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterString.lower(`input`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Retires commands a snapshot swallowed as history on this gateway. Returns how many.
+     */
+    @Throws(MobileBindingsException::class)override fun `retireSwallowedCommands`(): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_retire_swallowed_commands(
+        it,
+        _status)
 }
     }
     )

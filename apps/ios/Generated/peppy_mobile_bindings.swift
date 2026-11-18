@@ -1127,6 +1127,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func restoreContactJson(input: String) throws  -> String
     
+    /**
+     * Retires commands a snapshot swallowed as history on this gateway. Returns how many.
+     */
+    func retireSwallowedCommands() throws  -> UInt32
+    
     func saveComposeDraft(draftId: String, expectedRevision: UInt64, update: NativeComposeDraftUpdate) throws  -> NativeComposeDraft
     
     /**
@@ -3214,6 +3219,18 @@ open func restoreContactJson(input: String)throws  -> String  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_restore_contact_json(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(input),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Retires commands a snapshot swallowed as history on this gateway. Returns how many.
+     */
+open func retireSwallowedCommands()throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_retire_swallowed_commands(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -20732,6 +20749,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_restore_contact_json() != 61758) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_retire_swallowed_commands() != 18107) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_save_compose_draft() != 5300) {
