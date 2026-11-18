@@ -673,7 +673,8 @@ describe("setup landing routing", () => {
 
     render(<App hostKind="browser" fixedOrigin="https://community.example" />);
     expect(await screen.findByRole("button", { name: "Create server" })).toBeInTheDocument();
-    vi.useFakeTimers();
+    // Keep jsdom's focus-fixup rendering interval on the real clock.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     try {
       current = { ...current, connection: { state: "offline", origin: "https://community.example", errorCode: "connecting" } };
       await act(async () => hint?.());
@@ -3578,7 +3579,7 @@ describe("draft durability", () => {
     retry.focus();
 
     host.failSaves = undefined;
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout", "Date"] });
     try {
       fireEvent.click(retry);
 
@@ -4803,7 +4804,7 @@ describe("draft durability", () => {
     const local = host.drafts.get("aurora")!;
     const structuralRemote = { ...local, text: "remote structural", recipientIds: ["+18015550000"], revision: String(Number(local.revision) + 1) };
     host.drafts.set("aurora", structuralRemote);
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout", "Date"] });
     try {
       await act(async () => draftHint?.(structuralRemote));
       expect(screen.getByRole("button", { name: "Copy text of retained draft" })).toBeInTheDocument();

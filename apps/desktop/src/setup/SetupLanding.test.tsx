@@ -579,7 +579,8 @@ describe("SetupLanding", () => {
   });
 
   it.each(["setup", "signin"] as const)("rechecks a stale owner %s status until it can create a phone invitation", async (staleStage) => {
-    vi.useFakeTimers();
+    // Keep jsdom's focus-fixup rendering interval on the real clock.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     vi.spyOn(bridge, "enrollment_status")
       .mockResolvedValueOnce(view({ stage: staleStage }))
       .mockResolvedValueOnce(view({ stage: staleStage }))
@@ -599,7 +600,7 @@ describe("SetupLanding", () => {
   });
 
   it("reports a retryable error when owner status stays stale", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "setup" }));
     renderLanding({ enrolledWithoutPhone: true });
 
@@ -810,7 +811,7 @@ describe("SetupLanding", () => {
   });
 
   it("retries unknown gateway status until known absence before automatically creating a phone invitation", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     vi.spyOn(bridge, "enrollment_status")
       .mockResolvedValueOnce(view({ stage: "ready", owner: true }))
       .mockResolvedValueOnce(view({ stage: "ready", owner: true }))
@@ -838,7 +839,7 @@ describe("SetupLanding", () => {
   });
 
   it("retries unknown gateway status until a connected gateway is known", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     vi.spyOn(bridge, "enrollment_status")
       .mockResolvedValueOnce(view({ stage: "ready", owner: true }))
       .mockResolvedValueOnce(view({ stage: "ready", owner: true }))
@@ -853,7 +854,7 @@ describe("SetupLanding", () => {
   });
 
   it("ignores an older absent-gateway status after newer status finds a connected phone", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const olderStatus = deferred<EnrollmentView>();
     const newerStatus = deferred<EnrollmentView>();
     vi.spyOn(bridge, "enrollment_status")

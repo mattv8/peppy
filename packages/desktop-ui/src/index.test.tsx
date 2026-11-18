@@ -1,3 +1,4 @@
+import "./styles.css";
 import "@testing-library/jest-dom/vitest";
 import type { ComponentProps } from "react";
 import { useState } from "react";
