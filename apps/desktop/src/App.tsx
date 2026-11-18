@@ -197,6 +197,12 @@ import {
   type SaveOutcome,
   type DraftNoticeEvent,
 } from "./drafts/DraftStore";
+import {
+  CANCELLED_ATTACHMENTS_SKIPPED_NOTICE,
+  restorableContent,
+  settleCancelledSendRestore,
+  type CancelledSendRestore,
+} from "./drafts/cancelledSendRestore";
 import { DraftNotice } from "./drafts/DraftNotice";
 import { DraftSyncStatus } from "./drafts/DraftSyncStatus";
 import type { DraftResolutionResult } from "./drafts/DraftConflictReviewDialog";
@@ -939,6 +945,8 @@ function MessageList({
   onEditGroupResend,
   onEditRcsUnsent,
   onCreateGroupAgain,
+  takeSendCancellationSequence,
+  onSendCancellationRequested,
   pendingSends,
   attachmentViews,
   typingRow,
@@ -950,6 +958,8 @@ function MessageList({
   onEditRcsUnsent?(message: MessageView): void;
   /** Copies an unconfirmed group create's body back into the composer behind its confirmation. Nothing is sent. */
   onCreateGroupAgain?(message: MessageView): void;
+  takeSendCancellationSequence?(): number;
+  onSendCancellationRequested?(message: MessageView, sequence: number): void;
   loading: boolean;
   registerRow: RowRegistry;
   publicCopies: Record<string, PublicCopy>;
@@ -1027,6 +1037,7 @@ function MessageList({
   };
   const requestSendCancellation = async (message: MessageView) => {
     if (!bridge.cancel_send || cancellingMessageIdsRef.current.has(message.id)) return;
+    const sequence = takeSendCancellationSequence?.() ?? 0;
     const focusIntent = watchCancellationFocus(document.activeElement instanceof HTMLElement ? document.activeElement : null);
     const requestId = (cancellationRequestIds.current.get(message.id) ?? 0) + 1;
     const viewGeneration = cancellationViewGeneration.current;
@@ -1041,6 +1052,7 @@ function MessageList({
       if (cancellationViewGeneration.current !== viewGeneration || cancellationRequestIds.current.get(message.id) !== requestId || currentState === "confirmed" || currentState === "too-late" || currentState === "unknown") return;
       if (cancellation.state === "requested") {
         setLocalCancellationStates(states => new Map(states).set(message.id, "requested"));
+        onSendCancellationRequested?.(message, sequence);
         replacementFocusPending = true;
         requestAnimationFrame(() => {
           const ownsIntent = cancellationFocusIntents.current.get(message.id) === focusIntent;
@@ -2069,6 +2081,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   useMaximizeButtonRegion({ bridge, enabled: !browserHost && platform === "windows" && !composerConversation });
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
   const [pendingSends, setPendingSends] = useState<PendingSend[]>([]);
+  const [cancelledSendRestore, setCancelledSendRestore] = useState<CancelledSendRestore>();
+  const cancelledSendSequence = useRef(0);
+  const appliedCancelledSendSequence = useRef(0);
   const pendingSendGeneration = useRef(0);
   const pendingSendSessionScope = useRef<string | undefined>(undefined);
   useEffect(() => {
@@ -3376,6 +3391,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
        setAttachmentViews({});
        setDraftViews({});
        store.reset();
+       setCancelledSendRestore(undefined);
        draftNoticesRef.current.clear();
     };
   }, []);
@@ -3390,6 +3406,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setAttachmentViews({});
     setDraftViews({});
     store.reset();
+    setCancelledSendRestore(undefined);
     saveFailedKeysRef.current.clear();
     draftNoticesRef.current.clear();
     setDraftNotice(undefined);
@@ -3571,6 +3588,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       setResolvingDraftConflict(false);
       pastedAttachmentInFlight.current.clear();
       store.reset();
+      setCancelledSendRestore(undefined);
       saveFailedKeysRef.current.clear();
       draftNoticesRef.current.clear();
       setDraftNotice(undefined);
@@ -3655,6 +3673,22 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const active = snapshot?.conversations.find(
     (conversation) => conversation.id === slotKey,
   );
+  useEffect(() => {
+    if (!cancelledSendRestore) return;
+    const message = active?.messages.find(({ id }) => id === cancelledSendRestore.messageId);
+    const settlement = settleCancelledSendRestore(
+      cancelledSendRestore,
+      message?.sendCancellation?.state,
+      store.get(cancelledSendRestore.draftKey),
+    );
+    if (settlement === "roll-back") {
+      void store.edit(cancelledSendRestore.draftKey, cancelledSendRestore.previous);
+      setComposerFeedback((feedback) => feedback?.key === cancelledSendRestore.draftKey && feedback.message === CANCELLED_ATTACHMENTS_SKIPPED_NOTICE ? undefined : feedback);
+      setCancelledSendRestore(undefined);
+    } else if (settlement === "clear") {
+      setCancelledSendRestore(undefined);
+    }
+  }, [active?.messages, cancelledSendRestore]);
   useEffect(() => {
     setConversationTab("messages");
     setLightboxItems(null);
@@ -5334,6 +5368,32 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       attachmentIds: unsentAttachments.map((attachment) => attachment.id),
     });
   };
+  const restoreCancelledSend = (message: MessageView, sequence: number) => {
+    if (!slotKey || !active || sequence <= appliedCancelledSendSequence.current) return;
+    appliedCancelledSendSequence.current = sequence;
+    const draftKey = store.resolve(slotKey);
+    const before = store.get(draftKey);
+    const generationBefore = before?.generation;
+    const previous = before
+      ? { text: before.content.text, attachmentIds: [...before.content.attachmentIds] }
+      : { text: "", attachmentIds: [] };
+    const { skippedAttachments, ...restored } = restorableContent(message);
+    const restoredAttachments = message.attachments.filter((attachment) => restored.attachmentIds.includes(attachment.id));
+    setAttachmentViews((views) => ({ ...views, ...Object.fromEntries(restoredAttachments.map((attachment) => [attachment.id, attachment])) }));
+    void store.edit(draftKey, restored);
+    const after = store.get(draftKey);
+    if (!after || after.generation === generationBefore) return;
+    setCancelledSendRestore({
+      messageId: message.id,
+      draftKey,
+      sequence,
+      generation: after.generation,
+      restored,
+      previous,
+    });
+    if (skippedAttachments > 0)
+      setComposerNotice(draftKey, CANCELLED_ATTACHMENTS_SKIPPED_NOTICE, "warning", "attachment-feedback");
+  };
   const editGroupResend = (message: MessageView) => {
     if (!slotKey || groupLeft || !active) return;
     void restoreUnsentRcs(message);
@@ -5806,6 +5866,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       onEditGroupResend={editGroupResend}
       onEditRcsUnsent={restoreUnsentRcs}
       onCreateGroupAgain={createGroupAgainFromMessage}
+      takeSendCancellationSequence={() => ++cancelledSendSequence.current}
+      onSendCancellationRequested={restoreCancelledSend}
     />
       </div>
       {conversationTab === "media" && <div id="tabpanel-media" role="tabpanel" aria-labelledby="tab-media">
