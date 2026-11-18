@@ -658,6 +658,23 @@ jobs:
           DEVELOPMENT_ARTIFACTS_REQUIRED: ${{ needs.changes.outputs.development_artifacts }}
         run: bash .github/scripts/ci-gate.sh
 
+  timing-report:
+    needs: [gate]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Report job timing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/ci-timing-report.py run --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+
   publish-prerelease:
     if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success' && needs.version.outputs.head_released != 'true' && needs.version.result == 'success'"
     needs: [version, gate]
