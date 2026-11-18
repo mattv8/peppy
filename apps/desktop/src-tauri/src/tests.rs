@@ -1672,7 +1672,8 @@ fn mark_seen_rejects_oversized_batches_before_parsing() {
 
 #[test]
 fn snapshot_pending_count_is_exact_beyond_the_old_batch_cap() {
-    const QUEUED: usize = 1_001;
+    // Cross the old 200-row pending count cap.
+    const QUEUED: usize = 201;
     let f = fixture();
     let session = open(&f, &f.binding, &[]);
     unlock(&session, &f);
