@@ -23,6 +23,7 @@ public enum ClientError: Error, Equatable, Sendable {
     case network(code: Int)
     case canceled
     case secureStorage(status: Int32)
+    case snapshotTooLarge
     case core(MobileBindingsError)
     case syncInProgress
     case enrollmentChangeInProgress
@@ -38,6 +39,7 @@ public enum ClientError: Error, Equatable, Sendable {
     static func wrap(_ error: any Error) -> ClientError {
         switch error {
         case let error as ClientError: return error
+        case MobileBindingsError.SnapshotTooLarge: return .snapshotTooLarge
         case let error as MobileBindingsError: return .core(error)
         case is CancellationError: return .canceled
         case let error as URLError where error.code == .cancelled: return .canceled
@@ -66,6 +68,7 @@ public enum ClientError: Error, Equatable, Sendable {
         case .network(let code): "Network request failed (URLError \(code))."
         case .canceled: "Canceled."
         case .secureStorage(let status): "Keychain access failed (OSStatus \(status))."
+        case .snapshotTooLarge: "History is too large for this version."
         case .core(let error): Self.coreMessage(error)
         case .syncInProgress: "A sync pass is already running."
         case .enrollmentChangeInProgress: "Another enrollment change is in progress."

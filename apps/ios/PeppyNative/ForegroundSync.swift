@@ -15,6 +15,8 @@ public struct SyncBudget: Sendable {
     /// `applyPending` calls per pass.
     public var maxApplyRounds = 16
     public var applyLimit: UInt64 = 500
+    /// Snapshot transfer and drain time per foreground pass. Ordinary replay still uses request limits.
+    public var snapshotTimeLimit: TimeInterval = 60
 
     public init() {}
 }
@@ -39,10 +41,14 @@ public struct SyncReport: Equatable, Sendable {
     /// Commands addressed to this device. They are counted, never executed (see `TelephonyEligibility`).
     public var carrierCommandsNotExecuted = 0
     public var receiveCursor = "0"
+    /// Server requests this pass made, ordinary and snapshot traffic together.
     public var requests = 0
     public var applyRounds = 0
     /// False when the budget ran out; the next pass continues.
     public var complete = true
+    /// True when the pass advanced durable work: an upload, a journaled or quarantined event,
+    /// staged or published snapshot records, or applied, drained, superseded or quarantined rows.
+    public var progressed = false
     /// The core latched a contact/notification projection repair that has not promoted yet.
     public var contactRepairRequired = false
     /// A repair snapshot was started in this pass.
@@ -51,6 +57,14 @@ public struct SyncReport: Equatable, Sendable {
     public var projectionFailure: String?
     /// The server offers no compaction snapshot, so a latched repair cannot run yet.
     public var repairUnavailable = false
+    /// A snapshot was rejected as larger than this app version can import.
+    public var historyTooLarge = false
+}
+
+public enum SetupProgress: Equatable, Sendable {
+    case checking
+    case downloading(staged: UInt64, expected: UInt64)
+    case organizing(remaining: UInt64?)
 }
 
 /// Thrown only by the manifest GET when the server answers 404 or 405. `importSnapshot` alone catches it.
@@ -65,6 +79,28 @@ struct ForegroundSync: Sendable {
     let server: ServerClient
     let vaultId: String
     var budget = SyncBudget()
+    let shouldBeginSnapshot: @Sendable () -> Bool
+    let didRejectSnapshotAsTooLarge: @Sendable (SnapshotTooLargeStore.Rejection) -> Void
+    let didBeginSnapshot: @Sendable () -> Void
+    /// Monotonic nanoseconds for the snapshot time budget; wall-clock jumps must not shorten or extend it.
+    let clock: @Sendable () -> UInt64
+
+    init(
+        client: NativeClient, server: ServerClient, vaultId: String, budget: SyncBudget = SyncBudget(),
+        shouldBeginSnapshot: @escaping @Sendable () -> Bool = { true },
+        didRejectSnapshotAsTooLarge: @escaping @Sendable (SnapshotTooLargeStore.Rejection) -> Void = { _ in },
+        didBeginSnapshot: @escaping @Sendable () -> Void = {},
+        clock: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
+    ) {
+        self.client = client
+        self.server = server
+        self.vaultId = vaultId
+        self.budget = budget
+        self.shouldBeginSnapshot = shouldBeginSnapshot
+        self.didRejectSnapshotAsTooLarge = didRejectSnapshotAsTooLarge
+        self.didBeginSnapshot = didBeginSnapshot
+        self.clock = clock
+    }
 
     /// The server clamps `limit` to its maximum manifest page of 5,000 entries.
     private static let manifestPageLimit = 5_000
@@ -75,7 +111,16 @@ struct ForegroundSync: Sendable {
     private struct Pass {
         var report = SyncReport()
         var meter: RequestMeter
+        /// Snapshot page traffic is bounded by foreground time rather than the ordinary replay allowance.
+        var snapshotMeter = RequestMeter(limit: .max)
+        /// Ordinary replay apply rounds. Drain rounds are counted apart so a long drain never uses this allowance.
         var applyRounds = 0
+        var drainRounds = 0
+        /// Monotonic start of this pass's snapshot work; nil until a snapshot import or drain begins.
+        var snapshotStartedAt: UInt64?
+        /// Set when a snapshot could not begin or continue in this pass. `receive` then returns
+        /// instead of retrying the 409 that asked for it.
+        var snapshotDeferred = false
         /// Set once the manifest route answered 404/405; later begins in this pass are full imports.
         var manifestRouteMissing = false
     }
@@ -89,10 +134,10 @@ struct ForegroundSync: Sendable {
                 try await importSnapshot(resuming: staged, restartOnResync: true, &pass)
             }
             // Published snapshot records must drain before live replay continues.
-            try applyPending(&pass)
+            try await applyPending(&pass, drainingSnapshot: try client.snapshotProgress() != nil)
             try await repairIfRequired(&pass)
             if try !snapshotPending(pass) { try await receive(&pass) }
-            try applyPending(&pass)
+            try await applyPending(&pass, drainingSnapshot: pass.report.snapshotRemaining > 0)
         } catch ClientError.budgetExhausted {
             pass.report.complete = false
         }
@@ -103,8 +148,8 @@ struct ForegroundSync: Sendable {
         }
         pass.report.carrierCommandsNotExecuted = try client.pendingCommands().count
         pass.report.receiveCursor = try client.receiveCursor()
-        pass.report.requests = pass.meter.used
-        pass.report.applyRounds = pass.applyRounds
+        pass.report.requests = pass.meter.used + pass.snapshotMeter.used
+        pass.report.applyRounds = pass.applyRounds + pass.drainRounds
         return pass.report
     }
 
@@ -186,6 +231,7 @@ struct ForegroundSync: Sendable {
             }
             try client.ackOutbox(envelopeId: try envelope.string("envelope_id"))
             pass.report.uploaded += 1
+            pass.report.progressed = true
         }
     }
 
@@ -210,7 +256,8 @@ struct ForegroundSync: Sendable {
                 ], limit: ServerClient.maxPageBytes, meter: &pass.meter)
             } catch ClientError.resyncRequired {
                 try await startSnapshot(restartOnResync: true, &pass)
-                if try snapshotPending(pass) { return }
+                // A pending or deferred snapshot ends this pass; retrying the 409 cannot make progress.
+                if try snapshotPending(pass) || pass.snapshotDeferred { return }
                 after = try localCursor()
                 continue
             }
@@ -222,9 +269,13 @@ struct ForegroundSync: Sendable {
                 last = cursor
                 let result = try client.ingestRaw(envelopeJson: try event.object("envelope").jsonData(), cursor: String(cursor))
                 switch result.state {
-                case .journaled: pass.report.journaled += 1
+                case .journaled:
+                    pass.report.journaled += 1
+                    pass.report.progressed = true
                 case .duplicate: pass.report.duplicates += 1
-                case .quarantined: pass.report.quarantinedOnIngest += 1
+                case .quarantined:
+                    pass.report.quarantinedOnIngest += 1
+                    pass.report.progressed = true
                 }
             }
             try client.observeServerHighWater(highWaterCursor: String(try page.decimal("high_water_cursor")))
@@ -254,17 +305,31 @@ struct ForegroundSync: Sendable {
             default: break
             }
         }
-        pass.report.repairSnapshotStarted = true
+        // `startSnapshot` marks the repair started only once a begin really happened.
         try await startSnapshot(restartOnResync: true, requireCompaction: true, &pass)
     }
 
     /// Fixes a server cut and stages it from the start. A published generation that is still
     /// draining is finished first, because the core refuses a new snapshot until it is.
     private func startSnapshot(restartOnResync: Bool, requireCompaction: Bool = false, _ pass: inout Pass) async throws {
+        // A zero snapshot budget (background callers) never begins a cut; the foreground pass does.
+        guard budget.snapshotTimeLimit > 0 else {
+            deferSnapshot(&pass)
+            return
+        }
         // Without apply rounds left the drain state is unknown, so no new generation is begun.
         guard pass.applyRounds < budget.maxApplyRounds else { throw ClientError.budgetExhausted }
-        try applyPending(&pass)
-        guard pass.report.snapshotRemaining == 0 else { return }
+        guard shouldBeginSnapshot() else {
+            pass.report.historyTooLarge = true
+            deferSnapshot(&pass)
+            return
+        }
+        // A published generation must drain before a new cut is begun.
+        try await applyPending(&pass, drainingSnapshot: pass.report.snapshotRemaining > 0)
+        guard pass.report.snapshotRemaining == 0 else {
+            deferSnapshot(&pass)
+            return
+        }
         let cut = try await server.get("/v1/snapshot", limit: ServerClient.maxSmallBytes, meter: &pass.meter)
         guard try cut.integer("snapshot_version") == 1 else { throw ClientError.invalidResponse("snapshot_version") }
         guard UUID(uuidString: try cut.string("vault_id"))?.uuidString.lowercased() == vaultId else {
@@ -280,10 +345,38 @@ struct ForegroundSync: Sendable {
         let highWater = String(try cut.decimal("high_water_cursor"))
         let recordCount = try cut.decimal("record_count")
         let manifest = try !pass.manifestRouteMissing && manifestSupported(cut)
-        let progress = try manifest
-            ? client.beginSnapshotWithManifest(highWater: highWater, recordCount: recordCount, serverCompactionGeneration: generation)
-            : client.beginSnapshotWithCompaction(highWater: highWater, recordCount: recordCount, purpose: .resync, serverCompactionGeneration: generation)
+        let progress: NativeSnapshotProgress
+        do {
+            progress = try manifest
+                ? client.beginSnapshotWithManifest(highWater: highWater, recordCount: recordCount, serverCompactionGeneration: generation)
+                : client.beginSnapshotWithCompaction(highWater: highWater, recordCount: recordCount, purpose: .resync, serverCompactionGeneration: generation)
+        } catch let error where Self.isSnapshotTooLarge(error) {
+            markHistoryTooLarge(&pass, rejection: .begin)
+            return
+        }
+        didBeginSnapshot()
+        if requireCompaction { pass.report.repairSnapshotStarted = true }
         try await importSnapshot(resuming: progress, restartOnResync: restartOnResync, &pass)
+    }
+
+    /// Both the begin call and the page/manifest appends report an oversized snapshot with this error.
+    private static func isSnapshotTooLarge(_ error: any Error) -> Bool {
+        if case .SnapshotTooLarge? = error as? MobileBindingsError { return true }
+        return (error as? ClientError) == .snapshotTooLarge
+    }
+
+    /// The snapshot cannot be imported by this app version. The core has already failed the staged
+    /// generation, so the marker is the only memory that stops the next pass from restaging it.
+    private func markHistoryTooLarge(_ pass: inout Pass, rejection: SnapshotTooLargeStore.Rejection) {
+        didRejectSnapshotAsTooLarge(rejection)
+        pass.report.historyTooLarge = true
+        deferSnapshot(&pass)
+    }
+
+    /// The snapshot did not begin or continue in this pass; the next foreground pass resumes it.
+    private func deferSnapshot(_ pass: inout Pass) {
+        pass.snapshotDeferred = true
+        pass.report.complete = false
     }
 
     private func manifestSupported(_ cut: [String: Any]) throws -> Bool {
@@ -301,7 +394,12 @@ struct ForegroundSync: Sendable {
         resuming start: NativeSnapshotProgress, restartOnResync: Bool, _ pass: inout Pass
     ) async throws {
         var progress = start
+        if pass.snapshotStartedAt == nil { pass.snapshotStartedAt = clock() }
         while progress.receivedRecords < progress.expectedRecords {
+            guard snapshotTimeRemaining(pass) else {
+                deferSnapshot(&pass)
+                return
+            }
             do {
                 if progress.manifest {
                     try await appendManifestPage(&progress, &pass)
@@ -316,13 +414,18 @@ struct ForegroundSync: Sendable {
                 // Restage as a full import; this pass never begins a manifest generation again, and the resync retry carries over.
                 pass.manifestRouteMissing = true
                 return try await startSnapshot(restartOnResync: restartOnResync, &pass)
+            } catch let error where Self.isSnapshotTooLarge(error) {
+                // The append failed after the download reached the byte cap; the core failed the generation.
+                markHistoryTooLarge(&pass, rejection: .append)
+                return
             }
         }
         _ = try client.finishSnapshot(generation: progress.generation)
         pass.report.snapshotPublished = true
+        pass.report.progressed = true
         // Published, nothing drained yet; `applyPending` refines this.
         pass.report.snapshotRemaining = progress.expectedRecords
-        try applyPending(&pass)
+        try await applyPending(&pass, drainingSnapshot: true)
     }
 
     /// Verifies one manifest page against the staged journal, then downloads the records it reports missing.
@@ -335,7 +438,7 @@ struct ForegroundSync: Sendable {
                 URLQueryItem(name: "after", value: progress.lastCursor),
                 URLQueryItem(name: "limit", value: String(Self.manifestPageLimit)),
                 URLQueryItem(name: "compaction_generation", value: progress.serverCompactionGeneration),
-            ], limit: Self.maxManifestPageBytes, meter: &pass.meter)
+            ], limit: Self.maxManifestPageBytes, meter: &pass.snapshotMeter)
         } catch ClientError.server(let status, _) where status == 404 || status == 405 {
             throw ManifestRouteUnavailable()
         }
@@ -349,9 +452,11 @@ struct ForegroundSync: Sendable {
         guard !entries.isEmpty else { throw ClientError.invalidResponse("short manifest") }
         try Task.checkCancellation()
         let verified = try client.appendSnapshotManifest(generation: progress.generation, entries: entries)
+        if verified.progress.receivedRecords > progress.receivedRecords { pass.report.progressed = true }
         progress = verified.progress
         var missing = Int(verified.missing)
         while missing > 0 {
+            guard snapshotTimeRemaining(pass) else { return }
             missing -= try await appendRecordsPage(&progress, limit: min(missing, min(budget.pageLimit, 200)), &pass)
         }
     }
@@ -368,7 +473,7 @@ struct ForegroundSync: Sendable {
             URLQueryItem(name: "after", value: progress.lastCursor),
             URLQueryItem(name: "limit", value: String(limit)),
             URLQueryItem(name: "compaction_generation", value: progress.serverCompactionGeneration),
-        ], limit: ServerClient.maxPageBytes, meter: &pass.meter)
+        ], limit: ServerClient.maxPageBytes, meter: &pass.snapshotMeter)
         let records = try page.objects("records").map { record in
             NativeRawSnapshotRecord(
                 cursor: String(try record.decimal("cursor")),
@@ -379,23 +484,84 @@ struct ForegroundSync: Sendable {
         try Task.checkCancellation()
         progress = try client.appendSnapshotRawPage(generation: progress.generation, records: records)
         pass.report.snapshotRecords += records.count
+        pass.report.progressed = true
         return records.count
     }
 
-    /// Drains published snapshot records and applies journaled ones until idle or out of rounds.
-    private func applyPending(_ pass: inout Pass) throws {
-        while pass.applyRounds < budget.maxApplyRounds {
+    /// Drains published snapshot records and applies journaled ones. A drain runs until it is idle,
+    /// out of time, or a step makes no progress; ordinary apply rounds are capped per pass.
+    private func applyPending(_ pass: inout Pass, drainingSnapshot: Bool = false) async throws {
+        var draining = drainingSnapshot
+        while draining || pass.applyRounds < budget.maxApplyRounds {
+            if draining && pass.snapshotStartedAt == nil { pass.snapshotStartedAt = clock() }
+            if draining && !snapshotTimeRemaining(pass) {
+                pass.report.complete = false
+                return
+            }
             try Task.checkCancellation()
-            pass.applyRounds += 1
+            // A drain round is bounded by time, so it never spends the ordinary replay allowance.
+            if draining { pass.drainRounds += 1 } else { pass.applyRounds += 1 }
             let step = try client.applyPending(limit: budget.applyLimit)
             pass.report.applied += step.applied
             pass.report.superseded += step.superseded
             pass.report.quarantined += step.quarantined
             pass.report.waitingForKeys = step.waitingForKeys
             pass.report.snapshotRemaining = step.snapshotRemaining
-            if step.applied == 0 && step.drained == 0 && step.quarantined == 0 && step.superseded == 0 && step.snapshotRemaining == 0 { return }
+            let moved = step.applied > 0 || step.drained > 0 || step.quarantined > 0 || step.superseded > 0
+            if moved { pass.report.progressed = true }
+            draining = step.snapshotRemaining > 0
+            if !moved {
+                // Records waiting for keys, or an idle queue: a drain that cannot move ends here,
+                // whatever `snapshotRemaining` says, so the next pass retries.
+                if draining { pass.report.complete = false }
+                return
+            }
+            await Task.yield()
         }
         pass.report.complete = false
+    }
+
+    /// Foreground passes get `snapshotTimeLimit` seconds of snapshot work, measured monotonically. A zero
+    /// limit (background callers) never starts snapshot work, so it reports no time left.
+    private func snapshotTimeRemaining(_ pass: Pass) -> Bool {
+        guard let startedAt = pass.snapshotStartedAt else { return budget.snapshotTimeLimit > 0 }
+        let elapsed = Double(clock() &- startedAt) / 1_000_000_000
+        return elapsed < budget.snapshotTimeLimit
+    }
+}
+
+/// Foreground re-run policy: a call repeats a pass only while the last one advanced durable work,
+/// no upload was refused, and no history is too large. The pass cap is a backstop, not the stop rule.
+public enum ForegroundPassLoop {
+    public static let maxPassesPerCall = 8
+
+    public static func shouldRepeat(after report: SyncReport, passesRun: Int, foregroundActive: Bool, cancelled: Bool) -> Bool {
+        !report.complete
+            && report.progressed
+            && report.uploadRefused == nil
+            && !report.historyTooLarge
+            && foregroundActive
+            && !cancelled
+            && passesRun < maxPassesPerCall
+    }
+}
+
+/// Decides when the setup card announces "Setup finished": only after an import that this session
+/// observed in progress completes cleanly. A too-large history never announces completion.
+public struct SetupProgressTracker: Equatable, Sendable {
+    private var importing = false
+
+    public init() {}
+
+    /// Returns true when the setup announcement should fire for this pass.
+    public mutating func observe(progress: SetupProgress?, historyTooLarge: Bool, complete: Bool) -> Bool {
+        if progress != nil {
+            importing = true
+            return false
+        }
+        guard importing, complete || historyTooLarge else { return false }
+        importing = false
+        return complete && !historyTooLarge
     }
 }
 

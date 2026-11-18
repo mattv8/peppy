@@ -260,6 +260,109 @@ import Testing
         await #expect(throws: ClientError.notEnrolled) { try await session.syncOnce() }
     }
 
+    @Test func snapshotTooLargeMarkerSkipsUntilTimeOrBuildChangesAndClearsAfterBegin() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let producer = try openUnlockedClient(server, passphrase: passphrase)
+        _ = try producer.captureIncoming(sms: NativeIncomingSms(
+            conversationId: nil, senderAddress: "+15550001111", body: "history",
+            providerMessageId: UUID().uuidString, imported: false
+        ))
+        _ = try await ForegroundSync(client: producer, server: serverClient(server), vaultId: server.vaultId).run()
+        server.mutate { server in
+            server.replayFloor = 1
+            server.override = { request in
+                guard request.url.path == "/v1/snapshot" else { return nil }
+                return server.reply(request, 200, [
+                    "snapshot_version": 1, "compaction_supported": true, "compaction_active": true, "compaction_generation": "0",
+                    "vault_id": server.vaultId, "high_water_cursor": "1000001", "record_count": "1000001",
+                    "replay_floor_cursor": "1", "key_epoch": 1, "profile_fingerprint": "unused", "max_page_size": 200,
+                ])
+            }
+        }
+        let suite = "peppy-snapshot-marker-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let markerStore = SnapshotTooLargeStore(defaults: defaults)
+        let now = Locked(Date(timeIntervalSinceReferenceDate: 0))
+        let deviceID = UUID().uuidString.lowercased()
+        let makeSession: (String) -> NativeSession = { build in
+            NativeSession(
+                secureStore: InMemorySecureStore(), transport: DeviceScopedTransport(server: server, deviceId: deviceID),
+                databaseDirectory: temporaryDirectory(), allowLoopbackHTTP: false, snapshotTooLargeStore: markerStore,
+                appBuild: build, snapshotClock: { now.value }
+            )
+        }
+        let first = makeSession("1")
+        _ = try await first.importCredential(server.credential(deviceId: deviceID))
+        _ = try await first.unlock(passphrase: passphrase)
+        let rejected = try await first.syncOnce()
+        #expect(rejected.historyTooLarge)
+        #expect(markerStore.marker(for: server.vaultId)?.build == "1")
+
+        let beforeSkip = server.paths.count
+        let skipped = try await first.syncOnce()
+        #expect(skipped.historyTooLarge)
+        #expect(
+            Array(server.paths.dropFirst(beforeSkip)).filter { $0 == "GET /v1/events" }.count == 1,
+            "a gated begin ends the pass; the replay 409 is not retried"
+        )
+        #expect(Array(server.paths.dropFirst(beforeSkip)).filter { $0 == "GET /v1/snapshot" }.count == 1, "the only cut read is the capability probe")
+
+        now.withValue { $0 = $0.addingTimeInterval(6 * 60 * 60) }
+        let beforeRetry = server.paths.count
+        let retry = try await first.syncOnce()
+        #expect(retry.historyTooLarge)
+        #expect(Array(server.paths.dropFirst(beforeRetry)).filter { $0 == "GET /v1/snapshot" }.count == 2)
+
+        server.mutate { $0.override = nil }
+        let upgraded = makeSession("2")
+        _ = try await upgraded.importCredential(server.credential(deviceId: deviceID))
+        _ = try await upgraded.unlock(passphrase: passphrase)
+        let success = try await upgraded.syncOnce()
+        #expect(!success.historyTooLarge)
+        #expect(markerStore.marker(for: server.vaultId) == nil)
+
+        markerStore.mark(vaultID: server.vaultId, build: "2", now: now.value)
+        _ = try await upgraded.disconnectLocalOnly()
+        #expect(markerStore.marker(for: server.vaultId) == nil, "leaving the enrollment clears its too-large marker")
+        try producer.dispose()
+    }
+
+    /// Self-revoke and vault deletion both leave the enrollment through `changeEnrollment`, which clears its marker.
+    @Test func selfRevokeAndVaultDeletionClearTheTooLargeMarker() async throws {
+        for leave in ["revoke", "delete"] {
+            let server = try FakeServer(passphrase: passphrase)
+            let device = UUID().uuidString.lowercased()
+            server.mutate { server in
+                server.override = { request in
+                    if leave == "revoke", request.url.path.hasSuffix("/revoke") { return server.reply(request, 200, [:]) }
+                    if leave == "delete", request.method == "DELETE", request.url.path == "/v1/vault" {
+                        return server.reply(request, 200, [:])
+                    }
+                    return nil
+                }
+            }
+            let suite = "peppy-marker-leave-\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let markerStore = SnapshotTooLargeStore(defaults: defaults)
+            let session = NativeSession(
+                secureStore: InMemorySecureStore(), transport: DeviceScopedTransport(server: server, deviceId: device),
+                databaseDirectory: temporaryDirectory(), allowLoopbackHTTP: false, snapshotTooLargeStore: markerStore
+            )
+            _ = try await session.importCredential(server.credential(deviceId: device))
+            _ = try await session.unlock(passphrase: passphrase)
+            markerStore.mark(vaultID: server.vaultId, build: "1", rejection: .append)
+
+            if leave == "revoke" {
+                _ = try await session.revokeDevice(device)
+            } else {
+                _ = try await session.deleteVault(vaultId: server.vaultId)
+            }
+            #expect(markerStore.marker(for: server.vaultId) == nil, "leaving by \(leave) clears the marker")
+        }
+    }
+
     @Test func delayedOldReadinessResponseCannotMarkSameIdentityReopenReady() async throws {
         let server = try FakeServer(passphrase: passphrase)
         let store = InMemorySecureStore()

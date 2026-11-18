@@ -269,9 +269,26 @@ struct DeviceView: View {
                     .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).accessibilityIdentifier("sync-hero")
                 ContactsSection(model: model)
                 Section {
+                    if let setupProgress = model.setupProgress {
+                        SetupProgressView(progress: setupProgress)
+                    }
+                    if model.historyTooLarge {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(colors.WarningText)
+                                .accessibilityHidden(true)
+                            VStack(alignment: .leading) {
+                                Text("peppy.sync_too_large_title", tableName: "Peppy")
+                                Text("peppy.toggle_ios_sync_too_large_body", tableName: "Peppy")
+                                    .font(.subheadline).foregroundStyle(.secondary)
+                            }
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("sync-too-large-notice")
+                    }
                     NavigationLink { syncDetails } label: { Text("peppy.toggle_ios_sync_details", tableName: "Peppy") }
                         .accessibilityIdentifier("sync-details-link")
-                    if model.activity == .syncing { ProgressView("Syncing…") }
+                    if model.activity == .syncing && model.setupProgress == nil && !model.historyTooLarge { ProgressView("Syncing…") }
                     if let pending = model.lastSync?.carrierCommandsNotExecuted, pending > 0 {
                         Text("\(pending) send request(s) need attention.")
                             .foregroundStyle(colors.WarningText).accessibilityIdentifier("carrier-pending-summary")
@@ -335,14 +352,23 @@ struct DeviceView: View {
 
     private var syncSection: some View {
         Section("Sync") {
-            if model.activity == .syncing { ProgressView("Syncing…") }
+            if let setupProgress = model.setupProgress {
+                Text(verbatim: setupProgress.phase).foregroundStyle(.secondary)
+                if let count = setupProgress.count {
+                    Text(count).monospacedDigit()
+                }
+            } else if model.activity == .syncing && !model.historyTooLarge { ProgressView("Syncing…") }
+            if model.historyTooLarge {
+                LabeledContent("History", value: String(localized: "peppy.toggle_ios_check_history_too_large", table: "Peppy"))
+                    .accessibilityIdentifier("sync-details-history-row")
+            }
             if let report = model.lastSync, let date = model.lastSyncDate {
                 LabeledContent("Last pass", value: date.formatted(date: .omitted, time: .standard))
                 LabeledContent("Sent / received", value: "\(report.uploaded) / \(report.journaled)")
                 LabeledContent("Applied", value: "\(report.applied)")
                 if report.waitingForKeys > 0 { LabeledContent("Waiting for keys", value: "\(report.waitingForKeys)") }
                 if !report.complete { Text("More work remains; it continues on the next foreground pass.") }
-            } else { Text("Waiting for the next bounded foreground pass.") }
+            } else if model.setupProgress == nil && !model.historyTooLarge { Text("Waiting for the next bounded foreground pass.") }
             Text("peppy.encrypted", tableName: "Peppy").font(.footnote).foregroundStyle(.secondary)
         }.accessibilityIdentifier("sync-section")
     }
