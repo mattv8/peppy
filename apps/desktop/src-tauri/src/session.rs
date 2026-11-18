@@ -1774,6 +1774,7 @@ impl Session {
     ) -> BridgeResult<(Snapshot, DeferredHydration)> {
         let conversations = self.client.list_conversations().map_err(core_error)?;
         let drafts = self.client.compose_drafts().map_err(core_error)?;
+        let (reaction_gateways, _) = self.gateways();
         let drafts_by_conversation: HashMap<ConversationId, _> = drafts
             .iter()
             .map(|draft| (draft.conversation_id, draft))
@@ -1864,6 +1865,11 @@ impl Session {
                 self.client
                     .rcs_conversation_metadata(conversation.conversation_id),
             );
+            let reactions = peppy_desktop_api::reactions::conversation_reactions(
+                conversation,
+                &reaction_gateways,
+                draft.and_then(|draft| draft.route.as_ref()),
+            );
             views.push(ConversationView {
                 id: conversation.conversation_id.to_string(),
                 name,
@@ -1888,6 +1894,8 @@ impl Session {
                     conversation.conversation_id,
                 )
                 .map_err(core_error)?,
+                reaction_support: Some(reactions.support),
+                reaction_gateway_id: reactions.gateway_id,
             });
         }
         let listed: HashSet<ConversationId> =
@@ -1922,6 +1930,8 @@ impl Session {
                 rcs_encryption: None,
                 rcs_history_gap: false,
                 group: None,
+                reaction_support: None,
+                reaction_gateway_id: None,
             });
         }
         let draft = active
