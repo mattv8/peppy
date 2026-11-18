@@ -103,6 +103,18 @@ pub fn core_error(error: CoreError) -> BridgeError {
             "snapshot-too-large",
             "This snapshot exceeds what this build can import.",
         ),
+        CoreError::SendAgainNotAllowed => BridgeError::new(
+            "invalid-request",
+            "This message cannot be sent again.",
+        ),
+        CoreError::AlreadySentAgain => BridgeError::new(
+            "already-sent-again",
+            "This message was already sent again.",
+        ),
+        CoreError::SendAgainAttachmentsUnavailable => BridgeError::new(
+            "attachments-unavailable",
+            "The attachments for this message are not available on this device.",
+        ),
         CoreError::InvalidRequest(reason) => BridgeError::new("invalid-request", format!("Request rejected: {reason}.")),
         CoreError::InvalidMedia => BridgeError::new(
             "attachment-invalid",

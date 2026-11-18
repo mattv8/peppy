@@ -70,6 +70,7 @@ mod snapshot_benchmark;
 mod snapshot_manifest;
 mod snapshot_projection;
 mod snapshot_restart;
+mod stranded_commands;
 
 mod schema_upgrade_matrix;
 mod vault_identity_behaviour;

@@ -930,9 +930,12 @@ impl From<CoreError> for MobileBindingsError {
             CoreError::InvalidRequest(_)
             | CoreError::InvalidCursor
             | CoreError::NoAttempt
-            | CoreError::IllegalTransition { .. } => Self::InvalidRequest,
-            CoreError::Conflict | CoreError::ExistingCommandConflict => Self::Conflict,
-            CoreError::NotFound => Self::NotFound,
+            | CoreError::IllegalTransition { .. }
+            | CoreError::SendAgainNotAllowed => Self::InvalidRequest,
+            CoreError::Conflict
+            | CoreError::ExistingCommandConflict
+            | CoreError::AlreadySentAgain => Self::Conflict,
+            CoreError::NotFound | CoreError::SendAgainAttachmentsUnavailable => Self::NotFound,
             CoreError::StaleDraft { .. } | CoreError::DraftMoved { .. } => Self::StaleDraft,
             CoreError::DraftNotDiscardable
             | CoreError::DraftNotSynced
@@ -3970,6 +3973,11 @@ impl NativeClient {
 
     pub fn process_pending_send_cancellations(&self) -> Result<bool, MobileBindingsError> {
         with_client(&self.client, Client::process_pending_send_cancellations)
+    }
+
+    /// Retires commands a snapshot swallowed as history on this gateway. Returns how many.
+    pub fn retire_swallowed_commands(&self) -> Result<u32, MobileBindingsError> {
+        with_client(&self.client, Client::retire_swallowed_commands)
     }
 
     pub fn record_send_result(

@@ -71,6 +71,8 @@ mod send_cancellation_decoder_recovery_tests;
 #[cfg(test)]
 mod send_cancellation_validation_tests;
 mod sender_blocklist;
+#[cfg(test)]
+mod stranded_command_tests;
 #[cfg(feature = "test-support")]
 mod test_support;
 pub use deferred_media::{DeferredMediaRequestReport, DeferredMediaStatus, DeferredOriginal};
@@ -420,6 +422,15 @@ pub enum Error {
     SnapshotMismatch,
     #[error("snapshot exceeds what this build can import")]
     SnapshotTooLarge,
+    /// The message is not an outgoing carrier SMS or MMS in a state that allows a new copy.
+    #[error("message cannot be sent again")]
+    SendAgainNotAllowed,
+    /// A copy of this message was already created on this device.
+    #[error("message was already sent again")]
+    AlreadySentAgain,
+    /// An attachment of the message is not held by this device, so a copy cannot reference it.
+    #[error("attachments are not available on this device")]
+    SendAgainAttachmentsUnavailable,
     #[error("MMS acquisition limit reached")]
     MmsAcquisitionLimit,
     #[error("MMS pending media quota exceeded")]
@@ -1002,6 +1013,12 @@ pub struct Message {
     pub status_at_ms: Option<i64>,
     /// The gateway's recorded group refusal or information for this send, if any.
     pub send_refusal: Option<SendRefusalReason>,
+    /// The gateway device the send command targets; `None` for messages that are not sends.
+    pub target_gateway_id: Option<DeviceId>,
+    /// Whether a send cancellation was requested for this message.
+    pub send_cancel_requested: bool,
+    /// The "Send again" copy of this message, when this device holds that copy.
+    pub sent_again_message_id: Option<MessageId>,
 }
 /// A chronological, bounded conversation-history window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2967,6 +2984,57 @@ impl Client {
         Ok(())
     }
 
+    /// Gateway side: retires commands that a snapshot imported as history and that this device never
+    /// reported on. Each gets one `FailedBeforeSubmission` status with no refusal reason, so peers
+    /// stop showing "Server accepted" for a command that never runs.
+    ///
+    /// Bounded: at most `RETIRE_SWALLOWED_BATCH` commands per call, in one immediate transaction. A
+    /// full batch means more may remain, and the caller should call again. Changes nothing under the
+    /// restore guard or while a snapshot generation is staging or published but undrained. Once a
+    /// call finds nothing left, a metadata watermark makes later calls return 0 without scanning the
+    /// ledger; starting or publishing a snapshot generation clears the watermark.
+    ///
+    /// What it cannot know: a database copied or restored without the restore guard can lose the
+    /// attempts it recorded. A command attempted only in such a copy has no attempt here, so it can
+    /// be retired although the carrier may have seen it. Restore recovery is the guard for that case.
+    pub fn retire_swallowed_commands(&self) -> Result<u32, Error> {
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if restore_guarded(&tx)?
+            || active_generation(&tx)?.is_some()
+            || get_meta(&tx, SWALLOWED_RETIREMENT_COMPLETE)?.is_some()
+        {
+            return Ok(0);
+        }
+        let self_id = ctx.device_id.to_string();
+        let candidates: Vec<String> = {
+            let mut query = tx.prepare(SWALLOWED_CANDIDATES_SQL)?;
+            query
+                .query_map(
+                    params![
+                        self_id,
+                        to_i64(RETIRE_SWALLOWED_BATCH as u64)?,
+                        rcs_group::SEND_REASON_PREFIX
+                    ],
+                    |row| row.get(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for id in &candidates {
+            tx.execute(
+                "UPDATE command_ledger SET retired=1 WHERE command_id=?",
+                params![id],
+            )?;
+            emit_status(&tx, &ctx, parse(id)?, SendState::FailedBeforeSubmission)?;
+        }
+        if candidates.len() < RETIRE_SWALLOWED_BATCH {
+            set_meta(&tx, SWALLOWED_RETIREMENT_COMPLETE, "1")?;
+        }
+        tx.commit()?;
+        u32::try_from(candidates.len()).map_err(|_| Error::Database)
+    }
+
     /// Clears process-only typing state when the host locks its session. Restarting also creates
     /// a fresh empty state; this method never writes the database.
     pub fn clear_ephemeral_typing(&self) -> Result<(), Error> {
@@ -4270,6 +4338,158 @@ fn is_mms_only_address(address: &str) -> bool {
     address.contains('@')
 }
 
+/// Most commands one `retire_swallowed_commands` call retires; a full batch asks for another call.
+pub const RETIRE_SWALLOWED_BATCH: usize = 200;
+/// Watermark: nothing swallowed is left to retire. Cleared when a snapshot generation begins or
+/// publishes, the only ways a historical ledger row can appear.
+const SWALLOWED_RETIREMENT_COMPLETE: &str = "swallowed_retirement_complete_v1";
+
+/// Retirement candidates, at most `?2` rows. `?1` is this gateway, `?3` the group-refusal key prefix.
+/// Group refusals are excluded here, so a refused command never occupies a batch slot.
+const SWALLOWED_CANDIDATES_SQL: &str = "SELECT l.command_id FROM command_ledger l JOIN commands c ON c.command_id=l.command_id
+    WHERE l.historical=1 AND l.retired=0 AND c.gateway_device_id=?1
+    AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.command_id=l.command_id)
+    AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id)
+    AND NOT EXISTS(SELECT 1 FROM metadata g WHERE g.k=(?3||l.command_id))
+    AND NOT EXISTS(SELECT 1 FROM send_status s WHERE s.command_id=l.command_id AND s.producer_device_id=?1)
+    AND NOT EXISTS(SELECT 1 FROM send_status s WHERE s.command_id=l.command_id AND s.state NOT IN ('queued_local','accepted_server','persisted_gateway'))
+    ORDER BY l.local_order LIMIT ?2";
+
+fn clear_swallowed_retirement_watermark(conn: &Connection) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM metadata WHERE k=?",
+        params![SWALLOWED_RETIREMENT_COMPLETE],
+    )?;
+    Ok(())
+}
+
+/// Metadata key of the device-local link from an original message to its "Send again" copy.
+fn send_again_key(original: &str) -> String {
+    format!("send_again:{original}")
+}
+
+/// Whether this device's recorded copy of `original` still exists. A marker whose copy is gone is
+/// stale and does not count.
+fn send_again_copy_exists(conn: &Connection, original: MessageId) -> Result<bool, Error> {
+    let Some(copy) = get_meta(conn, &send_again_key(&original.to_string()))? else {
+        return Ok(false);
+    };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?)",
+        params![copy],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+const COMMAND_ROUTE_PREFIX: &str = "command_route_v1/";
+
+fn command_route_key(command_id: CommandId) -> String {
+    format!("{COMMAND_ROUTE_PREFIX}{command_id}")
+}
+
+/// Records the route a command was authored for. Written once, on every device that records the
+/// command, so a later device can tell a carrier command from an RCS-link command.
+fn record_command_route(
+    conn: &Connection,
+    command_id: CommandId,
+    route: &GatewayRoute,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT OR IGNORE INTO metadata(k,v) VALUES(?,?)",
+        params![command_route_key(command_id), json(route)?],
+    )?;
+    Ok(())
+}
+
+/// The route a command was authored for, from durable local evidence: the route recorded with the
+/// command, else the outbox row of a command this device authored. `None` when neither exists.
+fn command_route(conn: &Connection, command_id: CommandId) -> Result<Option<GatewayRoute>, Error> {
+    if let Some(value) = get_meta(conn, &command_route_key(command_id))? {
+        return serde_json::from_str(&value)
+            .map(Some)
+            .map_err(|_| Error::Database);
+    }
+    let outbox: Option<Option<String>> = conn
+        .query_row(
+            "SELECT route FROM outbox WHERE command_id=? AND purpose='command'",
+            params![command_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match outbox.flatten() {
+        Some(value) => serde_json::from_str(&value)
+            .map(Some)
+            .map_err(|_| Error::Database),
+        None => Ok(None),
+    }
+}
+
+/// Whether the command has any RCS send or RCS media row. Such a command never has a carrier copy.
+fn rcs_send_rows_exist(conn: &Connection, command_id: CommandId) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_send_ledger WHERE command_id=?1) OR EXISTS(SELECT 1 FROM rcs_media_send_ledger WHERE command_id=?1)",
+        params![command_id.to_string()],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+/// Whether every recorded status of the command leaves a copy possible. Waiting states are not
+/// submission evidence: they only mean the gateway has not reported a submission. A
+/// `FailedBeforeSubmission` with no refusal reason is the gateway's report that nothing was sent.
+fn send_again_status_allows(conn: &Connection, command_id: CommandId) -> Result<bool, Error> {
+    let mut query =
+        conn.prepare("SELECT state,refusal_reason FROM send_status WHERE command_id=?")?;
+    let statuses = query
+        .query_map([command_id.to_string()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(statuses.iter().all(|(state, reason)| match state.as_str() {
+        "queued_local" | "accepted_server" | "persisted_gateway" => true,
+        "failed_before_submission" => reason.is_none(),
+        _ => false,
+    }))
+}
+
+/// References for a "Send again" copy. Every attachment must still be encrypted on this device
+/// and not evicted from the gateway cache, the same states `local_references` accepts; otherwise
+/// the copy is refused whole.
+fn send_again_references(
+    conn: &Connection,
+    references: &[AttachmentReference],
+) -> Result<Vec<AttachmentReference>, Error> {
+    let mut copies = Vec::with_capacity(references.len());
+    for reference in references {
+        let held = attachment_row(conn, reference.attachment_id)?.is_some_and(|row| {
+            matches!(
+                row.state,
+                AttachmentState::PendingUpload | AttachmentState::Uploaded
+            )
+        });
+        // A release means the server may already have dropped the remote object, so a copy that
+        // referenced it would fail at the gateway. Storage-policy removal is the same.
+        let released: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachment_retention_uses WHERE attachment_id=?1 AND released=1)
+             OR EXISTS(SELECT 1 FROM attachment_remote_state WHERE attachment_id=?1 AND removed_by_storage_policy=1)",
+            params![reference.attachment_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if !held
+            || released
+            || media_cache::gateway_mms_ciphertext_evicted(conn, reference.attachment_id)?
+        {
+            return Err(Error::SendAgainAttachmentsUnavailable);
+        }
+        copies.push(AttachmentReference {
+            attachment_id: reference.attachment_id,
+            pending: false,
+        });
+    }
+    Ok(copies)
+}
+
 fn validate_outgoing(sms: &OutgoingSms, route: &GatewayRoute) -> Result<(), Error> {
     let [recipient] = sms.recipients.as_slice() else {
         return Err(Error::InvalidRequest("SMS requires exactly one recipient"));
@@ -4428,6 +4648,7 @@ fn queue_message(
     {
         return Err(Error::Database);
     }
+    record_command_route(tx, command_id, route)?;
     rcs_media::reconcile_staged_states(tx, message_id)?;
     let private = command_payload(payload, transport, group);
     // Persist the route-selected executor locally as well as in the command envelope, so
@@ -6214,6 +6435,116 @@ impl Client {
         Ok(SendState::OutcomeUnknown)
     }
 
+    /// Creates a new carrier SMS or MMS command with the same conversation, recipients, body,
+    /// subject and attachments as an earlier one, on a carrier route the caller chose. The copy has
+    /// ordinary random ids, exactly like `queue_send`/`queue_mms`. The original message, command and
+    /// statuses are not modified. The link original -> copy is a device-local `metadata` marker,
+    /// written in the same transaction as the copy and never sealed, uploaded or synced.
+    ///
+    /// Caller obligations; the core cannot check either:
+    /// - For an original whose state is `QueuedLocal`, `AcceptedServer`, `PersistedGateway` or
+    ///   absent, the caller must have established from the authoritative device roster that the
+    ///   original's target gateway is revoked. Those states mean "no known submission evidence"; they
+    ///   do not prove that nothing was submitted.
+    /// - Every call must follow an explicit user confirmation. Nothing may call this automatically.
+    ///
+    /// Refusals: `AlreadySentAgain` when this device already created a copy of this original and that
+    /// copy still exists (another device may still offer its own copy); `SendAgainNotAllowed` unless
+    /// the original is an outgoing SMS or MMS recorded for a carrier route, not in a group, and with
+    /// no submission evidence; `SendAgainAttachmentsUnavailable` when an attachment is not held here.
+    pub fn send_again(
+        &self,
+        original: MessageId,
+        route: GatewayRoute,
+    ) -> Result<QueuedSend, Error> {
+        if !matches!(route, GatewayRoute::Carrier { .. }) {
+            return Err(Error::SendAgainNotAllowed);
+        }
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let payload: String = tx
+            .query_row(
+                "SELECT payload FROM messages WHERE id=?",
+                params![original.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(Error::NotFound)?;
+        let message: MessagePayload = decode(payload.as_bytes())?;
+        if send_again_copy_exists(&tx, original)? {
+            return Err(Error::AlreadySentAgain);
+        }
+        let command_id: CommandId = tx
+            .query_row(
+                "SELECT command_id FROM commands WHERE message_id=? ORDER BY rowid LIMIT 1",
+                params![original.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|id| parse(&id))
+            .transpose()?
+            .ok_or(Error::SendAgainNotAllowed)?;
+        if message.direction != Direction::Outgoing
+            || message.rcs_capture
+            || !matches!(message.transport, Transport::Sms | Transport::Mms)
+            || rcs_group::is_group_conversation(&tx, message.record.conversation_id)?
+            || rcs_group::send_fields(&tx, command_id)?
+                .group_create
+                .is_some()
+            || !matches!(
+                command_route(&tx, command_id)?,
+                Some(GatewayRoute::Carrier { .. })
+            )
+            || rcs_send_rows_exist(&tx, command_id)?
+            || !send_again_status_allows(&tx, command_id)?
+        {
+            return Err(Error::SendAgainNotAllowed);
+        }
+        let attachments = send_again_references(&tx, &message.record.attachments)?;
+        let attachment_ids: Vec<AttachmentId> = attachments
+            .iter()
+            .map(|reference| reference.attachment_id)
+            .collect();
+        let sms = OutgoingSms {
+            conversation_id: message.record.conversation_id,
+            recipients: message.recipients,
+            body: message.body,
+        };
+        if message.transport == Transport::Sms {
+            if !attachments.is_empty() {
+                return Err(Error::SendAgainNotAllowed);
+            }
+            validate_outgoing(&sms, &route)?;
+        } else {
+            validate_outgoing_mms(
+                &sms.recipients,
+                &sms.body,
+                &attachment_ids,
+                message.subject.as_deref(),
+                &route,
+            )?;
+        }
+        let queued = queue_message(
+            &tx,
+            &ctx,
+            sms,
+            &route,
+            attachments,
+            message.transport,
+            message.subject,
+            None,
+            None,
+        )?;
+        set_meta(
+            &tx,
+            &send_again_key(&original.to_string()),
+            &queued.message_id.to_string(),
+        )?;
+        tx.commit()?;
+        Ok(queued)
+    }
+
     /// Creates a new local RCS command after the original attempt is explicitly known unknown.
     /// The new command has no permit until it is received through the normal command ledger.
     pub fn resend_rcs_outcome_unknown(&self, command_id: CommandId) -> Result<QueuedSend, Error> {
@@ -6444,9 +6775,7 @@ impl Client {
         let rows = query
             .query_map(params![conversation_id.to_string()], message_row)?
             .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|row| message_from_row(&s.conn, row))
-            .collect()
+        messages_from_rows(&s.conn, rows)
     }
 
     /// Whether every requested message belongs to the conversation. Empty input is in scope.
@@ -6498,7 +6827,7 @@ impl Client {
         query
             .query_row(params![conversation_id.to_string()], message_row)
             .optional()?
-            .map(|row| message_from_row(&s.conn, row))
+            .map(|row| message_from_stored(&s.conn, row))
             .transpose()
     }
 
@@ -6513,7 +6842,7 @@ impl Client {
                 message_row,
             )
             .optional()?
-            .map(|row| message_from_row(&store.conn, row))
+            .map(|row| message_from_stored(&store.conn, row))
             .transpose()
     }
 
@@ -6545,11 +6874,7 @@ impl Client {
             )?
             .collect::<Result<Vec<_>, _>>()?;
         let has_more = rows.len() > limit;
-        let messages = rows
-            .into_iter()
-            .take(limit)
-            .map(|row| message_from_row(&s.conn, row))
-            .collect::<Result<Vec<_>, _>>()?
+        let messages = messages_from_rows(&s.conn, rows.into_iter().take(limit).collect())?
             .into_iter()
             .rev()
             .collect();
@@ -6654,9 +6979,7 @@ impl Client {
                 message_row,
             )?
             .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|row| message_from_row(&s.conn, row))
-            .collect()
+        messages_from_rows(&s.conn, rows)
     }
 
     /// Marks one displayed incoming message seen and queues an encrypted `ReadState`.
@@ -7605,6 +7928,7 @@ impl Client {
             "INSERT INTO snapshot_generations(generation,high_water,expected,received,received_bytes,overlap,last_cursor,state,server_compaction_generation) VALUES(?,?,?,0,0,0,0,'staging',?)",
             params![to_i64(generation)?, high, to_i64(record_count)?, server_compaction_generation.map(|v| v.to_string())],
         )?;
+        clear_swallowed_retirement_watermark(&tx)?;
         if purpose == SnapshotPurpose::Restore {
             attachment_retention::bind_restore_generation(&tx, generation)?;
         }
@@ -7764,6 +8088,7 @@ impl Client {
                 "UPDATE snapshot_generations SET state='published' WHERE generation=?",
                 params![current.number],
             )?;
+            clear_swallowed_retirement_watermark(&tx)?;
         }
         clear_snapshot_reuse_source(&tx)?;
         snapshot_projection::on_publish(
@@ -8249,7 +8574,10 @@ macro_rules! message_select {
         concat!(
             "SELECT m.payload, m.seen, selected_status.state, selected_status.status_at_ms, selected_status.refusal_reason, ",
             "(SELECT o.state FROM commands c JOIN outbox o ON o.command_id=c.command_id WHERE c.message_id=m.id), ",
-            "EXISTS(SELECT 1 FROM commands c WHERE c.message_id=m.id) ",
+            "EXISTS(SELECT 1 FROM commands c WHERE c.message_id=m.id), ",
+            "(SELECT c.gateway_device_id FROM commands c WHERE c.message_id=m.id ORDER BY c.rowid LIMIT 1), ",
+            "EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id), ",
+            "m.id ",
             "FROM messages m LEFT JOIN send_status selected_status ON selected_status.rowid=(SELECT st.rowid FROM commands c JOIN send_status st ON st.command_id=c.command_id AND st.producer_device_id=c.gateway_device_id WHERE c.message_id=m.id ORDER BY c.rowid LIMIT 1) ",
             $suffix,
         )
@@ -8257,6 +8585,9 @@ macro_rules! message_select {
 }
 // Every history read uses one total order: the non-null `sort_at_ms` key (actual provider time
 // when known, otherwise local insertion time), then `local_order` as a deterministic tiebreak.
+/// Message rows for an id list within one conversation (`?1` conversation, `?2` JSON id array).
+pub(crate) const MESSAGE_IDS_SELECT: &str =
+    message_select!("WHERE m.conversation_id=?1 AND m.id IN (SELECT value FROM json_each(?2))");
 const MESSAGE_FULL_SELECT: &str = message_select!(
     "WHERE m.conversation_id=? AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') ORDER BY m.sort_at_ms,m.local_order"
 );
@@ -8455,6 +8786,8 @@ fn stage_cancellation_result(
     )? != 0)
 }
 
+/// Message columns, then the first command's gateway id, whether a cancellation exists, and the
+/// message id (the key of its device-local "Send again" marker).
 type StoredMessage = (
     String,
     bool,
@@ -8463,6 +8796,9 @@ type StoredMessage = (
     Option<String>,
     Option<String>,
     bool,
+    Option<String>,
+    bool,
+    String,
 );
 
 fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
@@ -8474,11 +8810,73 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
         row.get(4)?,
         row.get(5)?,
         row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
     ))
 }
 
-fn message_from_row(conn: &Connection, row: StoredMessage) -> Result<Message, Error> {
-    let (payload, seen, status, status_at_ms, refusal, outbox, is_command) = row;
+// Test probe: how many batched marker lookups ran on this thread. A read must run exactly one.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SENT_AGAIN_LOOKUPS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Builds messages from one read, with one batched lookup for their "Send again" markers.
+fn messages_from_rows(conn: &Connection, rows: Vec<StoredMessage>) -> Result<Vec<Message>, Error> {
+    let copies = sent_again_copies(conn, &rows)?;
+    rows.into_iter()
+        .map(|row| message_from_row(conn, row, &copies))
+        .collect()
+}
+
+fn message_from_stored(conn: &Connection, row: StoredMessage) -> Result<Message, Error> {
+    let copies = sent_again_copies(conn, std::slice::from_ref(&row))?;
+    message_from_row(conn, row, &copies)
+}
+
+/// The "Send again" copies of the given messages that exist on this device, keyed by the
+/// original's message id. One statement covers the whole read.
+fn sent_again_copies(
+    conn: &Connection,
+    rows: &[StoredMessage],
+) -> Result<HashMap<String, MessageId>, Error> {
+    #[cfg(test)]
+    SENT_AGAIN_LOOKUPS.with(|count| count.set(count.get() + 1));
+    if rows.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let keys = rows
+        .iter()
+        .map(|row| send_again_key(&row.9))
+        .collect::<Vec<_>>();
+    let json = serde_json::to_string(&keys).map_err(|_| Error::Database)?;
+    let mut query = conn.prepare(
+        "SELECT k,v,EXISTS(SELECT 1 FROM messages x WHERE x.id=metadata.v) FROM metadata WHERE k IN (SELECT value FROM json_each(?1))",
+    )?;
+    let found = query
+        .query_map([json], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    found
+        .into_iter()
+        .filter(|(_, _, exists)| *exists)
+        .map(|(key, copy, _)| Ok((key, parse::<MessageId>(&copy)?)))
+        .collect()
+}
+
+fn message_from_row(
+    conn: &Connection,
+    row: StoredMessage,
+    copies: &HashMap<String, MessageId>,
+) -> Result<Message, Error> {
+    let (payload, seen, status, status_at_ms, refusal, outbox, is_command, gateway, cancel, id) =
+        row;
     let send_state = if !is_command {
         None
     } else if let Some(status) = status {
@@ -8495,6 +8893,9 @@ fn message_from_row(conn: &Connection, row: StoredMessage) -> Result<Message, Er
         send_state,
         status_at_ms,
         send_refusal: refusal.as_deref().map(refusal_from_code).transpose()?,
+        target_gateway_id: gateway.as_deref().map(parse).transpose()?,
+        send_cancel_requested: cancel,
+        sent_again_message_id: copies.get(&send_again_key(&id)).copied(),
     })
 }
 
@@ -11599,6 +12000,7 @@ fn apply_record(
             {
                 return Ok(Some(Q::PayloadConflict));
             }
+            record_command_route(conn, command_id, route)?;
             rcs_media::reconcile_staged_states(conn, message.record.message_id)?;
             if gateway_device_id == ctx.device_id {
                 let attachment_ids = media
