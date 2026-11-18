@@ -154,7 +154,11 @@ Android classes named in `AndroidManifest.xml` and WorkManager worker classes st
 - Hosted onboarding retains its save acknowledgement and confirmation screens;
   the acknowledgement is a UI step, not a replacement for protected native
   storage. Existing-vault admission and website billing are separate outcomes.
-  See [Android hosted enrollment](../apps/android/app/src/main/java/dev/peppy/mobile/enrollment/HostedEnrollmentScreen.kt)
+  The phrase step offers an optional **Save to password manager** (Android
+  `CreatePasswordRequest`; iOS `webcredentials:peppy.pro`) with its disclosure
+  beside the button. A save, like a copy, never counts as acknowledgement and
+  never ticks the checkbox; show **Saved** only after the platform reports
+  success. See [Android hosted enrollment](../apps/android/app/src/main/java/dev/peppy/mobile/enrollment/HostedEnrollmentScreen.kt)
   and [iOS hosted enrollment](../apps/ios/PeppyMobile/HostedEnrollmentView.swift).
 
 ## Contacts
