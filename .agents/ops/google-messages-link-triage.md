@@ -48,7 +48,7 @@ Observed with `content query` on the evidence device. Query IDs, dates, boxes, a
 
 ## Reactions
 
-Native RCS reactions ship dark: the phone advertises them only when `NATIVE_RCS_REACTIONS_ENABLED` (Kotlin) is true, and desktops show the "update your phone" pill only when `NATIVE_REACTIONS_RELEASED` (core) is true. Flip both in the same release, and only after the linked-phone checks below pass.
+Native RCS reactions are always on. The phone advertises support (`publishReactionCapability`) while the link is linked and running, and runs reaction jobs whenever native RCS is enabled. The phone publishes on every status change, and core skips an unchanged value per key epoch, so a new epoch is advertised again. A desktop shows "Update Peppy on your phone to react in this chat." for an eligible RCS chat whose phone has no capability record for the active epoch, which means a build older than the reactions feature. A phone on the earlier dark-launch build published `supported: false`, so its chats show no control until it updates. Without an active epoch, desktops report no reaction support rather than the update prompt.
 
 - `SendReaction` is the one libgm call added to `allowedLibgmCalls` for this feature (`gmlink/source_test.go`). Do not allowlist another call to work around a reaction problem.
 - The send mirrors the text send: `PrepareReaction` makes no request; `CommitPreparedReaction` consumes the ticket, re-validates it after the conversation lookup and again at transport admission, then calls `SendReaction` once. A transport error, a nil response or `success: false` is `outcome_unknown` and is never retried. The SIM payload comes from the conversation's `DefaultOutgoingID`, as for text.
@@ -57,7 +57,7 @@ Native RCS reactions ship dark: the phone advertises them only when `NATIVE_RCS_
 - Received reactions ride on the projected record's `reactions` field. A set that breaks the limits (32 reactions, 100 actors, 32-byte emoji, the shared emoji contract in `packages/contracts/fixtures/reaction-emoji.json`) is omitted whole, with diagnostic 287; the rest of the record, including group sender facts, is unchanged. Google sends most emoji, including 🙏 and anything from the picker, as `CUSTOM` with Unicode set; those are kept.
 - Reaction diagnostics are 287 to 306 (`reaction/*`); none carries an emoji or message text.
 
-What is not established: whether a reaction change on an existing message reaches the link as an update event, whether the receive sweep recovers one missed during a reopen (a reaction does not move a chat's last activity, so the memo can skip it, like a status change), and whether Google accepts the message ID for add, switch and remove on both received and sent messages. Check these on a linked phone before enabling.
+What is not established: whether a reaction change on an existing message reaches the link as an update event, whether the receive sweep recovers one missed during a reopen (a reaction does not move a chat's last activity, so the memo can skip it, like a status change), and whether Google accepts the message ID for add, switch and remove on both received and sent messages. Start here when a reaction is missing, stuck as sending, or refused as `message_unavailable`.
 
 ## Conversation index revalidation
 
