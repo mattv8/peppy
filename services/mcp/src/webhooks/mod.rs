@@ -8,8 +8,6 @@ pub mod payload;
 pub mod signing;
 pub mod store;
 
-// W2b appends `store` and `engine` modules here.
-
 pub use egress::{UrlError, resolve_checked, validate_url};
 pub use filter::{FilterEntryRef, FilterMode, matches};
 pub use name::derive_name;
