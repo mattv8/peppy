@@ -29,7 +29,17 @@ def scope_output(scope, environment)
   end
 end
 
-jobs = YAML.safe_load(File.read(options[:workflow]), aliases: true).fetch('jobs')
+workflow = YAML.safe_load(File.read(options[:workflow]), aliases: true)
+jobs = workflow.fetch('jobs')
+fail!('nightly schedule is missing') unless workflow.fetch(true).fetch('schedule').include?({ 'cron' => '17 9 * * *' })
+fail!('nightly concurrency must be separate') unless workflow.dig('concurrency', 'group') == "ci-${{ github.workflow }}-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}"
+changes = jobs.fetch('changes')
+fail!('changes requires actions read') unless changes.dig('permissions', 'actions') == 'read'
+reuse = changes.fetch('steps').find { |step| step['id'] == 'reuse' }
+scope = changes.fetch('steps').find { |step| step['id'] == 'scope' }
+fail!('reuse must run only on production push before scope') unless reuse && scope && changes.fetch('steps').index(reuse) < changes.fetch('steps').index(scope) && reuse['if'] == "github.event_name == 'push' && github.ref == 'refs/heads/production'"
+fail!('scope must use the reuse step output') unless scope.dig('env', 'REUSE_VERIFIED') == '${{ steps.reuse.outputs.reused }}'
+fail!('reuse output must only feed scope') unless changes.fetch('steps').count { |step| step.fetch('env', {}).values.include?('${{ steps.reuse.outputs.reused }}') } == 1
 fail!('CI job inventory changed without topology classification') unless jobs.keys.sort == (VALIDATION_JOBS + %w[gate timing-report] + PUBLICATION_JOBS).sort
 fail!('timing-report must follow gate') unless jobs.fetch('timing-report').fetch('needs') == ['gate']
 integration = jobs.fetch('integration')
@@ -85,10 +95,16 @@ fail!('gate must need every validation job exactly once') unless gate.fetch('nee
 environment = gate.fetch('steps').find { |step| step['name'] == 'Evaluate CI gate' }.fetch('env')
 VALIDATION_JOBS.each { |name| prefix = name.upcase.tr('-', '_'); fail!("gate result is missing for #{name}") unless environment["#{prefix}_RESULT"] == "${{ needs.#{name}.result }}" }
 required_scopes = {
+  'rust' => 'rust',
+  'integration' => 'integration',
   'frontend' => 'desktop',
   'desktop' => 'desktop',
   'desktop-updater' => 'desktop',
-  'google-messages-go' => 'android'
+  'android' => 'android',
+  'google-messages-go' => 'android',
+  'swift-bindings' => 'swift_bindings',
+  'container-image' => 'container_image',
+  'development-artifacts' => 'development_artifacts'
 }.freeze
 required_scopes.each do |name, scope|
   prefix = name.upcase.tr('-', '_')

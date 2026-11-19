@@ -27,13 +27,15 @@ expect_failure() {
   fi
 }
 
-scope_cases=(force_full production_push docs_only rust_shared rust_mobile rust_desktop rust_browser rust_server android_bindings desktop web android ios mobile_design server build ci unclassified)
+scope_cases=(force_full production_push production_reuse schedule docs_only rust_shared rust_mobile rust_desktop rust_browser rust_server android_bindings desktop web android ios mobile_design server build ci unclassified)
 for case_name in "${scope_cases[@]}"; do
   output="$temp_dir/$case_name"
   : > "$output"
   case "$case_name" in
     force_full) env GITHUB_OUTPUT="$output" FILTER_FORCE_FULL=true "$SCOPE" ;;
-    production_push) env GITHUB_OUTPUT="$output" FILTER_FORCE_FULL=true PRODUCTION_PUSH=true "$SCOPE" ;;
+    production_push) env GITHUB_OUTPUT="$output" FILTER_FORCE_FULL=true PRODUCTION_PUSH=true SUPPRESS_DEVELOPMENT_ARTIFACTS=true "$SCOPE" ;;
+    production_reuse) env GITHUB_OUTPUT="$output" FILTER_FORCE_FULL=true PRODUCTION_PUSH=true SUPPRESS_DEVELOPMENT_ARTIFACTS=true REUSE_VERIFIED=true "$SCOPE" ;;
+    schedule) env GITHUB_OUTPUT="$output" FILTER_FORCE_FULL=true SUPPRESS_DEVELOPMENT_ARTIFACTS=true "$SCOPE" ;;
     docs_only) env GITHUB_OUTPUT="$output" "$SCOPE" ;;
     rust_shared) env GITHUB_OUTPUT="$output" FILTER_RUST_SHARED=true "$SCOPE" ;;
     rust_mobile) env GITHUB_OUTPUT="$output" FILTER_RUST_MOBILE=true "$SCOPE" ;;
@@ -52,6 +54,18 @@ for case_name in "${scope_cases[@]}"; do
     unclassified) env GITHUB_OUTPUT="$output" FILTER_UNCLASSIFIED=true "$SCOPE" ;;
   esac
 done
+expect_failure env GITHUB_OUTPUT="$temp_dir/reuse_without_production_push" REUSE_VERIFIED=true "$SCOPE"
+for name in rust integration desktop android swift_bindings container_image artifacts_android artifacts_desktop artifacts_ios development_artifacts; do
+  expect_output "$temp_dir/production_reuse" "$name=false"
+done
+for name in rust integration desktop android swift_bindings container_image; do
+  expect_output "$temp_dir/schedule" "$name=true"
+done
+for name in artifacts_android artifacts_desktop artifacts_ios development_artifacts; do
+  expect_output "$temp_dir/schedule" "$name=false"
+done
+expect_output "$temp_dir/production_reuse" 'desktop_matrix=[{"os":"ubuntu-24.04","index":1,"count":1}]'
+expect_output "$temp_dir/production_reuse" 'desktop_os_matrix=["ubuntu-24.04"]'
 
 expect_output "$temp_dir/production_push" 'rust=true'
 expect_output "$temp_dir/production_push" 'container_image=true'
@@ -211,6 +225,10 @@ done
 summary="$temp_dir/summary"
 expect_failure env "${gate_env[@]}" GITHUB_STEP_SUMMARY="$summary" RUST_REQUIRED= "$GATE"
 expect_output "$summary" '| job | required | result |'
+env "${gate_env[@]}" GITHUB_STEP_SUMMARY="$summary" REUSE_REUSED=true REUSE_REASON='verified' REUSE_EVIDENCE='https://example.test/run' "$GATE"
+expect_output "$summary" 'Validation reused from https://example.test/run: verified'
+env "${gate_env[@]}" GITHUB_STEP_SUMMARY="$summary" REUSE_REUSED=false REUSE_REASON='not verified' "$GATE"
+expect_output "$summary" 'Full validation (not verified)'
 
 echo 'CI script tests passed'
 bash "$SCRIPT_DIR/test-run-with-jvm-watchdog.sh"

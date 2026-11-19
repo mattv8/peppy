@@ -5,9 +5,11 @@ on:
   push:
     branches: [production, staging]
   workflow_dispatch:
+  schedule:
+    - cron: '17 9 * * *'
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -18,9 +20,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
+      actions: read
       contents: read
       pull-requests: read
     outputs:
+      reused: ${{ steps.reuse.outputs.reused }}
+      reuse_reason: ${{ steps.reuse.outputs.reason }}
+      reuse_evidence: ${{ steps.reuse.outputs.evidence_run_url }}
       rust: ${{ steps.scope.outputs.rust }}
       integration: ${{ steps.scope.outputs.integration }}
       desktop: ${{ steps.scope.outputs.desktop }}
@@ -43,11 +49,19 @@ jobs:
         with:
           filters: .github/ci-paths-filter.yml
           predicate-quantifier: some-with-excludes
+      - id: reuse
+        if: github.event_name == 'push' && github.ref == 'refs/heads/production'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+        run: python3 .github/scripts/ci-reuse.py verify --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA" --before "$BEFORE"
       - id: scope
         shell: bash
         env:
           FILTER_FORCE_FULL: ${{ github.event_name != 'pull_request' }}
           PRODUCTION_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/production' }}
+          SUPPRESS_DEVELOPMENT_ARTIFACTS: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/production') || github.event_name == 'schedule' }}
+          REUSE_VERIFIED: ${{ steps.reuse.outputs.reused }}
           FILTER_RUST_SHARED: ${{ steps.filter.outputs.rust_shared }}
           FILTER_RUST_MOBILE: ${{ steps.filter.outputs.rust_mobile }}
           FILTER_RUST_DESKTOP: ${{ steps.filter.outputs.rust_desktop }}
@@ -624,6 +638,9 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           CHANGES_REQUIRED: 'true'
+          REUSE_REUSED: ${{ needs.changes.outputs.reused }}
+          REUSE_REASON: ${{ needs.changes.outputs.reuse_reason }}
+          REUSE_EVIDENCE: ${{ needs.changes.outputs.reuse_evidence }}
           SOURCE_AUDIT_RESULT: ${{ needs.source-audit.result }}
           SOURCE_AUDIT_REQUIRED: 'true'
           WORKFLOW_SECURITY_RESULT: ${{ needs.workflow-security.result }}
