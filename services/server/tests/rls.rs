@@ -1195,6 +1195,38 @@ async fn startup_validation_rejects_grant_policy_and_execute_drift() {
 }
 
 #[tokio::test]
+async fn hosted_mode_rejects_unsafe_tenant_policy() {
+    let fixture = Fixture::new().await;
+    let server = ServerBuilder::new(fixture.config(), fixture.runtime.clone())
+        .setup_token(SETUP_TOKEN)
+        .row_security(true)
+        .maintenance_database(fixture.maintenance.clone())
+        .build()
+        .await
+        .unwrap();
+    drop(server);
+
+    sqlx::raw_sql(
+        "DROP POLICY community_encrypted_records_scope ON encrypted_records; \
+         CREATE POLICY community_encrypted_records_scope ON encrypted_records \
+         USING (true) WITH CHECK (true)",
+    )
+    .execute(&fixture.migration)
+    .await
+    .unwrap();
+    let error = ServerBuilder::new(fixture.config(), fixture.runtime.clone())
+        .setup_token(SETUP_TOKEN)
+        .row_security(true)
+        .maintenance_database(fixture.maintenance.clone())
+        .build()
+        .await
+        .err()
+        .expect("hosted startup must reject unsafe tenant policies");
+    assert!(error.to_string().contains("tenant policy is unsafe"));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn hosted_mode_missing_runtime_admission_grants_fails_closed_and_correct_grants_succeed() {
     let fixture = Fixture::new().await;
     let admission_tables = "instance_admission_windows, instance_admission_sources";

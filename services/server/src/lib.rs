@@ -193,6 +193,7 @@ impl ServerBuilder {
             rls::validate_maintenance_role(maintenance_db).await?;
             if self.row_security {
                 rls::validate_admission_runtime_privileges(&self.runtime_db).await?;
+                rls::validate_hosted_tenant_policies(&self.runtime_db).await?;
             } else {
                 rls::validate_runtime_role(&self.runtime_db, true).await?;
             }
