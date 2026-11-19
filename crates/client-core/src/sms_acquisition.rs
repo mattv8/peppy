@@ -276,6 +276,12 @@ impl Client {
         let reconciliation = reconcile_provider_sms(&tx, &ctx.device_id, &evidence(&input))?;
         if let SmsReconciliation::Matched(existing) = reconciliation {
             publish_reconciliation_alias(&tx, &ctx, &existing.message_id, &input)?;
+            link_matched_thread(
+                &tx,
+                &ctx.device_id.to_string(),
+                &input,
+                existing.conversation_id,
+            )?;
             let acquisition = matched_acquisition(&input, existing.conversation_id);
             persist_acquisition(
                 &tx,
@@ -310,10 +316,28 @@ impl Client {
             return Err(Error::SmsCapacity);
         }
         let ambiguous = reconciliation == SmsReconciliation::Ambiguous;
-        let conversation_id = thread_conversation(&tx, &ctx.device_id.to_string(), &input.source)?
-            .or(counterpart_conversation(&tx, &input)?)
-            .unwrap_or_else(ConversationId::new);
-        if input.source.provider_thread_id.is_some() {
+        let thread = thread_conversation(&tx, &ctx.device_id.to_string(), &input.source)?;
+        let address = match input.direction {
+            Direction::Incoming => input.sender_address.as_deref(),
+            Direction::Outgoing => input.recipients.first().map(String::as_str),
+        };
+        let resolved = if input.recipients.len() <= 1 {
+            address
+                .map(|address| {
+                    crate::conversation_match::resolve_carrier_counterpart(&tx, address, thread)
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        let conversation_id = match resolved {
+            Some(conversation) => conversation,
+            None => thread
+                .or(counterpart_conversation(&tx, &input)?)
+                .unwrap_or_else(ConversationId::new),
+        };
+        if resolved.is_some() || thread.is_none() {
             link_thread(
                 &tx,
                 &ctx.device_id.to_string(),
@@ -364,6 +388,12 @@ impl Client {
                 if existing.message_id.to_string() != stored_message =>
             {
                 publish_reconciliation_alias(&tx, &ctx, &existing.message_id, &input)?;
+                link_matched_thread(
+                    &tx,
+                    &ctx.device_id.to_string(),
+                    &input,
+                    existing.conversation_id,
+                )?;
                 tx.execute("UPDATE sms_acquisitions SET conversation_id=?,source_sequence=?,state='complete',reason=NULL,message_id=? WHERE acquisition_id=?", params![existing.conversation_id.to_string(), crate::to_i64(existing.source_sequence.0)?, existing.message_id.to_string(), id])?;
                 persist_alias_for_id(&tx, &input, &existing.message_id.to_string())?;
                 if crate::phone_read::observe_captured_read(
@@ -460,6 +490,7 @@ impl Client {
         if let Some(message_id) = crate::message_origin::claim(&tx, &payload, true)? {
             let (conversation_id, source_sequence) =
                 crate::message_origin::message_identity(&tx, &message_id)?;
+            link_matched_thread(&tx, &ctx.device_id.to_string(), &input, conversation_id)?;
             tx.execute("UPDATE sms_acquisitions SET state='complete',reason=NULL,message_id=?,conversation_id=?,source_sequence=? WHERE acquisition_id=?", params![message_id.to_string(), conversation_id.to_string(), crate::to_i64(source_sequence.0)?, id])?;
             persist_alias_for_id(&tx, &input, &message_id.to_string())?;
             if crate::phone_read::observe_captured_read(
@@ -1717,7 +1748,36 @@ fn link_thread(
     let Some(thread) = source.provider_thread_id.as_deref() else {
         return Ok(());
     };
-    conn.execute("INSERT OR IGNORE INTO mms_thread_conversations(source_device_id,source_generation,subscription_id,provider_thread_id,conversation_id) VALUES(?,?,?,?,?)",params![device,source.source_generation,source.subscription_id,thread,conversation.to_string()])?;
+    conn.execute("INSERT INTO mms_thread_conversations(source_device_id,source_generation,subscription_id,provider_thread_id,conversation_id) VALUES(?,?,?,?,?) ON CONFLICT(source_device_id,source_generation,subscription_id,provider_thread_id) DO UPDATE SET conversation_id=excluded.conversation_id",params![device,source.source_generation,source.subscription_id,thread,conversation.to_string()])?;
+    Ok(())
+}
+
+fn link_matched_thread(
+    conn: &Connection,
+    device: &str,
+    input: &SmsAcquisitionInput,
+    conversation: ConversationId,
+) -> Result<(), Error> {
+    if input.recipients.len() > 1 {
+        return Ok(());
+    }
+    let address = match input.direction {
+        Direction::Incoming => input.sender_address.as_deref(),
+        Direction::Outgoing => input.recipients.first().map(String::as_str),
+    };
+    let Some(address) = address else {
+        return Ok(());
+    };
+    if let Some(thread) = thread_conversation(conn, device, &input.source)?
+        && !crate::conversation_match::carrier_conversation_eligible(conn, thread)?
+    {
+        return Ok(());
+    }
+    if crate::conversation_match::resolve_carrier_counterpart(conn, address, Some(conversation))?
+        .is_some()
+    {
+        link_thread(conn, device, &input.source, conversation)?;
+    }
     Ok(())
 }
 
