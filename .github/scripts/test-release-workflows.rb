@@ -575,9 +575,11 @@ assert.call(play_publish.fetch('environment') == 'play-store' && !play_publish.k
 assert.call(play_publish.fetch('steps').last.dig('with', 'serviceAccountJsonPlainText') == '${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}', 'Play credential must come from the protected environment')
 play_credential_check = play_publish.fetch('steps')[-2]
 assert.call(play_credential_check.fetch('name') == 'Require the Play service account credential', 'Play upload must be preceded by the credential check')
-{ '{"type":"service_account"}' => true, '' => false }.each do |credential, accepted|
-  _, _, status = Open3.capture3({ 'PLAY_SERVICE_ACCOUNT_JSON' => credential }, 'bash', '-e', '-c', play_credential_check.fetch('run'))
+assert.call(play_credential_check.fetch('env') == { 'PLAY_SERVICE_ACCOUNT_JSON' => '${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}' }, 'Play credential check must read the environment credential')
+{ '{"type":"service_account","sentinel":"play-credential-sentinel"}' => true, '' => false }.each do |credential, accepted|
+  stdout, stderr, status = Open3.capture3({ 'PLAY_SERVICE_ACCOUNT_JSON' => credential }, 'bash', '-e', '-c', play_credential_check.fetch('run'))
   assert.call(status.success? == accepted, 'Play credential check must reject only an empty credential')
+  assert.call(!"#{stdout}#{stderr}".include?('play-credential-sentinel'), 'Play credential check must never print the credential')
 end
 assert.call(release.fetch(true).key?('workflow_call'), 'release must be reusable')
 assert.call(release.fetch('concurrency').fetch('cancel-in-progress') == false, 'release serialization must not cancel publication')
