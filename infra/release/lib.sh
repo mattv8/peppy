@@ -103,6 +103,19 @@ release_die() {
     exit "${2:-1}"
 }
 
+_release_checksum_transform() {
+    local exclude_signature=$1
+    shift
+    local -a exclusions=(! -name SHA256SUMS ! -name SHA256SUMS.tmp)
+    if [ "$exclude_signature" = yes ]; then
+        exclusions+=(! -name SHA256SUMS.sig)
+    fi
+    # shellcheck disable=SC2094 # SHA256SUMS.tmp is excluded from the enumeration.
+    find . -maxdepth 1 -type f "${exclusions[@]}" -exec "$@" {} \; |
+        sed 's#  \./#  #' |
+        LC_ALL=C sort > SHA256SUMS.tmp
+}
+
 release_update_targets() {
     local version=$1
     cat <<EOF

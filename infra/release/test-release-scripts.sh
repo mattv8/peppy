@@ -77,11 +77,13 @@ cp "$root/latest.json" "$root/stable/latest.json"
 PEPPY_UPDATE_PUBLIC_KEY=$(<"$alternate_key.pub")
 if "$script_dir/verify-update-assets.sh" 0.2.0 stable "$relative_stable_from_caller" >/dev/null 2>&1; then printf 'expected wrong-key verification failure\n' >&2; exit 1; fi
 PEPPY_UPDATE_PUBLIC_KEY=$(<"$key.pub")
-cp "$relative_stable/peppy-0.2.0-linux-x86_64.AppImage" "$root/original-appimage"
+cp "$relative_stable/peppy-0.2.0-darwin-x86_64.app.tar.gz" "$root/original-macos-archive"
 printf tampered >> "$relative_stable/peppy-0.2.0-darwin-x86_64.app.tar.gz"
 if "$script_dir/verify-update-assets.sh" 0.2.0 stable "$relative_stable_from_caller" >/dev/null 2>&1; then printf 'expected tampered-asset verification failure\n' >&2; exit 1; fi
-cp "$root/original-appimage" "$relative_stable/peppy-0.2.0-linux-x86_64.AppImage"
-if cargo run --quiet --locked --manifest-path "$script_dir/manifest-verifier/Cargo.toml" -- 0.2.0 "$relative_stable_from_caller" 0.2.1 >/dev/null 2>&1; then printf 'expected version-binding verification failure\n' >&2; exit 1; fi
+cp "$root/original-macos-archive" "$relative_stable/peppy-0.2.0-darwin-x86_64.app.tar.gz"
+"$script_dir/verify-update-assets.sh" 0.2.0 stable "$relative_stable_from_caller"
+if err=$(cargo run --quiet --locked --manifest-path "$script_dir/manifest-verifier/Cargo.toml" -- 0.2.0 "$relative_stable_from_caller" 0.2.1 2>&1); then printf 'expected version-binding verification failure\n' >&2; exit 1; fi
+grep -Fq 'is not signed for version 0.2.1' <<<"$err"
 floor_repo="$root/prerelease-floor"
 git init -q "$floor_repo"
 git -C "$floor_repo" config user.name release-test
@@ -189,4 +191,43 @@ chmod +x "$mismatch_bin/shasum"
 test -z "$(PATH="$mismatch_bin" "$bash_bin" -c 'command -v sha256sum || true')"
 if err=$(PATH="$mismatch_bin" "$bash_bin" "$script_dir/write-checksums.sh" "$checksum_dir" 2>&1 >/dev/null); then printf 'expected checksum self-validation failure\n' >&2; exit 1; fi
 grep -Fq 'simulated checksum mismatch' <<<"$err"
+parity_dir="$checksum_root/parity assets"
+mkdir -p "$parity_dir"
+printf a > "$parity_dir/-dash file"
+printf b > "$parity_dir/space name"
+cat > "$checksum_root/expected-parity" <<'EOF'
+3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d  space name
+ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb  -dash file
+EOF
+for checksum_path in "$PATH" "$fallback_bin"; do
+  for output in SHA256SUMS SHA256SUMS.tmp SHA256SUMS.sig; do printf stale > "$parity_dir/$output"; done
+  (cd "$checksum_root" && PATH="$checksum_path" CDPATH="$decoy_root" "$bash_bin" "$script_dir/write-checksums.sh" 'parity assets')
+  cmp "$checksum_root/expected-parity" "$parity_dir/SHA256SUMS"
+  test ! -e "$parity_dir/SHA256SUMS.tmp"
+done
+for tool in bash dirname mkdir rm cp wc tr; do ln -s "$(command -v "$tool")" "$fallback_bin/$tool"; done
+stage_parity="$checksum_root/stage parity"
+mkdir -p "$stage_parity"
+stage_bin="$checksum_root/stage-bin"
+mkdir -p "$stage_bin"
+real_cp=$(command -v cp)
+cat > "$stage_bin/cp" <<SH
+#!/bin/sh
+"$real_cp" "\$@" || exit
+printf signature > "\${2%/*}/SHA256SUMS.sig"
+SH
+chmod +x "$stage_bin/cp"
+cat > "$checksum_root/stage-parity-expected" <<'EOF'
+1a2fc26dc7ea5a2a4748b7cb2b1ef193d96ab2c99f93092f69e63075b28d1278  SHA256SUMS.sig
+1e6ed65d77d6364eeaed5a745ba5c4985ae2b700dd85d7cf7f027bdf294a33fc  peppy-v 1-dash-android.aab
+a4d451ec23463726f72c43d64c710968f6b602cd653b4de8adee1b556240a829  peppy-v 1-dash-android.apk
+EOF
+for checksum_path in "$PATH" "$fallback_bin"; do
+  for output in SHA256SUMS SHA256SUMS.tmp SHA256SUMS.sig; do printf stale > "$stage_parity/$output"; done
+  (cd "$checksum_root" && PATH="$stage_bin:$checksum_path" CDPATH="$decoy_root" "$bash_bin" "$script_dir/stage-assets.sh" --group android 'v 1-dash' stable "$fixture" './stage parity')
+  cmp "$checksum_root/stage-parity-expected" "$stage_parity/SHA256SUMS"
+  verify_checksum_hashes "$stage_parity"
+  if grep -Fq './' "$stage_parity/SHA256SUMS"; then printf 'unexpected checksum path prefix\n' >&2; exit 1; fi
+  test ! -e "$stage_parity/SHA256SUMS.tmp"
+done
 printf 'release script tests passed\n'
