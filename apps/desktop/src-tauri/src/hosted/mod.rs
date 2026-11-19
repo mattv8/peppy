@@ -718,11 +718,12 @@ pub(crate) async fn delete_account_core(
 }
 
 #[tauri::command]
-pub fn hosted_open_billing(
+pub async fn hosted_open_billing(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
 ) -> BridgeResult<()> {
     crate::require_main(window.label())?;
+    crate::purchases::require_website_billing(crate::purchases::current_options().await)?;
     app.opener()
         .open_url(
             format!("{}/account/subscribe", hosted_origin()?),

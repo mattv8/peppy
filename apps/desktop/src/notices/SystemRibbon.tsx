@@ -16,14 +16,14 @@ export function SystemRibbon({ model, openFailed = false, onAction, onDismiss }:
     <div className="system-ribbon-text" data-system-ribbon-text>
       <strong>{model.title}</strong>
       <span>{model.body}</span>
-      {openFailed && model.actionLabel !== null && <span className="system-ribbon-open-failed" data-system-ribbon-open-failed>{peppyCopy.toggle_android_link_unavailable}</span>}
+      {openFailed && model.actionLabel !== null && <span className="system-ribbon-open-failed" data-system-ribbon-open-failed>{model.actionTarget === "appStore" ? peppyCopy.store_manage_failed : peppyCopy.toggle_android_link_unavailable}</span>}
     </div>
     {(model.actionLabel !== null && onAction) || (model.dismissible && onDismiss) ? <div className="app-notice-actions">
       {model.actionLabel !== null && onAction && <button
         id="system-ribbon-action"
         type="button"
         className="secondary-button"
-        aria-label={`${model.actionLabel}, ${peppyCopy.system_banner_opens_in_browser}`}
+        aria-label={`${model.actionLabel}, ${model.actionTarget === "appStore" ? peppyCopy.store_manage_cta : peppyCopy.system_banner_opens_in_browser}`}
         onClick={() => onAction()}
       >
         {model.actionLabel}
