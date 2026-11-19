@@ -278,10 +278,42 @@ android_consumers = %w[android-debug-unit-tests android-sideload-unit-tests andr
 assert.call(android_consumers.all? { |job| job.fetch('needs') == 'android-native-preparation' }, 'every Android consumer must require native preparation')
 assert.call(android_consumers.all? { |job| job.fetch('steps').any? { |step| step.dig('with', 'name') == 'android-native-${{ github.sha }}' } }, 'every Android consumer must download the SHA-bound native artifact')
 android_packaging = android_ci_jobs.fetch('android-lint-and-assembly').fetch('steps').find { |step| step['name'] == 'Lint and assemble Android artifacts' }
+android_info_command_steps = android_ci_jobs.fetch('android-lint-and-assembly').fetch('steps')
+android_jvm_arguments = '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8'
+android_info_commands = {
+  'Lint and assemble Android artifacts' => ['./gradlew', '--console=plain', '--dependency-verification=strict', '--info', '--stacktrace', android_jvm_arguments, '--max-workers=2', '-PpeppyGoogleMessagesLink=true', ':app:verifyReleaseManifestSecurity', ':app:lintDebug', ':app:lintSideload', ':app:assembleDebug', ':app:assembleDebugAndroidTest', ':app:assembleSideload', ':app:verifySideloadGoogleMessagesLink'],
+  'Compile release with Google Messages link' => ['./gradlew', '--console=plain', '--dependency-verification=strict', '--info', '--stacktrace', android_jvm_arguments, '--max-workers=2', ':app:compileReleaseKotlin', '-PpeppyDistribution=play', '-PpeppyGoogleMessagesLink=true'],
+  'Verify release SMS diagnostics policy' => ['./gradlew', '--console=plain', '--dependency-verification=strict', '--info', ':app:testReleaseUnitTest', '--tests', 'dev.peppy.mobile.SmsCaptureReleasePolicyTest']
+}
+Dir.mktmpdir('android-lint-assembly-info') do |fixture|
+  project = File.join(fixture, 'apps', 'android')
+  FileUtils.mkdir_p(project)
+  File.write(File.join(project, 'gradlew'), <<~'SH')
+    #!/usr/bin/env bash
+    set -euo pipefail
+    printf '%s\0' "$@" > "$PEPPY_TEST_GRADLE_ARGS"
+    echo fake-gradle-stdout
+    echo fake-gradle-stderr >&2
+    exit "${PEPPY_TEST_GRADLE_STATUS:-0}"
+  SH
+  FileUtils.chmod(0o755, File.join(project, 'gradlew'))
+  android_info_commands.each_with_index do |(name, expected_argv), index|
+    step = android_info_command_steps.find { |candidate| candidate['name'] == name }
+    assert.call(!step.nil? && Shellwords.shellsplit(step.fetch('run')) == expected_argv, "#{name} must keep its exact Gradle arguments and add --info")
+    run = step.fetch('run')
+    capture = File.join(fixture, "gradle-#{index}.args")
+    env = { 'PATH' => ENV.fetch('PATH'), 'PEPPY_TEST_GRADLE_ARGS' => capture }
+    stdout, stderr, status = Open3.capture3(env, 'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', run, chdir: project)
+    assert.call(status.success? && stdout.include?('fake-gradle-stdout') && stderr.include?('fake-gradle-stderr'), "#{name} must succeed and keep Gradle output visible: #{stderr}")
+    assert.call(File.binread(capture).split("\0") == expected_argv.drop(1), "#{name} must pass exactly the expected Gradle arguments")
+    failed_stdout, failed_stderr, failed_status = Open3.capture3(env.merge('PEPPY_TEST_GRADLE_STATUS' => '42'), 'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', run, chdir: project)
+    assert.call(failed_status.exitstatus == 42 && failed_stdout.include?('fake-gradle-stdout') && failed_stderr.include?('fake-gradle-stderr'), "#{name} must keep Gradle failure status 42 fatal with visible output")
+  end
+end
 assert.call(!android_packaging.nil?, 'Android validation must retain the lint and packaging step')
 android_packaging_command = Shellwords.shellsplit(android_packaging.fetch('run'))
 android_packaging_flags = android_packaging_command.reject { |token| token.start_with?(':') }
-expected_android_packaging_flags = ['./gradlew', '--console=plain', '--dependency-verification=strict', '--stacktrace', '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8', '--max-workers=2', '-PpeppyGoogleMessagesLink=true']
+expected_android_packaging_flags = ['./gradlew', '--console=plain', '--dependency-verification=strict', '--info', '--stacktrace', '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8', '--max-workers=2', '-PpeppyGoogleMessagesLink=true']
 assert.call(android_packaging_flags == expected_android_packaging_flags, 'Android packaging must use strict dependency verification, the 4 GiB JVM override, two-worker bound, and diagnostic flags')
 android_packaging_tasks = android_packaging_command.select { |token| token.start_with?(':') }
 assert.call(android_packaging_tasks == %w[:app:verifyReleaseManifestSecurity :app:lintDebug :app:lintSideload :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleSideload :app:verifySideloadGoogleMessagesLink], 'Android packaging must verify the merged release manifest, sideload link, linting, and debug artifacts')
