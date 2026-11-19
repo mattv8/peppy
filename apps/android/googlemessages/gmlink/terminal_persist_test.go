@@ -3,6 +3,7 @@ package gmlink
 import (
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -288,6 +289,8 @@ func TestRunWaitsForTerminalPersistenceFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer link.Close()
+	releasePersist := sync.OnceFunc(func() { close(host.releasePersist) })
+	defer releasePersist()
 	setSafetyState(link, stateLinked, auth)
 	runDone := startSafetyRun(t, link)
 	select {
@@ -316,7 +319,7 @@ func TestRunWaitsForTerminalPersistenceFailure(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("owning Run did not wait for terminal completion")
 	}
-	close(host.releasePersist)
+	releasePersist()
 	if err := awaitSafetyResult(t, runDone, "Run after released terminal persistence failure"); err != errPersistFailed {
 		t.Fatalf("Run result = %v, want %v", err, errPersistFailed)
 	}

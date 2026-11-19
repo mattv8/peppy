@@ -124,6 +124,54 @@ struct EnrollmentInstallIntegrationTests {
         let reopened = NativeSession(secureStore: secure, transport: transport, databaseDirectory: directory, allowLoopbackHTTP: false)
         #expect(try await reopened.open().keysUnlocked)
     }
+
+    @Test(arguments: [false, true], ["active-enrollment", "enrollment", "key-cache-"])
+    func phoneStorageFailuresPreserveWriteOrderAndReopenState(sharedSecret: Bool, failure: String) async throws {
+        let fixture = try EnrollmentInstallFixture()
+        let phone = try fixture.phoneInvitation(method: sharedSecret ? .sharedSecret : .transfer)
+        let transport = InstallTransport(fixture: fixture, phone: phone)
+        let store = InstallWriteFailingStore(failure: failure)
+        let directory = temporaryDirectory()
+        let session = NativeSession(secureStore: store, transport: transport, databaseDirectory: directory, allowLoopbackHTTP: false)
+
+        _ = try await session.beginPhoneEnrollment(qrPayload: phone.qrPayload, deviceName: "phone")
+        try phone.approve()
+        await #expect(throws: ClientError.secureStorage(status: -1)) {
+            _ = try await session.confirmPhoneEnrollment(sharedSecret: sharedSecret ? EnrollmentInstallFixture.phrase : nil)
+        }
+        let expected = ["device-token", "enrollment", "active-enrollment", "key-cache-"]
+        let failureIndex = try #require(expected.firstIndex(of: failure))
+        #expect(store.writes == Array(expected.prefix(failureIndex + 1)))
+        #expect(!store.accounts.contains { $0.hasPrefix("vault-secret-v2") })
+
+        await session.close()
+        let reopened = NativeSession(secureStore: store, transport: transport, databaseDirectory: directory, allowLoopbackHTTP: false)
+        let status = try await reopened.open()
+        #expect(status.databaseOpen == (failure == "key-cache-"))
+        #expect(!status.keysUnlocked)
+        await reopened.close()
+    }
+}
+
+private final class InstallWriteFailingStore: SecureStore, @unchecked Sendable {
+    private let inner = InMemorySecureStore()
+    private let failure: String
+    private(set) var writes: [String] = []
+    var accounts: Set<String> { inner.accounts }
+
+    init(failure: String) { self.failure = failure }
+    func read(_ account: String) throws(ClientError) -> Data? { try inner.read(account) }
+    func addIfAbsent(_ account: String, _ data: Data) throws(ClientError) -> Bool { try inner.addIfAbsent(account, data) }
+    func upsert(_ account: String, _ data: Data) throws(ClientError) {
+        if let purpose = ["device-token", "enrollment", "active-enrollment", "key-cache-"].first(where: {
+            account == $0 || account.hasPrefix("\($0)|") || ($0 == "key-cache-" && account.hasPrefix($0))
+        }) {
+            writes.append(purpose)
+            if purpose == failure { throw .secureStorage(status: -1) }
+        }
+        try inner.upsert(account, data)
+    }
+    func delete(_ account: String) throws(ClientError) { try inner.delete(account) }
 }
 
 private final class BindingWriteFailingStore: SecureStore, @unchecked Sendable {

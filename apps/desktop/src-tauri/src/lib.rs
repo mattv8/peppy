@@ -6339,8 +6339,7 @@ async fn install_staged_update(
     state: &AppState,
     intent: updates::install::InstallIntent,
 ) -> BridgeResult<updates::types::UpdateStatus> {
-    // The updater plugin has no safe staged-payload handoff in the base build yet.
-    // Refuse before entering lifecycle exclusion rather than exit with an unchecked payload.
+    // Check the staged payload before entering lifecycle exclusion, so a refusal never exits with an unchecked payload.
     let status = state.updates.status();
     if !status.can_restart {
         return Err(BridgeError::new(

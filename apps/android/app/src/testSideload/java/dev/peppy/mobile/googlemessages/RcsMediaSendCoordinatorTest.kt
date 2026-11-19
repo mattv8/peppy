@@ -29,7 +29,7 @@ class RcsMediaSendCoordinatorTest {
         h.coordinator.submit(h.attachment); h.executor.runAll()
         assertFalse(h.events.contains("native_send"))
         h.uploadCode = "ok"
-        h.coordinator.submit(h.attachment.copy(attachmentIndex = 1u)); h.executor.runAll()
+        h.coordinator.submit(h.attachment); h.executor.runAll()
         assertEquals(1, h.events.count { it == "native_send" })
     }
 
@@ -38,7 +38,7 @@ class RcsMediaSendCoordinatorTest {
         h.coordinator.submit(h.attachment); h.executor.runAll()
         assertEquals(listOf("decrypt", "uploading", "upload", "outcome"), h.events)
         h.uploadCode = "ok"
-        h.coordinator.submit(h.attachment.copy(attachmentIndex = 1u)); h.executor.runAll()
+        h.coordinator.submit(h.attachment); h.executor.runAll()
         assertEquals(2, h.events.count { it == "upload" })
     }
 

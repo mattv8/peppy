@@ -12,9 +12,9 @@ import unittest
 import zipfile
 
 try:
-    from tests.dev.stub_commands import write_stub
+    from tests.dev.stub_commands import install_android_scripts, write_stub
 except ModuleNotFoundError:
-    from stub_commands import write_stub
+    from stub_commands import install_android_scripts, write_stub
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -179,10 +179,7 @@ class AndroidHelperTests(unittest.TestCase):
 
     def test_wsl_https_health_uses_ca_and_best_effort_revocation(self):
         with tempfile.TemporaryDirectory() as temp:
-            temp = pathlib.Path(temp); repo = temp / "repo"; script = repo / "infra/dev/android.sh"
-            script.parent.mkdir(parents=True)
-            for name in ("android.sh", "dev_tls.py", "dev_port.py"):
-                shutil.copy(ROOT / "infra/dev" / name, script.parent / name)
+            temp = pathlib.Path(temp); repo = temp / "repo"; script = install_android_scripts(repo)
             (repo / ".env").write_text("DEBUG=true\n")
             sdk = temp / "sdk"; tools = temp / "bin"; tools.mkdir(); (sdk / "platform-tools").mkdir(parents=True)
             log = temp / "powershell.log"; artifacts = temp / "artifacts"; artifacts.mkdir(); (artifacts / "app-sideload.apk").touch()
@@ -518,8 +515,7 @@ class AndroidHelperTests(unittest.TestCase):
     def test_host_build_prepares_android_cache_volumes(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp); bin_dir = temp / "bin"; bin_dir.mkdir(); log = temp / "docker.log"
-            repo = temp / "repo"; script = repo / "infra/dev/android.sh"
-            script.parent.mkdir(parents=True); shutil.copy(ROOT / "infra/dev/android.sh", script); shutil.copy(ROOT / "infra/dev/dev_tls.py", script.parent / "dev_tls.py"); shutil.copy(ROOT / "infra/dev/dev_port.py", script.parent / "dev_port.py")
+            repo = temp / "repo"; script = install_android_scripts(repo)
             (repo / ".env").write_text("synthetic=1\n")
             docker = bin_dir / "docker"
             docker.write_text("#!/bin/sh\nprintf 'destination=<%s>\\n' \"$PEPPY_ANDROID_CONTAINER_ARTIFACTS\" >> \"$DOCKER_LOG\"\nprintf 'argument=<%s>\\n' \"$@\" >> \"$DOCKER_LOG\"\nexit 0\n")
@@ -543,9 +539,7 @@ class AndroidHelperTests(unittest.TestCase):
             bin_dir = temp / "bin"
             bin_dir.mkdir()
             repo = temp / "caller"
-            script = repo / "infra/dev/android.sh"
-            script.parent.mkdir(parents=True)
-            shutil.copy(ROOT / "infra/dev/android.sh", script); shutil.copy(ROOT / "infra/dev/dev_tls.py", script.parent / "dev_tls.py"); shutil.copy(ROOT / "infra/dev/dev_port.py", script.parent / "dev_port.py")
+            script = install_android_scripts(repo)
             (repo / ".env").write_text("synthetic=1\n")
             source = temp / "selected source"
             source.mkdir()
@@ -571,8 +565,7 @@ class AndroidHelperTests(unittest.TestCase):
     def test_host_build_missing_env_has_setup_hint(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp); bin_dir = temp / "bin"; bin_dir.mkdir()
-            repo = temp / "repo"; script = repo / "infra/dev/android.sh"
-            script.parent.mkdir(parents=True); shutil.copy(ROOT / "infra/dev/android.sh", script); shutil.copy(ROOT / "infra/dev/dev_tls.py", script.parent / "dev_tls.py"); shutil.copy(ROOT / "infra/dev/dev_port.py", script.parent / "dev_port.py")
+            repo = temp / "repo"; script = install_android_scripts(repo)
             docker = bin_dir / "docker"; docker.write_text("#!/bin/sh\nexit 0\n"); docker.chmod(0o755)
             result = self.run_script(script, "build", env={"PATH": f"{bin_dir}:{os.environ['PATH']}", "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts")})
             self.assertNotEqual(result.returncode, 0)
@@ -595,11 +588,7 @@ class AndroidHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp)
             repo = temp / "repo"
-            script = repo / "infra/dev/android.sh"
-            script.parent.mkdir(parents=True)
-            shutil.copy(ROOT / "infra/dev/android.sh", script)
-            shutil.copy(ROOT / "infra/dev/dev_tls.py", script.parent / "dev_tls.py")
-            shutil.copy(ROOT / "infra/dev/dev_port.py", script.parent / "dev_port.py")
+            script = install_android_scripts(repo)
             (repo / ".env").write_text("API_HOST_PORT=7100\nPUBLIC_API_URL=http://127.0.0.1:7100\n")
             sdk = temp / "sdk"
             (sdk / "platform-tools").mkdir(parents=True)
@@ -856,9 +845,7 @@ class AndroidHelperTests(unittest.TestCase):
         artifacts = temp / "artifacts"
         artifacts.mkdir()
         repo = temp / "repo"
-        script = repo / "infra/dev/android.sh"
-        script.parent.mkdir(parents=True)
-        shutil.copy(ROOT / "infra/dev/android.sh", script); shutil.copy(ROOT / "infra/dev/dev_tls.py", script.parent / "dev_tls.py"); shutil.copy(ROOT / "infra/dev/dev_port.py", script.parent / "dev_port.py")
+        script = install_android_scripts(repo)
         gradle_log = temp / "gradle.log"
         verify_log = temp / "verify.log"
 
@@ -948,10 +935,7 @@ class AndroidHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp)
             repo = temp / "repo"
-            script = repo / "infra/dev/android.sh"
-            script.parent.mkdir(parents=True)
-            for name in ("android.sh", "dev_tls.py", "dev_port.py"):
-                shutil.copy(ROOT / "infra/dev" / name, script.parent / name)
+            script = install_android_scripts(repo)
             (repo / ".env").write_text("PEPPY_ANDROID_BUILD_VARIANT=debug\n")
             tools = temp / "bin"
             tools.mkdir()
@@ -996,10 +980,7 @@ class AndroidHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp)
             repo = temp / "repo"
-            script = repo / "infra/dev/android.sh"
-            script.parent.mkdir(parents=True)
-            for name in ("android.sh", "dev_tls.py", "dev_port.py"):
-                shutil.copy(ROOT / "infra/dev" / name, script.parent / name)
+            script = install_android_scripts(repo)
             (repo / ".env").write_text("DEBUG=false\n")
 
             for variant in ("debug", "sideload"):

@@ -964,8 +964,8 @@ func TestProbeF1ForcedRefreshFailureLeavesNoBasis(t *testing.T) {
 	if !recaptured {
 		t.Fatal("precondition: the settings event did not recapture a basis while the refresh waited")
 	}
-	if result := <-refreshed; result == `{"code":"ok"}` {
-		t.Fatal("a forced refresh whose scan fails reported ok")
+	if result := <-refreshed; stage2Code(t, result) != "unavailable" {
+		t.Fatalf("forced refresh with failed scan = %s, want unavailable", result)
 	}
 	link.mu.Lock()
 	leftover := link.conversationProbeBasis != nil
