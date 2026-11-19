@@ -16,6 +16,18 @@ describe("CodingAgentClientGuide", () => {
     vi.useRealTimers();
   });
 
+  it.each([
+    ["claude-code", "Copy Claude Code user-scope command"],
+    ["hermes", "Copy Hermes command"],
+    ["opencode", "Copy OpenCode OAuth connection command"],
+  ] as const)("copies a shell-quoted %s command", async (clientId, label) => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(<CodingAgentClientGuide clientId={clientId} mcpUrl={"https://x/$(echo MARK)"} />);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: label })); });
+    expect(writeText.mock.calls[0][0]).toContain("'https://x/$(echo MARK)'");
+  });
+
   it.each(clients)("renders the distinct %s guide", (clientId, expected) => {
     render(<CodingAgentClientGuide clientId={clientId} mcpUrl={mcpUrl} />);
     expect(screen.getByLabelText(/setup guide/i).dataset.clientGuide).toBe(clientId);
