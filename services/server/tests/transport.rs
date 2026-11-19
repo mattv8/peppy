@@ -5692,6 +5692,48 @@ async fn key_profile_activation_requires_a_matching_admission_verifier() {
 }
 
 #[tokio::test]
+async fn pending_commands_exclude_revoked_producer() {
+    let server = TestServer::start().await;
+    let producer = server.provision_device("device").await;
+    let gateway = server.provision_device("gateway").await;
+    let command_id = Uuid::new_v4();
+    let envelope = set_fingerprint(
+        command(
+            server.vault,
+            producer.id,
+            1,
+            Uuid::new_v4(),
+            command_id,
+            gateway.id,
+        ),
+        &server.fingerprint,
+    );
+    assert_eq!(
+        server
+            .post(&producer.token, "/v1/commands", &envelope)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (_, before) = server.get(&gateway.token, "/v1/commands/pending").await;
+    assert_eq!(before["commands"][0]["command_id"], json!(command_id));
+    assert_eq!(
+        server
+            .post(
+                &server.owner_token,
+                &format!("/v1/devices/{}/revoke", producer.id),
+                &json!({})
+            )
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let (_, after) = server.get(&gateway.token, "/v1/commands/pending").await;
+    assert_eq!(after["commands"], json!([]));
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn pending_command_references_never_retarget_a_gateway() {
     let server = TestServer::start().await;
     let owner = server.owner_token.clone();
