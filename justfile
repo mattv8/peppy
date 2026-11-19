@@ -217,4 +217,4 @@ backup destination:
     ./infra/compose/backup.sh {{ quote(destination) }}
 
 restore archive project:
-    ./infra/compose/restore.sh {{ quote(archive) }} {{ quote(project) }}
+    PEPPY_RESTORE_MANIFEST_SHA256="${PEPPY_RESTORE_MANIFEST_SHA256:-}" ./infra/compose/restore.sh {{ quote(archive) }} {{ quote(project) }}

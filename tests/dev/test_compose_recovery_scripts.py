@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import pathlib
 import stat
 import subprocess
+import tarfile
 import tempfile
 import unittest
 import unittest.mock
@@ -214,7 +216,11 @@ def write_restore_archive(root: pathlib.Path, artifacts: tuple[str, ...], config
     }
     (archive / "manifest.json").write_text(json.dumps(manifest))
     for name in artifacts:
-        (archive / name).write_bytes(b"fixture")
+        if name.endswith(".tar.gz"):
+            with tarfile.open(archive / name, "w:gz"):
+                pass
+        else:
+            (archive / name).write_bytes(b"fixture")
     entries = [f"{sha256((archive / name).read_bytes()).hexdigest()}  {name}" for name in ("manifest.json", *artifacts)]
     (archive / "manifest.sha256").write_text("\n".join(entries) + "\n")
     return archive
@@ -429,6 +435,7 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
             "READINESS_FAILURES": str(readiness_failures),
             "PSQL_ATTEMPT_FILE": str(root / "psql-attempts"),
             "EXPECTED_POSTGRES_PASSWORD": RESTORE_FIXTURE_PASSWORD,
+            "PEPPY_RESTORE_MANIFEST_SHA256": sha256((archive / "manifest.sha256").read_bytes()).hexdigest(),
         }
         return root, archive, log, environment
 
@@ -471,6 +478,53 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
         self.assertGreater(events.index(restore_calls[0]), events.index(readiness[-1]))
         self.assertNotIn(password, log.read_text())
 
+    def test_restore_requires_trusted_manifest_digest(self):
+        for digest in ("", "0" * 64, "A" * 64):
+            with self.subTest(digest=digest):
+                root, archive, log, environment = self.restore_fixture()
+                environment["PEPPY_RESTORE_MANIFEST_SHA256"] = digest
+                result = self.run_restore(root, archive, environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(log.exists())
+
+    def test_restore_rejects_unsafe_tar_members(self):
+        for name, kind, target in (
+            ("../evil", tarfile.REGTYPE, ""),
+            ("/evil", tarfile.REGTYPE, ""),
+            ("link", tarfile.SYMTYPE, "../../evil"),
+            ("link", tarfile.LNKTYPE, "/evil"),
+        ):
+            with self.subTest(name=name, kind=kind):
+                root, archive, log, environment = self.restore_fixture()
+                with tarfile.open(archive / "seaweed-data.tar.gz", "w:gz") as tar:
+                    member = tarfile.TarInfo(name)
+                    member.type = kind
+                    member.linkname = target
+                    if kind == tarfile.REGTYPE:
+                        member.size = 4
+                    tar.addfile(member, io.BytesIO(b"evil") if member.size else None)
+                entries = [
+                    f"{sha256((archive / artifact).read_bytes()).hexdigest()}  {artifact}"
+                    for artifact in ("manifest.json", *BASELINE_ARTIFACTS)
+                ]
+                (archive / "manifest.sha256").write_text("\n".join(entries) + "\n")
+                environment["PEPPY_RESTORE_MANIFEST_SHA256"] = sha256((archive / "manifest.sha256").read_bytes()).hexdigest()
+                result = self.run_restore(root, archive, environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(log.exists())
+
+    def test_backup_emits_external_manifest_digest(self):
+        root, destination, _, environment = self.backup_fixture(None, "seaweed:root")
+        result = self.run_backup(root, destination, environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        backup = next(path for path in destination.iterdir() if path.is_dir())
+        digest = sha256((backup / "manifest.sha256").read_bytes()).hexdigest()
+        expected = f"PEPPY_BACKUP_MANIFEST_SHA256={digest}\n"
+        sidecar = pathlib.Path(f"{backup}.manifest.sha256")
+        self.assertEqual(sidecar.read_text(), expected)
+        self.assertEqual(stat.S_IMODE(sidecar.stat().st_mode), 0o600)
+        self.assertIn(expected, result.stdout)
+
     def test_restore_refuses_pg_restore_when_target_database_never_becomes_ready(self):
         root, archive, log, environment = self.restore_fixture(readiness_failures=100)
 
@@ -498,7 +552,7 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
         calls = log.read_text()
         self.assertNotIn('"-f"', calls)
         self.assertIn("peppy-api", calls)
-        backup = next(destination.iterdir())
+        backup = next(path for path in destination.iterdir() if path.is_dir())
         self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o700)
         self.assertTrue(all(stat.S_IMODE(path.stat().st_mode) == 0o600 and path.stat().st_uid == os.getuid() for path in backup.iterdir()))
 
@@ -508,7 +562,7 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
         result = self.run_backup(root, destination, environment)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        manifest = json.loads((next(destination.iterdir()) / "manifest.json").read_text())
+        manifest = json.loads((next(path for path in destination.iterdir() if path.is_dir()) / "manifest.json").read_text())
         self.assertEqual(manifest["images"]["configured"]["seaweedfs"], "seaweed:community")
         self.assertNotIn('"-f"', log.read_text())
 
@@ -518,7 +572,7 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
         result = self.run_backup(root, destination, environment)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        backup = next(destination.iterdir())
+        backup = next(path for path in destination.iterdir() if path.is_dir())
         manifest = json.loads((backup / "manifest.json").read_text())
         self.assertEqual(manifest["format_version"], 2)
         self.assertIn("mcp-state.tar.gz", manifest["artifacts"])
@@ -597,7 +651,7 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
         self.assertNotIn('"stop", "mcp"', calls)
         self.assertNotIn('"start", "mcp"', calls)
         self.assertNotIn("peppy_mcp-state", calls)
-        manifest = json.loads((next(destination.iterdir()) / "manifest.json").read_text())
+        manifest = json.loads((next(path for path in destination.iterdir() if path.is_dir()) / "manifest.json").read_text())
         self.assertEqual(tuple(manifest["artifacts"]), BASELINE_ARTIFACTS)
         self.assertNotIn("mcp", manifest["images"]["configured"])
         self.assertNotIn("mcp", manifest["images"]["running_ids"])
@@ -727,7 +781,9 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
         self.assertIn('"create", "mcp-state-init"', calls)
         self.assertNotIn('"volume", "create", "peppy_mcp-state"', calls)
         self.assertIn("mcp-state.tar.gz", calls)
-        self.assertIn("chown 10001:10001", calls)
+        self.assertIn("chown -R 10001:10001 /destination", calls)
+        self.assertIn("find /destination -type d -exec chmod 0700", calls)
+        self.assertIn("find /destination -type f -exec chmod 0600", calls)
         self.assertNotIn('"start", "mcp"', calls)
         self.assertNotIn('"up", "--wait", "mcp"', calls)
 

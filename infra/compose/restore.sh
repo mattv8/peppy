@@ -13,7 +13,11 @@ target_project_arg=$2
 target_project=$target_project_arg
 case "$target_project" in *[!a-z0-9_-]*|''|[-_]* ) echo "project name must start with lowercase letter/digit and use lowercase letters, digits, _ or -" >&2; exit 64;; esac
 test -f "$root/.env" || { echo ".env is required" >&2; exit 64; }
-test -f "$archive/manifest.json" && test -f "$archive/manifest.sha256" || { echo "invalid backup directory" >&2; exit 64; }
+[[ ${PEPPY_RESTORE_MANIFEST_SHA256:-} =~ ^[0-9a-f]{64}$ ]] || { echo "PEPPY_RESTORE_MANIFEST_SHA256 must be a trusted lowercase SHA-256 digest" >&2; exit 64; }
+test -f "$archive/manifest.sha256" || { echo "backup checksum manifest is missing" >&2; exit 64; }
+manifest_digest=$(shasum -a 256 "$archive/manifest.sha256" | awk '{print $1}')
+test "$manifest_digest" = "$PEPPY_RESTORE_MANIFEST_SHA256" || { echo "backup checksum manifest SHA-256 mismatch" >&2; exit 65; }
+test -f "$archive/manifest.json" || { echo "invalid backup directory" >&2; exit 64; }
 
 python3 - "$archive" <<'PY'
 import json, os, re, sys
@@ -35,6 +39,23 @@ if len(checksum_entries) != len(required) or set(checksum_entries) != required:
     raise SystemExit("manifest.sha256 must list each required artifact exactly once")
 PY
 ( cd "$archive" && shasum -a 256 -c manifest.sha256 )
+python3 - "$archive" <<'PY'
+import json, os, sys, tarfile
+
+directory = sys.argv[1]
+with open(os.path.join(directory, "manifest.json")) as manifest:
+    artifacts = json.load(manifest)["artifacts"]
+for name in artifacts:
+    if not name.endswith(".tar.gz"):
+        continue
+    with tarfile.open(os.path.join(directory, name), "r:gz") as archive:
+        for member in archive:
+            if member.name.startswith("/") or ".." in member.name.split("/"):
+                raise SystemExit(f"unsafe archive member: {member.name}")
+            # Reject all links and special files: link chains can redirect later writes.
+            if not (member.isfile() or member.isdir()):
+                raise SystemExit(f"unsafe archive member type: {member.name}")
+PY
 postgres_image=$(python3 - "$archive/manifest.json" <<'PY'
 import json, re, sys
 image = json.load(open(sys.argv[1]))["images"]["running_ids"]["postgres"]
@@ -105,12 +126,16 @@ done
 
 "${compose[@]}" create postgres seaweedfs >/dev/null
 data_volume=${volumes[1]}; home_volume=${volumes[2]}
-docker run --pull never --rm -v "$data_volume:/destination" -v "$archive:/backup:ro" "$postgres_image" tar -C /destination -xzf /backup/seaweed-data.tar.gz
-docker run --pull never --rm -v "$home_volume:/destination" -v "$archive:/backup:ro" "$postgres_image" tar -C /destination -xzf /backup/seaweed-home.tar.gz
+# The pinned SeaweedFS image runs weed as seaweed (1000:1000), but its
+# entrypoint only recursively chowns when /data itself has a different owner.
+# Apply trusted service ownership and private data modes, never archive metadata.
+docker run --pull never --rm -v "$data_volume:/destination" -v "$archive:/backup:ro" "$postgres_image" sh -ec 'tar --no-same-owner --no-same-permissions -C /destination -xzf /backup/seaweed-data.tar.gz && chown -R 1000:1000 /destination && find /destination -type d -exec chmod 0700 {} + && find /destination -type f -exec chmod 0600 {} +'
+docker run --pull never --rm -v "$home_volume:/destination" -v "$archive:/backup:ro" "$postgres_image" sh -ec 'tar --no-same-owner --no-same-permissions -C /destination -xzf /backup/seaweed-home.tar.gz && chown -R 0:0 /destination && find /destination -type d -exec chmod 0700 {} + && find /destination -type f -exec chmod 0600 {} +'
 if test "$mcp_enabled" = 1; then
+  # Match compose.mcp.yml storage ownership and custody.rs private-file policy.
   mcp_state_volume=${volumes[3]}
   "${compose[@]}" create mcp-state-init >/dev/null
-  docker run --pull never --rm -v "$mcp_state_volume:/destination" -v "$archive:/backup:ro" "$postgres_image" sh -ec 'tar -C /destination -xzf /backup/mcp-state.tar.gz && chown 10001:10001 /destination && chmod 0700 /destination'
+  docker run --pull never --rm -v "$mcp_state_volume:/destination" -v "$archive:/backup:ro" "$postgres_image" sh -ec 'tar --no-same-owner --no-same-permissions -C /destination -xzf /backup/mcp-state.tar.gz && chown -R 10001:10001 /destination && find /destination -type d -exec chmod 0700 {} + && find /destination -type f -exec chmod 0600 {} +'
 fi
 if ! "${compose[@]}" up --wait postgres; then
   echo "PostgreSQL startup failed; restore aborted before pg_restore" >&2

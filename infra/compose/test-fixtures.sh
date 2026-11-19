@@ -163,6 +163,7 @@ else
   fail "backup did not accept created/exited clean states (rc=$command_status; $(tail -1 "$fixture/accepted.out"))"
 fi
 archive=$(find "$fixture/accepted backup" -mindepth 1 -maxdepth 1 -type d -print -quit)
+manifest_digest=$(sed -n 's/^PEPPY_BACKUP_MANIFEST_SHA256=//p' "$archive.manifest.sha256")
 if python3 - "$archive" "$(id -u)" <<'PY'
 from pathlib import Path
 import stat, sys
@@ -214,8 +215,9 @@ truncated="$fixture/truncated archive"
 cp -R "$archive" "$truncated"
 remove_last_line "$truncated/manifest.sha256"
 target="recoverytruncated${suffix}"; created_projects="$created_projects $target"
-run_capture "$fixture/truncated.out" bash -c 'cd "$1" && "$2" "$3" "$4"' _ "$fixture" "$repo/infra/compose/restore.sh" "$truncated" "$target"
-if test "$command_status" != 0 && test -z "$(docker volume ls --format '{{.Name}}' | grep "^${target}_" || true)"; then
+truncated_digest=$(shasum -a 256 "$truncated/manifest.sha256" | awk '{print $1}')
+run_capture "$fixture/truncated.out" env PEPPY_RESTORE_MANIFEST_SHA256="$truncated_digest" bash -c 'cd "$1" && "$2" "$3" "$4"' _ "$fixture" "$repo/infra/compose/restore.sh" "$truncated" "$target"
+if test "$command_status" != 0 && grep -q 'must list each required artifact exactly once' "$fixture/truncated.out" && test -z "$(docker volume ls --format '{{.Name}}' | grep "^${target}_" || true)"; then
   pass "restore rejects incomplete checksum index before target creation"
 else
   fail "restore accepted incomplete checksum index or created target volumes (rc=$command_status)"
@@ -227,8 +229,9 @@ cp -R "$archive" "$duplicated"
 remove_last_line "$duplicated/manifest.sha256"
 head -1 "$duplicated/manifest.sha256" >> "$duplicated/manifest.sha256"
 duplicate_target="recoveryduplicate${suffix}"; created_projects="$created_projects $duplicate_target"
-run_capture "$fixture/duplicate.out" bash -c 'cd "$1" && "$2" "$3" "$4"' _ "$fixture" "$repo/infra/compose/restore.sh" "$duplicated" "$duplicate_target"
-if test "$command_status" != 0 && test -z "$(docker volume ls --format '{{.Name}}' | grep "^${duplicate_target}_" || true)"; then
+duplicate_digest=$(shasum -a 256 "$duplicated/manifest.sha256" | awk '{print $1}')
+run_capture "$fixture/duplicate.out" env PEPPY_RESTORE_MANIFEST_SHA256="$duplicate_digest" bash -c 'cd "$1" && "$2" "$3" "$4"' _ "$fixture" "$repo/infra/compose/restore.sh" "$duplicated" "$duplicate_target"
+if test "$command_status" != 0 && grep -q 'must list each required artifact exactly once' "$fixture/duplicate.out" && test -z "$(docker volume ls --format '{{.Name}}' | grep "^${duplicate_target}_" || true)"; then
   pass "restore rejects duplicate checksum entries before target creation"
 else
   fail "restore accepted duplicate checksum entries or created target volumes (rc=$command_status)"
@@ -238,7 +241,7 @@ fi
 restore_weird="restore archive '\";\$(touch restore-injected); echo \""
 cp -R "$archive" "$fixture/$restore_weird"
 restore_quoted="recoveryquoted${suffix}"; created_projects="$created_projects $restore_quoted"
-run_capture "$fixture/just-restore.out" just --justfile "$repo/justfile" --working-directory "$fixture" restore "$restore_weird" "$restore_quoted"
+run_capture "$fixture/just-restore.out" env PEPPY_RESTORE_MANIFEST_SHA256="$manifest_digest" just --justfile "$repo/justfile" --working-directory "$fixture" restore "$restore_weird" "$restore_quoted"
 if test "$command_status" = 0 && test ! -e "$fixture/restore-injected" && test "$(docker inspect --format '{{.State.Status}}' "${restore_quoted}-postgres-1")" = running && test "$(docker exec "${restore_quoted}-postgres-1" psql -U recovery -d recovery -tAc 'select value from recovery_sentinel')" = backup-sentinel && test "$(docker run --rm -v "${restore_quoted}_seaweed-volume-data:/data" postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f cat /data/backup-sentinel)" = volume-sentinel && test "$(docker run --rm -v "${restore_quoted}_seaweed-filer-data:/data" postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f cat /data/backup-sentinel)" = filer-sentinel; then
   pass "just restore passes shell metacharacters literally and restores database and volume sentinels"
 else
@@ -308,7 +311,7 @@ s=s.replace("    healthcheck:\n      test: [CMD-SHELL, 'pg_isready -U $$POSTGRES
 p.write_text(s)
 PY
 startfail="recoverystartfail${suffix}"; created_projects="$created_projects $startfail"
-run_capture "$fixture/startfail.out" bash -c 'cd "$1" && "$2" "$3" "$4"' _ "$fixture" "$repo/infra/compose/restore.sh" "$archive" "$startfail"
+run_capture "$fixture/startfail.out" env PEPPY_RESTORE_MANIFEST_SHA256="$manifest_digest" bash -c 'cd "$1" && "$2" "$3" "$4"' _ "$fixture" "$repo/infra/compose/restore.sh" "$archive" "$startfail"
 if test "$command_status" = 74 && grep -q 'restore aborted' "$fixture/startfail.out" && ! grep -q 'pg_restore:' "$fixture/startfail.out"; then
   pass "restore aborts before pg_restore when PostgreSQL startup fails"
 else
@@ -398,6 +401,7 @@ YAML
   mkdir "$fixture/mcp backup"
   run_capture "$fixture/mcp-backup.out" env COMPOSE_FILE=docker-compose.yml:docker-compose.mcp.yml bash -c 'cd "$1" && "$2" "$3"' _ "$fixture" "$repo/infra/compose/backup.sh" "$fixture/mcp backup"
   mcp_archive=$(find "$fixture/mcp backup" -mindepth 1 -maxdepth 1 -type d -print -quit)
+  mcp_manifest_digest=$(sed -n 's/^PEPPY_BACKUP_MANIFEST_SHA256=//p' "$mcp_archive.manifest.sha256")
   if test "$command_status" = 0 && test -f "$mcp_archive/mcp-state.tar.gz" && python3 - "$mcp_archive/mcp-state.tar.gz" "$mcp_archive/manifest.json" <<'PY'
 import json, sys
 from pathlib import Path
@@ -438,13 +442,13 @@ PY
   fi
   "${mcp_compose[@]}" down -v --remove-orphans >/dev/null
   mcp_target="recoverymcp${suffix}"; created_projects="$created_projects $mcp_target"
-  run_capture "$fixture/mcp-without-overlay.out" bash -c 'cd "$1" && "$2" "$3" "$4"' _ "$fixture" "$repo/infra/compose/restore.sh" "$mcp_archive" "$mcp_target"
+  run_capture "$fixture/mcp-without-overlay.out" env PEPPY_RESTORE_MANIFEST_SHA256="$mcp_manifest_digest" bash -c 'cd "$1" && "$2" "$3" "$4"' _ "$fixture" "$repo/infra/compose/restore.sh" "$mcp_archive" "$mcp_target"
   if test "$command_status" != 0 && test -z "$(docker volume ls --format '{{.Name}}' | grep "^${mcp_target}_" || true)"; then
     pass "MCP restore rejects a missing overlay before volume creation"
   else
     fail "MCP restore accepted a missing overlay or created volumes"
   fi
-  run_capture "$fixture/mcp-restore.out" env COMPOSE_FILE=docker-compose.yml:docker-compose.mcp.yml bash -c 'cd "$1" && "$2" "$3" "$4"' _ "$fixture" "$repo/infra/compose/restore.sh" "$mcp_archive" "$mcp_target"
+  run_capture "$fixture/mcp-restore.out" env PEPPY_RESTORE_MANIFEST_SHA256="$mcp_manifest_digest" COMPOSE_FILE=docker-compose.yml:docker-compose.mcp.yml bash -c 'cd "$1" && "$2" "$3" "$4"' _ "$fixture" "$repo/infra/compose/restore.sh" "$mcp_archive" "$mcp_target"
   sentinel=$(docker run --rm -v "${mcp_target}_mcp-state:/state:ro" "$postgres_image" cat /state/recovery-sentinel 2>/dev/null || true)
   state_mode=$(docker run --rm -v "${mcp_target}_mcp-state:/state:ro" "$postgres_image" stat -c '%u:%g %a' /state 2>/dev/null || true)
   if test "$command_status" = 0 && test "$sentinel" = mcp-state-sentinel && test "$state_mode" = '10001:10001 700' && test -z "$(docker compose --project-name "$mcp_target" --project-directory "$fixture" --env-file "$fixture/.env" -f "$fixture/docker-compose.yml" -f "$fixture/docker-compose.mcp.yml" ps --status running --services | grep '^mcp$' || true)"; then

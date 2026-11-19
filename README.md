@@ -181,6 +181,22 @@ Read the [backup and restore guide](.agents/ops/backup-restore.md) before you re
 
 [Full guide →](https://peppy.pro/docs/self-host/recover-claim)
 
+### Backup and restore
+
+Run `just backup /secure/backups` and store the printed
+`PEPPY_BACKUP_MANIFEST_SHA256` value separately from the backup. A mode-0600
+`<backup-directory>.manifest.sha256` file is also written beside the backup;
+move its value to trusted independent storage. To restore into a distinct
+project with no existing target volumes, supply that trusted value:
+
+```sh
+PEPPY_RESTORE_MANIFEST_SHA256=<trusted-64-character-digest> just restore /secure/backups/peppy-... restore-drill
+```
+
+Use the same Compose overlays for backup and restore. Restore verifies the
+digest and archives before creating volumes; reconcile revocations and clients
+before reopening access, as described in the backup and restore guide.
+
 ### Update
 
 Back up first. If `.env` sets `PEPPY_SERVER_IMAGE` or `PEPPY_MCP_IMAGE`, change
