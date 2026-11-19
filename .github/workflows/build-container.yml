@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ inputs.ref || github.sha }}
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
       - id: metadata
         env:
           VERSION: ${{ inputs.version }}
@@ -38,7 +38,7 @@ jobs:
           fi
           echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           if [[ -n "$VERSION" ]]; then echo "version_label=org.opencontainers.image.version=$VERSION" >> "$GITHUB_OUTPUT"; fi
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: .
           file: infra/docker/server.Dockerfile
@@ -74,7 +74,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ inputs.ref || github.sha }}
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
       - id: metadata
         env:
           VERSION: ${{ inputs.version }}
@@ -85,7 +85,7 @@ jobs:
           fi
           echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           if [[ -n "$VERSION" ]]; then echo "version_label=org.opencontainers.image.version=$VERSION" >> "$GITHUB_OUTPUT"; fi
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: .
           file: infra/docker/push-relay.Dockerfile
@@ -121,7 +121,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ inputs.ref || github.sha }}
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
       - id: metadata
         env:
           VERSION: ${{ inputs.version }}
@@ -132,7 +132,7 @@ jobs:
           fi
           echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           if [[ -n "$VERSION" ]]; then echo "version_label=org.opencontainers.image.version=$VERSION" >> "$GITHUB_OUTPUT"; fi
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: .
           file: infra/docker/mcp.Dockerfile
