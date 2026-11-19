@@ -767,7 +767,7 @@ pub(super) async fn pending_commands(
             .map_err(|error| database_unavailable(&error, "pending_commands_capability_lookup"))?
             .is_some());
     let gateway_filter = is_executor.then_some(p.device);
-    let rows = sqlx::query("SELECT c.command_id,c.producer_device_id,c.gateway_device_id,c.cursor FROM commands c WHERE c.vault_id=$1 AND ($2::uuid IS NULL OR c.gateway_device_id=$2) AND c.cursor>$3 AND NOT EXISTS (SELECT 1 FROM command_receipts r WHERE r.vault_id=c.vault_id AND r.command_id=c.command_id AND r.gateway_device_id=c.gateway_device_id) ORDER BY c.cursor LIMIT $4")
+    let rows = sqlx::query("SELECT c.command_id,c.producer_device_id,c.gateway_device_id,c.cursor FROM commands c WHERE c.vault_id=$1 AND ($2::uuid IS NULL OR c.gateway_device_id=$2) AND c.cursor>$3 AND NOT EXISTS (SELECT 1 FROM command_receipts r WHERE r.vault_id=c.vault_id AND r.command_id=c.command_id AND r.gateway_device_id=c.gateway_device_id) AND NOT EXISTS (SELECT 1 FROM devices d WHERE d.vault_id=c.vault_id AND d.device_id=c.producer_device_id AND d.revoked_at IS NOT NULL) ORDER BY c.cursor LIMIT $4")
         .bind(p.vault)
         .bind(gateway_filter)
         .bind(after)
