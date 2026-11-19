@@ -1526,6 +1526,50 @@ async fn manifest_resync_downloads_only_the_records_the_journal_cannot_verify() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snapshot_resync_notifies_during_record_staging() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let page_two_notifications = Arc::new(AtomicUsize::new(usize::MAX));
+    let observed = page_two_notifications.clone();
+    let counter = notifications.clone();
+    let records: SnapshotReply = Arc::new(move |n, query, log| {
+        if n == 1 {
+            observed.store(counter.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+        records_page(page_of(query, log).into_iter().take(1).collect())
+    });
+    let (origin, requests) = resync_mock(log.clone(), false, Arc::new(not_found), records).await;
+    let f = fixture_at(&origin);
+    let counter = notifications.clone();
+    let session = Arc::new(
+        crate::session::open_session(
+            f.dir.path(),
+            &f.store,
+            &f.binding,
+            &[],
+            Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }),
+        )
+        .unwrap(),
+    );
+    session
+        .client
+        .unlock(&f.profile, &f.header, PHRASE)
+        .unwrap();
+    *log.lock().unwrap() = mock_records(&sealed_envelopes(&session, 3));
+    notifications.store(0, Ordering::SeqCst);
+
+    sync::snapshot_resync(&session).await.unwrap();
+    assert_eq!(requests.lock().unwrap().len(), 4, "three record pages");
+    assert!(
+        page_two_notifications.load(Ordering::SeqCst) > 0,
+        "no refresh notification was sent before snapshot record page 2"
+    );
+    session.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_without_manifest_support_keeps_the_full_import() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let (origin, requests) = manifest_mock(log.clone(), false, Arc::new(not_found)).await;

@@ -468,7 +468,10 @@ pub async fn drain_apply(session: &Arc<Session>, max_steps: usize) -> BridgeResu
             break;
         }
         let c = client(session);
-        let report = blocking(move || c.apply_pending(MAX_APPLY_BATCH).map_err(core_error)).await?;
+        let report = apply_batch(session, async move {
+            blocking(move || c.apply_pending(MAX_APPLY_BATCH).map_err(core_error)).await
+        })
+        .await?;
         let step = report.applied + report.drained + report.quarantined + report.superseded > 0;
         progressed |= step;
         // No progress at all ends the pass (history waiting for keys stays journaled); while
@@ -482,6 +485,67 @@ pub async fn drain_apply(session: &Arc<Session>, max_steps: usize) -> BridgeResu
         session.notify();
     }
     Ok(progressed)
+}
+
+async fn apply_batch(
+    session: &Session,
+    operation: impl std::future::Future<Output = BridgeResult<peppy_client_core::ApplyReport>>,
+) -> BridgeResult<peppy_client_core::ApplyReport> {
+    let report = {
+        let _guard = session.apply_batch_lock.lock().await;
+        let report = operation.await?;
+        session.set_apply_remaining(report.snapshot_remaining);
+        report
+    };
+    session.notify_progress(false);
+    Ok(report)
+}
+
+#[cfg(test)]
+mod apply_batch_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn overlapping_batches_publish_in_core_order() {
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let first_session = session.clone();
+        let first = tokio::spawn(async move {
+            apply_batch(&first_session, async {
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Ok(peppy_client_core::ApplyReport {
+                    snapshot_remaining: 10,
+                    ..Default::default()
+                })
+            })
+            .await
+            .unwrap()
+        });
+        started_rx.await.unwrap();
+        let (second_tx, mut second_rx) = tokio::sync::oneshot::channel();
+        let second_session = session.clone();
+        let second = tokio::spawn(async move {
+            apply_batch(&second_session, async {
+                let _ = second_tx.send(());
+                Ok(peppy_client_core::ApplyReport::default())
+            })
+            .await
+            .unwrap()
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut second_rx)
+                .await
+                .is_err()
+        );
+        release_tx.send(()).unwrap();
+        first.await.unwrap();
+        second_rx.await.unwrap();
+        second.await.unwrap();
+        assert!(!session.snapshot_applying());
+    }
 }
 
 #[derive(Deserialize)]
@@ -596,6 +660,12 @@ async fn ingest_page(session: &Arc<Session>, records: Vec<RawRecord>) -> BridgeR
 /// Records are passed raw so invalid ones are quarantined by core. Snapshot history is merge-only
 /// and its commands are historical (never executable); the restore guard is never touched.
 pub(crate) async fn snapshot_resync(session: &Arc<Session>) -> BridgeResult<()> {
+    let result = snapshot_resync_inner(session).await;
+    session.set_staging_progress(None, true);
+    result
+}
+
+async fn snapshot_resync_inner(session: &Arc<Session>) -> BridgeResult<()> {
     // Refused before any network or core work while the window is open, whichever path asked.
     if !snapshot_gate(session)
         .wait_before_attempt(Instant::now())
@@ -619,6 +689,7 @@ pub(crate) async fn snapshot_resync(session: &Arc<Session>) -> BridgeResult<()> 
             Ok(()) => return Ok(()),
             Err(CutError::Cancelled) => return Ok(()),
             Err(CutError::Impossible) => {
+                session.set_staging_progress(None, true);
                 // The staged cut can never complete (server moved/rolled back, or ended early):
                 // never resume it again; `begin_snapshot` obsoletes it on the next attempt.
                 *session
@@ -629,6 +700,7 @@ pub(crate) async fn snapshot_resync(session: &Arc<Session>) -> BridgeResult<()> 
                 impossible += 1;
             }
             Err(CutError::ManifestUnsupported) => {
+                session.set_staging_progress(None, true);
                 // The server has no manifest route: finish this import with the full download.
                 *session
                     .abandoned_snapshot
@@ -771,6 +843,10 @@ async fn start_or_resume(
             .await?
             .filter(|p| p.received_records < p.expected_records && Some(p.generation) != abandoned);
         if let Some(progress) = resume {
+            session.set_staging_progress(
+                Some((progress.received_records, progress.expected_records)),
+                false,
+            );
             return Ok(progress);
         }
     }
@@ -805,6 +881,10 @@ async fn start_or_resume(
     })
     .await;
     let progress = record_snapshot_refusal(session, progress)?;
+    session.set_staging_progress(
+        Some((progress.received_records, progress.expected_records)),
+        false,
+    );
     snapshot_gate(session).clear();
     session.set_status(|status| {
         if status.error_code == Some(SNAPSHOT_TOO_LARGE_CODE) {
@@ -878,6 +958,7 @@ async fn import_cut(
     let _retention = session.attachment_retention_maintenance.lock().await;
     session.begin_attachment_retention_restore();
     blocking(move || c.finish_snapshot(generation).map_err(core_error)).await?;
+    session.set_staging_progress(None, true);
     drain_apply(session, usize::MAX).await?;
     Ok(())
 }
@@ -915,7 +996,13 @@ async fn import_records_cut(
             return Err(CutError::Impossible);
         }
         match append_snapshot_records(session, progress, page.records).await {
-            Ok(next) => *progress = next,
+            Ok(next) => {
+                *progress = next;
+                session.set_staging_progress(
+                    Some((progress.received_records, progress.expected_records)),
+                    false,
+                );
+            }
             // Page byte cap: retry the same position with a smaller page.
             Err(error) if error.code == "invalid-request" && limit > 1 => limit /= 2,
             Err(error) => return Err(error.into()),
@@ -985,6 +1072,10 @@ async fn import_manifest_cut(
             Err(error) => return Err(error.into()),
         };
         *progress = manifest.progress;
+        session.set_staging_progress(
+            Some((progress.received_records, progress.expected_records)),
+            false,
+        );
         let mut remaining = manifest.missing as usize;
         while remaining > 0 {
             if session.cancel.is_cancelled() {
@@ -1019,6 +1110,10 @@ async fn import_manifest_cut(
                 Ok(next) => {
                     // Extra records from a server that ignores `limit` are records of this cut too.
                     *progress = next;
+                    session.set_staging_progress(
+                        Some((progress.received_records, progress.expected_records)),
+                        false,
+                    );
                     remaining = remaining.saturating_sub(count);
                 }
                 Err(error) if error.code == "invalid-request" && record_limit > 1 => {
@@ -3005,7 +3100,22 @@ async fn live(session: Arc<Session>) {
         let round = async {
             refresh_vault(&session).await?;
             probe_snapshot_capability(&session).await?;
-            replay_until_caught_up(&session).await?;
+            let c = client(&session);
+            let bootstrap = !session
+                .attachment_retention_replay_observed
+                .load(std::sync::atomic::Ordering::Acquire)
+                && blocking(move || c.receive_cursor().map_err(core_error))
+                    .await?
+                    .0
+                    == 0;
+            if bootstrap {
+                session.set_bootstrap(true, false);
+            }
+            let replay_result = replay_until_caught_up(&session).await;
+            if bootstrap {
+                session.set_bootstrap(false, true);
+            }
+            replay_result?;
             if session
                 .attachment_retention_supported
                 .load(std::sync::atomic::Ordering::Acquire)

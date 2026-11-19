@@ -114,6 +114,110 @@ pub struct NetStatus {
     pub revoked_device_ids: HashSet<String>,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum MirrorPhase {
+    #[default]
+    None,
+    Staging,
+    Applying,
+    Bootstrap,
+}
+
+struct ProgressMirror {
+    staging: Option<(u64, u64)>,
+    apply_remaining: u64,
+    bootstrap: bool,
+    last_phase: MirrorPhase,
+    last_notify: Option<std::time::Instant>,
+}
+
+impl Default for ProgressMirror {
+    fn default() -> Self {
+        Self {
+            staging: None,
+            apply_remaining: 0,
+            bootstrap: false,
+            last_phase: MirrorPhase::None,
+            last_notify: Some(std::time::Instant::now()),
+        }
+    }
+}
+
+impl ProgressMirror {
+    fn phase(&self) -> MirrorPhase {
+        if self.staging.is_some() {
+            MirrorPhase::Staging
+        } else if self.apply_remaining > 0 {
+            MirrorPhase::Applying
+        } else if self.bootstrap {
+            MirrorPhase::Bootstrap
+        } else {
+            MirrorPhase::None
+        }
+    }
+}
+
+#[cfg(test)]
+mod sync_progress_mirror_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn precedence_and_clearing() {
+        let progress = || ReplayProgress {
+            received_through: Cursor(0),
+            processed_through: Cursor(0),
+            waiting_for_keys: 1,
+        };
+        let view = Session::sync_progress_view(progress(), None, Some((2, 5)), 4, true);
+        assert!(matches!(view.phase, dto::SyncProgressPhase::Receiving));
+        assert_eq!(view.snapshot_remaining.as_deref(), Some("3"));
+        let view = Session::sync_progress_view(progress(), None, None, 4, true);
+        assert!(matches!(view.phase, dto::SyncProgressPhase::WaitingForKeys));
+        let unlocked = || ReplayProgress {
+            waiting_for_keys: 0,
+            ..progress()
+        };
+        let view = Session::sync_progress_view(unlocked(), None, None, 4, true);
+        assert!(matches!(view.phase, dto::SyncProgressPhase::Applying));
+        assert_eq!(view.snapshot_remaining.as_deref(), Some("4"));
+        let view = Session::sync_progress_view(unlocked(), None, None, 0, true);
+        assert!(matches!(view.phase, dto::SyncProgressPhase::Receiving));
+        assert!(view.snapshot_remaining.is_none());
+        let view = Session::sync_progress_view(unlocked(), None, None, 0, false);
+        assert!(matches!(view.phase, dto::SyncProgressPhase::Current));
+    }
+
+    #[test]
+    fn notifications_throttle_counts_but_flush_phases_and_force() {
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let count = Arc::new(AtomicUsize::new(0));
+        let observed = count.clone();
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }),
+        )
+        .unwrap();
+        session.set_staging_progress(Some((0, 5)), false);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        session.set_staging_progress(Some((1, 5)), false);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        session.notify_progress(true);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        session.set_staging_progress(None, false);
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+        session.progress_mirror.lock().unwrap().last_notify =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        session.notify_progress(false);
+        assert_eq!(count.load(Ordering::SeqCst), 4);
+    }
+}
+
 pub struct Session {
     pub generation: String,
     pub binding: Binding,
@@ -121,6 +225,8 @@ pub struct Session {
     pub api: Api,
     pub data_dir: PathBuf,
     pub status: Mutex<NetStatus>,
+    progress_mirror: Mutex<ProgressMirror>,
+    pub(crate) apply_batch_lock: tokio::sync::Mutex<()>,
     pub(crate) live_typing: crate::live_typing::LiveTypingHost,
     previews: Mutex<BoundedCache>,
     avatars: Mutex<BoundedCache>,
@@ -578,6 +684,8 @@ pub(crate) fn open_session_with_progress(
         api,
         data_dir,
         status: Mutex::new(status),
+        progress_mirror: Mutex::new(ProgressMirror::default()),
+        apply_batch_lock: tokio::sync::Mutex::new(()),
         live_typing: crate::live_typing::LiveTypingHost::default(),
         previews: Mutex::new(BoundedCache::new(MAX_PREVIEW_CACHE)),
         avatars: Mutex::new(BoundedCache::new(MAX_AVATAR_CACHE)),
@@ -879,6 +987,62 @@ impl Session {
         (self.notifier)();
     }
 
+    pub(crate) fn set_staging_progress(&self, staging: Option<(u64, u64)>, force: bool) {
+        self.progress_mirror
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .staging = staging;
+        self.notify_progress(force);
+    }
+
+    pub(crate) fn set_apply_remaining(&self, remaining: u64) {
+        self.progress_mirror
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .apply_remaining = remaining;
+    }
+
+    pub(crate) fn set_bootstrap(&self, bootstrap: bool, force: bool) {
+        self.progress_mirror
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .bootstrap = bootstrap;
+        self.notify_progress(force);
+    }
+
+    pub(crate) fn notify_progress(&self, force: bool) {
+        let should_notify = {
+            let mut mirror = self
+                .progress_mirror
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let phase = mirror.phase();
+            let now = std::time::Instant::now();
+            let notify = force
+                || phase != mirror.last_phase
+                || mirror.last_notify.is_none_or(|last| {
+                    now.duration_since(last) >= std::time::Duration::from_secs(1)
+                });
+            if notify {
+                mirror.last_phase = phase;
+                mirror.last_notify = Some(now);
+            }
+            notify
+        };
+        if should_notify {
+            self.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_applying(&self) -> bool {
+        self.progress_mirror
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .phase()
+            == MirrorPhase::Applying
+    }
+
     pub(crate) fn set_mismatch(&self, mismatch: bool) {
         let changed = self.mismatch.swap(mismatch, Ordering::AcqRel) != mismatch;
         if changed {
@@ -922,24 +1086,56 @@ impl Session {
     fn sync_progress(&self) -> BridgeResult<dto::SyncProgress> {
         let progress = self.replay_progress()?;
         let target_high_water = self.replay_target_high_water();
-        let phase = if progress.waiting_for_keys > 0 {
+        let (staging, apply_remaining, bootstrap) = {
+            let mirror = self
+                .progress_mirror
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            (mirror.staging, mirror.apply_remaining, mirror.bootstrap)
+        };
+        Ok(Self::sync_progress_view(
+            progress,
+            target_high_water,
+            staging,
+            apply_remaining,
+            bootstrap,
+        ))
+    }
+
+    fn sync_progress_view(
+        progress: ReplayProgress,
+        target_high_water: Option<Cursor>,
+        staging: Option<(u64, u64)>,
+        apply_remaining: u64,
+        bootstrap: bool,
+    ) -> dto::SyncProgress {
+        let phase = if staging.is_some() {
+            dto::SyncProgressPhase::Receiving
+        } else if progress.waiting_for_keys > 0 {
             dto::SyncProgressPhase::WaitingForKeys
-        } else if replay_is_behind(&progress, target_high_water) {
+        } else if apply_remaining > 0 {
+            dto::SyncProgressPhase::Applying
+        } else if bootstrap || replay_is_behind(&progress, target_high_water) {
             dto::SyncProgressPhase::Receiving
         } else if progress.processed_through < progress.received_through {
             dto::SyncProgressPhase::Applying
         } else {
             dto::SyncProgressPhase::Current
         };
-        Ok(dto::SyncProgress {
+        dto::SyncProgress {
             phase,
             received_through: progress.received_through.0.to_string(),
             processed_through: progress.processed_through.0.to_string(),
             target_high_water: target_high_water.map(|target| target.0.to_string()),
-            snapshot_received: None,
-            snapshot_expected: None,
-            snapshot_remaining: None,
-        })
+            snapshot_received: staging.map(|(received, _)| received.to_string()),
+            snapshot_expected: staging.map(|(_, expected)| expected.to_string()),
+            snapshot_remaining: staging
+                .map(|(received, expected)| expected.saturating_sub(received).to_string())
+                .or_else(|| {
+                    (progress.waiting_for_keys == 0 && apply_remaining > 0)
+                        .then(|| apply_remaining.to_string())
+                }),
+        }
     }
 
     pub fn notify_deferred_follow_up(&self) {
