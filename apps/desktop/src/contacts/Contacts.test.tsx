@@ -1548,7 +1548,8 @@ describe("ContactsView", () => {
       await waitFor(() => expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && offset === 200)).toHaveLength(1));
       const offsetZeroBefore = vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && (offset ?? 0) === 0).length;
 
-      vi.useFakeTimers({ shouldAdvanceTime: true });
+      // Keep jsdom's focus-fixup rendering interval on the real clock.
+      vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout", "Date"] });
       try {
         act(() => hint?.());
         await act(async () => { await vi.advanceTimersByTimeAsync(150); });

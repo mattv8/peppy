@@ -42,9 +42,9 @@ describe("ContactAvatar", () => {
 
   it("uses the deterministic palette color variable", () => {
     render(<ContactAvatar seed="+18015551234" />);
-    const avatar = document.querySelector(".contact-avatar")!;
+    const avatar = document.querySelector<HTMLElement>(".contact-avatar")!;
     const index = paletteIndex("+18015551234");
     expect(avatar).toHaveAttribute("data-avatar-color", String(index));
-    expect(avatar).toHaveStyle(`--peppy-tone: var(--peppy-avatar-${index}, var(--peppy-accent))`);
+    expect(avatar.style.getPropertyValue("--peppy-tone")).toBe(`var(--peppy-avatar-${index}, var(--peppy-accent))`);
   });
 });

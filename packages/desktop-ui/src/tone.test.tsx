@@ -46,6 +46,6 @@ describe("conversation tones", () => {
     }
 
     const { container } = render(<ToneOverridesProvider overrides={{ "+15550001111": 61 }}><StyledTone /></ToneOverridesProvider>);
-    expect(container.querySelector("[data-tone]")).toHaveStyle("--peppy-tone: var(--peppy-avatar-61, var(--peppy-accent))");
+    expect(container.querySelector<HTMLElement>("[data-tone]")!.style.getPropertyValue("--peppy-tone")).toBe("var(--peppy-avatar-61, var(--peppy-accent))");
   });
 });
