@@ -945,6 +945,12 @@ assert.call(android_gradle_ignore.none? { |entry| File.fnmatch?(entry.fetch('dep
 android_build_text = File.read(File.join(root, '..', 'apps', 'android', 'app', 'build.gradle.kts'))
 robolectric_sdk_fixtures = android_build_text.scan(/"org\.robolectric:android-all-instrumented:([^"]+)"/).flatten
 assert.call(robolectric_sdk_fixtures.length == 5 && robolectric_sdk_fixtures.uniq.length == 5, 'Robolectric SDK fixtures must remain five distinct android-all-instrumented images')
+android_gradle_properties = File.readlines(File.join(root, '..', 'apps', 'android', 'gradle.properties'), chomp: true).map(&:strip).reject { |line| line.empty? || line.start_with?('#') }.to_h { |line| line.split('=', 2) }
+repository_backoff_key = 'org.gradle.internal.repository.initial.backoff'
+repository_tentatives_key = 'org.gradle.internal.repository.max.tentatives'
+assert.call(android_gradle_properties['systemProp.' + repository_backoff_key].to_s.match?(/\A\d+\z/) && android_gradle_properties['systemProp.' + repository_backoff_key] == '30000', 'Android Gradle repository backoff must be the exact systemProp 30000 ms initial backoff')
+assert.call(android_gradle_properties['systemProp.' + repository_tentatives_key] == '3', 'Android Gradle repository retries must be the exact systemProp three total attempts')
+assert.call(!android_gradle_properties.key?(repository_backoff_key) && !android_gradle_properties.key?(repository_tentatives_key), 'Gradle repository tuning must use the systemProp prefix; unprefixed keys are ignored')
 
 component_state_test = File.join(__dir__, 'test-release-component-state.sh')
 _, stderr, status = Open3.capture3('bash', component_state_test)
