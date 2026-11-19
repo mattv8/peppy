@@ -118,6 +118,89 @@ async fn main_load_for_window_preserves_requested_second_conversation() {
 }
 
 #[tokio::test]
+async fn merged_source_loads_survivor_for_main_and_its_composer_only() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let first = peppy_client_core::ConversationId::new();
+    let second = peppy_client_core::ConversationId::new();
+    for (id, body) in [(first, "first"), (second, "second")] {
+        session
+            .client
+            .capture_incoming(IncomingSms {
+                conversation_id: Some(id),
+                sender_address: "+14155552671".into(),
+                body: body.into(),
+                provider_message_id: Some(uuid::Uuid::new_v4().to_string()),
+                imported: false,
+            })
+            .unwrap();
+    }
+    for _ in 0..1000 {
+        if !session.client.converge_conversations(16).unwrap() {
+            break;
+        }
+    }
+    let (source, target) = if first.to_string() < second.to_string() {
+        (second, first)
+    } else {
+        (first, second)
+    };
+    let source = source.to_string();
+    let target = target.to_string();
+    let state = state(&fixture);
+    for window in [crate::tray::MAIN.to_string(), label(&source)] {
+        let (snapshot, _) = load_state_for_window(
+            &state,
+            &window,
+            session.clone(),
+            Some(source.clone()),
+            None,
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            snapshot.active_conversation_id.as_deref(),
+            Some(target.as_str())
+        );
+        let wire = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(
+            wire["requestedRedirect"],
+            json!({ "from": source, "to": target })
+        );
+        let redirect = snapshot.requested_redirect.unwrap();
+        assert_eq!(
+            (redirect.from, redirect.to),
+            (source.clone(), target.clone())
+        );
+        assert_eq!(
+            snapshot
+                .conversations
+                .iter()
+                .find(|c| c.id == target)
+                .unwrap()
+                .messages
+                .len(),
+            2
+        );
+    }
+    let foreign = uuid::Uuid::new_v4().to_string();
+    assert!(load_state_for_window(
+        &state,
+        &label(&source),
+        session,
+        Some(foreign),
+        None,
+        None,
+        Default::default()
+    )
+    .await
+    .is_err());
+}
+
+#[tokio::test]
 async fn blank_recovery_create_works_without_old_history_and_never_overwrites_an_occupied_draft() {
     let fixture = fixture_at("http://127.0.0.1:9");
     let session = Arc::new(open(&fixture, &fixture.binding, &[]));

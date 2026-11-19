@@ -61,6 +61,20 @@ it("opens the selected conversation even when Notifications is open", async () =
   expect(screen.getByRole("textbox", { name: "Message" })).toBeInTheDocument();
 });
 
+it("opens the survivor when a notification names a merged-away conversation, without a warning", async () => {
+  snapshot.activeConversationId = "conv-river";
+  vi.mocked(bridge.load_state).mockImplementation(async id => id === "conv-river"
+    ? { ...structuredClone(snapshot), conversations: snapshot.conversations.filter(conversation => conversation.id !== "conv-river"), activeConversationId: "conv-aurora", requestedRedirect: { from: "conv-river", to: "conv-aurora" } }
+    : { ...structuredClone(snapshot), activeConversationId: id ?? snapshot.activeConversationId });
+  render(<App />);
+  await screen.findByRole("textbox", { name: "Message" });
+  expect(document.querySelector('[data-conversation-id="conv-river"]')).toHaveAttribute("aria-current", "location");
+  await clickBanner({ kind: "conversation", conversationId: "conv-river" });
+  await waitFor(() => expect(native.ack).toHaveBeenCalledOnce());
+  expect(document.querySelector('[data-conversation-id="conv-aurora"]')).toHaveAttribute("aria-current", "location");
+  expect(screen.queryByText("This conversation is no longer available.")).not.toBeInTheDocument();
+});
+
 it("keeps a replacement lifetime unfocused and acknowledges the unavailable target", async () => {
   render(<App />);
   await screen.findByRole("textbox", { name: "Message" });

@@ -461,12 +461,30 @@ pub(crate) fn apply_gateway_refresh(
 /// Drains published snapshot records and applies journaled records in bounded steps, yielding
 /// between steps. `applied == 0` alone never means complete: the loop continues while history is
 /// still being drained (`snapshot_remaining > 0`) unless `max_steps` is reached or cancelled.
+const CONVERGE_STEP_BUDGET: usize = 8;
+
 pub async fn drain_apply(session: &Arc<Session>, max_steps: usize) -> BridgeResult<bool> {
     let mut progressed = false;
     for _ in 0..max_steps {
         if session.cancel.is_cancelled() {
             break;
         }
+        let c = client(session);
+        let merge_pending = blocking(move || {
+            let pending = match c.converge_conversations(0) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    eprintln!(
+                        "peppy: conversation convergence probe failed: {}",
+                        core_error(error).code
+                    );
+                    false
+                }
+            };
+            Ok(pending)
+        })
+        .await?;
+        progressed |= merge_pending;
         let c = client(session);
         let report = apply_batch(session, async move {
             blocking(move || c.apply_pending(MAX_APPLY_BATCH).map_err(core_error)).await
@@ -478,6 +496,33 @@ pub async fn drain_apply(session: &Arc<Session>, max_steps: usize) -> BridgeResu
         // records are still being drained or applied the loop continues.
         if !step {
             break;
+        }
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..max_steps {
+        if session.cancel.is_cancelled() {
+            break;
+        }
+        let c = client(session);
+        let result = blocking(move || {
+            let pending = c.converge_conversations(0).map_err(core_error)?;
+            let remaining = c
+                .converge_conversations(CONVERGE_STEP_BUDGET)
+                .map_err(core_error)?;
+            Ok((pending, remaining))
+        })
+        .await;
+        match result {
+            Ok((pending, remaining)) => {
+                progressed |= pending || remaining;
+                if !remaining {
+                    break;
+                }
+            }
+            Err(error) => {
+                eprintln!("peppy: conversation convergence failed: {}", error.code);
+                break;
+            }
         }
         tokio::task::yield_now().await;
     }
@@ -3204,6 +3249,49 @@ mod first_snapshot_tests {
     fn session() -> Arc<Session> {
         let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
         Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]))
+    }
+
+    #[tokio::test]
+    async fn drain_apply_finishes_pending_conversation_merge() {
+        use peppy_client_core::{ConversationId, IncomingSms};
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]));
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, crate::tests::PHRASE)
+            .unwrap();
+        let first = ConversationId::new();
+        let second = ConversationId::new();
+        for index in 0..40 {
+            session
+                .client
+                .capture_incoming(IncomingSms {
+                    conversation_id: Some(if index % 2 == 0 { first } else { second }),
+                    sender_address: "+14155552671".into(),
+                    body: format!("message {index}"),
+                    provider_message_id: Some(format!("merge-{index}")),
+                    imported: false,
+                })
+                .unwrap();
+        }
+        assert!(drain_apply(&session, 100).await.unwrap());
+        let conversations = session.client.list_conversations().unwrap();
+        assert_eq!(conversations.len(), 1);
+        let survivor = conversations[0].conversation_id;
+        assert_eq!(
+            session
+                .client
+                .messages_page(survivor, None, 100)
+                .unwrap()
+                .messages
+                .len(),
+            40
+        );
+        let source = if survivor == first { second } else { first };
+        assert_eq!(
+            session.client.conversation_redirect(source).unwrap(),
+            Some(survivor)
+        );
     }
 
     #[tokio::test]

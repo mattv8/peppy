@@ -135,6 +135,26 @@ impl PinStore {
         ))
     }
 
+    pub fn remap(&self, binding: &Binding, from: &str, to: &str) -> Result<(), String> {
+        let _transaction = self
+            .transaction
+            .lock()
+            .map_err(|_| "Could not save floating conversations.")?;
+        let mut file = self.read()?;
+        if let Some(pins) = file.bindings.get_mut(&binding_key(binding)) {
+            *pins = sanitize(std::mem::take(pins));
+            if from != to && pins.iter().any(|pin| pin.conversation_id == from) {
+                if pins.iter().any(|pin| pin.conversation_id == to) {
+                    pins.retain(|pin| pin.conversation_id != from);
+                } else if let Some(pin) = pins.iter_mut().find(|pin| pin.conversation_id == from) {
+                    pin.conversation_id = to.to_owned();
+                }
+                self.write(&file)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn upsert(&self, binding: &Binding, pin: Pin) -> Result<bool, String> {
         if !valid_pin(&pin) {
             return Err("The floating conversation position is invalid.".into());
@@ -556,6 +576,27 @@ mod tests {
                 y: 8.0,
             },
         }
+    }
+
+    #[test]
+    fn remap_preserves_position_and_deduplicates_existing_survivor() {
+        let root = tempdir().unwrap();
+        let store = PinStore::new(root.path());
+        let source = uuid::Uuid::new_v4().to_string();
+        let target = uuid::Uuid::new_v4().to_string();
+        store.upsert(&binding("one"), pin(&source)).unwrap();
+        store.remap(&binding("one"), &source, &target).unwrap();
+        let pins = store.pins(&binding("one")).unwrap();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].conversation_id, target);
+        assert_eq!(pins[0].position.x, 4.0);
+        let mut source_pin = pin(&source);
+        source_pin.position.x = 99.0;
+        store.upsert(&binding("one"), source_pin).unwrap();
+        store.remap(&binding("one"), &source, &target).unwrap();
+        let pins = store.pins(&binding("one")).unwrap();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].position.x, 4.0);
     }
 
     #[test]

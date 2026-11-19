@@ -50,16 +50,19 @@ struct ReplySelection {
 }
 
 fn select_reply(session: &crate::session::Session, conversation: &str) -> Option<ReplySelection> {
-    let context = session
+    let source = conversation.parse().ok()?;
+    let conversation = session
         .client
-        .quick_reply_context(conversation.parse().ok()?)
-        .ok()?;
+        .conversation_redirect(source)
+        .ok()?
+        .unwrap_or(source);
+    let context = session.client.quick_reply_context(conversation).ok()?;
     let saved = session
         .client
         .compose_drafts()
         .ok()?
         .into_iter()
-        .find(|draft| draft.conversation_id.to_string() == conversation)
+        .find(|draft| draft.conversation_id == conversation)
         .and_then(|draft| draft.route);
     let (gateways, known) = session.gateways();
     Some(ReplySelection {
@@ -83,7 +86,19 @@ fn lookup_reveal_message(
     conversation_id: &str,
 ) -> Option<RevealedMessage> {
     let message = session.client.message_by_id(message_id).ok().flatten()?;
-    if message.payload.record.conversation_id.to_string() != conversation_id {
+    let source = message.payload.record.conversation_id;
+    let requested = conversation_id.parse().ok()?;
+    let source = session
+        .client
+        .conversation_redirect(source)
+        .ok()?
+        .unwrap_or(source);
+    let requested = session
+        .client
+        .conversation_redirect(requested)
+        .ok()?
+        .unwrap_or(requested);
+    if source != requested {
         return None;
     }
     let title = message
@@ -95,7 +110,7 @@ fn lookup_reveal_message(
     Some(RevealedMessage {
         title,
         body: message.payload.body,
-        selection: select_reply(session, conversation_id)?,
+        selection: select_reply(session, &source.to_string())?,
     })
 }
 
@@ -794,6 +809,62 @@ mod tests {
         ];
         assert!(select_route(&gateways, true, None).is_none());
         assert!(select_route(&gateways, false, None).is_none());
+    }
+
+    #[test]
+    fn host_redirect_reveal_and_reply_follow_merged_message_conversation() {
+        use peppy_client_core::{ConversationId, IncomingSms};
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = crate::tests::open(&fixture, &fixture.binding, &[]);
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, crate::tests::PHRASE)
+            .unwrap();
+        let first = ConversationId::new();
+        let second = ConversationId::new();
+        let (target, source) = if first.to_string() < second.to_string() {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let mut message = None;
+        for (conversation_id, body) in [(target, "survivor"), (source, "old message")] {
+            let captured = session
+                .client
+                .capture_incoming(IncomingSms {
+                    conversation_id: Some(conversation_id),
+                    sender_address: "+14155552671".into(),
+                    body: body.into(),
+                    provider_message_id: Some(uuid::Uuid::new_v4().to_string()),
+                    imported: false,
+                })
+                .unwrap();
+            if conversation_id == source {
+                message = Some(captured.message_id);
+            }
+        }
+        for _ in 0..1000 {
+            if !session.client.converge_conversations(16).unwrap() {
+                break;
+            }
+        }
+        let message = message.unwrap();
+        assert_eq!(
+            lookup_reveal_message(&session, message, &target.to_string())
+                .unwrap()
+                .body,
+            "old message"
+        );
+        assert_eq!(
+            lookup_reveal_message(&session, message, &source.to_string())
+                .unwrap()
+                .body,
+            "old message"
+        );
+        assert!(select_reply(&session, &source.to_string()).is_some());
+        assert!(
+            lookup_reveal_message(&session, message, &ConversationId::new().to_string()).is_none()
+        );
     }
 
     #[test]

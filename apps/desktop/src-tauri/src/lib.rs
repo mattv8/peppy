@@ -1056,6 +1056,7 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
         app_filters: vec![],
         notification_preferences: NotificationPreferences::default(),
         active_conversation_id: None,
+        requested_redirect: None,
         draft: None,
         head: head(),
         desktop: None,
@@ -1197,25 +1198,52 @@ async fn load_state_for_window_with_options(
         })
         .await;
     }
+    let source = tray::composer_conversation(label).ok_or_else(window_error)?;
+    let redirected = blocking({
+        let session = session.clone();
+        move || session.redirected_conversation(source)
+    })
+    .await?;
+    if let Some(target) = redirected {
+        if conversation_id
+            .as_deref()
+            .and_then(|id| ConversationId::from_str(id).ok())
+            .is_some_and(|id| id == source || id == target)
+        {
+            remember_composer_target(state, label, &session, &target.to_string());
+        }
+    }
+    let requested_source = conversation_id
+        .as_deref()
+        .and_then(|id| ConversationId::from_str(id).ok())
+        == Some(source);
     let conversation_id =
         effective_composer_conversation(state, label, &session, conversation_id.as_deref())?
             .expect("composer conversation");
     blocking(move || {
-        if metadata_only {
-            return session.snapshot_scoped_metadata_only(
+        let mut result = if metadata_only {
+            session.snapshot_scoped_metadata_only(
                 &conversation_id.to_string(),
                 head(),
                 origin,
                 preferences,
-            );
+            )?
+        } else {
+            session.snapshot_scoped(
+                &conversation_id.to_string(),
+                history_from_message_id.as_deref(),
+                head(),
+                origin,
+                preferences,
+            )?
+        };
+        if requested_source && source != conversation_id {
+            result.0.requested_redirect = Some(peppy_desktop_api::RequestedRedirect {
+                from: source.to_string(),
+                to: conversation_id.to_string(),
+            });
         }
-        session.snapshot_scoped(
-            &conversation_id.to_string(),
-            history_from_message_id.as_deref(),
-            head(),
-            origin,
-            preferences,
-        )
+        Ok(result)
     })
     .await
 }

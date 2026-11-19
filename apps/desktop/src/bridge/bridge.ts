@@ -241,6 +241,28 @@ const fixtureMailNotificationIcon = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr
 export function addFixtureMessageForTests(conversationId: string, message: MessageView): void {
   fixtureSnapshot.conversations.find((conversation) => conversation.id === conversationId)?.messages.push(message);
 }
+/**
+ * Tests and the browser fixture: merges `from` into `to` as the core does for a merged-away conversation.
+ * The survivor gains the source's messages, `from` leaves the list, and later requests for `from` return
+ * `requestedRedirect` with `to` as the active conversation. The returned function undoes the merge.
+ */
+export function mergeFixtureConversation(from: string, to: string): () => void {
+  const conversations = fixtureSnapshot.conversations;
+  const source = conversations.find((conversation) => conversation.id === from);
+  const survivor = conversations.find((conversation) => conversation.id === to);
+  if (!source || !survivor) throw new Error(`Fixture merge needs both conversations: ${from} -> ${to}`);
+  const { messages: survivorMessages, unread: survivorUnread } = survivor;
+  survivor.messages = [...source.messages, ...survivorMessages].sort((left, right) => Number(left.timestamp) - Number(right.timestamp));
+  survivor.unread += source.unread;
+  fixtureSnapshot.conversations = conversations.filter((conversation) => conversation.id !== from);
+  fixtureRedirects.set(from, to);
+  return () => {
+    survivor.messages = survivorMessages;
+    survivor.unread = survivorUnread;
+    fixtureSnapshot.conversations = conversations;
+    fixtureRedirects.delete(from);
+  };
+}
 
 const fixtureSnapshot: DesktopSnapshot = { version: "1", mode: "fixture", connection: { state: "connected", origin: "https://push.example.com" }, encryption: { state: "unlocked" }, gateways: [{ id: "gateway-pixel8", name: "Pixel 8", simId: "sim-1", online: true, simulated: true, supportsSms: true, supportsMms: true, mmsContentVersion: 2, mmsMaxBytes: 300 * 1024, mmsLimitSource: "fallback", mmsMaxRecipients: 20 }], conversations: [{ id: "conv-aurora", name: "Aurora Chen", preview: "Can you send over the estimate?", unread: 2, messages: fixtureMessages }, { id: "conv-river", name: "River Park", preview: "Attachment received", unread: 0, participants: ["River Park", "Mina Torres"], messages: [{ id: "message-river-1", revision: "1", sender: "other", body: "Attachment received", timestamp: "1788348060000", transport: "mms", subject: "Estimate", attachments: [{ id: "attachment-river-1", name: "estimate.pdf", mediaType: "application/pdf", byteSize: 182000, state: "ready", transfer: "download", retryable: true }] }] }, { id: "conv-short-code", name: "5556", preview: "Short code", unread: 0, messages: [] }, { id: "conv-unresolved-number", name: "+18015551234", preview: "Unresolved number", unread: 0, participants: ["+18015551234"], messages: [] }, { id: "conv-group-numbers", name: "+18015551234, +15555550199", preview: "Group conversation", unread: 0, participants: ["+18015551234", "+15555550199"], messages: [] }], activeConversationId: "conv-aurora", draft: undefined, head: { enabled: true, capability: "supported" }, deviceRole: "owner", pendingCount: 1, quarantineCount: 0, notifications: [{ target: { sourceDeviceId: "gateway-pixel8", notificationKey: "chat-42", lifetime: "1" }, packageName: "com.example.chat", appName: "Chat", appIconPngBase64: fixtureChatNotificationIcon, title: "Morgan", text: "Are we still meeting after lunch?", postedAt: Date.now() - 120000, dismissible: true, seen: false, dismissalPending: false }, { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "chat-43", lifetime: "1" }, packageName: "com.example.chat", appName: "Chat", appIconPngBase64: fixtureChatNotificationIcon, title: "Verification", text: "Your verification code is 839201.", oneTimeCode: "839201", postedAt: Date.now() - 180000, dismissible: true, seen: false, dismissalPending: false }, { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "mail-7", lifetime: "1" }, packageName: "com.example.mail", appName: "Mail", appIconPngBase64: fixtureMailNotificationIcon, title: "Project update", text: "A detailed update is ready for your review.", postedAt: Date.now() - 3600000, dismissible: true, seen: false, dismissalPending: false }], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full", muteWithHeads: true } };
 fixtureSnapshot.notifications.push(
@@ -321,6 +343,8 @@ fixtureSnapshot.conversations.push({ id: "conv-resend", name: "Resend states", p
 
 /** Fixture drafts keyed by conversation ID; mirrors the native compose-draft save contract (session.rs). */
 const fixtureDrafts = new Map<string, Draft>();
+/** Merged-away conversation ID to its survivor; requests for the former resolve to the latter, as the core does. */
+const fixtureRedirects = new Map<string, string>();
 const fixtureToneOverrides = new Map<string, number>();
 let fixtureCreated = 0;
 let fixturePhoneApproved = false;
@@ -464,7 +488,9 @@ let fixtureNotificationPersistence: NotificationPersistence = { seconds: 5 };
 let fixtureNotificationQuickReply = false;
 export const fixtureBridge: DesktopBridge = {
   load_state: async (conversationId, historyFromMessageId, options) => {
-    const active = conversationId && fixtureConversationIds().includes(conversationId) ? conversationId : fixtureSnapshot.activeConversationId!;
+    const redirectedTo = conversationId ? fixtureRedirects.get(conversationId) : undefined;
+    const active = redirectedTo ?? (conversationId && fixtureConversationIds().includes(conversationId) ? conversationId : fixtureSnapshot.activeConversationId!);
+    const requestedRedirect = redirectedTo && conversationId ? { from: conversationId, to: redirectedTo } : undefined;
     const conversations = fixtureSnapshot.conversations.map(conversation => {
       if (conversation.id !== active || options?.metadataOnly) return { ...conversation, messages: [] };
       const anchorIndex = historyFromMessageId === undefined ? -1 : conversation.messages.findIndex(message => message.id === historyFromMessageId);
@@ -472,7 +498,7 @@ export const fixtureBridge: DesktopBridge = {
       const messages = historyFromMessageId === undefined ? conversation.messages.slice(-50) : conversation.messages.slice(anchorIndex);
       return { ...conversation, messages, hasOlderMessages: historyFromMessageId === undefined ? conversation.messages.length > messages.length : anchorIndex > 0 };
     });
-    return { ...fixtureSnapshot, conversations: [...conversations, ...fixtureDraftConversations()], activeConversationId: active, draft: fixtureDrafts.get(active) };
+    return { ...fixtureSnapshot, conversations: [...conversations, ...fixtureDraftConversations()], activeConversationId: active, draft: fixtureDrafts.get(active), ...(requestedRedirect ? { requestedRedirect } : {}) };
   },
   search_local: async input => fixtureSearch(input),
   advance_search_index: async (): Promise<SearchIndexProgress> => ({ indexState: "ready", processed: 0, remaining: 0 }),
