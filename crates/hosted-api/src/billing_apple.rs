@@ -92,6 +92,7 @@ pub struct AppleTransactionResponse {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppleNotificationRequest {
+    #[serde(rename = "signedPayload", alias = "signed_payload")]
     pub signed_payload: String,
 }
 
@@ -100,6 +101,46 @@ pub struct AppleNotificationRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apple_notification_decodes_camelcase_envelope() {
+        let request: AppleNotificationRequest =
+            serde_json::from_str(r#"{"signedPayload":"test-signed-payload"}"#).unwrap();
+        assert_eq!(request.signed_payload, "test-signed-payload");
+    }
+
+    #[test]
+    fn apple_notification_serializes_canonical_envelope() {
+        let request = AppleNotificationRequest {
+            signed_payload: " opaque.payload+/= \n".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({"signedPayload": " opaque.payload+/= \n"})
+        );
+    }
+
+    #[test]
+    fn apple_notification_decodes_legacy_envelope_without_altering_payload() {
+        let request: AppleNotificationRequest =
+            serde_json::from_str(r#"{"signed_payload":" opaque.payload+/= \n"}"#).unwrap();
+        assert_eq!(request.signed_payload, " opaque.payload+/= \n");
+    }
+
+    #[test]
+    fn apple_notification_rejects_invalid_envelopes() {
+        for input in [
+            r#"{}"#,
+            r#"{"signedPayload":42}"#,
+            r#"{"signedPayload":"test","unexpected":true}"#,
+            r#"{"signedPayload":"test","signedPayload":"test"}"#,
+            r#"{"signed_payload":"test","signed_payload":"test"}"#,
+            r#"{"signedPayload":"test","signed_payload":"test"}"#,
+            r#"{"signed_payload":"test","signedPayload":"test"}"#,
+        ] {
+            assert!(serde_json::from_str::<AppleNotificationRequest>(input).is_err());
+        }
+    }
 
     #[test]
     fn routes_match_the_native_billing_contract() {
