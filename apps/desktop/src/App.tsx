@@ -127,7 +127,7 @@ export { searchRecipientSuggestions } from "./contacts/recipientSearch";
 import { SetupLanding, savedSetupMode } from "./setup/SetupLanding";
 import { AppLockScreen, AppLockSettings } from "./shell/AppLock";
 import { UpdatesSettings } from "./updates/UpdatesSettings";
-import { isTauriUpdateHost, useUpdateActivity } from "./updates/updates";
+import { isTauriUpdateHost, useUpdateActivity, useUpdateDistribution } from "./updates/updates";
 import { connectionText, historyStatus, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./shell/status";
 import { SyncTooLargeNotice } from "./shell/SyncTooLargeNotice";
 import { isSettingUp, liveSettingUpGatewayFor, resolveStoredRoute, settingUpGatewayFor } from "./setup/settingUpRoute";
@@ -1785,6 +1785,8 @@ function SettingsView({
   const [actionError, setActionError] = useState<{ action: SettingsAction; message: string } | null>(null);
   const [revealError, setRevealError] = useState<string | null>(null);
   const nativeUpdateHost = !browserHost && isTauriUpdateHost();
+  const updateDistribution = useUpdateDistribution(nativeUpdateHost);
+  const showUpdates = nativeUpdateHost && updateDistribution !== "app_store";
   const settingsContentRef = useRef<HTMLDivElement>(null);
   const pendingSectionRef = useRef<string | null>(null);
   const scrollEndTimer = useRef<number | undefined>(undefined);
@@ -1845,7 +1847,7 @@ function SettingsView({
     { id: "messages", label: "Messages" },
     { id: "theme", label: "Appearance" },
     ...(desktop?.startupSupported ? [{ id: "startup", label: "Startup" }] : []),
-    ...(nativeUpdateHost ? [{ id: "updates", label: "Updates" }] : []),
+    ...(showUpdates ? [{ id: "updates", label: "Updates" }] : []),
     ...(browserHost ? [] : [{ id: "app-lock", label: "App lock" }]),
     ...(hasAccount ? [{ id: "account-billing", label: "Account" }] : []),
     ...(typingShare !== undefined ? [{ id: "rcs-features", label: "RCS Features" }] : []),
@@ -2147,7 +2149,7 @@ function SettingsView({
         {openLoginItemsError && <p id="startup-open-login-items-error" className="settings-error" role="alert">{peppyCopy.startup_open_login_items_failed}</p>}
         {startupError && <p className="settings-error" role="alert">{startupError}</p>}
       </section>}
-      {nativeUpdateHost && <UpdatesSettings />}
+      {showUpdates && <UpdatesSettings />}
       {!browserHost && <AppLockSettings status={appLock} onChange={onAppLock} />}
       {hasAccount && <section id="settings-account-billing" className="settings-card" data-settings-section="account-billing">
         <h2>Account &amp; billing</h2>

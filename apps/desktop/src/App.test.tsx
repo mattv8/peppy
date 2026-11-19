@@ -13,6 +13,8 @@ import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 
 import { conversationAvatar, formatDateTime, isoDateTime, paletteIndex } from "@peppy/desktop-ui";
 import { App, DraftStore, nextComposerDraftIdentity, searchRecipientSuggestions, visiblePendingSends, type PendingSend } from "./App";
 import { peppyCopy } from "./generated/peppyCopy";
+import { UPDATE_STATUS_SERDE_FIXTURE } from "./updates/update-contract";
+import { updateApi, useUpdateDistribution } from "./updates/updates";
 import {
   bridge,
   fixtureBridge,
@@ -25,6 +27,12 @@ import {
   type ContactBookView,
   type SendDraftInput,
 } from "./bridge/bridge";
+
+// Mock only the distribution hook: its module-level cache would otherwise leak a result across tests.
+vi.mock("./updates/updates", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./updates/updates")>()),
+  useUpdateDistribution: vi.fn(),
+}));
 
 /**
  * In-memory stand-in for the native host contract (apps/desktop/src-tauri/src/session.rs):
@@ -5665,6 +5673,40 @@ describe("gateway routes", () => {
     expect(host.drafts.get("aurora")).toBeUndefined();
   });
 
+});
+
+describe("native update settings", () => {
+  beforeEach(() => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+    vi.spyOn(updateApi, "status").mockResolvedValue(UPDATE_STATUS_SERDE_FIXTURE);
+    vi.spyOn(updateApi, "subscribe").mockReturnValue(() => undefined);
+  });
+  afterEach(() => {
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.mocked(useUpdateDistribution).mockReset();
+  });
+
+  it("lists the Updates section for direct installs", async () => {
+    vi.mocked(useUpdateDistribution).mockReturnValue("direct");
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await screen.findByRole("region", { name: "Settings" });
+
+    expect(within(screen.getByRole("navigation", { name: "Settings categories" })).getByRole("link", { name: "Updates" })).toBeInTheDocument();
+    expect(document.querySelector('[data-settings-section="updates"]')).toBeInTheDocument();
+  });
+
+  it("hides the Updates section and nav entry for App Store builds", async () => {
+    vi.mocked(useUpdateDistribution).mockReturnValue("app_store");
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await screen.findByRole("region", { name: "Settings" });
+
+    expect(within(screen.getByRole("navigation", { name: "Settings categories" })).queryByRole("link", { name: "Updates" })).not.toBeInTheDocument();
+    expect(document.querySelector('[data-settings-section="updates"]')).not.toBeInTheDocument();
+  });
 });
 
 describe("host state display", () => {
