@@ -17,6 +17,7 @@ type McpDeviceSettingsProps = {
   refreshToken?: number;
   onDeviceId?(deviceId: string | null): void;
   onRemove?(device: DeviceRosterView["devices"][number], opener: HTMLButtonElement): void;
+  onRename?(device: DeviceRosterView["devices"][number], opener: HTMLButtonElement): void;
   onMutation?(): Promise<void> | void;
 };
 
@@ -54,7 +55,7 @@ const statusHintFor = ({ removed, exhausted, cleanupPending, starting, statusNot
   return statusNotice;
 };
 
-export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, browserHost = false, sessionKey, unlocked = false, refreshToken = 0, onDeviceId, onRemove, onMutation }: McpDeviceSettingsProps) {
+export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, browserHost = false, sessionKey, unlocked = false, refreshToken = 0, onDeviceId, onRemove, onRename, onMutation }: McpDeviceSettingsProps) {
   const [status, setStatus] = useState<McpDeviceStatus | null>(null);
   const [grants, setGrants] = useState<McpGrantView[]>([]);
   const [error, setError] = useState("");
@@ -450,7 +451,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
     <>
       <li id={device ? `mcp-device-${device.deviceId}` : "mcp-device"} ref={rowRef} tabIndex={-1} data-mcp-device-row data-device-id={device?.deviceId}>
         <div data-device-details="mcp">
-          <strong>Peppy MCP</strong>
+          <strong>{matchedDevice?.name.trim() || "Peppy MCP"}</strong>
           <span data-device-metadata="mcp">
             <span data-device-badge="platform">Server client</span>
             {device && <span data-device-badge="presence" data-presence-state={device.state === "online" ? "connected" : "delayed"}>{mcpStateLabel(device.state)}</span>}
@@ -463,6 +464,7 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
         </div>
         {device ? (
           <span data-mcp-actions>
+            {matchedDevice && !matchedDevice.revoked && current && !current.revoked && onRename && (serverOffline ? <small data-rename-offline={matchedDevice.id}>Unavailable while offline</small> : <button id="mcp-device-rename" type="button" className="secondary-button" aria-label={`Rename ${matchedDevice.name.trim() || "Peppy MCP"}`} onClick={event => onRename(matchedDevice, event.currentTarget)}>Rename</button>)}
             <button id="mcp-details-open" ref={detailsOpener} type="button" className="secondary-button" aria-label="Peppy MCP details" onClick={openDetails}>Details</button>
             {matchedDevice && owner && !serverOffline && (
               <button id="mcp-device-remove" type="button" className="secondary-button" aria-label="Remove Peppy MCP" onClick={event => onRemove?.(matchedDevice, event.currentTarget)}>Remove</button>

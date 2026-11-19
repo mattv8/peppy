@@ -2977,6 +2977,27 @@ describe("browser host RPC", () => {
     expect(session.calls).not.toContainEqual(expect.objectContaining({ command: "revoke_device" }));
   });
 
+  it("routes rename through the network, validates input, and wakes synchronization", async () => {
+    const renameDevice = vi.fn(async () => undefined);
+    const wake = vi.fn();
+    const host = new BrowserWorkerHost({
+      locks: locks(), boot: async () => new FakeSession(),
+      network: { start: async () => undefined, stop: async () => undefined, renameDevice, wake } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+    const deviceId = "00000000-0000-0000-0000-000000000002";
+    attached.emit({ id: 1, command: "rename_device", args: { deviceId, name: "Phone" } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(renameDevice).toHaveBeenCalledWith(deviceId, "Phone");
+    expect(wake).toHaveBeenCalledOnce();
+    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: undefined });
+    attached.emit({ id: 2, command: "rename_device", args: { deviceId, name: 42 } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
+    expect(renameDevice).toHaveBeenCalledOnce();
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 2, ok: false }));
+  });
+
   it("forwards optional raw roster presence without requiring older servers to provide it", async () => {
     const session = new FakeSession();
     const host = new BrowserWorkerHost({

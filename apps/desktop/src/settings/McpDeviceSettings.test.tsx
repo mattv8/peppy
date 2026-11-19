@@ -61,6 +61,22 @@ describe("McpDeviceSettings", () => {
     Reflect.deleteProperty(navigator, "clipboard");
   });
 
+  it("offers a non-owner rename using the roster name and replaces it offline", async () => {
+    vi.mocked(bridge.mcp_status).mockResolvedValue(onlineStatus);
+    const matched = { id: "mcp-device", name: " My server ", kind: "desktop", role: "device", revoked: false };
+    const roster: DeviceRosterView = { ...viewer, devices: [...viewer.devices, matched] };
+    const onRename = vi.fn();
+    const { rerender } = renderSettings({ roster, onRename });
+    const button = await screen.findByRole("button", { name: "Rename My server" });
+    expect(document.querySelector("[data-device-details='mcp'] strong")).toHaveTextContent("My server");
+    fireEvent.click(button);
+    expect(onRename).toHaveBeenCalledWith(matched, button);
+    expect(screen.queryByRole("button", { name: "Remove Peppy MCP" })).not.toBeInTheDocument();
+    rerender(<McpDeviceSettings roster={roster} serverOffline accountReadOnly={false} sessionKey="vault-a" onRename={onRename} />);
+    expect(screen.queryByRole("button", { name: "Rename My server" })).not.toBeInTheDocument();
+    expect(document.querySelector('[data-rename-offline="mcp-device"]')).toHaveTextContent("Unavailable while offline");
+  });
+
   describe("enablement and custody consent", () => {
     it("does not offer enablement to a non-owner", async () => {
       renderSettings({ roster: viewer });

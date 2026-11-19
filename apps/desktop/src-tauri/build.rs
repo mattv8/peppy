@@ -87,6 +87,7 @@ const COMMANDS: &[&str] = &[
     "restore_contact",
     "list_devices",
     "revoke_device",
+    "rename_device",
     "mcp_status",
     "mcp_enable",
     "mcp_grants",

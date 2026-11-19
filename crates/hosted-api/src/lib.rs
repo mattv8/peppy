@@ -1003,5 +1003,5 @@ pub mod presence;
 pub mod tester_admin;
 pub mod tester_admin_v2;
 
-pub use devices::{DeviceRosterDevice, DeviceRosterResponse};
+pub use devices::{DeviceRenameRequest, DeviceRosterDevice, DeviceRosterResponse};
 pub use presence::{DevicePresence, PresenceState};

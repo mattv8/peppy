@@ -95,6 +95,7 @@
     "allow-restore-contact",
     "allow-list-devices",
     "allow-revoke-device",
+    "allow-rename-device",
     "allow-mcp-status",
     "allow-mcp-enable",
     "allow-mcp-grants",
