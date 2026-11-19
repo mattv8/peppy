@@ -1,0 +1,21 @@
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+
+// Resolve external artifacts, not project outputs: no compilation or tests are needed.
+// FileCollection.files is eager and non-lenient; any missing artifact fails the task.
+gradle.projectsEvaluated {
+    rootProject.tasks.register('resolveCiDependencies') {
+        doLast {
+            def resolvedFiles = new LinkedHashSet<File>()
+            rootProject.allprojects.each { project ->
+                project.configurations.findAll { configuration -> configuration.canBeResolved }.each { configuration ->
+                    logger.lifecycle("Caching ${project.path}:${configuration.name}")
+                    def artifacts = configuration.incoming.artifactView {
+                        componentFilter { component -> component instanceof ModuleComponentIdentifier }
+                    }
+                    resolvedFiles.addAll(artifacts.files.files)
+                }
+            }
+            logger.lifecycle("Cached ${resolvedFiles.size()} external artifacts (${resolvedFiles.sum { it.length() } ?: 0} bytes)")
+        }
+    }
+}
