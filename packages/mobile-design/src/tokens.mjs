@@ -17,7 +17,7 @@ export const kotlinNames = Object.freeze({
   "surface-active": "surfaceActive", "surface-input": "surfaceInput",
   brand: "brand", border: "border", "border-strong": "borderStrong", "text-primary": "textPrimary",
   "text-strong": "textStrong", "text-secondary": "textSecondary", "text-muted": "textMuted",
-  brand: "brand", accent: "accent", "accent-hover": "accentHover", "accent-text": "accentText",
+  accent: "accent", "accent-hover": "accentHover", "accent-text": "accentText",
   success: "success", error: "error", "error-surface": "errorSurface", "error-text": "errorText", "warning-text": "warningText",
   "warning-surface": "warningSurface", "warning-border": "warningBorder",
   focus: "focus", "focus-ring": "focusRing", primary: "primary", "primary-text": "primaryText"

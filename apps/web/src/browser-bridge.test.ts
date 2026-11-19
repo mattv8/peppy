@@ -1247,7 +1247,7 @@ describe("BrowserBridge", () => {
     expect(listener).toHaveBeenCalledOnce();
   });
 
-  it("holds startup behind the ready handshake and reports it once", () => {
+  it("forwards each valid ready event to onReady listeners", () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);
     const ready = vi.fn();

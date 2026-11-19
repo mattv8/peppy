@@ -231,29 +231,121 @@ export function FamilyVaults({ bridge }: { bridge: FamilyVaultsBridge }) {
 
   return <section id="family-vaults" aria-labelledby="family-vaults-heading">
     <h2 id="family-vaults-heading">Family vaults</h2>
-    {error && <><p id="family-vaults-error" role="alert">{error}</p>{error === "Peppy could not refresh family vaults." && <button id="family-vaults-refresh-failed-lists" className="secondary-button" type="button" onClick={retryListRefresh}>Refresh family vaults</button>}</>}
+    {error && (
+      <>
+        <p id="family-vaults-error" role="alert">{error}</p>
+        {error === "Peppy could not refresh family vaults." && (
+          <button id="family-vaults-refresh-failed-lists" className="secondary-button" type="button" onClick={retryListRefresh}>Refresh family vaults</button>
+        )}
+      </>
+    )}
     <section id="family-vaults-invite" className="family-vaults-card">
       <h3>{invite ? "Share this invite link" : "Invite a family member"}</h3>
-      {invite ? <>
-        <p>{peppyCopy.family_vaults_invite_share_body}</p>
-        <p className="setup-hint">{peppyCopy.family_vaults_invite_expires_in} {duration(invite.expiresInSeconds)}.</p>
-        <div id="family-vaults-invite-link-display"><code id="family-vaults-invite-link-text">{invite.inviteLink}</code><button id="family-vaults-copy-invite-button" className="secondary-button" type="button" aria-label="Copy invite link" onClick={() => void copyInvite()}>{peppyCopy.family_vaults_copy_invite}</button>{copied && <span id="family-vaults-copy-confirm" aria-live="polite">{peppyCopy.family_vaults_invite_copied}</span>}</div>
-        <div id="family-vaults-invite-qr" role="img" aria-label={peppyCopy.family_vaults_invite_qr_accessibility}>{qr && <img id="family-vaults-invite-qr-image" src={qr} alt="" aria-hidden="true" />}</div>
-        <button id="family-vaults-done-invite-button" className="secondary-button" type="button" onClick={() => setInvite(undefined)}>{peppyCopy.family_vaults_invite_done}</button>
-      </> : <>
-        <p>{peppyCopy.family_vaults_invite_body}</p>
-        <button id="family-vaults-create-invite-button" className="primary-button" type="button" disabled={creatingInvite} onClick={() => void createInvite()}>Create invite link</button>
-      </>}
+      {invite ? (
+        <>
+          <p>{peppyCopy.family_vaults_invite_share_body}</p>
+          <p className="setup-hint">{peppyCopy.family_vaults_invite_expires_in} {duration(invite.expiresInSeconds)}.</p>
+          <div id="family-vaults-invite-link-display">
+            <code id="family-vaults-invite-link-text">{invite.inviteLink}</code>
+            <button id="family-vaults-copy-invite-button" className="secondary-button" type="button" aria-label="Copy invite link" onClick={() => void copyInvite()}>{peppyCopy.family_vaults_copy_invite}</button>
+            {copied && <span id="family-vaults-copy-confirm" aria-live="polite">{peppyCopy.family_vaults_invite_copied}</span>}
+          </div>
+          <div id="family-vaults-invite-qr" role="img" aria-label={peppyCopy.family_vaults_invite_qr_accessibility}>
+            {qr && <img id="family-vaults-invite-qr-image" src={qr} alt="" aria-hidden="true" />}
+          </div>
+          <button id="family-vaults-done-invite-button" className="secondary-button" type="button" onClick={() => setInvite(undefined)}>{peppyCopy.family_vaults_invite_done}</button>
+        </>
+      ) : (
+        <>
+          <p>{peppyCopy.family_vaults_invite_body}</p>
+          <button id="family-vaults-create-invite-button" className="primary-button" type="button" disabled={creatingInvite} onClick={() => void createInvite()}>Create invite link</button>
+        </>
+      )}
     </section>
     <section id="family-vaults-active-invites" className="family-vaults-card" aria-labelledby="family-vaults-active-invites-heading">
       <h3 id="family-vaults-active-invites-heading">Active invites</h3>
-      {invites.length === 0 ? <p id="family-vaults-no-active-invites">{peppyCopy.family_vaults_no_active_invites}</p> : <ul id="family-vaults-invite-list" aria-label="Active invites">{invites.map((item) => <li key={item.inviteId} data-invite-id={item.inviteId}><span className="family-vaults-invite-meta">{peppyCopy.family_vaults_invite_expires_in} {duration(item.expiresInSeconds)} · {inviteState(item.state)}</span><button id={`family-vaults-revoke-invite-${item.inviteId}`} className="secondary-button" type="button" onClick={() => setConfirmRevoke(item.inviteId)}>{peppyCopy.family_vaults_revoke_invite}</button>{confirmRevoke === item.inviteId && <div id={`family-vaults-revoke-confirm-${item.inviteId}`} role="dialog" aria-modal="false" aria-labelledby={`family-vaults-revoke-confirm-label-${item.inviteId}`}><span id={`family-vaults-revoke-confirm-label-${item.inviteId}`}>{peppyCopy.family_vaults_revoke_confirm_label}</span><button id={`family-vaults-revoke-confirm-yes-${item.inviteId}`} className="primary-button" type="button" onClick={() => void revokeInvite(item.inviteId)}>{peppyCopy.family_vaults_revoke_confirm_yes}</button><button id={`family-vaults-revoke-confirm-no-${item.inviteId}`} className="secondary-button" type="button" onClick={() => setConfirmRevoke(undefined)}>{peppyCopy.family_vaults_revoke_confirm_no}</button></div>}</li>)}</ul>}
+      {invites.length === 0 ? (
+        <p id="family-vaults-no-active-invites">{peppyCopy.family_vaults_no_active_invites}</p>
+      ) : (
+        <ul id="family-vaults-invite-list" aria-label="Active invites">
+          {invites.map((item) => (
+            <li key={item.inviteId} data-invite-id={item.inviteId}>
+              <span className="family-vaults-invite-meta">{peppyCopy.family_vaults_invite_expires_in} {duration(item.expiresInSeconds)} · {inviteState(item.state)}</span>
+              <button id={`family-vaults-revoke-invite-${item.inviteId}`} className="secondary-button" type="button" onClick={() => setConfirmRevoke(item.inviteId)}>{peppyCopy.family_vaults_revoke_invite}</button>
+              {confirmRevoke === item.inviteId && (
+                <div id={`family-vaults-revoke-confirm-${item.inviteId}`} role="dialog" aria-modal="false" aria-labelledby={`family-vaults-revoke-confirm-label-${item.inviteId}`}>
+                  <span id={`family-vaults-revoke-confirm-label-${item.inviteId}`}>{peppyCopy.family_vaults_revoke_confirm_label}</span>
+                  <button id={`family-vaults-revoke-confirm-yes-${item.inviteId}`} className="primary-button" type="button" onClick={() => void revokeInvite(item.inviteId)}>{peppyCopy.family_vaults_revoke_confirm_yes}</button>
+                  <button id={`family-vaults-revoke-confirm-no-${item.inviteId}`} className="secondary-button" type="button" onClick={() => setConfirmRevoke(undefined)}>{peppyCopy.family_vaults_revoke_confirm_no}</button>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
     <section id="family-vaults-requests" className="family-vaults-card" aria-labelledby="family-vaults-requests-heading">
       <h3 id="family-vaults-requests-heading">Vault requests</h3>
-      {paused && <div id="family-vaults-live-paused" role="status" aria-live="polite"><p>{peppyCopy.family_vaults_live_paused_body}</p><button id="family-vaults-live-refresh" className="secondary-button" type="button" onClick={manualRefresh}>{peppyCopy.family_vaults_live_refresh}</button></div>}
-      <div id="family-vaults-requests-live" aria-live="polite" aria-label="Live vault requests">{requests.length === 0 ? <p id="family-vaults-no-requests">{peppyCopy.family_vaults_no_requests}</p> : requests.map((request) => <article id={`family-vaults-request-${request.requestId}`} key={request.requestId} data-request-id={request.requestId} data-request-state={request.state}><h4>{request.displayName}</h4><dl className="family-vaults-request-meta"><div><dt>{peppyCopy.family_vaults_request_client}</dt><dd>{request.client}</dd></div><div><dt>{peppyCopy.family_vaults_request_age}</dt><dd>{age(request.createdAt)}</dd></div><div><dt>{peppyCopy.family_vaults_request_state}</dt><dd>{requestState(request.state)}</dd></div><div><dt>{peppyCopy.family_vaults_request_expires}</dt><dd>{peppyCopy.family_vaults_invite_expires_in} {duration(request.expiresInSeconds)}</dd></div></dl>{request.state === "pending" && <div className="enrollment-actions"><button id={`family-vaults-approve-${request.requestId}`} className="primary-button" type="button" onClick={() => void actOnRequest(request.requestId, "approve")}>{peppyCopy.family_vaults_approve_request}</button><button id={`family-vaults-deny-${request.requestId}`} className="secondary-button" type="button" onClick={() => setConfirmDeny(request.requestId)}>{peppyCopy.family_vaults_deny_request}</button>{confirmDeny === request.requestId && <div id={`family-vaults-deny-confirm-${request.requestId}`} role="dialog" aria-modal="false" aria-labelledby={`family-vaults-deny-confirm-label-${request.requestId}`}><span id={`family-vaults-deny-confirm-label-${request.requestId}`}>{peppyCopy.family_vaults_deny_confirm_label}</span><p className="setup-hint">{peppyCopy.family_vaults_deny_confirm_body}</p><button id={`family-vaults-deny-confirm-yes-${request.requestId}`} className="primary-button" type="button" onClick={() => void actOnRequest(request.requestId, "deny")}>{peppyCopy.family_vaults_deny_confirm_yes}</button><button id={`family-vaults-deny-confirm-no-${request.requestId}`} className="secondary-button" type="button" onClick={() => setConfirmDeny(undefined)}>{peppyCopy.family_vaults_deny_confirm_no}</button></div>}</div>}</article>)}</div>
+      {paused && (
+        <div id="family-vaults-live-paused" role="status" aria-live="polite">
+          <p>{peppyCopy.family_vaults_live_paused_body}</p>
+          <button id="family-vaults-live-refresh" className="secondary-button" type="button" onClick={manualRefresh}>{peppyCopy.family_vaults_live_refresh}</button>
+        </div>
+      )}
+      <div id="family-vaults-requests-live" aria-live="polite" aria-label="Live vault requests">
+        {requests.length === 0 ? (
+          <p id="family-vaults-no-requests">{peppyCopy.family_vaults_no_requests}</p>
+        ) : requests.map((request) => (
+          <article id={`family-vaults-request-${request.requestId}`} key={request.requestId} data-request-id={request.requestId} data-request-state={request.state}>
+            <h4>{request.displayName}</h4>
+            <dl className="family-vaults-request-meta">
+              <div><dt>{peppyCopy.family_vaults_request_client}</dt><dd>{request.client}</dd></div>
+              <div><dt>{peppyCopy.family_vaults_request_age}</dt><dd>{age(request.createdAt)}</dd></div>
+              <div><dt>{peppyCopy.family_vaults_request_state}</dt><dd>{requestState(request.state)}</dd></div>
+              <div><dt>{peppyCopy.family_vaults_request_expires}</dt><dd>{peppyCopy.family_vaults_invite_expires_in} {duration(request.expiresInSeconds)}</dd></div>
+            </dl>
+            {request.state === "pending" && (
+              <div className="enrollment-actions">
+                <button id={`family-vaults-approve-${request.requestId}`} className="primary-button" type="button" onClick={() => void actOnRequest(request.requestId, "approve")}>{peppyCopy.family_vaults_approve_request}</button>
+                <button id={`family-vaults-deny-${request.requestId}`} className="secondary-button" type="button" onClick={() => setConfirmDeny(request.requestId)}>{peppyCopy.family_vaults_deny_request}</button>
+                {confirmDeny === request.requestId && (
+                  <div id={`family-vaults-deny-confirm-${request.requestId}`} role="dialog" aria-modal="false" aria-labelledby={`family-vaults-deny-confirm-label-${request.requestId}`}>
+                    <span id={`family-vaults-deny-confirm-label-${request.requestId}`}>{peppyCopy.family_vaults_deny_confirm_label}</span>
+                    <p className="setup-hint">{peppyCopy.family_vaults_deny_confirm_body}</p>
+                    <button id={`family-vaults-deny-confirm-yes-${request.requestId}`} className="primary-button" type="button" onClick={() => void actOnRequest(request.requestId, "deny")}>{peppyCopy.family_vaults_deny_confirm_yes}</button>
+                    <button id={`family-vaults-deny-confirm-no-${request.requestId}`} className="secondary-button" type="button" onClick={() => setConfirmDeny(undefined)}>{peppyCopy.family_vaults_deny_confirm_no}</button>
+                  </div>
+                )}
+              </div>
+            )}
+          </article>
+        ))}
+      </div>
     </section>
-    <section id="family-vaults-list" className="family-vaults-card" aria-labelledby="family-vaults-list-heading"><h3 id="family-vaults-list-heading">Vaults</h3><table id="family-vaults-table" aria-label="Family vaults"><thead><tr><th scope="col">{peppyCopy.family_vaults_col_username}</th><th scope="col">{peppyCopy.family_vaults_col_role}</th><th scope="col">{peppyCopy.family_vaults_col_devices}</th><th scope="col">{peppyCopy.family_vaults_col_storage}</th><th scope="col">{peppyCopy.family_vaults_col_created}</th></tr></thead><tbody>{vaults.map((vault) => <tr id={`family-vaults-vault-${vault.vaultId}`} key={vault.vaultId} data-vault-id={vault.vaultId}><td>{vault.username}{vault.isAdmin && <span className="family-vaults-admin-badge"> ({peppyCopy.family_vaults_admin_badge_label})</span>}</td><td>{vault.isAdmin ? "Admin" : "Member"}</td><td>{vault.deviceCount}</td><td>{formatBytes(vault.storageBytes)}</td><td>{formattedDate(vault.createdAt)}</td></tr>)}</tbody></table></section>
+    <section id="family-vaults-list" className="family-vaults-card" aria-labelledby="family-vaults-list-heading">
+      <h3 id="family-vaults-list-heading">Vaults</h3>
+      <table id="family-vaults-table" aria-label="Family vaults">
+        <thead>
+          <tr>
+            <th scope="col">{peppyCopy.family_vaults_col_username}</th>
+            <th scope="col">{peppyCopy.family_vaults_col_role}</th>
+            <th scope="col">{peppyCopy.family_vaults_col_devices}</th>
+            <th scope="col">{peppyCopy.family_vaults_col_storage}</th>
+            <th scope="col">{peppyCopy.family_vaults_col_created}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {vaults.map((vault) => (
+            <tr id={`family-vaults-vault-${vault.vaultId}`} key={vault.vaultId} data-vault-id={vault.vaultId}>
+              <td>{vault.username}{vault.isAdmin && <span className="family-vaults-admin-badge"> ({peppyCopy.family_vaults_admin_badge_label})</span>}</td>
+              <td>{vault.isAdmin ? "Admin" : "Member"}</td>
+              <td>{vault.deviceCount}</td>
+              <td>{formatBytes(vault.storageBytes)}</td>
+              <td>{formattedDate(vault.createdAt)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
   </section>;
 }
