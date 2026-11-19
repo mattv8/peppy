@@ -21,11 +21,33 @@ dependencies {
     implementation 'example:present:1'
     implementation project(':library')
 }
+// These are not inputs of any CI/release task and must never be resolved by warming.
+configurations {
+    create('unified-test-platform-gradle-work-action') { canBeResolved = true; canBeConsumed = false }
+    create('unusedIdeMetadata') { canBeResolved = true; canBeConsumed = false }
+    ['debugAndroidTestCompileClasspath', 'debugUnitTestRuntimeClasspath',
+     'sideloadUnitTestCompileClasspath', 'releaseUnitTestRuntimeClasspath', 'releaseRuntimeClasspath', 'androidLintTool',
+     'kotlinCompilerPluginClasspathSideloadUnitTest', 'robolectricDependency0'].each { name ->
+        create(name) { canBeResolved = true; canBeConsumed = false }
+        dependencies.add(name, 'example:present:1')
+    }
+}
+dependencies {
+    add('unified-test-platform-gradle-work-action', 'example:instrumentation-only:1')
+    add('unusedIdeMetadata', 'example:ide-only:1')
+}
 tasks.named('compileJava') { doFirst { throw new GradleException('Compilation must not run') } }
 GRADLE
 printf "plugins { id 'java-library' }\n" > "$fixture/library/build.gradle"
 "$gradle" -p "$fixture" --no-daemon --offline --console=plain --init-script "$resolver" resolveCiDependencies > "$fixture/success.log" 2>&1 || { cat "$fixture/success.log"; exit 1; }
 grep -q 'Caching :library:runtimeClasspath' "$fixture/success.log"
+for configuration in debugAndroidTestCompileClasspath debugUnitTestRuntimeClasspath sideloadUnitTestCompileClasspath releaseUnitTestRuntimeClasspath releaseRuntimeClasspath androidLintTool kotlinCompilerPluginClasspathSideloadUnitTest robolectricDependency0; do
+  grep -q "Caching ::$configuration" "$fixture/success.log"
+done
+if grep -Eq 'Caching ::(unified-test-platform|unusedIdeMetadata)' "$fixture/success.log"; then
+  echo 'warming must not visit instrumentation-only or IDE configurations' >&2
+  exit 1
+fi
 if [[ -d "$fixture/build/classes" || -d "$fixture/library/build/libs" ]]; then
   echo 'dependency warming must not build project artifacts' >&2
   exit 1
@@ -36,8 +58,7 @@ cat > "$fixture/repository/example/missing/1/missing-1.pom" <<'POM'
 <project><modelVersion>4.0.0</modelVersion><groupId>example</groupId><artifactId>missing</artifactId><version>1</version></project>
 POM
 cat >> "$fixture/build.gradle" <<'GRADLE'
-configurations { missingDependency { canBeResolved = true; canBeConsumed = false } }
-dependencies { missingDependency 'example:missing:1' }
+dependencies { runtimeOnly 'example:missing:1' }
 GRADLE
 if "$gradle" -p "$fixture" --no-daemon --offline --console=plain --init-script "$resolver" resolveCiDependencies > "$fixture/failure.log" 2>&1; then
   echo 'unresolved dependency must fail the warming invocation' >&2

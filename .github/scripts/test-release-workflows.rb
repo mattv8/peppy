@@ -215,7 +215,7 @@ assert.call(gradle_producer_steps.any? { |step| step['run'] == 'bash ../../.gith
 assert.call(android_preparation.fetch('timeout-minutes') == 40, 'dependency producer must allow cold resolution overhead before native builds')
 
 resolver_script = File.read(File.join(__dir__, 'gradle-dependency-cache.init.gradle'))
-assert.call(resolver_script.include?('configuration.canBeResolved') && resolver_script.include?('ModuleComponentIdentifier') && resolver_script.include?('artifacts.files.files') && !resolver_script.match?(/lenient\s*(?:=|\()|catch\s*\(/), 'warming must eagerly fetch all external artifacts and propagate resolution failures, never use lenient reports')
+assert.call(resolver_script.include?('configuration.canBeResolved') && resolver_script.include?('isBuildInput(configuration.name)') && resolver_script.include?('ModuleComponentIdentifier') && resolver_script.include?('artifacts.files.files') && !resolver_script.match?(/lenient\s*(?:=|\()|catch\s*\(/), 'warming must filter build-input configurations, eagerly fetch external artifacts and propagate resolution failures, never use lenient reports')
 
 assert.call(gradle_save.fetch('if') == "${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/production' && steps.gradle-cache.outputs.cache-hit != 'true' }}" && gradle_stop.fetch('if') == gradle_save.fetch('if'), 'only successful production pushes with a missing exact snapshot may save')
 assert.call(gradle_save.dig('with', 'path') == gradle_dependency_cache.fetch('path') && gradle_save.dig('with', 'key') == '${{ steps.gradle-cache.outputs.cache-primary-key }}', 'cache producer must save exactly the dependency paths under the requested primary key')

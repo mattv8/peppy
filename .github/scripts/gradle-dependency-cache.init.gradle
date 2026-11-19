@@ -1,5 +1,22 @@
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 
+// Inputs of the compile/unit-test/lint/package tasks in test-android.yml and build-artifacts.yml.
+// Do not resolve every canBeResolved configuration: AGP also registers UTP/managed-device
+// runners and IDE/publishing metadata that those workflows never execute.
+def buildToolConfigurations = [
+    'androidJdkImage', 'androidLintTool', 'coreLibraryDesugaring',
+    'composeMappingProducerClasspath', 'lintChecks',
+    'kotlin-extension', 'kotlinCompilerClasspath', 'kotlinBuildToolsApiClasspath',
+    'kotlinCompilerPluginClasspath',
+] as Set
+def isBuildInput = { String name ->
+    name in buildToolConfigurations ||
+        name in ['compileClasspath', 'runtimeClasspath', 'annotationProcessor'] || // :jvm-smoke:run
+        name ==~ /(?:debug|sideload|release)(?:UnitTest|AndroidTest)?(?:CompileClasspath|RuntimeClasspath|AnnotationProcessorClasspath|LintChecksClasspath)/ ||
+        name ==~ /kotlinCompilerPluginClasspath(?:Main|Debug|Sideload|Release)(?:UnitTest|AndroidTest)?/ ||
+        name ==~ /robolectricDependency[0-9]+/
+}
+
 // Resolve external artifacts, not project outputs: no compilation or tests are needed.
 // FileCollection.files is eager and non-lenient; any missing artifact fails the task.
 gradle.projectsEvaluated {
@@ -7,7 +24,9 @@ gradle.projectsEvaluated {
         doLast {
             def resolvedFiles = new LinkedHashSet<File>()
             rootProject.allprojects.each { project ->
-                project.configurations.findAll { configuration -> configuration.canBeResolved }.each { configuration ->
+                project.configurations.findAll { configuration ->
+                    configuration.canBeResolved && isBuildInput(configuration.name)
+                }.each { configuration ->
                     logger.lifecycle("Caching ${project.path}:${configuration.name}")
                     def artifacts = configuration.incoming.artifactView {
                         componentFilter { component -> component instanceof ModuleComponentIdentifier }
