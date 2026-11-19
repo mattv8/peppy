@@ -49,6 +49,24 @@ jobs:
           sdkmanager_status=${PIPESTATUS[1]}
           set -e
           exit "$sdkmanager_status"
+      - name: Verify strict Gradle dependency resolution
+        id: gradle-resolution-preflight
+        working-directory: apps/android
+        run: ./gradlew --no-daemon --console=plain --dependency-verification=strict --info buildEnvironment
+      - name: Diagnose Gradle resolution with a fresh cache
+        id: gradle-resolution-diagnostic
+        if: ${{ failure() && steps.gradle-resolution-preflight.outcome == 'failure' }}
+        working-directory: apps/android
+        run: |
+          set -euo pipefail
+          source_gradle_user_home="${GRADLE_USER_HOME:-$HOME/.gradle}"
+          fresh_root="$(mktemp -d "$RUNNER_TEMP/gradle-resolution-fresh.XXXXXX")"
+          fresh_gradle_user_home="$fresh_root/gradle-home"
+          mkdir "$fresh_gradle_user_home"
+          if [ -d "$source_gradle_user_home/wrapper" ]; then
+            ln -s "$source_gradle_user_home/wrapper" "$fresh_gradle_user_home/wrapper"
+          fi
+          GRADLE_USER_HOME="$fresh_gradle_user_home" ./gradlew --no-daemon --console=plain --dependency-verification=strict --info --project-cache-dir "$fresh_gradle_user_home/project-cache" buildEnvironment
       - name: Build Google Messages AAR and licenses
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"

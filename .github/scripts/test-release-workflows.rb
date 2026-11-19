@@ -50,6 +50,76 @@ assert.call(!android_rust_cache_ok.call(android_mismatch), 'Android producer Rus
 android_ci_aar = android_ci_steps.find { |step| step['name'] == 'Build Google Messages AAR and licenses' }
 assert.call(android_ci_go && android_ci_go.fetch('uses') == 'actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e' && android_ci_go.fetch('with') == { 'go-version' => '1.27.3', 'cache' => false }, 'Android preparation must pin Go 1.27.3 without a shared cache')
 assert.call(android_ci_aar && android_ci_aar.fetch('run').include?('export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/build-aar.sh') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/check-licenses.sh') && android_ci_aar.fetch('run').include?('apps/android/googlemessages/check-licenses-test.sh'), 'Android preparation must build the Google Messages AAR and run its license checks with the pinned NDK')
+android_gradle_preflight = android_ci_steps.find { |step| step['id'] == 'gradle-resolution-preflight' }
+android_gradle_preflight_index = android_ci_steps.index(android_gradle_preflight)
+android_gradle_diagnostic = android_ci_steps.find { |step| step['id'] == 'gradle-resolution-diagnostic' }
+android_gradle_diagnostic_index = android_ci_steps.index(android_gradle_diagnostic)
+android_sdk_index = android_ci_steps.index { |step| step['name'] == 'Install Android SDK and NDK' }
+android_aar_index = android_ci_steps.index(android_ci_aar)
+android_native_index = android_ci_steps.index { |step| step['name'] == 'Verify and build Android native libraries' }
+assert.call(!android_gradle_preflight_index.nil? && !android_sdk_index.nil? && !android_aar_index.nil? && !android_native_index.nil? && android_sdk_index < android_gradle_preflight_index && android_gradle_preflight_index < android_aar_index && android_gradle_preflight_index < android_native_index, 'Android preparation must run strict Gradle resolution after SDK installation and before any native build')
+assert.call(android_gradle_preflight && android_gradle_preflight.fetch('working-directory') == 'apps/android' && Shellwords.shellsplit(android_gradle_preflight.fetch('run')) == %w[./gradlew --no-daemon --console=plain --dependency-verification=strict --info buildEnvironment] && !android_gradle_preflight.key?('continue-on-error') && !android_gradle_preflight.key?('if'), 'Gradle resolution preflight must run strict buildEnvironment in apps/android without continue-on-error or a guard')
+assert.call(!android_gradle_diagnostic_index.nil? && android_gradle_diagnostic_index == android_gradle_preflight_index + 1 && android_gradle_diagnostic.fetch('if') == "${{ failure() && steps.gradle-resolution-preflight.outcome == 'failure' }}" && android_gradle_diagnostic.fetch('working-directory') == 'apps/android' && !android_gradle_diagnostic.key?('continue-on-error'), 'Gradle resolution diagnostic must immediately follow the preflight and run only when that preflight fails')
+gradle_diagnostic_script = android_gradle_diagnostic.fetch('run')
+mutates_gradle_cache = ->(script) { script.match?(/\b(cp|rsync|rm)\b|--refresh(?:-dependencies)?\b/) }
+%w[cp rsync rm --refresh-dependencies].each do |mutation|
+  assert.call(mutates_gradle_cache.call("#{gradle_diagnostic_script}\n#{mutation}"), "Gradle cache mutation guard must reject #{mutation}")
+end
+assert.call(!mutates_gradle_cache.call(gradle_diagnostic_script), 'Gradle resolution diagnostic must not copy, delete, or refresh dependency metadata')
+Dir.mktmpdir('peppy-android-gradle-diagnostic') do |fixture|
+  project = File.join(fixture, 'apps', 'android')
+  FileUtils.mkdir_p(project)
+  gradlew = File.join(project, 'gradlew')
+  File.write(gradlew, <<~'SH')
+    #!/usr/bin/env bash
+    set -euo pipefail
+    printf 'home=%s\n' "$GRADLE_USER_HOME" >> "$PEPPY_TEST_GRADLE_CAPTURE"
+    printf 'arg=%s\n' "$@" >> "$PEPPY_TEST_GRADLE_CAPTURE"
+  SH
+  File.chmod(0o755, gradlew)
+  runner_temp = File.join(fixture, 'runner-temp')
+  FileUtils.mkdir_p(runner_temp)
+  source_home = File.join(fixture, 'home', '.gradle')
+  source_wrapper = File.join(source_home, 'wrapper')
+  FileUtils.mkdir_p(File.join(source_wrapper, 'dists', 'gradle-9.9.1'))
+  File.write(File.join(source_wrapper, 'dists', 'gradle-9.9.1', 'marker'), "wrapper\n")
+  FileUtils.mkdir_p(File.join(source_home, 'caches', 'modules-2'))
+  File.write(File.join(source_home, 'caches', 'modules-2', 'metadata-marker'), "cache\n")
+  snapshot = ->(directory) { Dir.glob(File.join(directory, '**', '*'), File::FNM_DOTMATCH).sort.map { |path| [path, File.lstat(path).ftype, File.file?(path) ? File.read(path) : nil] } }
+  source_before = snapshot.call(source_home)
+  run_diagnostic = lambda do |name, extra_environment|
+    capture = File.join(fixture, "#{name}-capture.txt")
+    environment = { 'GRADLE_USER_HOME' => nil, 'HOME' => File.join(fixture, 'home'), 'RUNNER_TEMP' => runner_temp, 'PATH' => ENV.fetch('PATH'), 'PEPPY_TEST_GRADLE_CAPTURE' => capture }.merge(extra_environment)
+    _, stderr, status = Open3.capture3(environment, 'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', gradle_diagnostic_script, chdir: project)
+    lines = status.success? && File.exist?(capture) ? File.readlines(capture, chomp: true) : []
+    [status, stderr, lines]
+  end
+  fresh_home_of = ->(lines) { lines.find { |line| line.start_with?('home=') }&.delete_prefix('home=') }
+  expected_arguments = lambda do |fresh_home|
+    ['arg=--no-daemon', 'arg=--console=plain', 'arg=--dependency-verification=strict', 'arg=--info', 'arg=--project-cache-dir', "arg=#{File.join(fresh_home, 'project-cache')}", 'arg=buildEnvironment']
+  end
+
+  status, stderr, lines = run_diagnostic.call('default', {})
+  assert.call(status.success?, "Gradle resolution diagnostic must run the fresh comparison: #{stderr}")
+  fresh_home = fresh_home_of.call(lines)
+  assert.call(!fresh_home.nil? && fresh_home.start_with?(runner_temp) && fresh_home != source_home, 'Gradle resolution diagnostic must use a fresh home under RUNNER_TEMP')
+  assert.call(lines.select { |line| line.start_with?('arg=') } == expected_arguments.call(fresh_home), 'Gradle resolution diagnostic must repeat the strict buildEnvironment invocation with an isolated project cache')
+  assert.call(Dir.children(fresh_home) == ['wrapper'] && File.symlink?(File.join(fresh_home, 'wrapper')) && File.readlink(File.join(fresh_home, 'wrapper')) == source_wrapper, 'Gradle resolution diagnostic must share only the downloaded wrapper and copy no dependency metadata')
+  assert.call(snapshot.call(source_home) == source_before, 'Gradle resolution diagnostic must not mutate the original Gradle cache')
+
+  custom_home = File.join(fixture, 'custom-gradle-home')
+  FileUtils.mkdir_p(File.join(custom_home, 'wrapper'))
+  status, stderr, lines = run_diagnostic.call('custom', 'GRADLE_USER_HOME' => custom_home)
+  assert.call(status.success?, "Gradle resolution diagnostic must honor GRADLE_USER_HOME: #{stderr}")
+  fresh_home = fresh_home_of.call(lines)
+  assert.call(File.readlink(File.join(fresh_home, 'wrapper')) == File.join(custom_home, 'wrapper'), 'Gradle resolution diagnostic must share the wrapper from an existing GRADLE_USER_HOME before overriding it')
+
+  empty_home = File.join(fixture, 'empty-gradle-home')
+  FileUtils.mkdir_p(empty_home)
+  status, stderr, lines = run_diagnostic.call('empty', 'GRADLE_USER_HOME' => empty_home)
+  assert.call(status.success?, "Gradle resolution diagnostic must run without a wrapper to share: #{stderr}")
+  assert.call(Dir.children(fresh_home_of.call(lines)).empty?, 'Gradle resolution diagnostic must not create a dangling wrapper link')
+end
 android_consumers = %w[android-debug-unit-tests android-sideload-unit-tests android-lint-and-assembly].map { |name| android_ci_jobs.fetch(name) }
 assert.call(android_consumers.all? { |job| job.fetch('needs') == 'android-native-preparation' }, 'every Android consumer must require native preparation')
 assert.call(android_consumers.all? { |job| job.fetch('steps').any? { |step| step.dig('with', 'name') == 'android-native-${{ github.sha }}' } }, 'every Android consumer must download the SHA-bound native artifact')
