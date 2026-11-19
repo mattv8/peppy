@@ -93,6 +93,10 @@ pub(crate) fn message_view(
     client: &Client,
     message: Message,
 ) -> Result<NativeMessage, peppy_client_core::Error> {
+    let conversation_id = message.payload.record.conversation_id;
+    let conversation_id = client
+        .conversation_redirect(conversation_id)?
+        .unwrap_or(conversation_id);
     let is_rcs = message.payload.transport == Transport::Rcs;
     let (rcs, rcs_reported) = if is_rcs || message.payload.direction == Direction::Outgoing {
         let message_id = message.payload.record.message_id;
@@ -106,7 +110,7 @@ pub(crate) fn message_view(
     let has_rcs_evidence = rcs.is_some() || rcs_reported == Some(true);
     Ok(NativeMessage {
         message_id: message.payload.record.message_id.to_string(),
-        conversation_id: message.payload.record.conversation_id.to_string(),
+        conversation_id: conversation_id.to_string(),
         sender_address: message.payload.sender_address,
         recipients: message.payload.recipients,
         body: message.payload.body,
@@ -362,6 +366,37 @@ mod tests {
             file.push(suffix);
             let _ = std::fs::remove_file(file);
         }
+    }
+
+    #[test]
+    fn message_view_resolves_merged_conversation_id() {
+        let (client, path) = client();
+        let message = message(Transport::Sms);
+        let source = message.payload.record.conversation_id;
+        let survivor = ConversationId::new();
+        assert_eq!(
+            message_view(&client, message.clone())
+                .unwrap()
+                .conversation_id,
+            source.to_string()
+        );
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch(&format!("PRAGMA key = \"{SQLCIPHER_KEY}\";"))
+            .unwrap();
+        db.execute_batch("CREATE TABLE IF NOT EXISTS conversation_merges(source_id TEXT PRIMARY KEY, target_id TEXT NOT NULL)")
+            .unwrap();
+        db.execute(
+            "INSERT INTO conversation_merges(source_id, target_id) VALUES(?, ?)",
+            rusqlite::params![source.to_string(), survivor.to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            message_view(&client, message).unwrap().conversation_id,
+            survivor.to_string()
+        );
+        drop(db);
+        drop(client);
+        remove_database(&path);
     }
 
     #[test]
