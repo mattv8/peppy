@@ -3803,8 +3803,13 @@ fn capture_in(
     }
     let conversation_id = match sms.conversation_id {
         Some(id) => id,
-        None => conversation_match::address_conversation(tx, &sms.sender_address)?
-            .unwrap_or_else(ConversationId::new),
+        None => {
+            match conversation_match::resolve_carrier_counterpart(tx, &sms.sender_address, None)? {
+                Some(id) => id,
+                None => conversation_match::address_conversation(tx, &sms.sender_address)?
+                    .unwrap_or_else(ConversationId::new),
+            }
+        }
     };
     let payload = MessagePayload {
         record: MessageRecord {

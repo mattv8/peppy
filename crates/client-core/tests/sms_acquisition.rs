@@ -51,6 +51,131 @@ fn mms_input(id: &str) -> MmsAcquisitionInput {
 }
 
 #[test]
+fn reservation_then_broadcast_and_next_outgoing_share_conversation() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "client", &vault), &vault);
+    let mut input = provider_input("reserved", "hello", Some(12), Some("broadcast"));
+    input.sender_address = Some("+12025550123".into());
+    let pending = client.begin_sms_acquisition(input).unwrap();
+    let mut incoming = incoming("hello", "broadcast");
+    incoming.sender_address = "+12025550123".into();
+    let broadcast = client
+        .capture_incoming_broadcast(incoming, Some(10), Some(12))
+        .unwrap();
+    assert_eq!(pending.conversation_id, broadcast.conversation_id);
+    let completed = client
+        .complete_sms_acquisition(&pending.acquisition_id)
+        .unwrap();
+    assert_eq!(completed.conversation_id, broadcast.conversation_id);
+    let mut outgoing = provider_input("outgoing", "reply", Some(13), None);
+    outgoing.direction = Direction::Outgoing;
+    outgoing.sender_address = None;
+    outgoing.recipients = vec!["+12025550123".into()];
+    let outgoing = client.begin_sms_acquisition(outgoing).unwrap();
+    assert_eq!(outgoing.conversation_id, broadcast.conversation_id);
+}
+
+#[test]
+fn mms_reservation_then_broadcast_and_outgoing_share_conversation() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "client", &vault), &vault);
+    let mut input = mms_input("first-mms");
+    input.sender_address = Some("+12025550123".into());
+    let mms = client.begin_mms_acquisition(input).unwrap();
+    client
+        .complete_mms_acquisition(&mms.acquisition_id)
+        .unwrap();
+    let mut incoming = incoming("broadcast", "broadcast-mms");
+    incoming.sender_address = "+12025550123".into();
+    let broadcast = client.capture_incoming(incoming).unwrap();
+    assert_eq!(broadcast.conversation_id, mms.conversation_id);
+    let mut outgoing = provider_input("outgoing-mms", "reply", Some(13), None);
+    outgoing.direction = Direction::Outgoing;
+    outgoing.sender_address = None;
+    outgoing.recipients = vec!["+12025550123".into()];
+    assert_eq!(
+        client
+            .begin_sms_acquisition(outgoing)
+            .unwrap()
+            .conversation_id,
+        mms.conversation_id
+    );
+}
+
+#[test]
+fn provider_thread_is_relinked_to_existing_address_owner() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "client", &vault), &vault);
+    let mut first = provider_input("first-thread", "first", Some(1), None);
+    first.sender_address = Some("+12025550124".into());
+    let first = client.begin_sms_acquisition(first).unwrap();
+    let mut incoming = incoming("owner", "owner");
+    incoming.sender_address = "+12025550123".into();
+    let owner = client.capture_incoming(incoming).unwrap();
+    assert_ne!(first.conversation_id, owner.conversation_id);
+    let mut input = provider_input("second-thread", "second", Some(2), None);
+    input.sender_address = Some("+12025550123".into());
+    let second = client.begin_sms_acquisition(input).unwrap();
+    assert_eq!(second.conversation_id, owner.conversation_id);
+    let mut unknown = provider_input("third-thread", "third", Some(3), None);
+    unknown.sender_address = Some("shortcode".into());
+    assert_eq!(
+        client
+            .begin_sms_acquisition(unknown)
+            .unwrap()
+            .conversation_id,
+        owner.conversation_id
+    );
+}
+
+#[test]
+fn reconciliation_relinks_thread_to_matched_message_conversation() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "client", &vault), &vault);
+    let mut input = provider_input("reserved-match", "hello", Some(12), Some("match"));
+    input.sender_address = Some("+12025550123".into());
+    let pending = client.begin_sms_acquisition(input).unwrap();
+    let target = ConversationId::new();
+    let mut incoming = incoming("hello", "match");
+    incoming.sender_address = "+12025550123".into();
+    incoming.conversation_id = Some(target);
+    let broadcast = client
+        .capture_incoming_broadcast(incoming, Some(10), Some(12))
+        .unwrap();
+    assert_ne!(pending.conversation_id, target);
+    let matched = client
+        .complete_sms_acquisition(&pending.acquisition_id)
+        .unwrap();
+    assert_eq!(matched.message_id, broadcast.message_id);
+    let mut next = provider_input("after-match", "next", Some(13), None);
+    next.sender_address = Some("shortcode".into());
+    assert_eq!(
+        client.begin_sms_acquisition(next).unwrap().conversation_id,
+        target
+    );
+}
+
+#[test]
+fn group_mms_does_not_claim_single_counterpart_address() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "client", &vault), &vault);
+    let mut group = mms_input("group");
+    group.direction = Direction::Outgoing;
+    group.sender_address = None;
+    group.recipients = vec!["+12025550123".into(), "+12025550124".into()];
+    let group = client.begin_mms_acquisition(group).unwrap();
+    let mut incoming = incoming("individual", "individual");
+    incoming.sender_address = "+12025550123".into();
+    let individual = client.capture_incoming(incoming).unwrap();
+    assert_ne!(group.conversation_id, individual.conversation_id);
+}
+
+#[test]
 fn pending_sms_and_mms_reservations_preserve_conversation_sequence_order() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
