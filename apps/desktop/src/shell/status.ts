@@ -51,6 +51,20 @@ export function syncStatusText(encryption: EncryptionState): string {
   return "Device sync not unlocked";
 }
 
+export function historyStatus(progress?: DesktopSnapshot["syncProgress"]): { phase: "receiving" | "applying"; value: string } | undefined {
+  if (progress?.phase === "applying") return { phase: "applying", value: "Organizing" };
+  if (progress?.phase !== "receiving") return undefined;
+  const received = Number(progress.snapshotReceived);
+  const expected = Number(progress.snapshotExpected);
+  if (progress.snapshotReceived === undefined || progress.snapshotExpected === undefined ||
+      !Number.isSafeInteger(received) || !Number.isSafeInteger(expected) ||
+      received < 0 || expected <= 0 || received > expected) {
+    return { phase: "receiving", value: "Loading" };
+  }
+  const number = new Intl.NumberFormat();
+  return { phase: "receiving", value: `Loading ${number.format(received)} of ${number.format(expected)} items` };
+}
+
 export function statusTone(connection: Connection, encryption: EncryptionState, serverUnreachable = false): StatusTone {
   if (connection.state === "error" || connection.state === "missing-native-host") return "error";
   if (encryption === "mismatch") return "warning";
