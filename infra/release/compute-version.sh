@@ -66,6 +66,8 @@ elif [[ $bump == auto ]]; then
     if [[ $component == android ]]; then
         if [[ $last_stable == android-v* ]]; then
             cliff_args+=(--tag-pattern "$stable_tag_regex")
+            # The range anchors git-cliff to the authoritative tag even if path filtering hides its commit.
+            cliff_args+=("$last_stable..HEAD")
         else
             # Before the first Android tag, only the bootstrap base counts; later v* tags must not move Android.
             cliff_args+=(--tag-pattern "$PEPPY_STABLE_TAG_REGEX" --count-tags "^${last_stable//./\\.}\$")
@@ -86,6 +88,11 @@ elif [[ $bump == auto ]]; then
             fi
         done < <(git log --no-merges --format=%s "${release_range[@]}")
         if [[ $only_non_releasable == true ]]; then base_version=$last_stable_version; fi
+    fi
+    # Exit 3 also denotes an automatic bump that cannot produce a safe release.
+    if [[ $component == android && $last_stable == android-v* && ${only_non_releasable:-false} != true ]] &&
+        [[ $(semver_compare "$base_version" "$last_stable_version") != 1 ]]; then
+        release_die "computed version must exceed $last_stable" 3
     fi
     if [[ $base_version == "$last_stable_version" ]]; then
         if [[ $channel == stable && $allow_auto_patch_fallback != true ]]; then release_die "no releasable commits since $last_stable; pass --bump or --version" 3; fi

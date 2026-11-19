@@ -169,6 +169,35 @@ touch_commit "$repo" packages/desktop-ui/release.txt 'fix: desktop release'; git
 out=$(PEPPY_ANDROID_BOOTSTRAP_TAG=v0.17.1 run "$repo" --channel prerelease --component android)
 assert_eq "$(field "$out" last_stable)" android-v0.17.2
 
+repo=$tmp/android-tag-off-path; new_repo "$repo"
+touch_commit "$repo" apps/android/release.txt 'fix: initial android'; git -C "$repo" tag android-v0.17.1
+touch_commit "$repo" packages/desktop-ui/release.txt 'feat: desktop only'; git -C "$repo" tag android-v0.17.2
+touch_commit "$repo" packages/desktop-ui/release.txt 'feat: later desktop only'
+out=$(run "$repo" --channel stable --component android --allow-auto-patch-fallback)
+assert_eq "$(field "$out" version)" 0.17.3
+assert_eq "$(field "$out" bump)" none-patch
+touch_commit "$repo" apps/android/release.txt 'fix: android repair'
+assert_eq "$(field "$(run "$repo" --channel stable --component android)" version)" 0.17.3
+touch_commit "$repo" apps/android/release.txt 'feat: android capability'
+for channel in stable prerelease dev; do
+    out=$(run "$repo" --channel "$channel" --component android)
+    assert_eq "$(field "$out" base_version)" 0.18.0
+done
+mkdir -p "$tmp/fake-bin"
+cat >"$tmp/fake-bin/git-cliff" <<'EOF'
+#!/usr/bin/env bash
+if [[ ${1:-} == --version ]]; then echo 'git-cliff 2.14.2'; else echo "${FAKE_CLIFF_VERSION:?}"; fi
+EOF
+chmod +x "$tmp/fake-bin/git-cliff"
+for bad_version in 0.17.2 0.17.1; do
+    if output=$(PATH="$tmp/fake-bin:$PATH" FAKE_CLIFF_VERSION=$bad_version run "$repo" --channel stable --component android 2>&1); then
+        echo "expected invalid computed version to fail" >&2; exit 1
+    else
+        assert_eq "$?" 3
+        [[ $output == *'computed version must exceed'* ]] || { echo "$output" >&2; exit 1; }
+    fi
+done
+
 repo=$tmp/android-budget; new_repo "$repo"; git -C "$repo" tag v0.17.1
 i=0; while ((i < 501)); do git -C "$repo" commit --allow-empty -qm "docs: $i"; i=$((i + 1)); done
 out=$(PEPPY_ANDROID_BOOTSTRAP_TAG=v0.17.1 run "$repo" --channel prerelease --component android)
