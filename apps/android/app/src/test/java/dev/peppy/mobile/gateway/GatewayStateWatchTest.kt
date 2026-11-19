@@ -1,6 +1,12 @@
 package dev.peppy.mobile.gateway
 
-import kotlinx.coroutines.delay
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.resume
+import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Delay
+import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -33,22 +39,79 @@ class GatewayStateWatchTest {
 
     @Test
     fun changesDuringThePauseMergeIntoOneReload() = runBlocking {
+        val dispatcher = PausedReloadDispatcher()
         val changes = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
+        val finishFirstReload = CompletableDeferred<Unit>()
         var reloads = 0
-        val watching = launch { coalescedReloads(changes, pauseMs = 300L) { reloads++ } }
-        delay(20)
+        val watching = launch(dispatcher) {
+            coalescedReloads(changes, pauseMs = 300L) {
+                reloads++
+                if (reloads == 1) finishFirstReload.await()
+            }
+        }
+        fun emitChanges(count: Int) {
+            repeat(count) { assertTrue(changes.tryEmit(Unit)) }
+            dispatcher.runCurrent()
+        }
 
-        changes.emit(Unit)
-        delay(50)
-        assertEquals(1, reloads)
+        try {
+            // Drain both the collector launch and conflate's upstream producer before emitting.
+            dispatcher.runCurrent()
+            assertEquals("the upstream is subscribed", 1, changes.subscriptionCount.value)
+            emitChanges(1)
+            assertEquals("the initial change reloads once", 1, reloads)
 
-        repeat(3) { changes.emit(Unit) }
-        delay(50)
-        assertEquals("still inside the pause", 1, reloads)
+            emitChanges(3)
+            assertEquals("changes do not interrupt an active reload", 1, reloads)
+            finishFirstReload.complete(Unit)
+            dispatcher.runCurrent()
+            assertEquals("finishing the reload must still leave a pause", 1, reloads)
 
-        delay(450)
-        assertEquals("the burst is one pending reload", 2, reloads)
-        watching.cancel()
+            emitChanges(3)
+            assertEquals("still inside the pause", 1, reloads)
+            dispatcher.finishPause(expectedMs = 300L)
+            assertEquals("reload and pause changes merge into one pending reload", 2, reloads)
+            dispatcher.finishPause(expectedMs = 300L)
+            assertEquals("the burst leaves no extra reload or polling timer", 2, reloads)
+            assertTrue(dispatcher.isIdle)
+
+            emitChanges(1)
+            assertEquals("a later change starts a new reload", 3, reloads)
+            dispatcher.finishPause(expectedMs = 300L)
+            assertEquals(3, reloads)
+            assertTrue(dispatcher.isIdle)
+        } finally {
+            watching.cancel()
+            dispatcher.runCurrent()
+        }
+    }
+
+    /** Runs queued coroutine work explicitly; delay stays suspended until the test releases it. */
+    @OptIn(InternalCoroutinesApi::class)
+    private class PausedReloadDispatcher : CoroutineDispatcher(), Delay {
+        private val work = ArrayDeque<Runnable>()
+        private val pauses = ArrayDeque<Pair<Long, CancellableContinuation<Unit>>>()
+        val isIdle: Boolean get() = work.isEmpty() && pauses.isEmpty()
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            work.addLast(block)
+        }
+
+        override fun scheduleResumeAfterDelay(timeMillis: Long, continuation: CancellableContinuation<Unit>) {
+            pauses.addLast(timeMillis to continuation)
+        }
+
+        fun runCurrent() {
+            while (work.isNotEmpty()) work.removeFirst().run()
+        }
+
+        fun finishPause(expectedMs: Long) {
+            assertEquals("exactly one reload pause is suspended", 1, pauses.size)
+            val (durationMs, continuation) = pauses.removeFirst()
+            assertEquals("the requested pause separates reloads", expectedMs, durationMs)
+            continuation.resume(Unit)
+            runCurrent()
+        }
     }
 
     private fun status(historyTooLarge: Boolean, sharedKeysReady: Boolean) = GatewayStatus(
