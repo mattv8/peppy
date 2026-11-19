@@ -1,6 +1,6 @@
 import type { ReactElement } from "react";
 import { useEffect, useRef, useState } from "react";
-import { Lock, LoaderCircle } from "lucide-react";
+import { Check, Lock, LoaderCircle } from "lucide-react";
 import type { SyncProgress as SyncProgressSnapshot } from "./bridge-contracts";
 
 type SyncPhase = SyncProgressSnapshot["phase"];
@@ -14,7 +14,7 @@ export type SyncProgressProps = {
   progress?: SyncProgressSnapshot;
 };
 
-/** Compact, truthful phase labels; exact cursors live in the details disclosure. */
+/** Compact, truthful phase labels. */
 const TITLES: Record<ActivePhase, string> = {
   receiving: "Loading your history…",
   applying: "Organizing downloaded history…",
@@ -28,8 +28,6 @@ const PHASE_ANNOUNCEMENTS: Record<SyncPhase, string> = {
   current: "Your history is up to date.",
 };
 const DOWNLOADING_COUNT = "%s of %s items";
-const DOWNLOADED = "Downloaded";
-const EXPECTED = "Expected";
 const number = new Intl.NumberFormat();
 
 function snapshotCounts(progress: SyncProgressSnapshot) {
@@ -122,6 +120,7 @@ export function SyncProgress({ progress }: SyncProgressProps): ReactElement {
   }, []);
 
   const cursorProgress = progress ?? lastActiveProgressRef.current;
+  const complete = phase === "current";
   const counts = cursorProgress && snapshotCounts(cursorProgress);
   const countText = counts && displayedPhase === "receiving"
     ? DOWNLOADING_COUNT.replace("%s", number.format(counts.received)).replace("%s", number.format(counts.expected))
@@ -132,37 +131,18 @@ export function SyncProgress({ progress }: SyncProgressProps): ReactElement {
       className="sync-progress"
       aria-label="History sync"
       data-sync-progress
-      data-sync-phase={displayedPhase}
+      data-sync-phase={complete ? "current" : displayedPhase}
     >
-      {displayedPhase === "waitingForKeys"
+      {complete
+        ? <Check className="sync-progress-icon" size={14} strokeWidth={1.75} aria-hidden />
+        : displayedPhase === "waitingForKeys"
         ? <Lock className="sync-progress-icon" size={14} strokeWidth={1.75} aria-hidden />
         : <LoaderCircle className="busy-indicator-icon sync-progress-icon" size={14} strokeWidth={1.75} aria-hidden />}
       <div className="sync-progress-main">
-        <p className="sync-progress-title" data-sync-title>{TITLES[displayedPhase]}</p>
-        {displayedPhase === "receiving" && counts && <progress id="sync-progress-bar" aria-label="Loading your history" value={counts.received} max={counts.expected} />}
-        {displayedPhase === "applying" && counts && <progress id="sync-progress-bar" aria-label="Organizing downloaded history" />}
-        {countText && <p data-sync-count>{countText}</p>}
-        <details className="sync-progress-details" data-sync-details>
-          <summary>Sync details</summary>
-          <dl className="sync-progress-cursors">
-            {counts ? <>
-              <dt>{DOWNLOADED}</dt>
-              <dd data-sync-received>{number.format(counts.received)}</dd>
-              <dt>{EXPECTED}</dt>
-              <dd data-sync-target>{number.format(counts.expected)}</dd>
-            </> : <>
-              <dt>Received through</dt>
-              <dd data-sync-received>{cursorProgress.receivedThrough}</dd>
-              <dt>Processed through</dt>
-              <dd data-sync-processed>{cursorProgress.processedThrough}</dd>
-              {cursorProgress.targetHighWater !== undefined && <>
-                <dt>Target</dt>
-                <dd data-sync-target>{cursorProgress.targetHighWater}</dd>
-              </>}
-            </>}
-          </dl>
-          <p className="sync-progress-note">You can use conversations as they become available.</p>
-        </details>
+        <p className="sync-progress-title" data-sync-title>{complete ? "History is up to date" : TITLES[displayedPhase]}</p>
+        {!complete && displayedPhase === "receiving" && counts && <progress id="sync-progress-bar" aria-label="Loading your history" value={counts.received} max={counts.expected} />}
+        {!complete && displayedPhase === "applying" && <progress id="sync-progress-bar" aria-label="Organizing downloaded history" />}
+        {!complete && countText && <p data-sync-count>{countText}</p>}
       </div>
     </section>}
     <span id="sync-progress-announcement" className="sr-only" role="status" aria-live="polite" data-sync-announcement>{announcement}</span>
