@@ -51,6 +51,7 @@ pub struct AppState {
     pool: PgPool,
     provider: Arc<dyn PushProvider>,
     admissions: Arc<Mutex<HashMap<String, Admission>>>,
+    challenge_admissions: Arc<Mutex<HashMap<Vec<u8>, Admission>>>,
     wake_admissions: Arc<Mutex<HashMap<String, Admission>>>,
     management_admissions: Arc<Mutex<HashMap<String, Admission>>>,
     wake_admission_limit: u32,
@@ -275,6 +276,7 @@ impl AppState {
             pool,
             provider,
             admissions: Arc::new(Mutex::new(HashMap::new())),
+            challenge_admissions: Arc::new(Mutex::new(HashMap::new())),
             wake_admissions: Arc::new(Mutex::new(HashMap::new())),
             management_admissions: Arc::new(Mutex::new(HashMap::new())),
             wake_admission_limit,
@@ -291,6 +293,28 @@ impl AppState {
             .await?;
         self.admit_durable(AdmissionKind::Registration, source)
             .await
+    }
+    async fn admit_challenge(&self, provider: Provider, token: &str) -> Result<(), AdmissionError> {
+        let key = digest(&format!("{}:{token}", provider_name(provider)));
+        let now = SystemTime::now();
+        let mut entries = self.challenge_admissions.lock().await;
+        entries.retain(|_, value| {
+            now.duration_since(value.window)
+                .map(|elapsed| elapsed < CHALLENGE_TTL)
+                .unwrap_or(true)
+        });
+        if entries.len() >= ADMISSION_MAP_CAP && !entries.contains_key(&key) {
+            return Err(AdmissionError::RateLimited);
+        }
+        let entry = entries.entry(key).or_insert(Admission {
+            window: now,
+            count: 0,
+        });
+        if entry.count >= 3 {
+            return Err(AdmissionError::RateLimited);
+        }
+        entry.count += 1;
+        Ok(())
     }
     async fn admit_route_wake(
         &self,
@@ -622,6 +646,10 @@ async fn register(
     if !state.provider.supports(request.provider) {
         return Err(unconfigured());
     }
+    state
+        .admit_challenge(request.provider, &request.device_token)
+        .await
+        .map_err(admission_error)?;
     let id = Uuid::new_v4();
     let challenge = secret();
     let insert = sqlx::query("INSERT INTO relay_registrations(id,provider,token,challenge_digest,expires_at) VALUES($1,$2,$3,$4,now()+interval '10 minutes')")
@@ -821,7 +849,7 @@ async fn wake(
     // A repeated idempotency ID must not reclaim an in-flight leased delivery.
     // A newer authoritative wake coalesces over the older pending hint.
     sqlx::query("INSERT INTO relay_wake_jobs(route_id,idempotency_id,opaque_nonce,state) VALUES($1,$2,$3,'pending') ON CONFLICT(route_id) DO UPDATE SET idempotency_id=EXCLUDED.idempotency_id,opaque_nonce=CASE WHEN relay_wake_jobs.idempotency_id=EXCLUDED.idempotency_id THEN relay_wake_jobs.opaque_nonce ELSE EXCLUDED.opaque_nonce END,state=CASE WHEN relay_wake_jobs.idempotency_id=EXCLUDED.idempotency_id THEN relay_wake_jobs.state ELSE 'pending' END,attempts=CASE WHEN relay_wake_jobs.idempotency_id=EXCLUDED.idempotency_id THEN relay_wake_jobs.attempts ELSE 0 END,next_attempt_at=CASE WHEN relay_wake_jobs.idempotency_id=EXCLUDED.idempotency_id THEN relay_wake_jobs.next_attempt_at WHEN relay_wake_jobs.state='attempted' THEN relay_wake_jobs.next_attempt_at ELSE now() END,updated_at=now()")
-        .bind(id).bind(&request.idempotency_id).bind(&request.opaque_nonce).execute(&mut *tx).await.map_err(db)?;
+        .bind(id).bind(&request.idempotency_id).bind(secret()).execute(&mut *tx).await.map_err(db)?;
     tx.commit().await.map_err(db)?;
     Ok((
         StatusCode::ACCEPTED,
@@ -1183,6 +1211,52 @@ mod tests {
             }
         }
     }
+    #[tokio::test]
+    async fn registration_challenge_budget_is_per_provider_token() {
+        let (pool, schema) = test_pool().await;
+        let fake = Arc::new(FakeProvider::default());
+        let (base, task) = serve(AppState::with_provider(pool.clone(), fake.clone())).await;
+        let client = reqwest::Client::new();
+        for _ in 0..3 {
+            assert_eq!(
+                post(
+                    &client,
+                    &base,
+                    "/v1/registrations",
+                    serde_json::json!({"provider":"fcm","device_token":"budget-token"})
+                )
+                .await
+                .status(),
+                StatusCode::CREATED
+            );
+        }
+        assert_eq!(
+            post(
+                &client,
+                &base,
+                "/v1/registrations",
+                serde_json::json!({"provider":"fcm","device_token":"budget-token"})
+            )
+            .await
+            .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            post(
+                &client,
+                &base,
+                "/v1/registrations",
+                serde_json::json!({"provider":"apns","device_token":"budget-token"})
+            )
+            .await
+            .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(fake.challenges.lock().unwrap().len(), 4);
+        task.abort();
+        cleanup(pool, schema).await;
+    }
+
     async fn test_pool() -> (PgPool, String) {
         test_pool_with_connections(1).await
     }
@@ -1449,13 +1523,28 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(job, ("two".into(), "n2".into()));
+        assert_eq!(job.0, "two");
+        assert_ne!(job.1, "n2");
+        assert_eq!(job.1.len(), 64);
+        assert!(
+            job.1
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+        assert_eq!(post(&client, &base, &format!("/v1/routes/{}/wake", route.route_id), serde_json::json!({"wake_credential":route.wake_credential,"idempotency_id":"two","opaque_nonce":"different"})).await.status(), StatusCode::ACCEPTED);
+        let retry_nonce: String =
+            sqlx::query_scalar("SELECT opaque_nonce FROM relay_wake_jobs WHERE route_id=$1")
+                .bind(route.route_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(retry_nonce, job.1);
         assert!(
             deliver_one(&AppState::with_provider(pool.clone(), fake.clone()))
                 .await
                 .unwrap()
         );
-        assert_eq!(fake.wakes.lock().unwrap().last().unwrap().2, "n2");
+        assert_eq!(fake.wakes.lock().unwrap().last().unwrap().2, job.1);
         assert_eq!(
             post(
                 &client,
@@ -2194,6 +2283,88 @@ mod tests {
 
         task.abort();
         cleanup(pool, schema).await;
+    }
+
+    #[tokio::test]
+    async fn challenge_budget_expired_entries_free_capacity() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost:1/unused")
+            .unwrap();
+        let state = AppState::new(pool);
+        let now = SystemTime::now();
+        let expired_key = digest("fcm:expired");
+        {
+            let mut entries = state.challenge_admissions.lock().await;
+            for index in 0..ADMISSION_MAP_CAP - 1 {
+                entries.insert(
+                    digest(&format!("fcm:current-{index}")),
+                    Admission {
+                        window: now,
+                        count: 3,
+                    },
+                );
+            }
+            entries.insert(
+                expired_key.clone(),
+                Admission {
+                    window: now - CHALLENGE_TTL - Duration::from_secs(1),
+                    count: 3,
+                },
+            );
+        }
+
+        assert!(state.admit_challenge(Provider::Fcm, "new").await.is_ok());
+        let entries = state.challenge_admissions.lock().await;
+        assert_eq!(entries.len(), ADMISSION_MAP_CAP);
+        assert!(!entries.contains_key(&expired_key));
+        assert_eq!(entries[&digest("fcm:new")].count, 1);
+        assert_eq!(entries[&digest("fcm:current-0")].count, 3);
+    }
+
+    #[tokio::test]
+    async fn challenge_budget_full_map_preserves_live_counts() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost:1/unused")
+            .unwrap();
+        let state = AppState::new(pool);
+        let now = SystemTime::now();
+        {
+            let mut entries = state.challenge_admissions.lock().await;
+            for index in 0..ADMISSION_MAP_CAP {
+                entries.insert(
+                    digest(&format!("fcm:token-{index}")),
+                    Admission {
+                        window: now,
+                        count: if index == 0 { 2 } else { 3 },
+                    },
+                );
+            }
+        }
+
+        assert!(matches!(
+            state.admit_challenge(Provider::Fcm, "new").await,
+            Err(AdmissionError::RateLimited)
+        ));
+        assert!(
+            state
+                .admit_challenge(Provider::Fcm, "token-0")
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            state.admit_challenge(Provider::Fcm, "token-0").await,
+            Err(AdmissionError::RateLimited)
+        ));
+        assert!(matches!(
+            state.admit_challenge(Provider::Fcm, "token-1").await,
+            Err(AdmissionError::RateLimited)
+        ));
+        let entries = state.challenge_admissions.lock().await;
+        assert_eq!(entries.len(), ADMISSION_MAP_CAP);
+        assert!(!entries.contains_key(&digest("fcm:new")));
+        assert_eq!(entries[&digest("fcm:token-0")].count, 3);
+        assert_eq!(entries[&digest("fcm:token-1")].count, 3);
+        assert!(entries.values().all(|entry| entry.count == 3));
     }
 
     #[tokio::test]
