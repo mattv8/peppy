@@ -177,7 +177,12 @@ async fn fake_account_handler(
 async fn fake_delete_account_handler(
     axum::extract::State(state): axum::extract::State<Arc<Mutex<FakeServerState>>>,
 ) -> impl IntoResponse {
-    state.lock().unwrap().delete_response
+    let status = state.lock().unwrap().delete_response;
+    if status == StatusCode::FORBIDDEN {
+        (status, Json(json!({"error": "reauthentication_required"}))).into_response()
+    } else {
+        status.into_response()
+    }
 }
 
 async fn fake_session_renew_handler(
@@ -1474,6 +1479,37 @@ async fn delete_account_202_keeps_the_session_for_pending_deletion() {
             .await
             .unwrap(),
         "pending"
+    );
+    assert!(store
+        .get(&key)
+        .unwrap()
+        .is_some_and(|value| !value.is_empty()));
+}
+
+#[tokio::test]
+async fn delete_account_reauthentication_required_keeps_the_session() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState {
+        delete_response: StatusCode::FORBIDDEN,
+        ..FakeServerState::default()
+    }));
+    let (base, _handle) = start_fake_server(server).await;
+    hosted.base_override.lock().unwrap().replace(base);
+    let key = super::session_key(HTTPS_ORIGIN);
+    store
+        .set(
+            &key,
+            &encode_session(ACCOUNT, "error-bearer", super::now_unix() + 3600),
+        )
+        .unwrap();
+    let error = super::delete_account_core(&store, &hosted, HTTPS_ORIGIN)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "hosted-session-required");
+    assert_eq!(
+        error.message,
+        "Sign in again to Peppy Hosted before deleting your account."
     );
     assert!(store
         .get(&key)

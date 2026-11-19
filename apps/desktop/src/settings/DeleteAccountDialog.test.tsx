@@ -4,6 +4,7 @@ import { createRef, useRef, useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { bridge } from "../bridge/bridge";
 import { DeleteAccountDialog } from "./DeleteAccountDialog";
+import { peppyCopy } from "../generated/peppyCopy";
 
 vi.mock("../bridge/bridge", { spy: true });
 
@@ -12,6 +13,19 @@ beforeEach(() => {
   vi.mocked(bridge.billing_summary).mockResolvedValue({ provider: "apple", manageableIn: "app_store", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
 });
 afterEach(cleanup);
+
+it.each([
+  [{ code: "hosted-session-required", message: "Sign in again to Peppy Hosted before deleting your account." }, "Sign in again to Peppy Hosted before deleting your account."],
+  [{ code: "other", message: "unexpected detail" }, peppyCopy.account_delete_error],
+])("shows the appropriate deletion failure", async (error, expected) => {
+  vi.mocked(bridge.hosted_delete_account).mockRejectedValue(error);
+  render(<DeleteAccountDialog billing={{ provider: "apple", manageableIn: "app_store", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false }} opener={createRef()} onDismiss={vi.fn()} onDeleted={vi.fn()} />);
+  fireEvent.click(screen.getByRole("checkbox", { name: "I understand this is permanent" }));
+  fireEvent.click(document.getElementById("account-delete-submit")!);
+  await waitFor(() => expect(document.getElementById("account-delete-error")?.textContent).not.toBe(""));
+  const text = document.getElementById("account-delete-error")!.textContent;
+  expect(text).toBe(expected);
+});
 
 it("keeps deletion confirmation intact when subscription management fails and clears the error on retry", async () => {
   let finishRetry!: () => void;
