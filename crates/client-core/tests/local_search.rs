@@ -70,7 +70,7 @@ fn category_cursor_pages_without_duplicates_and_rejects_query_mismatch() {
 }
 
 #[test]
-fn ambiguous_duplicate_contacts_leave_conversation_title_as_address() {
+fn ambiguous_duplicate_contacts_use_consensus_conversation_title() {
     let directory = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();
     let config = config(&directory, "contacts", &vault);
@@ -111,8 +111,8 @@ fn ambiguous_duplicate_contacts_leave_conversation_title_as_address() {
         page.items,
         vec![LocalSearchHit::Conversation {
             conversation_id: captured.conversation_id.to_string(),
-            title: ADDRESS.into(),
-            subtitle: String::new(),
+            title: "Alice".into(),
+            subtitle: ADDRESS.into(),
         }]
     );
 

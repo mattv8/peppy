@@ -11,6 +11,10 @@ pub(super) fn handles(command: &str) -> bool {
         command,
         "list_contact_books"
             | "forget_contact_book"
+            | "set_contact_book_lookup"
+            | "list_contact_name_candidates"
+            | "set_contact_name_pin"
+            | "clear_contact_name_pin"
             | "list_contacts"
             | "submit_contact_edit"
             | "list_contact_edits"
@@ -50,6 +54,7 @@ fn now_seconds() -> i64 {
 
 struct ContactSnapshot {
     resolution: Option<serde_json::Map<String, Value>>,
+    name_conflicts: Option<Vec<String>>,
     books: Option<Vec<Value>>,
     pending_count: Option<u64>,
     sync: Value,
@@ -74,6 +79,10 @@ impl BrowserCore {
         match command {
             "list_contact_books" => self.contact_books(),
             "forget_contact_book" => self.forget_contact_book(args),
+            "set_contact_book_lookup" => self.set_contact_book_lookup(args),
+            "list_contact_name_candidates" | "set_contact_name_pin" | "clear_contact_name_pin" => {
+                self.contact_name_command(command, args)
+            }
             "list_contacts" => self.list_contacts(args),
             "submit_contact_edit" => self.submit_contact_edit(args),
             "list_contact_edits" => self.list_contact_edits(args),
@@ -139,6 +148,8 @@ impl BrowserCore {
         addresses: &[(String, Option<String>)],
     ) -> Result<ContactSnapshot, Failure> {
         let mut resolution = serde_json::Map::new();
+        let mut seen_conflicts = std::collections::HashSet::new();
+        let mut conflicts = Vec::new();
         for (source, addresses) in shared::resolution_candidates(addresses) {
             for batch in addresses.chunks(shared::RESOLVE_ADDRESS_BATCH) {
                 let mut input = json!({"addresses": batch});
@@ -149,13 +160,26 @@ impl BrowserCore {
                     self.client()?
                         .resolve_contact_addresses_json(&input.to_string()),
                 )?;
+                for address in shared::name_conflicts_view(&raw) {
+                    if seen_conflicts.insert(address.clone())
+                        && conflicts.len() < shared::MAX_RESOLVED_ADDRESSES
+                    {
+                        conflicts.push(address);
+                    }
+                }
                 for (address, contact) in shared::resolved_addresses_view(&raw) {
                     resolution.entry(address).or_insert_with(|| {
-                        json!({
-                            "contactId": contact.contact_id,
-                            "bookId": contact.book_id,
-                            "displayName": contact.display_name,
-                        })
+                        let mut view = json!({"displayName": contact.display_name});
+                        if let Some(id) = contact.contact_id {
+                            view["contactId"] = json!(id);
+                        }
+                        if let Some(id) = contact.book_id {
+                            view["bookId"] = json!(id);
+                        }
+                        if let Some(basis) = contact.basis {
+                            view["nameBasis"] = json!(basis);
+                        }
+                        view
                     });
                 }
             }
@@ -190,6 +214,7 @@ impl BrowserCore {
         );
         Ok(ContactSnapshot {
             resolution: (!resolution.is_empty()).then_some(resolution),
+            name_conflicts: (!conflicts.is_empty()).then_some(conflicts),
             books,
             pending_count: pending,
             sync,
@@ -215,12 +240,16 @@ impl BrowserCore {
             })
             .collect::<Result<Vec<_>, Failure>>()?;
         let snapshot = self.snapshot_contacts(&addresses)?;
-        Ok(json!({
+        let mut view = json!({
             "contactResolution": snapshot.resolution,
             "contactBooks": snapshot.books,
             "contactsPendingCount": snapshot.pending_count,
             "contactSync": snapshot.sync,
-        }))
+        });
+        if let Some(conflicts) = snapshot.name_conflicts {
+            view["contactNameConflicts"] = json!(conflicts);
+        }
+        Ok(view)
     }
 
     fn find_book(&self, book_id: &str) -> Result<Value, Failure> {
@@ -276,6 +305,58 @@ impl BrowserCore {
                 .forget_contact_book(&json!({"book_id": book_id}).to_string()),
         )?;
         Ok(json!({}))
+    }
+
+    fn set_contact_book_lookup(&self, args: Value) -> Result<Value, Failure> {
+        let book_id = args
+            .get("bookId")
+            .and_then(Value::as_str)
+            .filter(|id| shared::name_lookup_id(id))
+            .ok_or_else(invalid)?;
+        let enabled = args
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .ok_or_else(invalid)?;
+        parse(self.client()?.set_contact_book_lookup_json(
+            &json!({"book_id":book_id,"enabled":enabled}).to_string(),
+        ))?;
+        Ok(json!({}))
+    }
+
+    fn contact_name_command(&self, command: &str, args: Value) -> Result<Value, Failure> {
+        let address = args
+            .get("address")
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)?;
+        let source = match args.get("sourceDeviceId") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(value.as_str().ok_or_else(invalid)?),
+        };
+        let mut input = shared::name_lookup_input(address, source).map_err(contact_error)?;
+        let client = self.client()?;
+        match command {
+            "list_contact_name_candidates" => {
+                let raw = parse(client.contact_name_candidates_json(&input.to_string()))?;
+                Ok(shared::name_candidates_view(&raw))
+            }
+            "set_contact_name_pin" => {
+                for (ui, core_key) in [("bookId", "book_id"), ("contactId", "contact_id")] {
+                    let id = args
+                        .get(ui)
+                        .and_then(Value::as_str)
+                        .filter(|id| shared::name_lookup_id(id))
+                        .ok_or_else(invalid)?;
+                    input[core_key] = json!(id);
+                }
+                parse(client.set_contact_name_pin_json(&input.to_string()))?;
+                Ok(json!({}))
+            }
+            "clear_contact_name_pin" => {
+                parse(client.clear_contact_name_pin_json(&input.to_string()))?;
+                Ok(json!({}))
+            }
+            _ => Err(unknown_command()),
+        }
     }
 
     fn list_contacts(&self, args: Value) -> Result<Value, Failure> {
@@ -780,6 +861,7 @@ mod tests {
                 "defaultAccountLabel",
                 "deviceName",
                 "id",
+                "lookupExcluded",
                 "ownerDeviceId",
                 "pendingEditCount",
                 "state",
@@ -856,6 +938,61 @@ mod tests {
                 json!({"query": "x".repeat(129)}),
             )["code"],
             "invalid-contact-edit"
+        );
+    }
+
+    #[test]
+    fn name_commands_and_snapshot_follow_local_choices() {
+        let mut fixture = ContactFixture::new();
+        fixture.capture_book(
+            OTHER_BOOK_ID,
+            true,
+            vec![contact_in_book(
+                OTHER_BOOK_ID,
+                "other",
+                "Different",
+                "+12025550100",
+            )],
+        );
+        fixture.deliver_owner_to_browser();
+        let args = json!({"address":"+12025550100"});
+        let snapshot_args = json!({"addresses":[{"address":"+12025550100"}]});
+        let snapshot = fixture.command("contact_snapshot", snapshot_args.clone());
+        assert_eq!(snapshot["contactNameConflicts"], json!(["+12025550100"]));
+        let candidates = fixture.command("list_contact_name_candidates", args.clone());
+        assert_eq!(candidates["candidates"].as_array().unwrap().len(), 2);
+        assert!(candidates["pinned"].is_null());
+        fixture.command(
+            "set_contact_name_pin",
+            json!({"address":"+12025550100","bookId":OTHER_BOOK_ID,"contactId":"other"}),
+        );
+        let snapshot = fixture.command("contact_snapshot", snapshot_args.clone());
+        assert_eq!(
+            snapshot["contactResolution"]["+12025550100"]["nameBasis"],
+            "pinned"
+        );
+        assert!(
+            snapshot["contactResolution"]["+12025550100"]
+                .get("contactId")
+                .is_none()
+        );
+        fixture.command("clear_contact_name_pin", args);
+        fixture.command(
+            "set_contact_book_lookup",
+            json!({"bookId":OTHER_BOOK_ID,"enabled":false}),
+        );
+        let snapshot = fixture.command("contact_snapshot", snapshot_args);
+        assert_eq!(
+            snapshot["contactResolution"]["+12025550100"]["contactId"],
+            "c1"
+        );
+        assert!(snapshot.get("contactNameConflicts").is_none());
+        assert_eq!(
+            fixture.error(
+                "set_contact_book_lookup",
+                json!({"bookId":"","enabled":false})
+            )["code"],
+            "invalid-request"
         );
     }
 

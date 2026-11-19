@@ -77,6 +77,8 @@ pub struct Snapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contact_resolution: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub contact_name_conflicts: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub contact_books: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contacts_pending_count: Option<u64>,

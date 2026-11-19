@@ -2810,6 +2810,26 @@ impl Client {
         contact_resolution::resolve(&mut store.conn, input)
     }
 
+    pub fn contact_name_candidates_json(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        contact_resolution::name_candidates(&mut store.conn, input)
+    }
+
+    pub fn set_contact_name_pin_json(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        contact_resolution::set_pin(&mut store.conn, input)
+    }
+
+    pub fn clear_contact_name_pin_json(&self, input: &str) -> Result<String, Error> {
+        let store = self.lock()?;
+        contact_resolution::clear_pin(&store.conn, input)
+    }
+
+    pub fn set_contact_book_lookup_json(&self, input: &str) -> Result<String, Error> {
+        let store = self.lock()?;
+        contact_resolution::set_book_lookup(&store.conn, input)
+    }
+
     /// Bounded, display-only recipient discovery over live contact phone numbers
     /// (`contact_search`). Results name the phone address to message, never a contact ID.
     pub fn search_contact_recipients_json(&self, input: &str) -> Result<String, Error> {

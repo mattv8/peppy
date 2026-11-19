@@ -7490,12 +7490,23 @@ describe("display-only contact names", () => {
   it("maps each contact result to its book, contact, and phone row identity", async () => {
     vi.spyOn(bridge, "search_contact_recipients").mockResolvedValue([
       { address: "+12025550160", bookId: "book-a", displayName: "Ada", number: "+12025550160", normalized: true, contactId: "contact-a", phoneId: "phone-a" },
-      { address: "+12025550160", bookId: "book-b", displayName: "Ada", number: "+12025550160", normalized: true, contactId: "contact-b", phoneId: "phone-b" },
+      { address: "+12025550160", bookId: "book-b", displayName: "Ada Lovelace", number: "+12025550160", normalized: true, contactId: "contact-b", phoneId: "phone-b" },
     ]);
 
     await expect(searchRecipientSuggestions("Ada")).resolves.toEqual([
       expect.objectContaining({ id: "+12025550160", rowId: '["book-a","contact-a","phone-a"]' }),
       expect.objectContaining({ id: "+12025550160", rowId: '["book-b","contact-b","phone-b"]' }),
+    ]);
+  });
+
+  it("shows one suggestion when two books hold the same name for a number", async () => {
+    vi.spyOn(bridge, "search_contact_recipients").mockResolvedValue([
+      { address: "+12025550160", bookId: "book-a", displayName: "Ada", number: "+12025550160", normalized: true, contactId: "contact-a", phoneId: "phone-a" },
+      { address: "+12025550160", bookId: "book-b", displayName: "Ada", number: "+12025550160", normalized: true, contactId: "contact-b", phoneId: "phone-b" },
+    ]);
+
+    await expect(searchRecipientSuggestions("Ada")).resolves.toEqual([
+      expect.objectContaining({ id: "+12025550160", label: "Ada", source: null }),
     ]);
   });
 

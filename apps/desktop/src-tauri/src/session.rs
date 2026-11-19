@@ -2316,6 +2316,7 @@ impl Session {
             pending_count: pending,
             quarantine_count: quarantine,
             contact_resolution: contacts.resolution,
+            contact_name_conflicts: contacts.name_conflicts,
             contact_books: contacts.books,
             contacts_pending_count: contacts.pending_count,
             contact_sync: contacts.sync,

@@ -360,6 +360,7 @@ pub(crate) fn initialize(conn: &Connection) -> Result<(), Error> {
     conn.execute_batch(
         "\
 CREATE TABLE IF NOT EXISTS contact_books(id TEXT PRIMARY KEY, owner_device_id TEXT NOT NULL, generation INTEGER NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL, forgotten INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS contact_book_lookup_exclusions(book_id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS contacts(id TEXT NOT NULL, book_id TEXT NOT NULL REFERENCES contact_books(id) ON DELETE CASCADE, revision INTEGER NOT NULL, body TEXT NOT NULL, deleted_at INTEGER, PRIMARY KEY(book_id,id));
 CREATE TABLE IF NOT EXISTS contact_scans(scan_id TEXT PRIMARY KEY, book_id TEXT NOT NULL, generation INTEGER NOT NULL, access TEXT NOT NULL, authoritative INTEGER NOT NULL, complete INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS contact_scan_members(scan_id TEXT NOT NULL, contact_id TEXT NOT NULL, PRIMARY KEY(scan_id,contact_id));
@@ -2246,6 +2247,15 @@ pub(crate) fn visible_book_ids(conn: &Connection) -> Result<BTreeSet<String>, Er
         }
     }
     Ok(visible)
+}
+
+pub(crate) fn lookup_book_ids(conn: &Connection) -> Result<BTreeSet<String>, Error> {
+    let mut ids = visible_book_ids(conn)?;
+    let mut statement = conn.prepare("SELECT book_id FROM contact_book_lookup_exclusions")?;
+    for id in statement.query_map([], |row| row.get::<_, String>(0))? {
+        ids.remove(&id?);
+    }
+    Ok(ids)
 }
 
 fn apply_peer(

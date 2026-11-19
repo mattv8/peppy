@@ -434,6 +434,18 @@ describe("bridge subscriptions", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(37, "webhook_test", { id: "00000000-0000-4000-8000-000000000001" });
   });
 
+  it("sends contact book lookup and name pin commands with their arguments", async () => {
+    await tauriBridge.set_contact_book_lookup("book-id", false);
+    await tauriBridge.list_contact_name_candidates("+12025550123", "device-id");
+    await tauriBridge.set_contact_name_pin("+12025550123", "book-id", "contact-id", "device-id");
+    await tauriBridge.clear_contact_name_pin("+12025550123");
+
+    expect(invokeMock).toHaveBeenCalledWith("set_contact_book_lookup", { bookId: "book-id", enabled: false });
+    expect(invokeMock).toHaveBeenCalledWith("list_contact_name_candidates", { address: "+12025550123", sourceDeviceId: "device-id" });
+    expect(invokeMock).toHaveBeenCalledWith("set_contact_name_pin", { address: "+12025550123", sourceDeviceId: "device-id", bookId: "book-id", contactId: "contact-id" });
+    expect(invokeMock).toHaveBeenCalledWith("clear_contact_name_pin", { address: "+12025550123", sourceDeviceId: undefined });
+  });
+
   it("opens a media viewer with its conversation, attachment, and message", async () => {
     await tauriBridge.open_media_viewer?.("conversation-id", "attachment-id", "message-id");
 
@@ -524,6 +536,25 @@ describe("fixture draft saves", () => {
 
     await fixtureBridge.set_conversation_tone("contact:+15555550100", null);
     expect((await fixtureBridge.load_state()).toneOverrides).toEqual({});
+  });
+
+  it("hides a fixture book from names until restored, and honors a pin only for a current candidate", async () => {
+    await fixtureBridge.set_contact_book_lookup("book-pixel8", false);
+    expect((await fixtureBridge.list_contact_books()).find(book => book.id === "book-pixel8")?.lookupExcluded).toBe(true);
+    expect((await fixtureBridge.list_contact_name_candidates("+12025550123")).candidates).toEqual([]);
+
+    await fixtureBridge.set_contact_book_lookup("book-pixel8", true);
+    await fixtureBridge.set_contact_name_pin("+12025550123", "book-pixel8", "contact-aurora");
+    expect(await fixtureBridge.list_contact_name_candidates("+12025550123")).toEqual({
+      candidates: [{ bookId: "book-pixel8", contactId: "contact-aurora", displayName: "Aurora Chen" }],
+      pinned: { bookId: "book-pixel8", contactId: "contact-aurora" },
+      moreIndexing: false,
+    });
+
+    await fixtureBridge.clear_contact_name_pin("+12025550123");
+    expect((await fixtureBridge.list_contact_name_candidates("+12025550123")).pinned).toBeNull();
+    await expect(fixtureBridge.set_contact_name_pin("+12025550123", "book-pixel8", "contact-missing")).rejects.toMatchObject({ code: "not-found" });
+    await expect(fixtureBridge.set_contact_book_lookup("missing", false)).rejects.toMatchObject({ code: "not-found" });
   });
 
   it("reuses one blank draft without overwriting its content", async () => {

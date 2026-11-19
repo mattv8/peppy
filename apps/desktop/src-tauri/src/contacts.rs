@@ -159,6 +159,60 @@ pub fn forget_book(session: &Session, book_id: &str) -> BridgeResult<()> {
     Ok(())
 }
 
+pub fn set_book_lookup(session: &Session, book_id: &str, enabled: bool) -> BridgeResult<()> {
+    if !shared::name_lookup_id(book_id) {
+        return Err(invalid("The contact book is invalid."));
+    }
+    parse_core(session.client.set_contact_book_lookup_json(
+        &json!({"book_id": book_id, "enabled": enabled}).to_string(),
+    ))?;
+    session.notify();
+    Ok(())
+}
+
+pub fn name_candidates(
+    session: &Session,
+    address: &str,
+    source: Option<&str>,
+) -> BridgeResult<Value> {
+    let input = shared::name_lookup_input(address, source)?;
+    let raw = parse_core(
+        session
+            .client
+            .contact_name_candidates_json(&input.to_string()),
+    )?;
+    Ok(shared::name_candidates_view(&raw))
+}
+
+pub fn set_name_pin(
+    session: &Session,
+    address: &str,
+    source: Option<&str>,
+    book_id: &str,
+    contact_id: &str,
+) -> BridgeResult<()> {
+    if !shared::name_lookup_id(book_id) || !shared::name_lookup_id(contact_id) {
+        return Err(invalid("The contact identifier is invalid."));
+    }
+    let mut input = shared::name_lookup_input(address, source)?;
+    input["book_id"] = json!(book_id);
+    input["contact_id"] = json!(contact_id);
+    parse_core(session.client.set_contact_name_pin_json(&input.to_string()))?;
+    session.notify();
+    Ok(())
+}
+
+pub fn clear_name_pin(session: &Session, address: &str, source: Option<&str>) -> BridgeResult<()> {
+    let input = shared::name_lookup_input(address, source)?;
+    parse_core(
+        session
+            .client
+            .clear_contact_name_pin_json(&input.to_string()),
+    )?;
+    session.notify();
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------------------------
 // Contact views
 // ---------------------------------------------------------------------------------------------
@@ -446,13 +500,22 @@ const SNAPSHOT_AVATARS: usize = 64;
 pub use shared::Resolved;
 
 /// Resolves phone-number addresses through core's bounded projection, preferring the given
-/// source device's book. Ambiguous or unknown numbers are simply absent (shown raw). Purely
-/// display data: failures (for example a locked vault) resolve nothing.
+/// source device's book. Unresolved numbers are absent (shown raw); ambiguous numbers may
+/// still have a name-only result. Failures (for example a locked vault) resolve nothing.
 pub fn resolve_addresses(
     client: &Client,
     addresses: &[(String, Option<String>)],
 ) -> HashMap<String, Resolved> {
+    resolve_addresses_and_conflicts(client, addresses).0
+}
+
+fn resolve_addresses_and_conflicts(
+    client: &Client,
+    addresses: &[(String, Option<String>)],
+) -> (HashMap<String, Resolved>, Vec<String>) {
     let mut out = HashMap::new();
+    let mut seen_conflicts = std::collections::HashSet::new();
+    let mut conflicts = Vec::new();
     for (source, list) in shared::resolution_candidates(addresses) {
         for batch in list.chunks(shared::RESOLVE_ADDRESS_BATCH) {
             let mut input = json!({"addresses": batch});
@@ -461,20 +524,28 @@ pub fn resolve_addresses(
             }
             let Ok(raw) = parse_core(client.resolve_contact_addresses_json(&input.to_string()))
             else {
-                return out;
+                return (out, conflicts);
             };
+            for address in shared::name_conflicts_view(&raw) {
+                if seen_conflicts.insert(address.clone())
+                    && conflicts.len() < shared::MAX_RESOLVED_ADDRESSES
+                {
+                    conflicts.push(address);
+                }
+            }
             for (address, contact) in shared::resolved_addresses_view(&raw) {
                 out.entry(address).or_insert(contact);
             }
         }
     }
-    out
+    (out, conflicts)
 }
 
 /// Contact data carried in each UI snapshot. Every part is optional display data.
 #[derive(Default)]
 pub struct SnapshotContacts {
     pub resolution: Option<Map<String, Value>>,
+    pub name_conflicts: Option<Vec<String>>,
     pub books: Option<Vec<Value>>,
     pub pending_count: Option<u64>,
     pub sync: Option<Value>,
@@ -484,16 +555,21 @@ pub fn snapshot_contacts(
     session: &Session,
     addresses: &[(String, Option<String>)],
 ) -> SnapshotContacts {
-    let resolved = resolve_addresses(&session.client, addresses);
+    let (resolved, conflicts) = resolve_addresses_and_conflicts(&session.client, addresses);
     let mut budget = SNAPSHOT_AVATARS;
     let resolution = resolved
         .into_iter()
         .map(|(address, contact)| {
-            let mut view = json!({
-                "contactId": contact.contact_id,
-                "bookId": contact.book_id,
-                "displayName": contact.display_name,
-            });
+            let mut view = json!({"displayName": contact.display_name});
+            if let Some(id) = contact.contact_id {
+                view["contactId"] = json!(id);
+            }
+            if let Some(id) = contact.book_id {
+                view["bookId"] = json!(id);
+            }
+            if let Some(basis) = contact.basis {
+                view["nameBasis"] = json!(basis);
+            }
             if let Some(url) = contact
                 .photo
                 .filter(|id| {
@@ -518,6 +594,7 @@ pub fn snapshot_contacts(
     });
     SnapshotContacts {
         resolution: (!resolution.is_empty()).then_some(resolution),
+        name_conflicts: (!conflicts.is_empty()).then_some(conflicts),
         books,
         pending_count,
         sync: Some(sync_status(&session.client)),

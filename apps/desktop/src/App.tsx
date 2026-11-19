@@ -194,6 +194,7 @@ import { CORAL_ACCENT_INDEX, accentAttribute, accentSwatchColor } from "./shell/
 import { useAccentColor } from "./shell/useAccentColor";
 import { senderLabel, senderRunEdges } from "./sender/attribution";
 import { conversationContactAddress } from "./contacts/conversation-contact";
+import { ContactNameChooser } from "./contacts/ContactNameChooser";
 import { hiddenTimeIds } from "./conversation/timestamp-bursts";
 import { createSeenReactionLedger, linkReactions, locateReactionTarget, mergeReactions, NO_REACTIONS, ReactionAnnouncer, ReactionBadges, ReactionNotice, ReactionSettings, useSeenBadges, useShowReactions, type ActorName, type MergedReactionBadge, type OwnChipState, type ReactionNoticeInfo, type ReactionTargetResult, type SeenReactionLedger } from "./reactions";
 import { type Announcement, isReactionEligible, MessageReactionLayer, NO_ANNOUNCEMENT, nativeSelection } from "./reactions/ReactionLayer";
@@ -2320,6 +2321,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   useMaximizeButtonRegion({ bridge, enabled: !browserHost && platform === "windows" && !composerConversation });
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
+  const [nameChooser, setNameChooser] = useState<{ address: string; conversationId: string; returnFocus: HTMLElement | null }>();
   const [pendingSends, setPendingSends] = useState<PendingSend[]>([]);
   const [cancelledSendRestore, setCancelledSendRestore] = useState<CancelledSendRestore>();
   const cancelledSendSequence = useRef(0);
@@ -2362,6 +2364,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [mode, setMode] = useState<"hosted" | "self-hosted">(() => browserHost ? "self-hosted" : savedSetupMode());
   const headPanel = Boolean(composerConversation && (snapshot?.head.panel ?? headPanelBootstrap));
   const [selected, setSelected] = useState(composerConversation ?? "");
+  useEffect(() => { setNameChooser(undefined); }, [selected]);
   const [attachmentViews, setAttachmentViews] = useState<
     Record<string, AttachmentView>
   >({});
@@ -5543,6 +5546,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const openSender = (address: string) => {
     const label = senderLabel(address, resolution);
+    if ((!label.contact && resolution[address]) || snapshot?.contactNameConflicts?.includes(address)) {
+      setNameChooser({ address, conversationId: active?.id ?? "", returnFocus: document.activeElement instanceof HTMLElement ? document.activeElement : null });
+      return;
+    }
     const requestId = ++contactTargetRequestId.current;
     const target: ContactTarget & { requestId: number } = label.contact
       ? { ...label.contact, requestId }
@@ -5550,8 +5557,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     void openContactTarget(target, "Sender not opened");
   };
   const addConversationContactAddress = conversationLoaded
-    ? conversationContactAddress({ conversation: active, resolution, books: snapshot?.contactBooks })
+    ? conversationContactAddress({ conversation: active, resolution, books: snapshot?.contactBooks, conflicts: snapshot?.contactNameConflicts })
     : undefined;
+  const chooserAddress = conversationLoaded && !active?.group && active?.participants?.length === 1 ? active.participants[0] : undefined;
+  const chooserState = chooserAddress && (snapshot?.contactNameConflicts?.includes(chooserAddress) ? "conflict" : resolution[chooserAddress]?.nameBasis);
+  const chooserOpen = nameChooser?.conversationId === active?.id;
+  const closeNameChooser = () => {
+    setNameChooser(undefined);
+    nameChooser?.returnFocus?.focus();
+  };
   const revealReactionTarget = (row: HTMLElement) => {
     reactionHighlightCleanupRef.current();
     let addedTabIndex = false;
@@ -6523,6 +6537,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <Info size={16} aria-hidden />
               </button>}
               {conversationLoaded && <ConversationViewTabs value={conversationTab} onChange={setConversationTab} />}
+              {(chooserState || chooserOpen) && <div className="contact-source-anchor" data-contact-source-anchor>
+                {chooserState && <button id="conversation-contact-chooser" type="button" className="link-button" data-name-state={chooserState} aria-haspopup="dialog" aria-expanded={Boolean(chooserOpen)} onClick={event => chooserOpen ? closeNameChooser() : setNameChooser({ address: chooserAddress!, conversationId: active!.id, returnFocus: event.currentTarget })}>
+                  {chooserState === "conflict" ? "Choose contact" : chooserState === "pinned" ? "Name chosen" : "Contact sources"}
+                </button>}
+                {chooserOpen && nameChooser && <ContactNameChooser key={`${nameChooser.conversationId}:${nameChooser.address}`} address={nameChooser.address} state={snapshot?.contactNameConflicts?.includes(nameChooser.address) ? "conflict" : resolution[nameChooser.address]?.nameBasis ?? "conflict"} books={snapshot?.contactBooks ?? []} bridge={bridge} onClose={closeNameChooser} onRefresh={() => { void refresh(active?.id).catch(reportRefresh("")); }} onOpenContact={candidate => { setNameChooser(undefined); void openContactTarget({ bookId: candidate.bookId, contactId: candidate.contactId, requestId: ++contactTargetRequestId.current }); }} />}
+              </div>}
               {addConversationContactAddress && <button
                 id="add-conversation-contact"
                 aria-label={`Add ${formatPhoneNumber(addConversationContactAddress)} to contacts`}
