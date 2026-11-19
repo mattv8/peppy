@@ -3085,32 +3085,10 @@ impl Client {
             )?;
             emit_status(&tx, &ctx, parse(&id)?, SendState::FailedBeforeSubmission)?;
         }
-        let media = tx.prepare("SELECT m.command_id,m.attachment_index,m.state FROM rcs_media_send_ledger m JOIN command_ledger l USING(command_id) WHERE l.key_epoch<? AND l.retired=0")?
-            .query_map([epoch], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?)))?
+        let media = tx.prepare("SELECT l.command_id FROM command_ledger l WHERE l.key_epoch<? AND l.retired=0 AND EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id)")?
+            .query_map([epoch], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
-        for (id, index, state) in media {
-            tx.execute(
-                "UPDATE command_ledger SET retired=1 WHERE command_id=?",
-                [&id],
-            )?;
-            let (local, sync, reason) = match state.as_str() {
-                "pending" | "uploading" | "reference_ready" => (
-                    "refused",
-                    RcsMediaSyncState::NotSent,
-                    Some(RcsMediaNotSentReason::Failed),
-                ),
-                "permit_issued" | "committed" => {
-                    ("outcome_unknown", RcsMediaSyncState::OutcomeUnknown, None)
-                }
-                _ => continue,
-            };
-            tx.execute("UPDATE rcs_media_send_ledger SET state=? WHERE command_id=? AND attachment_index=?", params![local, id, index])?;
-            tx.execute(
-                "DELETE FROM rcs_google_media_refs WHERE command_id=? AND attachment_index=?",
-                params![id, index],
-            )?;
-            emit_rcs_media_state(&tx, &ctx, parse(&id)?, index, sync, reason)?;
-        }
+        retire_rcs_media_commands(&tx, &ctx, &media)?;
         seal_pending(&tx, &ctx, MAX_SEAL_BATCH)?;
         tx.commit()?;
         s.active_epoch = Some(epoch);
@@ -3193,6 +3171,61 @@ impl Client {
         set_meta(&tx, SWALLOWED_RETIREMENT_MORE, if more { "1" } else { "0" })?;
         tx.commit()?;
         u32::try_from(retired).map_err(|_| Error::Database)
+    }
+
+    /// Retires remote commands, preserving any recorded media permit outcomes.
+    pub fn retire_unattempted_commands_from_producers(
+        &self,
+        producers: &[DeviceId],
+    ) -> Result<u32, Error> {
+        if producers.is_empty() {
+            return Ok(0);
+        }
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let producers: HashSet<String> = producers
+            .iter()
+            .filter(|id| **id != ctx.device_id)
+            .map(ToString::to_string)
+            .collect();
+        if producers.is_empty() {
+            return Ok(0);
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Command ingest validates the message source against the authenticated producer
+        // and binds the command to that same conflict-checked message.
+        let rows: Vec<(String, String, bool)> = {
+            let mut query = tx.prepare(
+                "SELECT l.command_id,m.source_device_id,EXISTS(SELECT 1 FROM rcs_media_send_ledger r WHERE r.command_id=l.command_id) FROM command_ledger l
+                 JOIN commands c ON c.command_id=l.command_id JOIN messages m ON m.id=c.message_id
+                 WHERE l.retired=0 AND l.historical=0
+                 AND (NOT EXISTS(SELECT 1 FROM attempts a WHERE a.command_id=l.command_id)
+                      OR EXISTS(SELECT 1 FROM rcs_media_send_ledger r WHERE r.command_id=l.command_id))
+                 ORDER BY l.local_order",
+            )?;
+            query
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut count = 0_u32;
+        let mut media = Vec::new();
+        for (id, source, has_media) in rows {
+            if producers.contains(&source) {
+                if has_media {
+                    media.push(id);
+                } else {
+                    tx.execute(
+                        "UPDATE command_ledger SET retired=1 WHERE command_id=?",
+                        [&id],
+                    )?;
+                    emit_status(&tx, &ctx, parse(&id)?, SendState::FailedBeforeSubmission)?;
+                }
+                count = count.checked_add(1).ok_or(Error::Database)?;
+            }
+        }
+        retire_rcs_media_commands(&tx, &ctx, &media)?;
+        tx.commit()?;
+        Ok(count)
     }
 
     /// Whether the last `retire_swallowed_commands` stopped at a bound with ledger rows left to examine
@@ -4942,6 +4975,42 @@ fn queue_message(
     })
 }
 
+fn retire_rcs_media_commands(
+    conn: &Connection,
+    ctx: &Ctx,
+    commands: &[String],
+) -> Result<(), Error> {
+    for id in commands {
+        let slots = conn.prepare("SELECT attachment_index,state FROM rcs_media_send_ledger WHERE command_id=? ORDER BY attachment_index")?
+            .query_map([id], |row| Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        conn.execute(
+            "UPDATE command_ledger SET retired=1 WHERE command_id=?",
+            [id],
+        )?;
+        for (index, state) in slots {
+            let (local, sync, reason) = match state.as_str() {
+                "pending" | "uploading" | "reference_ready" => (
+                    "refused",
+                    RcsMediaSyncState::NotSent,
+                    Some(RcsMediaNotSentReason::Failed),
+                ),
+                "permit_issued" | "committed" => {
+                    ("outcome_unknown", RcsMediaSyncState::OutcomeUnknown, None)
+                }
+                _ => continue,
+            };
+            conn.execute("UPDATE rcs_media_send_ledger SET state=? WHERE command_id=? AND attachment_index=?", params![local, id, index])?;
+            conn.execute(
+                "DELETE FROM rcs_google_media_refs WHERE command_id=? AND attachment_index=?",
+                params![id, index],
+            )?;
+            emit_rcs_media_state(conn, ctx, parse(id)?, index, sync, reason)?;
+        }
+    }
+    Ok(())
+}
+
 /// Records and distributes one sanitized outgoing media state in the transaction that changed its
 /// gateway-local ledger. The Google reference remains local and never enters the event.
 fn emit_rcs_media_state(
@@ -5715,14 +5784,14 @@ impl Client {
         let active = guard.active_epoch;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let ledger: Option<(u32, String, String, bool)> = tx
+        let ledger: Option<(u32, String, String, bool, bool)> = tx
             .query_row(
-                "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
+                "SELECT key_epoch,subscription_id,payload,historical,retired FROM command_ledger WHERE command_id=?",
                 params![command_id.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        let Some((epoch, subscription_id, payload, historical)) = ledger else {
+        let Some((epoch, subscription_id, payload, historical, retired)) = ledger else {
             return Ok(PermitDecision::Blocked(PermitBlock::NotReceived));
         };
         // Known attempts keep reporting their recorded (or unknown) outcome.
@@ -5830,6 +5899,9 @@ impl Client {
         }
         if send_retention_blocked(&tx, command_id)? {
             return Ok(PermitDecision::Blocked(PermitBlock::MediaUnavailable));
+        }
+        if retired {
+            return Ok(PermitDecision::Blocked(PermitBlock::NotReceived));
         }
         // The attempt time is the gateway's best evidence for the provider row the platform
         // writes when it submits this text; queue time on another device is not.
@@ -6409,14 +6481,14 @@ impl Client {
         let active = guard.active_epoch;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let ledger: Option<(u32, String, String, bool)> = tx
+        let ledger: Option<(u32, String, String, bool, bool)> = tx
             .query_row(
-                "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
+                "SELECT key_epoch,subscription_id,payload,historical,retired FROM command_ledger WHERE command_id=?",
                 [command_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()?;
-        let Some((epoch, subscription_id, payload, historical)) = ledger else {
+        let Some((epoch, subscription_id, payload, historical, retired)) = ledger else {
             return Ok(AutomaticPermitDecision::Blocked(PermitBlock::NotReceived));
         };
         if let Some(state) = attempt_state(&tx, command_id)? {
@@ -6490,6 +6562,7 @@ impl Client {
                 Err(Error::InvalidRequest(_)) => {
                     AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven)
                 }
+                Err(Error::NotFound) => AutomaticPermitDecision::Blocked(PermitBlock::NotReceived),
                 Err(error) => return Err(error),
             };
             tx.commit()?;
@@ -6504,9 +6577,11 @@ impl Client {
                 None,
                 observation,
                 now_ms,
-            )? {
-                Some(permit) => AutomaticPermitDecision::Rcs(permit),
-                None => AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven),
+            ) {
+                Ok(Some(permit)) => AutomaticPermitDecision::Rcs(permit),
+                Ok(None) => AutomaticPermitDecision::Blocked(PermitBlock::MappingUnproven),
+                Err(Error::NotFound) => AutomaticPermitDecision::Blocked(PermitBlock::NotReceived),
+                Err(error) => return Err(error),
             };
             tx.commit()?;
             return Ok(decision);
@@ -6567,6 +6642,9 @@ impl Client {
             return Ok(AutomaticPermitDecision::Blocked(
                 PermitBlock::CarrierOnlyProofUnavailable,
             ));
+        }
+        if retired {
+            return Ok(AutomaticPermitDecision::Blocked(PermitBlock::NotReceived));
         }
         record_finalized_attempt(&tx, command_id, "carrier", now_ms)?;
         tx.commit()?;
@@ -15084,7 +15162,7 @@ struct LedgerCommand {
 fn ledger_command(conn: &Connection, command_id: CommandId) -> Result<LedgerCommand, Error> {
     let ledger: Option<(u32, String, String, bool)> = conn
         .query_row(
-            "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
+            "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=? AND retired=0",
             [command_id.to_string()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -15111,7 +15189,7 @@ pub(crate) fn unattempted_rcs_media_message(
 ) -> Result<MessagePayload, Error> {
     let ledger: Option<(u32, String, String, bool)> = conn
         .query_row(
-            "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
+            "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=? AND retired=0",
             [command_id.to_string()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -15456,7 +15534,7 @@ fn admit_rcs_media_materialization(
 ) -> Result<bool, Error> {
     let ledger: Option<(u32, String, String, bool)> = conn
         .query_row(
-            "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=?",
+            "SELECT key_epoch,subscription_id,payload,historical FROM command_ledger WHERE command_id=? AND retired=0",
             [command_id.to_string()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -15662,6 +15740,14 @@ fn automatic_rcs_permit(
     let mapping = exact_rcs_mapping(tx, message.record.conversation_id, observation, now_ms)?
         .ok_or(Error::InvalidRequest("mapping unproven"))?;
     require_exact_rcs_recipient(&message, &mapping)?;
+    let retired: bool = tx.query_row(
+        "SELECT retired FROM command_ledger WHERE command_id=?",
+        [command_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if retired {
+        return Err(Error::NotFound);
+    }
     let tmp_id = finalize_rcs_admission(tx, command_id, &mapping, observation, now_ms)?;
     rcs_permit(command_id, message, tmp_id, &mapping, observation)
 }

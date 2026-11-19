@@ -1146,6 +1146,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func retireSwallowedCommands() throws  -> UInt32
     
+    func retireUnattemptedCommandsFromProducers(producers: [String]) throws  -> UInt32
+    
     func saveComposeDraft(draftId: String, expectedRevision: UInt64, update: NativeComposeDraftUpdate) throws  -> NativeComposeDraft
     
     /**
@@ -3306,6 +3308,16 @@ open func retireSwallowedCommands()throws  -> UInt32  {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_retire_swallowed_commands(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func retireUnattemptedCommandsFromProducers(producers: [String])throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_retire_unattempted_commands_from_producers(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(producers),uniffiCallStatus
     )
 })
 }
@@ -21407,6 +21419,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_retire_swallowed_commands() != 18107) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_retire_unattempted_commands_from_producers() != 47220) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_save_compose_draft() != 5300) {

@@ -2,9 +2,63 @@ package dev.peppy.mobile.googlemessages
 
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import dev.peppy.mobile.gateway.revocationCheckedCandidates
+import dev.peppy.mobile.gateway.cachedProducerRetirement
 import java.util.concurrent.Executor
 
 class RcsNativeSendWorkTest {
+    @Test fun `new command after group work is retired using cached roster`() {
+        var loads = 0
+        var pending = listOf(command("first"))
+        val retire = cachedProducerRetirement(
+            load = { loads += 1; listOf("revoked") },
+            retire = { ids -> if ("revoked" in ids) pending = emptyList() },
+        )
+        assertEquals(emptyList<RcsNativeCommand>(), revocationCheckedCandidates({ pending }, retire))
+        pending = listOf(command("arrived-after-group-create"))
+        assertEquals(emptyList<RcsNativeCommand>(), revocationCheckedCandidates({ pending }, retire))
+        assertEquals(1, loads)
+    }
+
+    @Test fun `revoked producer is retired before native work admits a journaled command`() {
+        var pending = listOf(command("revoked"))
+        var failedBeforeSubmission = 0
+        var goSendEffects = 0
+        val work = RcsNativeSendWork(
+            enabled = { true },
+            candidates = {
+                revocationCheckedCandidates(
+                    read = { pending },
+                    retire = {
+                        failedBeforeSubmission += pending.size
+                        pending = emptyList()
+                        true
+                    },
+                )
+            },
+            execute = { goSendEffects += 1 },
+            current = { true },
+            executor = directExecutor,
+        )
+        work.start()
+        assertEquals(0, goSendEffects)
+        assertEquals(1, failedBeforeSubmission)
+    }
+
+    @Test fun `unavailable roster retains previous candidates and empty work skips lookup`() {
+        var lookups = 0
+        assertEquals(emptyList<RcsNativeCommand>(), revocationCheckedCandidates(
+            read = { emptyList<RcsNativeCommand>() },
+            retire = { lookups += 1; true },
+        ))
+        val candidate = command("one")
+        assertEquals(listOf(candidate), revocationCheckedCandidates(
+            read = { listOf(candidate) },
+            retire = { lookups += 1; false },
+        ))
+        assertEquals(1, lookups)
+    }
+
     @Test fun `disabled work does not read candidates or run native sends`() {
         var reads = 0
         var sends = 0

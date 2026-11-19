@@ -415,6 +415,14 @@ pub(crate) fn begin(
 ) -> Result<GroupCreateBegin, Error> {
     match gate(conn, command_id, conversation_id)? {
         Gate::Needed(request) => {
+            let retired: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM command_ledger WHERE command_id=? AND retired=1)",
+                [command_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if retired {
+                return Err(Error::InvalidRequest("group create not permitted"));
+            }
             conn.execute(
                 "INSERT INTO rcs_group_create_permits(command_id) VALUES(?)",
                 [command_id.to_string()],

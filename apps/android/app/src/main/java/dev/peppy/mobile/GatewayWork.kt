@@ -30,6 +30,7 @@ import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.diagnostics.SyncTraceEvent
 import dev.peppy.mobile.diagnostics.SyncTraceField
 import dev.peppy.mobile.gateway.GatewayHttp
+import dev.peppy.mobile.gateway.retireRevokedProducers
 import dev.peppy.mobile.gateway.GatewayPolicyHost
 import dev.peppy.mobile.gateway.GatewayStateStore
 import dev.peppy.mobile.gateway.GatewayTransportException
@@ -1103,6 +1104,9 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             state = GatewayStateStore(applicationContext),
             deviceId = session.deviceId,
             dispatch = {
+                if (session.client.pendingCommands().isNotEmpty()) {
+                    retireRevokedProducers(applicationContext, session.client)
+                }
                 val mms = MmsDispatcher(applicationContext, session.client, AndroidMmsCarrier(applicationContext), routes, sendGranted, mmsEnabled,
                     currentRoutes = SimRoutes::current, mayIssueEffect = { job?.isActive != false }).dispatch()
                 val used = mms.submitted + mms.refusedBeforeCarrier

@@ -134,6 +134,23 @@ fn group_send(
     (draft.conversation_id, queued.command_id)
 }
 
+#[test]
+fn retired_group_command_cannot_issue_a_create_permit() {
+    let fixture = fixture(true);
+    let (conversation, command) = group_send(&fixture, &[ALEX, SAM], false);
+    let db = sqlcipher(&fixture.config.database_path);
+    db.execute(
+        "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,retired,historical) VALUES(?,1,'sub-1','{}',1,0)",
+        [command.to_string()],
+    ).unwrap();
+    assert!(matches!(
+        fixture
+            .client
+            .begin_rcs_group_create(conversation, command, now_ms()),
+        Err(Error::InvalidRequest("group create not permitted"))
+    ));
+}
+
 fn record_create_request(fixture: &Fixture, command: CommandId, confirm_duplicate: bool) {
     let mut request = json!({"name": "Weekend"});
     if confirm_duplicate {

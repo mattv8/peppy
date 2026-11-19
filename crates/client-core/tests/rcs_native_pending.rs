@@ -541,6 +541,43 @@ fn a_picture_moves_to_the_media_send_work_once_its_number_has_a_chat() {
 }
 
 #[test]
+fn revoked_media_command_is_not_offered_again() {
+    let mut fixture = Fixture::new();
+    let conversation = fixture.conversation_id;
+    let command = fixture.queue_mms_content_for(conversation, PEER, true);
+    assert!(
+        fixture
+            .gateway
+            .pending_rcs_media_commands(1_000)
+            .unwrap()
+            .iter()
+            .any(|item| item.command_id == command)
+    );
+    let producer = fixture
+        .server
+        .log
+        .iter()
+        .find(|envelope| envelope.command_id == Some(command))
+        .unwrap()
+        .producer_device_id;
+    assert_eq!(
+        fixture
+            .gateway
+            .retire_unattempted_commands_from_producers(&[producer])
+            .unwrap(),
+        1
+    );
+    assert!(
+        !fixture
+            .gateway
+            .pending_rcs_media_commands(1_000)
+            .unwrap()
+            .iter()
+            .any(|item| item.command_id == command)
+    );
+}
+
+#[test]
 fn native_carrier_candidates_are_one_per_conversation_and_capped_at_eight() {
     let mut fixture = Fixture::new();
     let first_conversation = fixture
