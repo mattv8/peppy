@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import purchaseOptionsFixture from "./purchase-options.fixture.json";
 
 const eventMock = vi.hoisted(() => ({
   handler: undefined as ((event: { payload: unknown }) => void) | undefined,
   windowHandlers: new Map<string, (event: { payload: unknown }) => void>(),
   stop: vi.fn(),
+  listen: vi.fn(),
   windowStop: vi.fn(),
   windowListen: vi.fn(),
 }));
@@ -13,10 +14,7 @@ const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async (_event: string, handler: (event: { payload: unknown }) => void) => {
-    eventMock.handler = handler;
-    return eventMock.stop;
-  }),
+  listen: eventMock.listen,
 }));
 
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
@@ -96,6 +94,11 @@ describe("bridge subscriptions", () => {
     invokeMock.mockClear();
     eventMock.handler = undefined;
     eventMock.stop.mockReset();
+    eventMock.listen.mockReset();
+    eventMock.listen.mockImplementation(async (_event: string, handler: (event: { payload: unknown }) => void) => {
+      eventMock.handler = handler;
+      return eventMock.stop;
+    });
     eventMock.windowStop.mockReset();
     eventMock.windowListen.mockReset();
     eventMock.windowListen.mockImplementation(async (event: string, handler: (event: { payload: unknown }) => void) => {
@@ -103,6 +106,80 @@ describe("bridge subscriptions", () => {
       return eventMock.windowStop;
     });
     eventMock.windowHandlers.clear();
+  });
+
+  afterEach(() => vi.useRealTimers());
+
+  it("retries state registration and delivers subsequent events", async () => {
+    vi.useFakeTimers();
+    eventMock.listen.mockRejectedValueOnce(new Error("listen failed"));
+    const listener = vi.fn();
+    const dispose = tauriBridge.subscribe(listener);
+    await vi.dynamicImportSettled();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(eventMock.listen).toHaveBeenCalledTimes(2);
+    expect(eventMock.handler).toEqual(expect.any(Function));
+    eventMock.handler?.({ payload: null });
+    expect(listener).toHaveBeenCalledTimes(2);
+    dispose();
+    expect(eventMock.stop).toHaveBeenCalledOnce();
+  });
+
+  it("catches up once after state registration", async () => {
+    const listener = vi.fn();
+    const dispose = tauriBridge.subscribe(listener);
+    await vi.waitFor(() => expect(listener).toHaveBeenCalledOnce());
+    dispose();
+  });
+
+  it("keeps the registration when the catch-up listener throws", async () => {
+    vi.useFakeTimers();
+    const listener = vi.fn().mockImplementationOnce(() => { throw new Error("listener failed"); });
+    const dispose = tauriBridge.subscribe(listener);
+    await vi.dynamicImportSettled();
+    expect(listener).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(eventMock.listen).toHaveBeenCalledOnce();
+    eventMock.handler?.({ payload: null });
+    expect(listener).toHaveBeenCalledTimes(2);
+    dispose();
+    expect(eventMock.stop).toHaveBeenCalledOnce();
+  });
+
+  it("unlistens without catching up when state registration finishes after disposal", async () => {
+    let finishRegistration: ((stop: () => void) => void) | undefined;
+    eventMock.listen.mockImplementationOnce(() => new Promise(resolve => { finishRegistration = resolve; }));
+    const listener = vi.fn();
+    const dispose = tauriBridge.subscribe(listener);
+    await vi.waitFor(() => expect(eventMock.listen).toHaveBeenCalledOnce());
+    dispose();
+    finishRegistration?.(eventMock.stop);
+    await vi.waitFor(() => expect(eventMock.stop).toHaveBeenCalledOnce());
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("cancels state registration retries on disposal", async () => {
+    vi.useFakeTimers();
+    eventMock.listen.mockRejectedValue(new Error("listen failed"));
+    const dispose = tauriBridge.subscribe(vi.fn());
+    await vi.dynamicImportSettled();
+    dispose();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(eventMock.listen).toHaveBeenCalledOnce();
+  });
+
+  it("doubles state registration retry delays up to 30 seconds", async () => {
+    vi.useFakeTimers();
+    eventMock.listen.mockRejectedValue(new Error("listen failed"));
+    const dispose = tauriBridge.subscribe(vi.fn());
+    await vi.dynamicImportSettled();
+    for (const [index, delay] of [1000, 2000, 4000, 8000, 16000, 30000, 30000].entries()) {
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(eventMock.listen).toHaveBeenCalledTimes(index + 1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(eventMock.listen).toHaveBeenCalledTimes(index + 2);
+    }
+    dispose();
   });
 
   it("returns a disposer for both missing-host subscriptions", () => {
