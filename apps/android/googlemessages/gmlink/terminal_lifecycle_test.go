@@ -198,15 +198,11 @@ func TestCloseRefusesLaterCalls(t *testing.T) {
 
 func TestPersistFailureUsesOneCode(t *testing.T) {
 	host := newSafetyHost()
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, nil, host)
 	setSafetyState(link, stateSignedOut, nil)
 	host.setFailPersist(true)
 
-	err = link.Unlink()
+	err := link.Unlink()
 
 	expectErrorCode(t, err, "persist_failed")
 	expectStatus(t, link, `"stop_code":"persist_failed"`)

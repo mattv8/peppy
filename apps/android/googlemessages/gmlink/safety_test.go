@@ -290,6 +290,7 @@ func TestCloseDuringRunNoRace(t *testing.T) {
 				t.Fatalf("process slot not freed by Close: %v", err)
 			}
 			reopened.Close()
+			awaitSafety(t, "reopened link output drain", func() bool { return openLink.Load() != reopened })
 		})
 	}
 }

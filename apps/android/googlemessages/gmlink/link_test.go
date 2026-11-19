@@ -36,11 +36,7 @@ func (host *testHost) Event(kind, code string, _, _, _ int64) {
 func (host *testHost) ShowEmoji(string, int64, int64) {}
 
 func TestOpenEmptyIsUnlinked(t *testing.T) {
-	link, err := Open(nil, &testHost{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, nil, &testHost{})
 	if !strings.Contains(link.Status(), `"state":"unlinked"`) {
 		t.Fatalf("status=%s", link.Status())
 	}
@@ -55,11 +51,7 @@ func TestOpenCorruptFailsClosed(t *testing.T) {
 func TestOpenPairingReopensAsPrevious(t *testing.T) {
 	host := &testHost{}
 	state := []byte(`{"version":1,"seq":4,"state":"pairing","pairing_from":"needs_relink","stop_code":"","auth":{}}`)
-	link, err := Open(state, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, state, host)
 	if !strings.Contains(link.Status(), `"state":"needs_relink"`) {
 		t.Fatalf("status=%s", link.Status())
 	}
@@ -71,27 +63,18 @@ func TestOpenPairingReopensAsPrevious(t *testing.T) {
 }
 
 func TestSecondOpenRefusedUntilClose(t *testing.T) {
-	first, err := Open(nil, &testHost{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := openTestLink(t, nil, &testHost{})
 	if _, err := Open(nil, &testHost{}); err == nil || err.Error() != "link_already_open" {
 		t.Fatalf("second open error=%v", err)
 	}
 	first.Close()
-	second, err := Open(nil, &testHost{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	awaitSafety(t, "first link output drain", func() bool { return openLink.Load() != first })
+	second := openTestLink(t, nil, &testHost{})
 	second.Close()
 }
 
 func TestPairOnlyFromUnlinkedOrSignedOut(t *testing.T) {
-	link, err := Open(nil, &testHost{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, nil, &testHost{})
 	link.mu.Lock()
 	link.state = stateLinked
 	link.mu.Unlock()
@@ -101,11 +84,7 @@ func TestPairOnlyFromUnlinkedOrSignedOut(t *testing.T) {
 }
 
 func TestPairRefusesMissingCookie(t *testing.T) {
-	link, err := Open(nil, &testHost{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, nil, &testHost{})
 	if err := link.Pair([]byte(`{"OSID":"synthetic"}`)); err == nil || err.Error() != "invalid_cookies" {
 		t.Fatalf("error=%v", err)
 	}
@@ -124,11 +103,7 @@ func TestPairAcceptsOptionalPSIDTSAndRejectsUnknownCookie(t *testing.T) {
 }
 
 func TestConcurrentPairSecondRefused(t *testing.T) {
-	link, err := Open(nil, &testHost{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, nil, &testHost{})
 	link.mu.Lock()
 	link.state = statePairing
 	link.mu.Unlock()
@@ -139,11 +114,7 @@ func TestConcurrentPairSecondRefused(t *testing.T) {
 
 func TestGaiaLoggedOutNeedsRelink(t *testing.T) {
 	host := &testHost{}
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, nil, host)
 	link.mu.Lock()
 	link.state = stateLinked
 	link.mu.Unlock()
@@ -161,11 +132,7 @@ func TestGaiaLoggedOutNeedsRelink(t *testing.T) {
 
 func TestListenFatalAuthErrorSignsOut(t *testing.T) {
 	host := &testHost{}
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, nil, host)
 	link.mu.Lock()
 	link.state = stateLinked
 	link.mu.Unlock()
@@ -182,11 +149,7 @@ func TestListenFatalAuthErrorSignsOut(t *testing.T) {
 }
 
 func TestFakeAccountChangeIgnored(t *testing.T) {
-	link, err := Open(nil, &testHost{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, nil, &testHost{})
 	link.mu.Lock()
 	link.state = stateLinked
 	link.mu.Unlock()
@@ -203,11 +166,7 @@ func TestFakeAccountChangeIgnored(t *testing.T) {
 
 func TestRealAccountChangeSignsOut(t *testing.T) {
 	host := &testHost{}
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, nil, host)
 	link.mu.Lock()
 	link.state = stateLinked
 	link.mu.Unlock()
@@ -224,22 +183,14 @@ func TestRealAccountChangeSignsOut(t *testing.T) {
 }
 
 func TestRelinkOnlyFromNeedsRelinkAndUsesExistingCookies(t *testing.T) {
-	link, err := Open(nil, &testHost{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, nil, &testHost{})
 	if err := link.Relink(); err == nil || err.Error() != "relink_refused" {
 		t.Fatalf("error=%v", err)
 	}
 }
 
 func TestRunRefusesSecondConcurrentRun(t *testing.T) {
-	link, err := Open(nil, &testHost{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, nil, &testHost{})
 	link.mu.Lock()
 	link.state, link.running, link.auth.Browser = stateLinked, true, &gmproto.Device{}
 	link.mu.Unlock()
@@ -249,11 +200,7 @@ func TestRunRefusesSecondConcurrentRun(t *testing.T) {
 }
 
 func TestRunTransientErrorKeepsState(t *testing.T) {
-	link, err := Open(nil, &testHost{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, nil, &testHost{})
 	link.mu.Lock()
 	link.state = stateLinked
 	link.mu.Unlock()
@@ -264,11 +211,7 @@ func TestRunTransientErrorKeepsState(t *testing.T) {
 }
 
 func TestEventHandlerNeverBlocks(t *testing.T) {
-	link, err := Open(nil, &testHost{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, nil, &testHost{})
 	done := make(chan struct{})
 	go func() {
 		link.queueEvent(&events.PhoneNotResponding{})
@@ -285,10 +228,7 @@ func TestOpenDisablesUpstreamLoggers(t *testing.T) {
 	previous := zerolog.GlobalLevel()
 	t.Cleanup(func() { zerolog.SetGlobalLevel(previous) })
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
-	link, err := Open(nil, &testHost{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	link := openTestLink(t, nil, &testHost{})
 	link.Close()
 	if zerolog.GlobalLevel() != zerolog.Disabled {
 		t.Fatalf("global log level=%v", zerolog.GlobalLevel())
@@ -297,11 +237,7 @@ func TestOpenDisablesUpstreamLoggers(t *testing.T) {
 
 func TestPersistOrderingSeqMonotonic(t *testing.T) {
 	host := &testHost{}
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(link.Close)
+	link := openTestLink(t, nil, host)
 	if err := link.persist(); err != nil {
 		t.Fatal(err)
 	}
