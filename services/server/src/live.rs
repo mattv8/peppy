@@ -52,7 +52,10 @@ struct LiveHubInner {
 #[derive(Default)]
 struct LiveHubState {
     sinks: HashMap<(VaultId, DeviceId), LiveSink>,
+    vault_sinks: HashMap<VaultId, std::collections::HashSet<DeviceId>>,
     mutation_epochs: HashMap<(VaultId, DeviceId), u64>,
+    #[cfg(test)]
+    sink_visits: std::sync::atomic::AtomicUsize,
 }
 
 struct LiveSink {
@@ -497,7 +500,7 @@ impl LiveHub {
         Self::validate_frame(authenticated_device_id, &frame, now_ms)?;
         let state = self.inner.state.lock().expect("live hub lock poisoned");
         Ok(Self::forward_locked(
-            &state.sinks,
+            &state,
             vault_id,
             authenticated_device_id,
             frame,
@@ -524,7 +527,7 @@ impl LiveHub {
             return Ok(None);
         }
         Ok(Some(Self::forward_locked(
-            &state.sinks,
+            &state,
             vault_id,
             authenticated_device_id,
             frame,
@@ -554,6 +557,7 @@ impl LiveHub {
 
     fn install_sink(state: &mut LiveHubState, key: (VaultId, DeviceId), sink: LiveSink) {
         Self::advance_mutation_epoch(state, key);
+        state.vault_sinks.entry(key.0).or_default().insert(key.1);
         if let Some(replaced) = state.sinks.insert(key, sink) {
             let _ = replaced.cancellation.send(true);
         }
@@ -561,21 +565,33 @@ impl LiveHub {
 
     fn remove_sink(state: &mut LiveHubState, key: (VaultId, DeviceId)) {
         let removed = state.sinks.remove(&key).expect("live sink must exist");
+        let devices = state
+            .vault_sinks
+            .get_mut(&key.0)
+            .expect("live vault must exist");
+        assert!(devices.remove(&key.1), "live device must exist");
+        if devices.is_empty() {
+            state.vault_sinks.remove(&key.0);
+        }
         Self::advance_mutation_epoch(state, key);
         drop(removed);
     }
 
     fn forward_locked(
-        sinks: &HashMap<(VaultId, DeviceId), LiveSink>,
+        state: &LiveHubState,
         vault_id: VaultId,
         authenticated_device_id: DeviceId,
         frame: EphemeralSignalV2,
     ) -> usize {
         let mut accepted = 0;
-        for (&(sink_vault, sink_device), sink) in sinks.iter() {
-            if sink_vault == vault_id
-                && sink_device != authenticated_device_id
-                && sink.sender.try_send(frame.clone()).is_ok()
+        for &sink_device in state.vault_sinks.get(&vault_id).into_iter().flatten() {
+            #[cfg(test)]
+            state.sink_visits.fetch_add(1, Ordering::Relaxed);
+            let sink = state
+                .sinks
+                .get(&(vault_id, sink_device))
+                .expect("indexed live sink must exist");
+            if sink_device != authenticated_device_id && sink.sender.try_send(frame.clone()).is_ok()
             {
                 accepted += 1;
             }
@@ -636,6 +652,67 @@ mod tests {
 
     fn ticket(session: u8, incarnation: i64, connection: i64) -> LiveTicketIdentity {
         LiveTicketIdentity::new([session; 16], incarnation, connection)
+    }
+
+    #[test]
+    fn many_vaults_preserve_fanout_and_ticket_lifecycle() {
+        let hub = LiveHub::new();
+        let mut others: Vec<_> = (2..102)
+            .map(|n| hub.register(vault(n), device(2)))
+            .collect();
+        let mut sender = hub.register(vault(1), device(1));
+        let old_ticket = ticket(1, 1, 1);
+        let mut old = hub.register_ticket_with_identity(vault(1), device(2), old_ticket);
+        let snapshot = hub.ticket_snapshot(vault(1), device(2));
+        let current_ticket = ticket(1, 1, 2);
+        let mut current = hub
+            .register_ticket_if_current(vault(1), device(2), snapshot, current_ticket)
+            .unwrap();
+        assert!(*old.cancellation.borrow());
+        assert_eq!(old.receiver.try_recv(), Err(TryRecvError::Disconnected));
+        hub.cancel_ticket_exact(vault(1), device(2), old_ticket);
+        hub.unregister(vault(1), device(2), old.generation);
+        assert!(matches!(
+            hub.register_ticket_if_current(vault(1), device(2), snapshot, ticket(1, 1, 3)),
+            Err(LiveTicketInstallRefusal::ChangedEpoch)
+        ));
+        assert_eq!(
+            hub.forward_current(vault(1), device(1), sender.generation, frame(), 100000),
+            Ok(Some(1))
+        );
+        assert_eq!(
+            hub.inner
+                .state
+                .lock()
+                .unwrap()
+                .sink_visits
+                .load(Ordering::Relaxed),
+            2
+        );
+        assert_eq!(current.receiver.try_recv(), Ok(frame()));
+        assert_eq!(sender.receiver.try_recv(), Err(TryRecvError::Empty));
+        for other in &mut others {
+            assert_eq!(other.receiver.try_recv(), Err(TryRecvError::Empty));
+        }
+        for _ in 0..LIVE_CHANNEL_CAPACITY {
+            assert_eq!(hub.forward(vault(1), device(1), frame(), 100000), Ok(1));
+        }
+        assert_eq!(hub.forward(vault(1), device(1), frame(), 100000), Ok(0));
+        for _ in 0..LIVE_CHANNEL_CAPACITY {
+            assert_eq!(current.receiver.try_recv(), Ok(frame()));
+        }
+        let before_cancel = hub.ticket_snapshot(vault(1), device(2));
+        hub.cancel_ticket_exact(vault(1), device(2), current_ticket);
+        assert_eq!(current.receiver.try_recv(), Err(TryRecvError::Disconnected));
+        assert!(matches!(
+            hub.register_ticket_if_current(vault(1), device(2), before_cancel, ticket(1, 1, 3)),
+            Err(LiveTicketInstallRefusal::ChangedEpoch)
+        ));
+        assert_eq!(hub.forward(vault(1), device(1), frame(), 100000), Ok(0));
+        hub.unregister(vault(1), device(1), sender.generation);
+        let state = hub.inner.state.lock().unwrap();
+        assert!(!state.vault_sinks.contains_key(&vault(1)));
+        assert_eq!(state.vault_sinks.len(), 100);
     }
 
     #[test]
