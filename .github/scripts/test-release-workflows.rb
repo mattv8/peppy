@@ -192,6 +192,33 @@ expected_android_packaging_flags = ['./gradlew', '--console=plain', '--dependenc
 assert.call(android_packaging_flags == expected_android_packaging_flags, 'Android packaging must use strict dependency verification, the 4 GiB JVM override, two-worker bound, and diagnostic flags')
 android_packaging_tasks = android_packaging_command.select { |token| token.start_with?(':') }
 assert.call(android_packaging_tasks == %w[:app:verifyReleaseManifestSecurity :app:lintDebug :app:lintSideload :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleSideload :app:verifySideloadGoogleMessagesLink], 'Android packaging must verify the merged release manifest, sideload link, linting, and debug artifacts')
+# The immutable shared snapshot must contain app dependencies, not just build plugins.
+gradle_restore_steps = android_ci_jobs.values.flat_map { |job| job.fetch('steps', []) }.select { |step| step['uses']&.start_with?('actions/cache/restore@') }
+gradle_save_jobs = android_ci_jobs.select { |_name, job| job.fetch('steps', []).any? { |step| step['uses']&.start_with?('actions/cache/save@') } }
+assert.call(gradle_save_jobs.keys == ['android-native-preparation'], 'only the dependency-warming producer may publish the immutable snapshot')
+gradle_dependency_cache = gradle_restore_steps.first.fetch('with')
+assert.call(gradle_restore_steps.length == 4 && gradle_restore_steps.all? { |step| step.fetch('with') == gradle_dependency_cache }, 'all Android lanes must restore the same dependency cache')
+assert.call(gradle_dependency_cache.fetch('key').start_with?('gradle-dependencies-v1-') && gradle_dependency_cache.fetch('restore-keys') == 'gradle-dependencies-v1-${{ runner.os }}-', 'dependency cache must not fall back to the old incomplete build-plugin snapshot')
+assert.call(gradle_dependency_cache.fetch('path').lines.map(&:strip) == %w[~/.gradle/caches/modules-2 ~/.gradle/wrapper], 'shared cache must contain dependencies and wrapper only; directory exclusions are not effective with recursive tar')
+gradle_producer_steps = gradle_save_jobs.values.first.fetch('steps')
+gradle_save = gradle_producer_steps.find { |step| step['uses']&.start_with?('actions/cache/save@') }
+gradle_stop = gradle_producer_steps.find { |step| step['name'] == 'Stop Gradle before caching' }
+gradle_restore = gradle_producer_steps.find { |step| step['id'] == 'gradle-cache' }
+gradle_warm = gradle_producer_steps.find { |step| step['name'] == 'Resolve Android CI and release dependencies' }
+assert.call(gradle_restore && gradle_warm && gradle_stop, 'producer must restore, warm, and stop before saving')
+gradle_order = [gradle_restore, gradle_warm, gradle_stop, gradle_save].map { |step| gradle_producer_steps.index(step) }
+assert.call(gradle_order.each_cons(2).all? { |before, after| before < after } && gradle_order.last < android_aar_index, 'a complete dependency snapshot must be saved before expensive native builds, independently of later lint/test outcomes')
+warm_commands = gradle_warm.fetch('run').lines.reject { |line| line.strip.empty? }.map { |line| Shellwords.shellsplit(line) }
+assert.call(warm_commands.length == 2 && warm_commands.all? { |command| command.include?('--dependency-verification=strict') && command.include?('resolveCiDependencies') && command[command.index('--init-script').to_i + 1] == '../../.github/scripts/gradle-dependency-cache.init.gradle' } && warm_commands.first.none? { |arg| arg.start_with?('-P') } && warm_commands.last.include?('-PpeppyGoogleMessagesLink=true') && warm_commands.last.include?('-PpeppyDistribution=play') && !gradle_warm.key?('continue-on-error'), 'warming must resolve all configurations for flag-off CI and flag-on Play/release modes, with strict verification and fatal errors')
+assert.call(gradle_dependency_cache.fetch('key').include?("'.github/scripts/gradle-dependency-cache.init.gradle'"), 'cache completeness policy changes must invalidate the snapshot')
+assert.call(gradle_producer_steps.any? { |step| step['run'] == 'bash ../../.github/scripts/test-gradle-dependency-cache.sh "$PWD/gradlew"' }, 'native preparation must exercise real Gradle resolution failure propagation')
+assert.call(android_preparation.fetch('timeout-minutes') == 40, 'dependency producer must allow cold resolution overhead before native builds')
+
+resolver_script = File.read(File.join(__dir__, 'gradle-dependency-cache.init.gradle'))
+assert.call(resolver_script.include?('configuration.canBeResolved') && resolver_script.include?('ModuleComponentIdentifier') && resolver_script.include?('artifacts.files.files') && !resolver_script.match?(/lenient\s*(?:=|\()|catch\s*\(/), 'warming must eagerly fetch all external artifacts and propagate resolution failures, never use lenient reports')
+
+assert.call(gradle_save.fetch('if') == "${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/production' && steps.gradle-cache.outputs.cache-hit != 'true' }}" && gradle_stop.fetch('if') == gradle_save.fetch('if'), 'only successful production pushes with a missing exact snapshot may save')
+assert.call(gradle_save.dig('with', 'path') == gradle_dependency_cache.fetch('path') && gradle_save.dig('with', 'key') == '${{ steps.gradle-cache.outputs.cache-primary-key }}', 'cache producer must save exactly the dependency paths under the requested primary key')
 android_aggregate = android_ci_jobs.fetch('android-aggregate')
 assert.call(android_aggregate.fetch('if') == '${{ always() }}' && android_aggregate.fetch('needs').sort == %w[android-debug-unit-tests android-lint-and-assembly android-native-preparation android-sideload-unit-tests], 'Android aggregate must always require preparation and every consumer')
 ci_text = File.read(File.join(root, 'workflows', 'ci.yml'))
@@ -597,8 +624,9 @@ assert.call(release.fetch('jobs').fetch('publish').fetch('if').include?('!cancel
 end
 
 artifacts = load_workflow.call('build-artifacts.yml').fetch('jobs')
-artifact_workflow_text = File.read(File.join(root, 'workflows', 'build-artifacts.yml'))
-assert.call(!artifact_workflow_text.match?(%r{uses:\s*(actions/cache(/\w+)?|Swatinem/rust-cache)@}), 'build-artifacts must not restore or save Actions caches: the 10 GB repository cache limit evicts gate-critical caches')
+artifact_cache_steps = artifacts.flat_map { |name, job| job.fetch('steps', []).map { |step| [name, step] } }.select { |_name, step| step['uses']&.match?(%r{\A(actions/cache|Swatinem/rust-cache)}) }
+assert.call(artifact_cache_steps.length == 1 && artifact_cache_steps.first.first == 'android-development-artifacts' && artifact_cache_steps.first.last['uses'].start_with?('actions/cache/restore@'), 'artifact builds may only read the existing Android dependency cache; never create competing release caches')
+assert.call(artifact_cache_steps.first.last.fetch('with') == gradle_dependency_cache, 'release builds must reuse the same verified dependency snapshot as Android validation')
 %w[android desktop ios].each do |component|
   job = artifacts.fetch("#{component}-development-artifacts")
   assert.call(job.fetch('if') == "inputs.build_#{component} != false", "#{component} artifact job must run unless explicitly disabled")

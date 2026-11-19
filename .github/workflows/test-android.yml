@@ -9,7 +9,7 @@ permissions:
 jobs:
   android-native-preparation:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -27,10 +27,10 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.gradle/caches
+            ~/.gradle/caches/modules-2
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
-          restore-keys: gradle-${{ runner.os }}-
+          key: gradle-dependencies-v1-${{ runner.os }}-${{ hashFiles('.github/scripts/gradle-dependency-cache.init.gradle', 'apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
+          restore-keys: gradle-dependencies-v1-${{ runner.os }}-
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.98.1
@@ -67,6 +67,26 @@ jobs:
             ln -s "$source_gradle_user_home/wrapper" "$fresh_gradle_user_home/wrapper"
           fi
           GRADLE_USER_HOME="$fresh_gradle_user_home" ./gradlew --no-daemon --console=plain --dependency-verification=strict --info --project-cache-dir "$fresh_gradle_user_home/project-cache" buildEnvironment
+      - name: Test dependency snapshot resolver
+        working-directory: apps/android
+        run: bash ../../.github/scripts/test-gradle-dependency-cache.sh "$PWD/gradlew"
+      - name: Resolve Android CI and release dependencies
+        working-directory: apps/android
+        run: |
+          ./gradlew --no-daemon --console=plain --dependency-verification=strict --max-workers=2 --init-script ../../.github/scripts/gradle-dependency-cache.init.gradle resolveCiDependencies
+          ./gradlew --no-daemon --console=plain --dependency-verification=strict --max-workers=2 --init-script ../../.github/scripts/gradle-dependency-cache.init.gradle resolveCiDependencies -PpeppyDistribution=play -PpeppyGoogleMessagesLink=true
+      - name: Stop Gradle before caching
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/production' && steps.gradle-cache.outputs.cache-hit != 'true' }}
+        working-directory: apps/android
+        run: ./gradlew --stop
+      - name: Save Gradle cache
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/production' && steps.gradle-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
       - name: Build Google Messages AAR and licenses
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
@@ -121,18 +141,6 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           overwrite: true
-      - name: Stop Gradle before caching
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/production' && steps.gradle-cache.outputs.cache-hit != 'true' }}
-        working-directory: apps/android
-        run: ./gradlew --stop
-      - name: Save Gradle cache
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/production' && steps.gradle-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
 
   android-debug-unit-tests:
     needs: android-native-preparation
@@ -158,10 +166,10 @@ jobs:
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.gradle/caches
+            ~/.gradle/caches/modules-2
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
-          restore-keys: gradle-${{ runner.os }}-
+          key: gradle-dependencies-v1-${{ runner.os }}-${{ hashFiles('.github/scripts/gradle-dependency-cache.init.gradle', 'apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
+          restore-keys: gradle-dependencies-v1-${{ runner.os }}-
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: android-native-${{ github.sha }}
@@ -216,10 +224,10 @@ jobs:
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.gradle/caches
+            ~/.gradle/caches/modules-2
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
-          restore-keys: gradle-${{ runner.os }}-
+          key: gradle-dependencies-v1-${{ runner.os }}-${{ hashFiles('.github/scripts/gradle-dependency-cache.init.gradle', 'apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
+          restore-keys: gradle-dependencies-v1-${{ runner.os }}-
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: android-native-${{ github.sha }}
@@ -336,13 +344,14 @@ jobs:
           sdkmanager_status=${PIPESTATUS[1]}
           set -e
           exit "$sdkmanager_status"
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore Gradle dependency cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.gradle/caches
+            ~/.gradle/caches/modules-2
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
-          restore-keys: gradle-${{ runner.os }}-
+          key: gradle-dependencies-v1-${{ runner.os }}-${{ hashFiles('.github/scripts/gradle-dependency-cache.init.gradle', 'apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
+          restore-keys: gradle-dependencies-v1-${{ runner.os }}-
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: android-native-${{ github.sha }}
