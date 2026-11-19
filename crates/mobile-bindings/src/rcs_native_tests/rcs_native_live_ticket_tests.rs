@@ -153,7 +153,7 @@ fn carrier_live_go_ticket_uses_real_rust_facts_and_commit() {
     run_live_ticket(fixture);
 }
 
-fn run_live_ticket(fixture: Fixture) {
+fn launch_live_ticket(go_test: &str) -> (ChildGuard, BufReader<TcpStream>, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let go_dir =
@@ -169,7 +169,7 @@ fn run_live_ticket(fixture: Fixture) {
                 "rcs_native_contract",
                 "./gmlink",
                 "-run",
-                "^TestNativeRcsLiveCoreRoundTrip$",
+                go_test,
                 "-count=1",
                 "-timeout",
                 "60s",
@@ -188,8 +188,12 @@ fn run_live_ticket(fixture: Fixture) {
     stream.set_nonblocking(false).unwrap();
     stream.set_read_timeout(Some(IPC_TIMEOUT)).unwrap();
     stream.set_write_timeout(Some(IPC_TIMEOUT)).unwrap();
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut writer = stream;
+    let reader = BufReader::new(stream.try_clone().unwrap());
+    (child, reader, stream)
+}
+
+fn run_live_ticket(fixture: Fixture) {
+    let (child, mut reader, mut writer) = launch_live_ticket("^TestNativeRcsLiveCoreRoundTrip$");
     write_frame(
         &mut writer,
         &serde_json::json!({ "command_id": fixture.command_id }),
@@ -739,41 +743,7 @@ fn uploaded_media_reference(attachment: &NativeRcsMediaAttachment) -> String {
 }
 
 fn run_live_media_ticket(fixture: Fixture, go_test: &str, expected_body: &str) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap().to_string();
-    let go_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/android/googlemessages");
-    let path = std::env::var_os("PATH").unwrap();
-    let home = std::env::var_os("HOME").unwrap();
-    let mut child = ChildGuard::new(
-        Command::new("go")
-            .args([
-                "test",
-                "-race",
-                "-tags",
-                "rcs_native_contract",
-                "./gmlink",
-                "-run",
-                go_test,
-                "-count=1",
-                "-timeout",
-                "60s",
-            ])
-            .current_dir(go_dir)
-            .env_clear()
-            .env("PATH", path)
-            .env("HOME", home)
-            .env("PEPPY_RCS_NATIVE_LIVE_ADDR", address)
-            .spawn()
-            .unwrap(),
-    );
-    let stream =
-        accept_with_deadline(&listener, child.child_mut(), Instant::now() + IPC_TIMEOUT).unwrap();
-    stream.set_nonblocking(false).unwrap();
-    stream.set_read_timeout(Some(IPC_TIMEOUT)).unwrap();
-    stream.set_write_timeout(Some(IPC_TIMEOUT)).unwrap();
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut writer = stream;
+    let (child, mut reader, mut writer) = launch_live_ticket(go_test);
     write_frame(
         &mut writer,
         &serde_json::json!({ "command_id": fixture.command_id }),
@@ -920,41 +890,7 @@ fn run_live_group_ticket_with_media(
     go_test: &str,
     expected_summary: &str,
 ) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap().to_string();
-    let go_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/android/googlemessages");
-    let path = std::env::var_os("PATH").unwrap();
-    let home = std::env::var_os("HOME").unwrap();
-    let mut child = ChildGuard::new(
-        Command::new("go")
-            .args([
-                "test",
-                "-race",
-                "-tags",
-                "rcs_native_contract",
-                "./gmlink",
-                "-run",
-                go_test,
-                "-count=1",
-                "-timeout",
-                "60s",
-            ])
-            .current_dir(go_dir)
-            .env_clear()
-            .env("PATH", path)
-            .env("HOME", home)
-            .env("PEPPY_RCS_NATIVE_LIVE_ADDR", address)
-            .spawn()
-            .unwrap(),
-    );
-    let stream =
-        accept_with_deadline(&listener, child.child_mut(), Instant::now() + IPC_TIMEOUT).unwrap();
-    stream.set_nonblocking(false).unwrap();
-    stream.set_read_timeout(Some(IPC_TIMEOUT)).unwrap();
-    stream.set_write_timeout(Some(IPC_TIMEOUT)).unwrap();
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut writer = stream;
+    let (child, mut reader, mut writer) = launch_live_ticket(go_test);
     write_frame(
         &mut writer,
         &serde_json::json!({ "command_id": fixture.command_id }),
@@ -1119,42 +1055,7 @@ fn same_live_go_group_ticket_refuses_a_changed_roster_before_dispatch() {
 /// dispatch count; Rust owns the verification, facts, begin, and commit projection.
 fn run_live_group_ticket(go_test: &str, expected_summary: &str) {
     let fixture = group_fixture(&GROUP_MEMBERS);
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap().to_string();
-    let go_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/android/googlemessages");
-    let path = std::env::var_os("PATH").unwrap();
-    let home = std::env::var_os("HOME").unwrap();
-    let mut child = ChildGuard::new(
-        Command::new("go")
-            .args([
-                "test",
-                "-race",
-                "-tags",
-                "rcs_native_contract",
-                "./gmlink",
-                "-run",
-                go_test,
-                "-count=1",
-                "-timeout",
-                "60s",
-            ])
-            .current_dir(go_dir)
-            .env_clear()
-            .env("PATH", path)
-            .env("HOME", home)
-            .env("PEPPY_RCS_NATIVE_LIVE_ADDR", address)
-            .spawn()
-            .unwrap(),
-    );
-
-    let stream =
-        accept_with_deadline(&listener, child.child_mut(), Instant::now() + IPC_TIMEOUT).unwrap();
-    stream.set_nonblocking(false).unwrap();
-    stream.set_read_timeout(Some(IPC_TIMEOUT)).unwrap();
-    stream.set_write_timeout(Some(IPC_TIMEOUT)).unwrap();
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut writer = stream;
+    let (child, mut reader, mut writer) = launch_live_ticket(go_test);
     write_frame(
         &mut writer,
         &serde_json::json!({ "command_id": fixture.command_id }),

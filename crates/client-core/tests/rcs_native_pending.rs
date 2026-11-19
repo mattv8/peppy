@@ -271,6 +271,15 @@ fn pending_ids(client: &Client) -> Vec<CommandId> {
         .collect()
 }
 
+fn carrier_cursor(config: &ClientConfig) -> Option<String> {
+    let connection = encrypted_connection(config);
+    let mut query = connection
+        .prepare("SELECT v FROM metadata WHERE k='native_rcs_carrier_candidate_cursor_v1'")
+        .unwrap();
+    let mut rows = query.query([]).unwrap();
+    rows.next().unwrap().map(|row| row.get(0).unwrap())
+}
+
 #[test]
 fn native_candidates_exclude_every_recorded_attempt_state() {
     let mut fixture = Fixture::new();
@@ -547,6 +556,9 @@ fn native_carrier_candidates_are_one_per_conversation_and_capped_at_eight() {
         .conversation_id;
     let first = fixture.queue_carrier_for(first_conversation, "+12025550130");
     let duplicate = fixture.queue_carrier_for(first_conversation, "+12025550130");
+    for _ in 0..100 {
+        fixture.queue_carrier_for(first_conversation, "+12025550130");
+    }
     let mut candidates = vec![first];
     for index in 1..9 {
         let peer = format!("+120255501{index:02}");
@@ -569,11 +581,20 @@ fn native_carrier_candidates_are_one_per_conversation_and_capped_at_eight() {
     assert_eq!(pending[0], first);
     assert!(!pending.contains(&duplicate));
     assert_eq!(pending, candidates[..8]);
+    assert_eq!(
+        carrier_cursor(&fixture.gateway_config),
+        Some(candidates[7].to_string())
+    );
 
     let next = pending_ids(&fixture.gateway);
-    assert_eq!(next.len(), 8);
-    assert_eq!(next[0], candidates[8]);
-    assert_eq!(next[1], candidates[0]);
+    assert_eq!(
+        next,
+        [candidates[8..].to_vec(), candidates[..7].to_vec()].concat()
+    );
+    assert_eq!(
+        carrier_cursor(&fixture.gateway_config),
+        Some(candidates[6].to_string())
+    );
 
     let Fixture {
         _directory,
@@ -587,9 +608,14 @@ fn native_carrier_candidates_are_one_per_conversation_and_capped_at_eight() {
     drop(sender);
     let reopened = unlocked(&gateway_config, &vault);
     let resumed = pending_ids(&reopened);
-    assert_eq!(resumed.len(), 8);
-    assert_eq!(resumed[0], candidates[7]);
-    assert_eq!(resumed[1], candidates[8]);
+    assert_eq!(
+        resumed,
+        [candidates[7..].to_vec(), candidates[..6].to_vec()].concat()
+    );
+    assert_eq!(
+        carrier_cursor(&gateway_config),
+        Some(candidates[5].to_string())
+    );
 }
 
 #[test]
@@ -643,6 +669,7 @@ fn requested_cancellations_do_not_starve_later_native_candidates() {
 
     let valid = fixture.queue();
     assert_eq!(pending_ids(&fixture.gateway), vec![valid]);
+    assert_eq!(carrier_cursor(&fixture.gateway_config), None);
 }
 
 #[test]
@@ -685,6 +712,7 @@ fn native_candidates_exclude_imported_history_and_restored_commands() {
     fixture.gateway.finish_snapshot(session.generation).unwrap();
     fixture.gateway.apply_pending(100).unwrap();
     assert!(!pending_ids(&fixture.gateway).contains(&historical));
+    assert_eq!(carrier_cursor(&fixture.gateway_config), None);
 
     let restored = fixture.queue();
     assert_eq!(pending_ids(&fixture.gateway), vec![restored]);

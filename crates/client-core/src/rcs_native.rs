@@ -66,6 +66,7 @@ fn pending_commands_for(
     let mut cursor = (i64::MIN, String::new());
     let mut rcs_candidates = Vec::new();
     let mut carrier_candidates = Vec::new();
+    let mut carrier_conversations = HashSet::new();
     let mut rcs_conversations = HashSet::new();
     loop {
         let rows = query
@@ -90,12 +91,7 @@ fn pending_commands_for(
                 candidate(conn, active_epoch, command_id, kind)?
             {
                 if carrier_intent {
-                    if !carrier_candidates
-                        .iter()
-                        .any(|existing: &PendingNativeRcsCommand| {
-                            existing.conversation_id == candidate.conversation_id
-                        })
-                    {
+                    if carrier_conversations.insert(candidate.conversation_id) {
                         carrier_candidates.push(candidate);
                     }
                 } else if rcs_candidates.len() < NATIVE_RCS_COMMAND_PAGE_SIZE {

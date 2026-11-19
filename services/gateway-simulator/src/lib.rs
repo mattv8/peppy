@@ -8,7 +8,8 @@ use std::{
 
 use futures_util::StreamExt;
 use peppy_client_core::{
-    Client, Cursor, DeviceId, PermitDecision, RawSnapshotRecord, SendResult, SnapshotPurpose,
+    Client, CommandId, Cursor, DeviceId, PermitDecision, RawSnapshotRecord, SendResult,
+    SnapshotPurpose,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -955,22 +956,7 @@ pub fn run_one_carrier_effect(
     else {
         return Ok(false);
     };
-    let permit = client
-        .begin_send_attempt(command.command_id)
-        .map_err(|_| SimulatorError::Core)?;
-    let PermitDecision::Permit(_) = permit else {
-        return Ok(false);
-    };
-    let mut effect = open_private_effect_log(effects)?;
-    writeln!(effect, "{}", command.command_id.0).map_err(|_| SimulatorError::Io)?;
-    effect.sync_all().map_err(|_| SimulatorError::Io)?;
-    if crash_after_effect {
-        return Ok(true);
-    }
-    client
-        .record_send_result(command.command_id, SendResult::Sent)
-        .map_err(|_| SimulatorError::Core)?;
-    Ok(true)
+    run_selected_carrier_effect(client, effects, command.command_id, crash_after_effect)
 }
 
 /// Runtime route fence: commands for another advertised SIM remain durable reconciliation work,
@@ -989,20 +975,29 @@ pub fn run_one_carrier_effect_for_route(
     let Some(command) = command else {
         return Ok(false);
     };
+    run_selected_carrier_effect(client, effects, command.command_id, crash_after_effect)
+}
+
+fn run_selected_carrier_effect(
+    client: &Client,
+    effects: &Path,
+    command_id: CommandId,
+    crash_after_effect: bool,
+) -> Result<bool, SimulatorError> {
     let permit = client
-        .begin_send_attempt(command.command_id)
+        .begin_send_attempt(command_id)
         .map_err(|_| SimulatorError::Core)?;
     let PermitDecision::Permit(_) = permit else {
         return Ok(false);
     };
     let mut effect = open_private_effect_log(effects)?;
-    writeln!(effect, "{}", command.command_id.0).map_err(|_| SimulatorError::Io)?;
+    writeln!(effect, "{}", command_id.0).map_err(|_| SimulatorError::Io)?;
     effect.sync_all().map_err(|_| SimulatorError::Io)?;
     if crash_after_effect {
         return Ok(true);
     }
     client
-        .record_send_result(command.command_id, SendResult::Sent)
+        .record_send_result(command_id, SendResult::Sent)
         .map_err(|_| SimulatorError::Core)?;
     Ok(true)
 }
@@ -1709,5 +1704,78 @@ mod fake_http_tests {
             queued.command_id.0.to_string()
         );
         assert!(gateway.pending_commands().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn selected_effects_preserve_journal_and_attempt_boundaries() {
+        for routed in [false, true] {
+            let state: Shared = Arc::default();
+            let origin = start_fake(state.clone()).await;
+            let temp = TempDir::new().unwrap();
+            let vault = vault();
+            let gateway_id = DeviceId::new();
+            let gateway = client(temp.path(), "gateway", &vault, gateway_id);
+            let desktop = client(temp.path(), "desktop", &vault, DeviceId::new());
+            let effects = effects_path(temp.path());
+            let run = |client: &Client, path: &Path, crash| {
+                if routed {
+                    run_one_carrier_effect_for_route(client, path, "sim", crash)
+                } else {
+                    run_one_carrier_effect(client, path, crash)
+                }
+            };
+
+            assert!(!run(&gateway, &effects, false).unwrap());
+            assert!(!effects.exists());
+            for body in ["sent", "crash", "io error"] {
+                desktop
+                    .queue_send(
+                        OutgoingSms {
+                            conversation_id: ConversationId::new(),
+                            recipients: vec!["+15555550100".into()],
+                            body: body.into(),
+                        },
+                        GatewayRoute::Carrier {
+                            gateway_device_id: gateway_id,
+                            subscription_id: "sim".into(),
+                        },
+                    )
+                    .unwrap();
+            }
+            assert_eq!(upload_pending(&desktop, &origin, "token").await.unwrap(), 3);
+            deliver(&gateway, &state, 1);
+            let pending = gateway.pending_commands().unwrap();
+            let ids: Vec<_> = pending.iter().map(|command| command.command_id).collect();
+            assert_eq!(ids.len(), 3);
+            assert!(!run_one_carrier_effect_for_route(&gateway, &effects, "wrong", false).unwrap());
+            assert!(!effects.exists());
+            assert!(run(&gateway, &effects, false).unwrap());
+            assert_eq!(
+                fs::read(&effects).unwrap(),
+                format!("{}\n", ids[0].0).as_bytes()
+            );
+            assert!(run(&gateway, &effects, true).unwrap());
+            assert_eq!(
+                fs::read(&effects).unwrap(),
+                format!("{}\n{}\n", ids[0].0, ids[1].0).as_bytes()
+            );
+            assert!(matches!(
+                run(&gateway, temp.path(), false),
+                Err(SimulatorError::Io)
+            ));
+            drop(gateway);
+            let reopened = client(temp.path(), "gateway", &vault, gateway_id);
+            assert!(matches!(
+                reopened.begin_send_attempt(ids[0]).unwrap(),
+                PermitDecision::AlreadyAttempted(peppy_client_core::SendState::Sent)
+            ));
+            for id in &ids[1..] {
+                assert!(matches!(
+                    reopened.begin_send_attempt(*id).unwrap(),
+                    PermitDecision::AlreadyAttempted(peppy_client_core::SendState::OutcomeUnknown)
+                ));
+            }
+            assert!(!run(&reopened, &effects, false).unwrap());
+        }
     }
 }

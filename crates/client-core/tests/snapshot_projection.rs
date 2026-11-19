@@ -1011,6 +1011,21 @@ fn retained_tombstone_waits_for_authentication_without_blocking_recovery_or_live
         peer.replay_progress().unwrap().processed_through,
         Cursor(high_water as u64)
     );
+    let promoted_book = call(peer.contact_book_view(
+        &json!({"schema_version": 1, "book_id": BOOK, "limit": 200}).to_string(),
+    ));
+    drop(peer);
+    let peer = unlocked(&peer_cfg, &p.vault);
+    assert_eq!(
+        state(&peer),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert_eq!(
+        call(peer.contact_book_view(
+            &json!({"schema_version": 1, "book_id": BOOK, "limit": 200}).to_string(),
+        )),
+        promoted_book
+    );
 
     capture(
         &p.owner,

@@ -3300,8 +3300,11 @@ impl Client {
 
     /// Restores purpose keys without a passphrase. Requires this device's pinned profile for
     /// the cached epoch and the integrity check recorded at passphrase unlock; it never pins a
-    /// profile or changes the active epoch. On any failure installed keys and the outbox are
-    /// unchanged. Seals locked work when the active epoch becomes available.
+    /// profile or changes the active epoch. Validation failures (cache format, identity, pinned
+    /// profile, fingerprint, integrity check, key import) leave installed keys and the outbox
+    /// unchanged. Decoder recovery and sealing run after the restored keys are installed, so a
+    /// failure there keeps those keys installed and is not rolled back. Seals locked work when
+    /// the active epoch becomes available.
     pub fn import_native_key_cache(&self, cache: &NativeKeyCache) -> Result<(), Error> {
         self.import_native_key_cache_with_progress(cache, &mut |_| {})
     }

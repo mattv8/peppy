@@ -1986,8 +1986,8 @@ mod draft_push_outcome_tests {
         tests::{fixture_at, open},
     };
 
-    #[test]
-    fn only_documented_client_rejections_are_permanent() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_documented_client_rejections_are_permanent() {
         let cases = [
             (413, "draft_record_too_large", true),
             (422, "draft_invalid_request", true),
@@ -1996,13 +1996,52 @@ mod draft_push_outcome_tests {
             (500, "draft_invalid_request", false),
         ];
         for (status, code, rejected) in cases {
-            let outcome = match (status, code) {
-                (413, "draft_record_too_large") | (422, "draft_invalid_request") => {
-                    Some(DraftPushOutcome::Rejected)
-                }
-                _ => None,
-            };
-            assert_eq!(outcome.is_some(), rejected);
+            let (origin, seen) = mock_server(move |_, _, _| {
+                (status, serde_json::json!({ "code": code }).to_string())
+            })
+            .await;
+            let fixture = fixture_at(&origin);
+            let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+            session
+                .client
+                .unlock(&fixture.profile, &fixture.header, crate::tests::PHRASE)
+                .unwrap();
+            session.client.set_draft_sync_supported(true).unwrap();
+            let draft = session
+                .save_draft(&crate::tests::input(
+                    "",
+                    "",
+                    "draft",
+                    &["+15555550100"],
+                    "0",
+                ))
+                .unwrap();
+            let push = session.client.pending_draft_pushes().unwrap().remove(0);
+            let draft_id = push.draft_id;
+            let outcome = push_draft_revision(&session, push).await.unwrap();
+            assert!(
+                if rejected {
+                    matches!(outcome, Some(DraftPushOutcome::Rejected))
+                } else {
+                    outcome.is_none()
+                },
+                "{status} {code}"
+            );
+            assert_eq!(
+                seen.lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request.method == "PUT")
+                    .count(),
+                1
+            );
+            let state = session.client.draft_sync_status(draft_id).unwrap().state;
+            assert_eq!(
+                matches!(state, peppy_client_core::DraftSyncState::Failed),
+                rejected,
+                "{status} {code}"
+            );
+            assert_eq!(draft.id, draft_id.to_string());
         }
     }
 

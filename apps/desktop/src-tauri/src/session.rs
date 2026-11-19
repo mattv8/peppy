@@ -1019,17 +1019,7 @@ impl Session {
                     .and_then(|cache| cache.get(id))
                     .flatten();
                 let mut view = dto::attachment_view(&info, errors.get(id).cloned(), preview);
-                view.draft_state = states.get(id).map(|state| match state {
-                    peppy_client_core::DraftAttachmentState::Saving => "saving",
-                    peppy_client_core::DraftAttachmentState::Local => "local",
-                    peppy_client_core::DraftAttachmentState::Waiting => "waiting",
-                    peppy_client_core::DraftAttachmentState::Uploading => "uploading",
-                    peppy_client_core::DraftAttachmentState::Uploaded => "uploaded",
-                    peppy_client_core::DraftAttachmentState::UploadFailed => "upload-failed",
-                    peppy_client_core::DraftAttachmentState::Downloading => "downloading",
-                    peppy_client_core::DraftAttachmentState::DownloadFailed => "download-failed",
-                    peppy_client_core::DraftAttachmentState::Unavailable => "unavailable",
-                });
+                view.draft_state = states.get(id).copied().map(draft_attachment_state_label);
                 view
             })
             .collect();
@@ -2380,6 +2370,66 @@ mod tests {
         assert_eq!(view.state, "pending");
         assert_eq!(view.draft_state, Some("saving"));
         assert_ne!(view.draft_state, Some("unavailable"));
+    }
+
+    #[test]
+    fn draft_attachment_state_labels_cover_all_variants() {
+        use peppy_client_core::DraftAttachmentState::*;
+        for (state, label) in [
+            (Saving, "saving"),
+            (Local, "local"),
+            (Waiting, "waiting"),
+            (Uploading, "uploading"),
+            (Uploaded, "uploaded"),
+            (UploadFailed, "upload-failed"),
+            (Downloading, "downloading"),
+            (DownloadFailed, "download-failed"),
+            (Unavailable, "unavailable"),
+        ] {
+            assert_eq!(draft_attachment_state_label(state), label);
+        }
+    }
+
+    #[test]
+    fn draft_view_serializes_waiting_and_missing_state() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        let attachment = session
+            .prepare_attachment_bytes(&sample_png(2, 2), "image/png", "image")
+            .unwrap();
+        let draft = session.client.recipientless_compose_draft().unwrap();
+        let mut draft_input = input(
+            &draft.draft_id.to_string(),
+            &draft.conversation_id.to_string(),
+            "image",
+            &[],
+            &draft.revision.to_string(),
+        );
+        draft_input.attachment_ids = vec![attachment.id.clone()];
+        let saved = session.save_draft(&draft_input).unwrap();
+        let extra = session
+            .prepare_attachment_bytes(&sample_png(2, 2), "image/png", "extra")
+            .unwrap();
+        let mut draft = session
+            .client
+            .compose_draft(saved.id.parse().unwrap())
+            .unwrap()
+            .unwrap();
+        draft.attachment_ids.push(extra.id.parse().unwrap());
+        let value = serde_json::to_value(session.draft_view(&draft).unwrap()).unwrap();
+        assert_eq!(value["attachments"][0]["draftState"], "waiting");
+        assert!(value["attachments"][1].get("draftState").is_none());
     }
 
     #[test]
