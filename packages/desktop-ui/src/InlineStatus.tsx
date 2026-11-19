@@ -172,7 +172,7 @@ export function InlineStatus({ items, idPrefix = "inline-status", labels }: { it
   const sections = visibleItems.map((item) => <section key={item.key} data-inline-status-key={item.key}>
     <div data-inline-status-popover-message data-inline-status-tone={item.tone}><ToneIcon tone={item.tone} /><strong>{item.message}</strong></div>
     {item.detail ? <p>{item.detail}</p> : null}
-    {item.detailItems?.length ? <ul>{item.detailItems.map((detail, index) => <li key={`${index}-${detail}`}>{detail}</li>)}</ul> : null}
+    {item.detailItems?.length ? <ul data-inline-status-detail-list={item.key}>{item.detailItems.map((detail, index) => <li key={`${index}-${detail}`}>{detail}</li>)}</ul> : null}
     {item.actions?.length ? <div data-inline-status-popover-actions>{item.actions.map((action) => actionButton(item.key, action, `${action.id}-popover`))}</div> : null}
   </section>);
 

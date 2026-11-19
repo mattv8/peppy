@@ -3,8 +3,8 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 
 const COPIED_DURATION_MS = 1_500;
 
-export function Steps({ children, start }: { children: ReactNode; start?: number }) {
-  return <ol className="coding-agent-guide-steps" start={start}>{children}</ol>;
+export function Steps({ children, start, listId }: { children: ReactNode; start?: number; listId?: string }) {
+  return <ol className="coding-agent-guide-steps" start={start} data-guide-steps={listId}>{children}</ol>;
 }
 
 export function ExternalLink({ href, children, className, onOpenExternal }: { href: string; children: ReactNode; className?: string; onOpenExternal?: (url: string) => void }) {

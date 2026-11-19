@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserCoreError, CoreRejectedError } from "./core.js";
 import { BrowserEnrollment, type EnrollmentSession } from "./enrollment.js";
-import { browserRememberedUnlock, BrowserWorkerHost, DraftSyncPrompt, dispatchBrowserRpc, sendBrowserDraft, type BrowserPort, type HostSession } from "./host.js";
+import { browserRememberedUnlock, BrowserWorkerHost, DraftSyncPrompt, dispatchBrowserRpc, sendBrowserDraft, type BrowserPort, type HostSession, type RpcRequest } from "./host.js";
 import type { OwnerLockManager } from "./owner.js";
 import { TransportError } from "./transport.js";
 import { RememberedUnlock } from "./remembered-unlock.js";
@@ -131,6 +131,66 @@ function familyHost(enrollment: BrowserEnrollment): BrowserWorkerHost {
 
 describe("browser host RPC", () => {
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  it("preserves enrollment command results and network call traces", async () => {
+    const trace: unknown[] = [];
+    const network = new Proxy({}, {
+      get: (_target, name: string) => async (...args: unknown[]) => {
+        trace.push([name, ...args]);
+        if (name === "enrollmentGenerateSecret") return "generated";
+        if (["enrollmentSetHostedCsrf", "enrollmentSignOut", "enrollmentRevokeInvite", "enrollmentApproveVaultRequest", "enrollmentDenyVaultRequest", "enrollmentCancel"].includes(name)) return undefined;
+        return { source: name };
+      },
+    }) as import("./host.js").BrowserNetwork;
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => new FakeSession(), network });
+    const enrollment = (request: RpcRequest) =>
+      (host as unknown as { enrollment(request: RpcRequest): Promise<unknown> }).enrollment(request);
+    const cases: Array<[string, Record<string, unknown>, string, unknown[], unknown]> = [
+      ["discover", { origin: "origin" }, "Discover", ["origin"], { source: "enrollmentDiscover" }],
+      ["create_owner", { setupToken: "setup", adminPassword: "admin", passphrase: "phrase", username: "user" }, "CreateOwner", [{ setupToken: "setup", adminPassword: "admin", passphrase: "phrase" }, "user"], { source: "enrollmentCreateOwner" }],
+      ["sign_in", { username: "user" }, "SignIn", ["", "user"], { source: "enrollmentSignIn" }],
+      ["set_hosted_csrf", { csrf: "csrf" }, "SetHostedCsrf", ["csrf"], undefined],
+      ["connect_shared_secret", { passphrase: "phrase", vaultOwner: "owner" }, "ConnectSharedSecret", ["phrase", "owner"], { source: "enrollmentConnectSharedSecret" }],
+      ["begin_vault_request", { inviteLink: "link", displayName: "name" }, "BeginVaultRequest", ["link", "name"], { source: "enrollmentBeginVaultRequest" }],
+      ["vault_request_status", {}, "VaultRequestStatus", [], { source: "enrollmentVaultRequestStatus" }],
+      ["create_vault", { username: "user", adminPassword: "admin", passphrase: "phrase" }, "CreateVault", ["user", { adminPassword: "admin", passphrase: "phrase" }], { source: "enrollmentCreateVault" }],
+      ["pending_vault_request", {}, "PendingVaultRequest", [], { source: "enrollmentPendingVaultRequest" }],
+      ["add_phone", { method: "transfer" }, "AddPhone", ["transfer"], { source: "enrollmentAddPhone" }],
+      ["connect_computer", {}, "ConnectComputer", [], { source: "enrollmentConnectComputer" }],
+      ["computer_status", {}, "ComputerStatus", [], { source: "enrollmentComputerStatus" }],
+      ["confirm_computer", {}, "ConfirmComputer", [], { source: "enrollmentConfirmComputer" }],
+      ["cancel_computer", {}, "CancelComputer", [], { source: "enrollmentCancelComputer" }],
+      ["status", {}, "Status", [], { source: "enrollmentStatus" }],
+      ["approve", {}, "Approve", [], { source: "enrollmentApprove" }],
+      ["cancel", { waitingOnly: true }, "Cancel", [{ waitingOnly: true }], undefined],
+      ["sign_out", {}, "SignOut", [], undefined],
+      ["generate_secret", {}, "GenerateSecret", [], { passphrase: "generated" }],
+      ["management", {}, "Management", [], { source: "enrollmentManagement" }],
+      ["revoke_device", { deviceId: "device" }, "RevokeDevice", ["device"], { source: "enrollmentRevokeDevice" }],
+      ["list_vaults", {}, "ListVaults", [], { source: "enrollmentListVaults" }],
+      ["create_invite", {}, "CreateInvite", [], { source: "enrollmentCreateInvite" }],
+      ["list_invites", {}, "ListInvites", [], { source: "enrollmentListInvites" }],
+      ["revoke_invite", { inviteId: "invite" }, "RevokeInvite", ["invite"], undefined],
+      ["list_vault_requests", {}, "ListVaultRequests", [], { source: "enrollmentListVaultRequests" }],
+      ["approve_vault_request", { requestId: "request" }, "ApproveVaultRequest", ["request"], undefined],
+      ["deny_vault_request", { requestId: "request" }, "DenyVaultRequest", ["request"], undefined],
+    ];
+    for (const [command, args, method, methodArgs, value] of cases) {
+      trace.length = 0;
+      expect(await enrollment({ id: 1, command: `enrollment_${command}`, args })).toEqual({ id: 1, ok: true, value });
+      expect(trace).toEqual([[`enrollment${method}`, ...methodArgs]]);
+    }
+    for (const [command, args] of [
+      ["enrollment_unknown", {}],
+      ["enrollment_create_owner", {}],
+      ["enrollment_set_hosted_csrf", {}],
+      ["enrollment_discover", { waitingOnly: "true" }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      trace.length = 0;
+      expect(await enrollment({ id: 2, command, args })).toMatchObject({ id: 2, ok: false, error: { code: "invalid-request" } });
+      expect(trace).toEqual([]);
+    }
+  });
 
   it("keeps the focused context over a later unfocused port and chooses the latest focused context", async () => {
     let now = 10_000;

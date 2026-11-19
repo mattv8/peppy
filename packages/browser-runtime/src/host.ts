@@ -1535,35 +1535,37 @@ export class BrowserWorkerHost {
       if (request.command === "enrollment_set_hosted_csrf" && !csrf) throw { code: "invalid-request" };
       if (request.command === "enrollment_revoke_invite") requiredString(request.args.inviteId);
       if (request.command === "enrollment_approve_vault_request" || request.command === "enrollment_deny_vault_request") requiredString(request.args.requestId);
-      const value = request.command === "enrollment_discover" ? await network.enrollmentDiscover(typeof request.args.origin === "string" ? request.args.origin : undefined)
-       : request.command === "enrollment_create_owner" && passphrase ? await network.enrollmentCreateOwner({ ...(setupToken ? { setupToken } : {}), ...(adminPassword ? { adminPassword } : {}), passphrase }, username)
-          : request.command === "enrollment_sign_in" ? await network.enrollmentSignIn(adminPassword ?? "", username)
-            : request.command === "enrollment_set_hosted_csrf" && csrf ? (await network.enrollmentSetHostedCsrf(csrf), undefined)
-            : request.command === "enrollment_connect_shared_secret" && passphrase ? await network.enrollmentConnectSharedSecret(passphrase, vaultOwner)
-              : request.command === "enrollment_begin_vault_request" && inviteLink && displayName ? await network.enrollmentBeginVaultRequest(inviteLink, displayName)
-                : request.command === "enrollment_vault_request_status" ? await network.enrollmentVaultRequestStatus()
-                  : request.command === "enrollment_create_vault" && username && passphrase && adminPassword ? await network.enrollmentCreateVault(username, { adminPassword, passphrase })
-                    : request.command === "enrollment_pending_vault_request" ? await network.enrollmentPendingVaultRequest()
-               : request.command === "enrollment_add_phone" && (method === "transfer" || method === "shared_secret") ? await network.enrollmentAddPhone(method)
-                 : request.command === "enrollment_connect_computer" ? await network.enrollmentConnectComputer()
-                   : request.command === "enrollment_computer_status" ? await network.enrollmentComputerStatus()
-                     : request.command === "enrollment_confirm_computer" ? await network.enrollmentConfirmComputer()
-                       : request.command === "enrollment_cancel_computer" ? await network.enrollmentCancelComputer()
-                 : request.command === "enrollment_status" ? await network.enrollmentStatus()
-                   : request.command === "enrollment_approve" ? await network.enrollmentApprove()
-                     : request.command === "enrollment_cancel" ? await network.enrollmentCancel(waitingOnly === true ? { waitingOnly: true } : undefined)
-        : request.command === "enrollment_sign_out" ? (await network.enrollmentSignOut(), undefined)
-                        : request.command === "enrollment_generate_secret" ? { passphrase: await network.enrollmentGenerateSecret() }
-                          : request.command === "enrollment_management" ? await network.enrollmentManagement()
-                             : request.command === "enrollment_revoke_device" && typeof request.args.deviceId === "string" ? await network.enrollmentRevokeDevice(request.args.deviceId)
-                               : request.command === "enrollment_list_vaults" ? await network.enrollmentListVaults()
-                                 : request.command === "enrollment_create_invite" ? await network.enrollmentCreateInvite()
-                                   : request.command === "enrollment_list_invites" ? await network.enrollmentListInvites()
-                                     : request.command === "enrollment_revoke_invite" && typeof request.args.inviteId === "string" ? (await network.enrollmentRevokeInvite(request.args.inviteId), undefined)
-                                       : request.command === "enrollment_list_vault_requests" ? await network.enrollmentListVaultRequests()
-                                         : request.command === "enrollment_approve_vault_request" && typeof request.args.requestId === "string" ? (await network.enrollmentApproveVaultRequest(request.args.requestId), undefined)
-                                           : request.command === "enrollment_deny_vault_request" && typeof request.args.requestId === "string" ? (await network.enrollmentDenyVaultRequest(request.args.requestId), undefined)
-                           : undefined;
+      let value: unknown;
+      switch (request.command) {
+        case "enrollment_discover": value = await network.enrollmentDiscover(typeof request.args.origin === "string" ? request.args.origin : undefined); break;
+        case "enrollment_create_owner": if (passphrase) value = await network.enrollmentCreateOwner({ ...(setupToken ? { setupToken } : {}), ...(adminPassword ? { adminPassword } : {}), passphrase }, username); break;
+        case "enrollment_sign_in": value = await network.enrollmentSignIn(adminPassword ?? "", username); break;
+        case "enrollment_set_hosted_csrf": if (csrf) await network.enrollmentSetHostedCsrf(csrf); break;
+        case "enrollment_connect_shared_secret": if (passphrase) value = await network.enrollmentConnectSharedSecret(passphrase, vaultOwner); break;
+        case "enrollment_begin_vault_request": if (inviteLink && displayName) value = await network.enrollmentBeginVaultRequest(inviteLink, displayName); break;
+        case "enrollment_vault_request_status": value = await network.enrollmentVaultRequestStatus(); break;
+        case "enrollment_create_vault": if (username && passphrase && adminPassword) value = await network.enrollmentCreateVault(username, { adminPassword, passphrase }); break;
+        case "enrollment_pending_vault_request": value = await network.enrollmentPendingVaultRequest(); break;
+        case "enrollment_add_phone": if (method === "transfer" || method === "shared_secret") value = await network.enrollmentAddPhone(method); break;
+        case "enrollment_connect_computer": value = await network.enrollmentConnectComputer(); break;
+        case "enrollment_computer_status": value = await network.enrollmentComputerStatus(); break;
+        case "enrollment_confirm_computer": value = await network.enrollmentConfirmComputer(); break;
+        case "enrollment_cancel_computer": value = await network.enrollmentCancelComputer(); break;
+        case "enrollment_status": value = await network.enrollmentStatus(); break;
+        case "enrollment_approve": value = await network.enrollmentApprove(); break;
+        case "enrollment_cancel": value = await network.enrollmentCancel(waitingOnly === true ? { waitingOnly: true } : undefined); break;
+        case "enrollment_sign_out": await network.enrollmentSignOut(); break;
+        case "enrollment_generate_secret": value = { passphrase: await network.enrollmentGenerateSecret() }; break;
+        case "enrollment_management": value = await network.enrollmentManagement(); break;
+        case "enrollment_revoke_device": if (typeof request.args.deviceId === "string") value = await network.enrollmentRevokeDevice(request.args.deviceId); break;
+        case "enrollment_list_vaults": value = await network.enrollmentListVaults(); break;
+        case "enrollment_create_invite": value = await network.enrollmentCreateInvite(); break;
+        case "enrollment_list_invites": value = await network.enrollmentListInvites(); break;
+        case "enrollment_revoke_invite": if (typeof request.args.inviteId === "string") await network.enrollmentRevokeInvite(request.args.inviteId); break;
+        case "enrollment_list_vault_requests": value = await network.enrollmentListVaultRequests(); break;
+        case "enrollment_approve_vault_request": if (typeof request.args.requestId === "string") await network.enrollmentApproveVaultRequest(request.args.requestId); break;
+        case "enrollment_deny_vault_request": if (typeof request.args.requestId === "string") await network.enrollmentDenyVaultRequest(request.args.requestId); break;
+      }
       if (value === undefined && !["enrollment_cancel", "enrollment_sign_out", "enrollment_set_hosted_csrf", "enrollment_revoke_invite", "enrollment_approve_vault_request", "enrollment_deny_vault_request"].includes(request.command)) throw { code: "invalid-request" };
       if (request.command === "enrollment_status") this.scheduleRememberedUnlockValidation();
       if (request.command === "enrollment_sign_out" && recoveryClearFailed) return { id: request.id, ok: false, error: RECOVERY_CLEAR_ERROR };

@@ -1064,7 +1064,7 @@ export function ConversationList({
 }) {
   return (
     <nav id="conversation-list" aria-label="Conversations" aria-busy={loading}>
-      <ul role="list">
+      <ul id="conversation-list-rows" role="list">
         {loading ? (
           <li className="sidebar-empty">Loading conversations…</li>
         ) : conversations.length ? (

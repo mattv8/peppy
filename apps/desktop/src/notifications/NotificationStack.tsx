@@ -34,7 +34,7 @@ export function NotificationSections({ notifications, ...props }: FeedProps & { 
     <h2 id={`notification-section-${section.id}`} className={showLabels ? "notif-section-label" : "visually-hidden"}>
       {section.label}{section.id === "new" && <span className="notification-count-badge">{section.items.length}</span>}
     </h2>
-    <ul>{section.items.map(notification => <li key={notificationKey(notification.target)}><NotificationRow
+    <ul data-notification-section-list={section.id}>{section.items.map(notification => <li key={notificationKey(notification.target)}><NotificationRow
       notification={notification}
       labels={props.labels}
       filter={filterFor(notification, props.filtersByApp)}
@@ -84,7 +84,7 @@ export function NotificationStacks({
           </button>
         </div>
       </header>}
-      <ul data-notification-list>{items.map(notification => <li key={notificationKey(notification.target)}><NotificationRow
+      <ul data-notification-list data-notification-stack-list={stack.key}>{items.map(notification => <li key={notificationKey(notification.target)}><NotificationRow
         notification={notification}
         labels={props.labels}
         filter={filter}
