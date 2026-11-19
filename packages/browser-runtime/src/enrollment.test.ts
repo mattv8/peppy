@@ -14,6 +14,24 @@ const mcpVaultId = "550e8400-e29b-41d4-a716-446655440000";
 const authorizationId = `${"A".repeat(42)}E`;
 const authorizationIds = [..."AEIMQUYcgkosw048"].map(finalCharacter => `${"A".repeat(42)}${finalCharacter}`);
 
+describe("MCP server origin", () => {
+  it.each(["https://x/$(id)", "javascript:alert(1)", "https://u:p@x", "https://x/?q", "http://127.evil.example"])("rejects %s", async serverOrigin => {
+    const fetcher = vi.fn<typeof fetch>(async () => json({ vaultId: mcpVaultId, available: true, serverOrigin, hosted: false, device: null }));
+    const enrollment = new BrowserEnrollment({ invoke: vi.fn() }, new TestSession(), origin, fetcher);
+    await expect(enrollment.mcpStatus()).rejects.toThrow("mcp-response");
+  });
+  it("canonicalizes a valid origin", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => json({ vaultId: mcpVaultId, available: true, serverOrigin: "https://PEPPY.example:443/", hosted: false, device: null }));
+    const enrollment = new BrowserEnrollment({ invoke: vi.fn() }, new TestSession(), origin, fetcher);
+    await expect(enrollment.mcpStatus()).resolves.toMatchObject({ serverOrigin: "https://peppy.example" });
+  });
+  it.each(["http://localhost:3000", "http://127.1", "http://[::1]:3000"])("accepts loopback %s", async serverOrigin => {
+    const fetcher = vi.fn<typeof fetch>(async () => json({ vaultId: mcpVaultId, available: true, serverOrigin, hosted: false, device: null }));
+    const enrollment = new BrowserEnrollment({ invoke: vi.fn() }, new TestSession(), origin, fetcher);
+    await expect(enrollment.mcpStatus()).resolves.toMatchObject({ serverOrigin: new URL(serverOrigin).origin });
+  });
+});
+
 class TestSession implements EnrollmentSession {
   public phase: "unenrolled" | "locked" | "ready" = "unenrolled";
   public identity?: EnrollmentIdentity;
@@ -684,6 +702,8 @@ describe("BrowserEnrollment", () => {
       await expect(enrollment.mcpAuthorization(authorizationId)).rejects.toThrow("mcp-response");
       response[field] = field === "redirectIsLoopback" ? false : field === "redirectOrigin" ? "https://client.example" : "client-id";
     }
+    response.serverOrigin = "https://x/$(id)";
+    await expect(enrollment.mcpAuthorization(authorizationId)).rejects.toThrow("mcp-response");
   });
 
   it("preserves the HTTPS requirement through the browser core boundary", async () => {

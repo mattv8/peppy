@@ -5,6 +5,7 @@ import { getCodingAgentClientLabel, type CodingAgentClientId } from "./codingAge
 import { CodingAgentOAuthConnection } from "./CodingAgentOAuthConnection";
 import { ConfigLocations, CopyableSnippet, ExternalLink, GuideImage, GuideNote, Steps } from "./CodingAgentSetupPrimitives";
 import "./coding-agent-guide.css";
+import { posixQuote } from "./shellQuote";
 
 type GuideProps = { clientId: CodingAgentClientId; mcpUrl: string; onOpenExternal?: (url: string) => void };
 type StandardClientId = Exclude<CodingAgentClientId, "claude-desktop" | "chatgpt">;
@@ -99,7 +100,7 @@ function troubleshooting(clientId: StandardClientId): ReactNode {
 }
 
 function ClaudeCodeConnection({ mcpUrl, config }: { mcpUrl: string; config: string }) {
-  return <><Steps listId="claude-code-initial"><li>Use the current CLI for user scope, or use the project <code>.mcp.json</code> alternative.</li></Steps><CopyableSnippet value={`claude mcp add --scope user --transport http peppy ${JSON.stringify(mcpUrl)}`} label="Copy Claude Code user-scope command" /><Steps listId="claude-code-continuation" start={2}><li>Open Claude Code, run <code>/mcp</code>, select <strong>peppy</strong>, and sign in.</li></Steps><Alternative summary="Project configuration alternative" disclosure="claude-code-project-config"><CopyableSnippet value={config} label="Copy Claude Code project configuration" /></Alternative></>;
+  return <><Steps listId="claude-code-initial"><li>Use the current CLI for user scope, or use the project <code>.mcp.json</code> alternative.</li></Steps><CopyableSnippet value={`claude mcp add --scope user --transport http peppy ${posixQuote(mcpUrl)}`} label="Copy Claude Code user-scope command" /><Steps listId="claude-code-continuation" start={2}><li>Open Claude Code, run <code>/mcp</code>, select <strong>peppy</strong>, and sign in.</li></Steps><Alternative summary="Project configuration alternative" disclosure="claude-code-project-config"><CopyableSnippet value={config} label="Copy Claude Code project configuration" /></Alternative></>;
 }
 
 function CursorConnection({ mcpUrl, config, onOpenExternal }: { mcpUrl: string; config: string; onOpenExternal?: (url: string) => void }) {
@@ -111,7 +112,7 @@ function StandardConnection({ clientId, clientLabel, mcpUrl, config, onOpenExter
     case "claude-code": return <ClaudeCodeConnection mcpUrl={mcpUrl} config={config} />;
     case "cursor": return <CursorConnection mcpUrl={mcpUrl} config={config} onOpenExternal={onOpenExternal} />;
     case "opencode": return <><CodingAgentOAuthConnection clientId="opencode" mcpUrl={mcpUrl} /><Alternative summary="Configuration alternative" disclosure="opencode-config"><CopyableSnippet value={config} label="Copy OpenCode configuration" /></Alternative></>;
-    case "hermes": return <><CopyableSnippet value={`hermes mcp add --url ${JSON.stringify(mcpUrl)} --auth oauth peppy`} label="Copy Hermes command" /><Alternative summary="Configuration alternative" disclosure="hermes-config"><CopyableSnippet value={config} label="Copy Hermes configuration" /></Alternative></>;
+    case "hermes": return <><CopyableSnippet value={`hermes mcp add --url ${posixQuote(mcpUrl)} --auth oauth peppy`} label="Copy Hermes command" /><Alternative summary="Configuration alternative" disclosure="hermes-config"><CopyableSnippet value={config} label="Copy Hermes configuration" /></Alternative></>;
     case "codex": return <><CopyableSnippet value={config} label="Copy Codex configuration" /><p>Then sign in:</p><CopyableSnippet value="codex mcp login peppy" label="Copy Codex sign-in command" /></>;
     case "cline":
     case "continue": return <CopyableSnippet value={config} label={`Copy ${clientLabel} configuration`} />;

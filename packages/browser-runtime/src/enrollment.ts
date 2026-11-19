@@ -958,13 +958,25 @@ function isDefinitiveVaultRequestRejection(error: unknown): boolean {
   return error instanceof HttpStatusError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429;
 }
 
+function canonicalMcpOrigin(value: string): string {
+  try {
+    const url = new URL(value);
+    const loopback = url.hostname === "localhost" || url.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(url.hostname);
+    if (url.username || url.password || url.pathname !== "/" || value.includes("?") || value.includes("#") ||
+        (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))) throw new Error();
+    return url.origin;
+  } catch {
+    throw new Error("mcp-response");
+  }
+}
+
 function mcpDeviceStatus(value: unknown): McpDeviceStatus {
   const status = record(value);
   const device = status.device === null ? null : mcpDevice(record(status.device));
   return {
     vaultId: mcpId(required(status, "vaultId")),
     available: requiredBoolean(status, "available"),
-    serverOrigin: required(status, "serverOrigin"),
+    serverOrigin: canonicalMcpOrigin(required(status, "serverOrigin")),
     hosted: requiredBoolean(status, "hosted"),
     device,
   };
@@ -1042,7 +1054,7 @@ function mcpAuthorization(value: unknown): McpAuthorizationView {
     clientName: required(authorization, "clientName"),
     clientId: mcpOpaqueString(authorization, "clientId", MAX_MCP_CLIENT_ID_LENGTH),
     requestedScopes: mcpScopes(scopes),
-    serverOrigin: required(authorization, "serverOrigin"),
+    serverOrigin: canonicalMcpOrigin(required(authorization, "serverOrigin")),
     resource: required(authorization, "resource"),
     redirectOrigin: mcpOrigin(authorization, "redirectOrigin"),
     redirectIsLoopback: requiredBoolean(authorization, "redirectIsLoopback"),

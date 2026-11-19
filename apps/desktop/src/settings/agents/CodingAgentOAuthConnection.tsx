@@ -1,4 +1,5 @@
 import { CopyableSnippet, Steps } from "./CodingAgentSetupPrimitives";
+import { posixQuote } from "./shellQuote";
 
 export type OAuthCodingAgentClientId = "claude-desktop" | "chatgpt" | "opencode";
 
@@ -18,7 +19,7 @@ export function CodingAgentOAuthConnection({ clientId, mcpUrl }: { clientId: OAu
     <li>Complete Peppy sign-in and approve the connection if prompted, then enable the app in a conversation.</li>
   </Steps>;
   return <Steps>
-    <li>Run this command in a local terminal:<CopyableSnippet value={`opencode mcp add peppy --global --url ${JSON.stringify(mcpUrl)}`} label="Copy OpenCode OAuth connection command" /></li>
+    <li>Run this command in a local terminal:<CopyableSnippet value={`opencode mcp add peppy --global --url ${posixQuote(mcpUrl)}`} label="Copy OpenCode OAuth connection command" /></li>
     <li>Open OpenCode and use <code>/mcps</code> to sign in to Peppy.</li>
     <li>Use <code>/mcps</code> or <code>opencode mcp list</code> to verify the connection status.</li>
   </Steps>;

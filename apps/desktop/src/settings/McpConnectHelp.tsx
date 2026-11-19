@@ -43,7 +43,7 @@ export function McpConnectHelp({ sessionKey, browserHost }: McpConnectHelpProps)
 
   if (!status?.device || isRemovedDevice(status.device) || status.device.cleanupPending) return null;
 
-  const endpoint = `${status.serverOrigin}/mcp`;
+  const endpoint = new URL("/mcp", status.serverOrigin).toString();
   const openSetup = (clientId: CodingAgentClientId, openerElement: HTMLElement) => {
     opener.current = openerElement;
     setSelected(clientId);

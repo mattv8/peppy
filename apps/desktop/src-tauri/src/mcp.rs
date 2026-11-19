@@ -15,6 +15,7 @@ use peppy_hosted_api::{
     enrollment::AdmissionComplete,
     DeviceRosterResponse,
 };
+use peppy_hosted_client::device_credentials::canonical_credential_origin;
 use peppy_hosted_client::newenrollment::{ClientKind, EnrollmentClient};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{str::FromStr, time::Duration};
@@ -317,7 +318,7 @@ async fn complete_mcp_enable(
         )
         .await
         {
-            Ok(response) => return Ok(response),
+            Ok(response) => return validate_mcp_status(response),
             Err(McpAccountPostError::Network(error))
                 if ambiguous_mcp_complete(&error) && attempt == 0 => {}
             Err(McpAccountPostError::Network(error)) if ambiguous_mcp_complete(&error) => {
@@ -339,13 +340,20 @@ pub async fn mcp_status(
 ) -> BridgeResult<McpDeviceStatus> {
     crate::require_main(window.label())?;
     let command = McpCommand::admit(&state)?;
-    command
+    let status: McpDeviceStatus = command
         .session()
         .await?
         .api
         .get_json("/v1/mcp/device", MAX_JSON_BYTES)
         .await
-        .map_err(Into::into)
+        .map_err(BridgeError::from)?;
+    validate_mcp_status(status)
+}
+
+fn validate_mcp_status(mut status: McpDeviceStatus) -> BridgeResult<McpDeviceStatus> {
+    status.server_origin = canonical_credential_origin(&status.server_origin)
+        .map_err(|_| BridgeError::from(NetError::Invalid))?;
+    Ok(status)
 }
 
 #[tauri::command]
@@ -1341,6 +1349,25 @@ mod tests {
 
     fn mcp_device_status() -> &'static str {
         r#"{"vaultId":"550e8400-e29b-41d4-a716-446655440001","available":true,"serverOrigin":"https://peppy.example","hosted":true,"device":null}"#
+    }
+
+    #[test]
+    fn mcp_status_rejects_invalid_server_origins() {
+        for origin in [
+            "https://x/$(id)",
+            "javascript:alert(1)",
+            "https://u:p@x",
+            "https://x/?q",
+        ] {
+            let mut status: McpDeviceStatus = serde_json::from_str(mcp_device_status()).unwrap();
+            status.server_origin = origin.into();
+            assert!(validate_mcp_status(status).is_err(), "{origin}");
+        }
+        let status: McpDeviceStatus = serde_json::from_str(mcp_device_status()).unwrap();
+        assert_eq!(
+            validate_mcp_status(status).unwrap().server_origin,
+            "https://peppy.example"
+        );
     }
 
     async fn complete_with_timeout(
