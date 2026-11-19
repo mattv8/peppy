@@ -404,8 +404,8 @@
 #hosted-account-label { color: var(--peppy-text-strong); font-size: 13px; }
 #hosted-account-sign-out-scope,
 #hosted-account-delete p { color: var(--peppy-text-secondary); font-size: 12px; }
-#hosted-account-delete { padding: 12px; border: 1px solid color-mix(in srgb, var(--peppy-error) 35%, var(--peppy-border)); border-radius: var(--peppy-radius-sm); }
-#hosted-account-delete-title { color: var(--peppy-text-strong); font-size: 13px; }
+#hosted-account-delete { padding: 16px 0 0; margin-top: 8px; border: 0; border-top: 1px solid var(--peppy-border); border-radius: 0; }
+#hosted-account-delete-title { color: var(--peppy-text-strong); font-size: 13px; font-weight: 600; line-height: 1.4; }
 #hosted-account-sign-out,
 #hosted-account-delete-open { flex: 0 0 auto; width: auto; min-height: 28px; padding: 4px 10px; font-size: 13px; line-height: 1.4; white-space: normal; }
 #hosted-account-delete-open:hover:not(:disabled) { background: color-mix(in srgb, var(--peppy-danger-hover) 85%, black); }
@@ -467,6 +467,50 @@
 #attachment-storage-capacity-notice[data-capacity="near-full"] { color: var(--peppy-warning-text); }
 #attachment-storage-capacity-notice[data-capacity="full"] { color: var(--peppy-error-text); }
 
+#settings-account-billing { container-type: inline-size; container-name: account-billing; }
+#settings-account-billing #hosted-account-delete-open { height: auto; }
+#settings-account-billing #hosted-account-delete-title { margin: 0; }
+#settings-account-billing #attachment-storage > h3,
+#settings-account-billing #attachment-storage-heading-row > h3 { margin: 0; color: var(--peppy-text-strong); font-size: 13px; font-weight: 600; line-height: 1.4; }
+#settings-account-billing #billing-elsewhere-notice { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; row-gap: 0; align-items: start; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+#settings-account-billing #attachment-storage > #billing-elsewhere-notice { padding-top: 16px; margin-top: 8px; border-top: 1px solid var(--peppy-border); }
+#settings-account-billing #billing-elsewhere-notice > :not(#billing-elsewhere-manage) { grid-column: 1; min-width: 0; margin: 0; }
+#settings-account-billing #billing-elsewhere-title { margin: 0; color: var(--peppy-text-strong); font-size: 13px; font-weight: 600; line-height: 1.4; }
+#settings-account-billing #billing-elsewhere-notice > #billing-elsewhere-body { margin-top: 4px; color: var(--peppy-text-secondary); font-size: 12px; line-height: 1.4; }
+#settings-account-billing #billing-elsewhere-notice > #billing-elsewhere-handoff { margin-top: 4px; color: var(--peppy-text-muted); font-size: 12px; line-height: 1.4; }
+#settings-account-billing #billing-elsewhere-notice > #billing-elsewhere-error { order: 2; margin-top: 4px; }
+#settings-account-billing #billing-elsewhere-manage { grid-column: 2; grid-row: 1 / span 3; align-self: start; justify-self: end; order: 1; flex: 0 0 auto; width: auto; height: auto; min-height: 28px; margin-left: 16px; padding: 4px 10px; font-size: 13px; line-height: 1.4; white-space: normal; }
+#settings-account-billing #attachment-storage-google-play-notice { padding-top: 16px; margin-top: 8px; border-top: 1px solid var(--peppy-border); gap: 8px; }
+#settings-account-billing #attachment-storage-google-play-storage-note { margin: 0; color: var(--peppy-text-muted); font-size: 12px; line-height: 1.4; }
+#settings-account-billing #attachment-storage-addons { position: relative; display: grid; gap: 8px; padding: 16px 0 0; margin-top: 8px; border: 0; border-top: 1px solid var(--peppy-border); border-radius: 0; background: transparent; box-shadow: none; }
+#settings-account-billing #attachment-storage-addons-title { margin: 0; color: var(--peppy-text-strong); font-size: 13px; font-weight: 600; line-height: 1.4; }
+#settings-account-billing #attachment-storage-addons > p { margin: 0; font-size: 12px; line-height: 1.4; }
+#settings-account-billing #attachment-storage-addons-title + p:not([data-tone]) { margin-top: -4px; }
+#settings-account-billing #attachment-storage-addons > p:not([data-tone], .settings-note, [role="alert"]) { color: var(--peppy-text-secondary); }
+#settings-account-billing #attachment-storage-addons > p[role="alert"] { color: var(--peppy-error); }
+#settings-account-billing #attachment-storage-addon-manage,
+#settings-account-billing #attachment-storage-addon-retry,
+#settings-account-billing #attachment-storage-addon-options .secondary-button { flex: 0 0 auto; width: auto; height: auto; min-height: 28px; padding: 4px 10px; font-size: 13px; line-height: 1.4; white-space: normal; }
+#settings-account-billing #attachment-storage-addon-manage,
+#settings-account-billing #attachment-storage-addon-retry { justify-self: start; }
+#settings-account-billing #attachment-storage-addon-options { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--peppy-border); }
+#settings-account-billing #attachment-storage-addon-options > li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-height: 44px; padding: 6px 0; border: 0; border-radius: 0; background: transparent; }
+#settings-account-billing #attachment-storage-addon-options > li + li { border-top: 1px solid var(--peppy-border); }
+#settings-account-billing #attachment-storage-addon-options > li > :last-child:not(:first-child) { margin-left: auto; }
+#settings-account-billing #attachment-storage-addon-options > li > [id$="-label"] { color: var(--peppy-text-strong); font-size: 13px; font-weight: 600; }
+#settings-account-billing #attachment-storage-addon-options > li > [id$="-price"] { color: var(--peppy-text-secondary); font-size: 12px; }
+#settings-account-billing #attachment-storage-addon-options > li > [id$="-price"]:first-child { color: var(--peppy-text-primary); font-size: 13px; }
+#settings-account-billing #attachment-storage-addon-lapsed-warning { margin: 0; font-size: 12px; line-height: 1.4; align-items: flex-start; }
+#settings-account-billing #attachment-storage-addon-lapsed-warning svg { flex: none; margin-top: 1px; }
+#settings-account-billing #billing-elsewhere-notice > #billing-elsewhere-error:empty,
+#settings-account-billing #attachment-storage-addon-status:empty,
+#settings-account-billing #attachment-storage-addon-error:empty { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+
+@container account-billing (max-width: 440px) {
+  #settings-account-billing #billing-elsewhere-notice { grid-template-columns: minmax(0, 1fr); }
+  #settings-account-billing #billing-elsewhere-manage { grid-column: 1; grid-row: auto; justify-self: start; margin-top: 8px; margin-left: 0; }
+}
+
 #account-delete-body,
 #hosted-account-sign-in-options {
   display: grid;
@@ -484,11 +528,21 @@
   #account-delete-submit {
     min-height: 44px;
   }
+  #settings-account-billing #billing-elsewhere-manage,
+  #settings-account-billing #attachment-storage-addon-manage,
+  #settings-account-billing #attachment-storage-addon-retry,
+  #settings-account-billing #attachment-storage-addon-options .secondary-button { min-width: 44px; min-height: 44px; }
+  #settings-account-billing #attachment-storage-addon-options > li { min-height: 56px; }
 }
 
 @media (forced-colors: active) {
   #attachment-storage.settings-card { border-top-color: CanvasText; }
-  #hosted-account-delete { border-color: CanvasText; }
+  #hosted-account-delete { border-top-color: CanvasText; }
+  #settings-account-billing #attachment-storage > #billing-elsewhere-notice,
+  #settings-account-billing #attachment-storage-google-play-notice,
+  #settings-account-billing #attachment-storage-addons,
+  #settings-account-billing #attachment-storage-addon-options,
+  #settings-account-billing #attachment-storage-addon-options > li + li { border-top-color: CanvasText; }
   #hosted-account-delete-status,
   #account-delete-apple-notice,
   #account-delete-google-play-notice {
