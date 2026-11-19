@@ -120,6 +120,20 @@ Dir.mktmpdir('peppy-android-gradle-diagnostic') do |fixture|
   assert.call(status.success?, "Gradle resolution diagnostic must run without a wrapper to share: #{stderr}")
   assert.call(Dir.children(fresh_home_of.call(lines)).empty?, 'Gradle resolution diagnostic must not create a dangling wrapper link')
 end
+debug_steps = android_ci_jobs.fetch('android-debug-unit-tests').fetch('steps')
+debug_preparation = debug_steps.find { |step| step['name'] == 'Compile debug unit tests and prepare Robolectric runtimes' }
+Dir.mktmpdir('debug-preparation-failure') do |fixture|
+  project = File.join(fixture, 'apps', 'android')
+  FileUtils.mkdir_p(project)
+  File.write(File.join(project, 'gradlew'), "#!/bin/bash\nprintf '%s\\n' \"$@\" > \"$RUNNER_TEMP/debug-args\"\necho debug-failure >&2\nexit 42\n")
+  FileUtils.chmod(0o755, File.join(project, 'gradlew'))
+  stdout, stderr, status = Open3.capture3({ 'RUNNER_TEMP' => fixture }, 'bash', '-e', '-o', 'pipefail', '-c', debug_preparation.fetch('run'), chdir: project)
+  log = File.join(fixture, 'debug-preparation.log')
+  assert.call(status.exitstatus == 42 && stdout.include?('debug-failure') && File.exist?(log) && File.read(log).include?('debug-failure'), "debug preparation must capture output without suppressing exit 42: #{stderr}")
+  assert.call(File.readlines(File.join(fixture, 'debug-args'), chomp: true) == %w[--console=plain --dependency-verification=strict --info :app:compileDebugUnitTestKotlin :app:prepareRobolectricDependencies], 'debug preparation must keep its strict tasks and include INFO logging')
+end
+debug_diagnostic = debug_steps.find { |step| step['id'] == 'debug-resolution-diagnostic' }
+assert.call(debug_preparation['id'] == 'debug-preparation' && debug_diagnostic && debug_steps.index(debug_diagnostic) == debug_steps.index(debug_preparation) + 1 && debug_diagnostic['if'] == "${{ failure() && steps.debug-preparation.outcome == 'failure' }}" && debug_diagnostic['timeout-minutes'].to_i.between?(1, 5) && !debug_preparation.key?('continue-on-error'), 'debug diagnostic must immediately follow and only run on failed preparation')
 sideload_steps = android_ci_jobs.fetch('android-sideload-unit-tests').fetch('steps')
 sideload_test = sideload_steps.find { |step| step['id'] == 'sideload-tests' }
 sideload_diagnostic = sideload_steps.find { |step| step['id'] == 'sideload-resolution-diagnostic' }
@@ -137,49 +151,65 @@ Dir.mktmpdir('sideload-test-failure') do |fixture|
   stdout, stderr, status = Open3.capture3({ 'RUNNER_TEMP' => fixture, 'PEPPY_NATIVE_RCS_KOTLIN_FIXTURE_DIR' => fixture }, 'bash', '-e', '-o', 'pipefail', '-c', test_script, chdir: project)
   assert.call(status.exitstatus == 42 && stdout.include?('watchdog-failure') && File.read(File.join(fixture, 'sideload-test.log')).include?('watchdog-failure'), "sideload logging must retain the original failing command status and output: #{stderr}")
 end
-diagnostic_script = sideload_diagnostic.fetch('run')
-assert.call(!mutates_gradle_cache.call(diagnostic_script), 'sideload diagnostic must not remove or refresh original caches')
-Dir.mktmpdir('sideload-diagnostic') do |fixture|
-  project = File.join(fixture, 'project')
-  bin = File.join(fixture, 'bin')
-  runner = File.join(fixture, 'runner')
-  source = File.join(fixture, 'custom-home')
-  FileUtils.mkdir_p([project, bin, runner, File.join(source, 'wrapper', 'dists'), File.join(source, 'init.d')])
-  File.write(File.join(source, 'gradle.properties'), 'secret properties')
-  File.write(File.join(source, 'init.d', 'example.gradle'), 'secret init')
-  File.write(File.join(source, 'sentinel'), 'unchanged')
-  File.write(File.join(runner, 'sideload-test.log'), "https://repo.maven.apache.org/maven2/invalid.pom?secret=1\n" + (1..6).map { |n| "https://repo.maven.apache.org/maven2/org/example/lib/#{n}/lib-#{n}.pom" }.join("\n") + "\nhttps://evil.example/a.pom\n")
-  File.write(File.join(project, 'gradlew'), <<~'SH')
-    #!/bin/bash
-    printf '%s\n' "$GRADLE_USER_HOME|$*" >> "$RUNNER_TEMP/calls"
-    if [[ "$GRADLE_USER_HOME" == "$SOURCE_HOME" ]]; then
-      echo '+--- example:original:1 FAILED'
-      exit 0
-    fi
-    [[ -L "$GRADLE_USER_HOME/wrapper/dists" && ! -e "$GRADLE_USER_HOME/gradle.properties" && ! -e "$GRADLE_USER_HOME/init.d" ]] || exit 8
-    echo '+--- example:fresh:1'
-    exit 3
-  SH
-  FileUtils.chmod(0o755, File.join(project, 'gradlew'))
-  File.write(File.join(bin, 'curl'), <<~'SH')
-    #!/bin/bash
-    printf '%s\n' "$*" >> "$RUNNER_TEMP/curl-calls"
-    while [[ $# -gt 0 ]]; do
-      if [[ "$1" == "--output" ]]; then shift; printf 'pom' > "$1"; fi
-      shift
-    done
-    printf 200
-  SH
-  FileUtils.chmod(0o755, File.join(bin, 'curl'))
-  env = { 'RUNNER_TEMP' => runner, 'GRADLE_USER_HOME' => source, 'SOURCE_HOME' => source, 'PATH' => "#{bin}:#{ENV.fetch('PATH')}" }
-  stdout, stderr, status = Open3.capture3(env, 'bash', '-e', '-o', 'pipefail', '-c', diagnostic_script, chdir: project)
-  assert.call(status.success?, "sideload diagnostic fixture must finish: #{stderr}")
-  calls = File.readlines(File.join(runner, 'calls'), chomp: true)
-  assert.call(calls.length == 2 && calls[0].start_with?("#{source}|") && !calls[1].start_with?("#{source}|") && calls.all? { |call| call.include?('--dependency-verification=strict') && call.include?('--info') && call.include?(':app:dependencies --configuration sideloadRuntimeClasspath') } && calls[1].include?('--project-cache-dir'), 'sideload graph comparison must use strict original then isolated fresh homes')
-  assert.call(stdout.match?(/original.*status=0.*FAILED.nodes=1/i) && stdout.match?(/fresh.*status=3.*FAILED.nodes=0/i), 'sideload graph results must distinguish process failures from FAILED nodes')
-  curl_calls = File.readlines(File.join(runner, 'curl-calls'), chomp: true)
-  assert.call(curl_calls.length == 4 && curl_calls.all? { |call| call.include?('--proto =https') && call.include?('--proto-redir =https') && call.include?('--connect-timeout') && call.include?('--max-time') && call.include?('https://repo.maven.apache.org/maven2/org/example/') }, 'Central probes must be limited and HTTPS-only with bounded timeouts, excluding URLs with query strings')
-  assert.call(File.read(File.join(source, 'sentinel')) == 'unchanged' && File.read(File.join(source, 'gradle.properties')) == 'secret properties' && !stdout.include?('secret properties') && !stdout.include?('secret init'), 'diagnostic must preserve original files and report configuration presence only')
+[
+  ['debug', debug_diagnostic, 'debugRuntimeClasspath', 'debug-preparation.log'],
+  ['sideload', sideload_diagnostic, 'sideloadRuntimeClasspath', 'sideload-test.log']
+].each do |name, diagnostic, configuration, log_name|
+  Dir.mktmpdir("#{name}-diagnostic") do |fixture|
+    project = File.join(fixture, 'apps', 'android')
+    scripts = File.join(fixture, '.github', 'scripts')
+    bin = File.join(fixture, 'bin')
+    runner = File.join(fixture, 'runner')
+    source = File.join(fixture, 'custom-home')
+    FileUtils.mkdir_p([project, scripts, bin, runner, File.join(source, 'wrapper', 'dists'), File.join(source, 'init.d')])
+    FileUtils.cp(File.join(__dir__, 'android-resolution-diagnostics.sh'), scripts)
+    File.write(File.join(source, 'gradle.properties'), 'secret properties')
+    File.write(File.join(source, 'init.d', 'example.gradle'), 'secret init')
+    File.write(File.join(source, 'sentinel'), 'unchanged')
+    File.write(File.join(runner, log_name), "https://repo.maven.apache.org/maven2/invalid.pom?secret=1\n" + (1..6).map { |n| "https://repo.maven.apache.org/maven2/org/example/lib/#{n}/lib-#{n}.pom" }.join("\n") + "\nhttps://evil.example/a.pom\n")
+    File.write(File.join(project, 'gradlew'), <<~'SH')
+      #!/bin/bash
+      printf '%s\n' "$GRADLE_USER_HOME|$*" >> "$RUNNER_TEMP/calls"
+      if [[ "$GRADLE_USER_HOME" == "$SOURCE_HOME" ]]; then
+        echo '+--- example:original:1 FAILED'
+        exit 0
+      fi
+      [[ -L "$GRADLE_USER_HOME/wrapper/dists" && ! -e "$GRADLE_USER_HOME/gradle.properties" && ! -e "$GRADLE_USER_HOME/init.d" ]] || exit 8
+      echo '+--- example:fresh:1'
+      exit 3
+    SH
+    FileUtils.chmod(0o755, File.join(project, 'gradlew'))
+    File.write(File.join(bin, 'curl'), <<~'SH')
+      #!/bin/bash
+      printf '%s\n' "$*" >> "$RUNNER_TEMP/curl-calls"
+      while [[ $# -gt 0 ]]; do
+        if [[ "$1" == "--output" ]]; then shift; printf 'pom' > "$1"; fi
+        shift
+      done
+      printf 200
+    SH
+    FileUtils.chmod(0o755, File.join(bin, 'curl'))
+    env = { 'RUNNER_TEMP' => runner, 'GRADLE_USER_HOME' => source, 'SOURCE_HOME' => source, 'PATH' => "#{bin}:#{ENV.fetch('PATH')}" }
+    before = Dir.glob(File.join(source, '**', '*'), File::FNM_DOTMATCH).sort.map { |path| [path, File.lstat(path).ftype, File.file?(path) ? File.read(path) : nil] }
+    stdout, stderr, status = Open3.capture3(env, 'bash', '-e', '-o', 'pipefail', '-c', diagnostic.fetch('run'), chdir: project)
+    assert.call(status.success?, "#{name} diagnostic fixture must finish: #{stderr}")
+    calls = File.readlines(File.join(runner, 'calls'), chomp: true)
+    assert.call(calls.length == 2 && calls[0] == "#{source}|--no-daemon --console=plain --dependency-verification=strict --info :app:dependencies --configuration #{configuration}" && calls[1].match?(%r{\A#{Regexp.escape(runner)}/[^|]+/home\|--no-daemon --console=plain --dependency-verification=strict --info --project-cache-dir #{Regexp.escape(runner)}/[^ ]+/project-cache :app:dependencies --configuration #{configuration}\z}), "#{name} graph comparison must use strict original then isolated fresh homes")
+    fresh_home = calls[1].split('|', 2).first
+    assert.call(File.readlink(File.join(fresh_home, 'wrapper', 'dists')) == File.join(source, 'wrapper', 'dists') && Dir.children(fresh_home) == ['wrapper'], 'fresh home must share only the downloaded wrapper')
+    assert.call(stdout.match?(/original.*status=0.*FAILED.nodes=1/i) && stdout.match?(/fresh.*status=3.*FAILED.nodes=0/i), 'sideload graph results must distinguish process failures from FAILED nodes')
+    curl_calls = File.readlines(File.join(runner, 'curl-calls'), chomp: true)
+    expected_urls = (1..4).map { |n| "https://repo.maven.apache.org/maven2/org/example/lib/#{n}/lib-#{n}.pom" }
+    assert.call(curl_calls.map { |call| call.split.last } == expected_urls && curl_calls.all? { |call| call.include?('--proto =https') && call.include?('--proto-redir =https') && call.include?('--connect-timeout 5') && call.include?('--max-time 15') }, 'Central probes must be limited and HTTPS-only with bounded timeouts, excluding URLs with query strings')
+    after = Dir.glob(File.join(source, '**', '*'), File::FNM_DOTMATCH).sort.map { |path| [path, File.lstat(path).ftype, File.file?(path) ? File.read(path) : nil] }
+    assert.call(after == before && stdout.include?('gradle.properties: present') && stdout.include?('init scripts present: true') && !stdout.include?('secret properties') && !stdout.include?('secret init'), 'diagnostic must preserve original files and report configuration presence only')
+    _, _, invalid_status = Open3.capture3(env, 'bash', File.join(scripts, 'android-resolution-diagnostics.sh'), 'releaseRuntimeClasspath', File.join(runner, log_name), chdir: project)
+    assert.call(!invalid_status.success? && File.readlines(File.join(runner, 'calls')).length == 2, 'diagnostic must reject unapproved configurations before running Gradle')
+    File.write(File.join(bin, 'mktemp'), "#!/bin/bash\nprintf '%s\\n' \"$RUNNER_TEMP/failed-mktemp\"\nexit 17\n")
+    FileUtils.chmod(0o755, File.join(bin, 'mktemp'))
+    _, _, setup_status = Open3.capture3(env, 'bash', File.join(scripts, 'android-resolution-diagnostics.sh'), configuration, File.join(runner, log_name), chdir: project)
+    assert.call(setup_status.exitstatus == 17 && File.readlines(File.join(runner, 'calls')).length == 2 && File.readlines(File.join(runner, 'curl-calls')).length == 4 && !File.exist?(File.join(runner, 'failed-mktemp')), 'diagnostic must stop immediately on failed temporary-directory setup')
+  end
 end
 android_consumers = %w[android-debug-unit-tests android-sideload-unit-tests android-lint-and-assembly].map { |name| android_ci_jobs.fetch(name) }
 assert.call(android_consumers.all? { |job| job.fetch('needs') == 'android-native-preparation' }, 'every Android consumer must require native preparation')
