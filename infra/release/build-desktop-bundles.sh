@@ -144,8 +144,16 @@ package_app_store() {
     security list-keychains -d user -s "$keychain"
   fi
   keychain_search_list_changed=true
-  security import "$application_certificate" -k "$keychain" -P "$APPLE_MAS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-  security import "$installer_certificate" -k "$keychain" -P "$APPLE_MAS_CERTIFICATE_PASSWORD" -T /usr/bin/productbuild
+  security import "$application_certificate" -f pkcs12 -t agg -k "$keychain" -P "$APPLE_MAS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign || {
+    local status=$?
+    echo 'App Store application certificate import failed' >&2
+    return "$status"
+  }
+  security import "$installer_certificate" -f pkcs12 -t agg -k "$keychain" -P "$APPLE_MAS_CERTIFICATE_PASSWORD" -T /usr/bin/productbuild || {
+    local status=$?
+    echo 'App Store installer certificate import failed' >&2
+    return "$status"
+  }
   cp packaging/macos/app-store/entitlements.plist "$entitlements"
   plutil -replace 'com\.apple\.application-identifier' -string "$application_identifier" "$entitlements"
   plutil -replace 'com\.apple\.developer\.team-identifier' -string "$team_id" "$entitlements"
