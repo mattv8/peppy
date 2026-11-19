@@ -65,7 +65,16 @@ junit_path="$target_dir/nextest/ci/junit.xml"
 report_safe=true
 rm -f "$junit_path" || { echo "::warning::Could not remove stale JUnit report"; report_safe=false; }
 status=0
-if [[ $lane == workspace ]]; then
+if [[ -n ${PEPPY_NEXTEST_ARCHIVE:-} ]]; then
+    if [[ $(basename "$target_dir") != target ]]; then
+        echo "archive mode requires CARGO_TARGET_DIR to end in /target" >&2
+        exit 2
+    fi
+    cargo nextest run --archive-file "$PEPPY_NEXTEST_ARCHIVE" \
+        --extract-to "$(dirname "$target_dir")" --extract-overwrite \
+        --profile ci --config-file "$repository_root/.config/nextest.toml" \
+        --partition "hash:$index/$count" || status=$?
+elif [[ $lane == workspace ]]; then
     cargo "${nextest_arguments[@]:0:2}" --workspace "${nextest_arguments[@]:2}" || status=$?
 else
     cargo "${nextest_arguments[@]:0:2}" --manifest-path "$repository_root/apps/desktop/src-tauri/Cargo.toml" "${nextest_arguments[@]:2}" || status=$?

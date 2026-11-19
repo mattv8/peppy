@@ -30,6 +30,7 @@ jobs:
       rust: ${{ steps.scope.outputs.rust }}
       integration: ${{ steps.scope.outputs.integration }}
       desktop: ${{ steps.scope.outputs.desktop }}
+      desktop_windows: ${{ steps.scope.outputs.desktop_windows }}
       desktop_matrix: ${{ steps.scope.outputs.desktop_matrix }}
       desktop_os_matrix: ${{ steps.scope.outputs.desktop_os_matrix }}
       android: ${{ steps.scope.outputs.android }}
@@ -227,6 +228,8 @@ jobs:
         with:
           toolchain: 1.98.1
           components: rustfmt, clippy
+      - run: bash .github/scripts/remove-unpinned-rust-toolchains.sh 1.98.1
+        shell: bash
       - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libpq-dev libsqlite3-dev libssl-dev libsodium-dev
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -251,10 +254,9 @@ jobs:
       - run: python3 infra/audit/check-vendored.py
 
   integration:
-    needs: changes
+    needs: [changes, integration-build]
     if: needs.changes.outputs.integration == 'true'
     runs-on: ubuntu-24.04
-    # Leave cold-cache headroom: workspace tests alone can take over 40 minutes.
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -262,21 +264,25 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: 1.98.1
       - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libpq-dev libsqlite3-dev libssl-dev libsodium-dev
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          key: ubuntu-24.04
-          save-if: ${{ github.ref == 'refs/heads/production' && matrix.shard == 1 }}
-          cache-on-failure: true
       - name: Install cargo-nextest
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
           bash .github/scripts/install-cargo-nextest.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Download workspace test archive
+        id: workspace_archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: workspace-tests-${{ github.sha }}
+          path: ${{ runner.temp }}
+      - name: Explain unavailable workspace archive
+        if: failure() && steps.workspace_archive.outcome == 'failure'
+        run: echo "::error::Workspace test archive unavailable; it expires after one day. Re-run all jobs."
+        shell: bash
       - name: Run workspace integration tests
+        env:
+          PEPPY_NEXTEST_ARCHIVE: ${{ runner.temp }}/workspace-tests.tar.zst
         run: |
           bash infra/docker/test-seaweedfs-entrypoint.sh
           source infra/compose/test-env.sh
@@ -289,9 +295,6 @@ jobs:
           trap cleanup EXIT
           peppy_test_infra_up
           bash .github/scripts/run-rust-test-shard.sh workspace ${{ matrix.shard }} 4
-          if [ '${{ matrix.shard }}' = 1 ]; then
-            cargo test --workspace --locked --doc
-          fi
 
   frontend:
     needs: changes
@@ -324,6 +327,198 @@ jobs:
           retention-days: 1
           overwrite: true
 
+  integration-build:
+    needs: changes
+    if: needs.changes.outputs.integration == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: 1.98.1
+      - run: bash .github/scripts/remove-unpinned-rust-toolchains.sh 1.98.1
+        shell: bash
+      - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libpq-dev libsqlite3-dev libssl-dev libsodium-dev
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ubuntu-24.04
+          save-if: ${{ github.ref == 'refs/heads/production' }}
+          cache-on-failure: true
+      - name: Install cargo-nextest
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          bash .github/scripts/install-cargo-nextest.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: cargo nextest archive --workspace --locked --profile ci --config-file .config/nextest.toml --archive-file "$RUNNER_TEMP/workspace-tests.tar.zst"
+      - run: cargo test --workspace --locked --doc
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: workspace-tests-${{ github.sha }}
+          path: ${{ runner.temp }}/workspace-tests.tar.zst
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
+  desktop-windows-build:
+    needs: [changes, frontend]
+    if: needs.changes.outputs.desktop_windows == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: desktop-dist-${{ github.sha }}
+          path: apps/desktop/dist
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: 1.98.1
+      - run: bash .github/scripts/remove-unpinned-rust-toolchains.sh 1.98.1
+        shell: bash
+      - name: Select native Windows Perl
+        shell: pwsh
+        run: |
+          $perl = (Get-Command perl.exe -CommandType Application -ErrorAction Stop).Source
+          if ($perl -match '(?i)\\(?:Git\\usr|msys64\\usr)\\bin\\perl\.exe$') {
+            $perl = 'C:\Strawberry\perl\bin\perl.exe'
+            if (-not (Test-Path -LiteralPath $perl -PathType Leaf)) {
+              throw "Native Strawberry Perl was not found at $perl"
+            }
+          }
+          $perl = (Resolve-Path -LiteralPath $perl).ProviderPath
+          & $perl -MIPC::Cmd -e '1'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Native Perl at $perl cannot load IPC::Cmd"
+          }
+          "OPENSSL_SRC_PERL=$perl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Install cargo-nextest on Windows
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP/bin" | Out-Null
+          pwsh -NoProfile -File .github/scripts/install-cargo-nextest.ps1 "$env:RUNNER_TEMP/bin"
+          "$env:RUNNER_TEMP/bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Test cargo-nextest installer on Windows
+        shell: pwsh
+        run: pwsh -NoProfile -File .github/scripts/install-cargo-nextest.Tests.ps1
+      - name: Test Windows desktop development script
+        shell: pwsh
+        run: pwsh -NoProfile -File tests/dev/windows-desktop.Tests.ps1
+      - name: Test Windows loader diagnostics parser
+        shell: pwsh
+        run: pwsh -NoProfile -File .github/scripts/windows-loader-diagnostics.Tests.ps1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: windows-2025-desktop
+          workspaces: apps/desktop/src-tauri -> target
+          save-if: ${{ github.ref == 'refs/heads/production' }}
+          cache-on-failure: true
+      - run: cargo nextest archive --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --profile ci --config-file .config/nextest.toml --archive-file "$RUNNER_TEMP/desktop-tests.tar.zst"
+        shell: bash
+      - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --doc
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: desktop-tests-windows-${{ github.sha }}
+          path: ${{ runner.temp }}/desktop-tests.tar.zst
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
+  desktop-windows-check:
+    needs: [changes, frontend]
+    if: needs.changes.outputs.desktop_windows == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: desktop-dist-${{ github.sha }}
+          path: apps/desktop/dist
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: 1.98.1
+      - run: bash .github/scripts/remove-unpinned-rust-toolchains.sh 1.98.1
+        shell: bash
+      - name: Select native Windows Perl
+        shell: pwsh
+        run: |
+          $perl = (Get-Command perl.exe -CommandType Application -ErrorAction Stop).Source
+          if ($perl -match '(?i)\\(?:Git\\usr|msys64\\usr)\\bin\\perl\.exe$') {
+            $perl = 'C:\Strawberry\perl\bin\perl.exe'
+            if (-not (Test-Path -LiteralPath $perl -PathType Leaf)) {
+              throw "Native Strawberry Perl was not found at $perl"
+            }
+          }
+          $perl = (Resolve-Path -LiteralPath $perl).ProviderPath
+          & $perl -MIPC::Cmd -e '1'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Native Perl at $perl cannot load IPC::Cmd"
+          }
+          "OPENSSL_SRC_PERL=$perl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: windows-2025-desktop
+          workspaces: apps/desktop/src-tauri -> target
+          save-if: false
+          cache-on-failure: true
+      - run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+  desktop-windows:
+    needs: [changes, desktop-windows-build]
+    if: needs.changes.outputs.desktop_windows == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        index: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install cargo-nextest on Windows
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP/bin" | Out-Null
+          pwsh -NoProfile -File .github/scripts/install-cargo-nextest.ps1 "$env:RUNNER_TEMP/bin"
+          "$env:RUNNER_TEMP/bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Download desktop test archive
+        id: desktop_archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: desktop-tests-windows-${{ github.sha }}
+          path: ${{ runner.temp }}
+      - name: Explain unavailable desktop archive
+        if: failure() && steps.desktop_archive.outcome == 'failure'
+        run: echo "::error::Desktop test archive unavailable; it expires after one day. Re-run all jobs."
+        shell: bash
+      - name: Run Windows desktop tests
+        env:
+          PEPPY_NEXTEST_ARCHIVE: ${{ runner.temp }}/desktop-tests.tar.zst
+        run: bash .github/scripts/run-rust-test-shard.sh desktop ${{ matrix.index }} 4
+        shell: bash
+      - name: Diagnose Windows loader failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $executable = Get-ChildItem -LiteralPath apps/desktop/src-tauri/target/debug/deps -Filter 'peppy_desktop_lib-*.exe' -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if (-not $executable) {
+            Write-Warning 'No peppy_desktop_lib test executable was available for loader diagnostics.'
+            exit 0
+          }
+          try {
+            & .github/scripts/windows-loader-diagnostics.ps1 -ExecutablePath $executable.FullName
+          } catch {
+            Write-Warning "Windows loader diagnostics could not complete: $($_.Exception.Message)"
+          }
+
   desktop:
     needs: [changes, frontend]
     if: needs.changes.outputs.desktop == 'true'
@@ -346,9 +541,6 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version-file: .node-version
-      - name: Remove preinstalled package-manager shims
-        if: runner.os == 'Windows'
-        run: npm uninstall --global yarn pnpm
       - run: npm install --global corepack@0.36.0
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
@@ -362,82 +554,29 @@ jobs:
           "$RUNNER_TEMP/installer-tests/bin/python" -m pip install --require-hashes --only-binary=:all: -r packaging/macos/dmg/requirements.txt
           PYTHONPATH=packaging/macos/dmg "$RUNNER_TEMP/installer-tests/bin/python" -m unittest discover -s packaging/macos/dmg/tests
           python3 packaging/windows/installer/tests/test_installer_assets.py
-      - name: Test Windows desktop development script
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: pwsh -NoProfile -File tests/dev/windows-desktop.Tests.ps1
-      - name: Test Windows loader diagnostics parser
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: pwsh -NoProfile -File .github/scripts/windows-loader-diagnostics.Tests.ps1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.98.1
+      - run: bash .github/scripts/remove-unpinned-rust-toolchains.sh 1.98.1
+        shell: bash
       - if: runner.os == 'Linux'
         run: sudo apt-get update --error-on=any && sudo apt-get install --yes build-essential pkg-config libsqlite3-dev libssl-dev libsodium-dev libsecret-1-dev libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
-      - if: runner.os == 'Windows'
-        name: Select native Windows Perl
-        shell: pwsh
-        run: |
-          $perl = (Get-Command perl.exe -CommandType Application -ErrorAction Stop).Source
-          if ($perl -match '(?i)\\(?:Git\\usr|msys64\\usr)\\bin\\perl\.exe$') {
-            $perl = 'C:\Strawberry\perl\bin\perl.exe'
-            if (-not (Test-Path -LiteralPath $perl -PathType Leaf)) {
-              throw "Native Strawberry Perl was not found at $perl"
-            }
-          }
-          $perl = (Resolve-Path -LiteralPath $perl).ProviderPath
-          & $perl -MIPC::Cmd -e '1'
-          if ($LASTEXITCODE -ne 0) {
-            throw "Native Perl at $perl cannot load IPC::Cmd"
-          }
-          "OPENSSL_SRC_PERL=$perl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Install cargo-nextest
-        if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
           bash .github/scripts/install-cargo-nextest.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Install cargo-nextest on Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP/bin" | Out-Null
-          pwsh -NoProfile -File .github/scripts/install-cargo-nextest.ps1 "$env:RUNNER_TEMP/bin"
-          "$env:RUNNER_TEMP/bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - name: Test cargo-nextest installer on Windows
-        if: runner.os == 'Windows' && matrix.index == 1
-        shell: pwsh
-        run: pwsh -NoProfile -File .github/scripts/install-cargo-nextest.Tests.ps1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ${{ matrix.os }}-desktop
           workspaces: apps/desktop/src-tauri -> target
-          save-if: ${{ github.ref == 'refs/heads/production' && matrix.index == 1 }}
+          save-if: ${{ github.ref == 'refs/heads/production' }}
           cache-on-failure: true
-      - if: matrix.index == 1
-        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
       - run: bash .github/scripts/run-rust-test-shard.sh desktop ${{ matrix.index }} ${{ matrix.count }}
       - name: Run desktop doctests
-        if: matrix.index == 1
         run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --doc
-      - name: Diagnose Windows loader failure
-        if: failure() && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $executable = Get-ChildItem -LiteralPath apps/desktop/src-tauri/target/debug/deps -Filter 'peppy_desktop_lib-*.exe' -File -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTimeUtc -Descending |
-            Select-Object -First 1
-          if (-not $executable) {
-            Write-Warning 'No peppy_desktop_lib test executable was available for loader diagnostics.'
-            exit 0
-          }
-          try {
-            & .github/scripts/windows-loader-diagnostics.ps1 -ExecutablePath $executable.FullName
-          } catch {
-            Write-Warning "Windows loader diagnostics could not complete: $($_.Exception.Message)"
-          }
       - name: Run desktop integration tests with the existing build
         if: runner.os == 'Linux' && needs.changes.outputs.integration == 'true'
         shell: bash
@@ -453,8 +592,9 @@ jobs:
           trap cleanup EXIT
           peppy_test_infra_up
           cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --ignored
-      - run: cargo install cargo-deny --version 0.20.2 --locked
-      - if: matrix.index == 1
+      - if: runner.os == 'Linux'
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      - if: runner.os == 'Linux'
         run: cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml --config deny.toml check licenses bans sources advisories
 
   desktop-updater:
@@ -477,6 +617,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.98.1
+      - run: bash .github/scripts/remove-unpinned-rust-toolchains.sh 1.98.1
+        shell: bash
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libsqlite3-dev libssl-dev libsodium-dev libsecret-1-dev libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
       - if: runner.os == 'Windows'
@@ -567,6 +709,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.98.1
+      - run: bash .github/scripts/remove-unpinned-rust-toolchains.sh 1.98.1
+        shell: bash
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: macos-15-swift-bindings
@@ -627,7 +771,7 @@ jobs:
 
   gate:
     if: always()
-    needs: [changes, source-audit, workflow-security, version, release-tooling, release-macos-tooling, development-tools, rust, integration, frontend, desktop, desktop-updater, android, google-messages-go, swift-bindings, container-image, development-artifacts]
+    needs: [changes, source-audit, workflow-security, version, release-tooling, release-macos-tooling, development-tools, rust, integration-build, integration, frontend, desktop, desktop-windows-build, desktop-windows-check, desktop-windows, desktop-updater, android, google-messages-go, swift-bindings, container-image, development-artifacts]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -655,12 +799,20 @@ jobs:
           DEVELOPMENT_TOOLS_REQUIRED: 'true'
           RUST_RESULT: ${{ needs.rust.result }}
           RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
+          INTEGRATION_BUILD_RESULT: ${{ needs.integration-build.result }}
+          INTEGRATION_BUILD_REQUIRED: ${{ needs.changes.outputs.integration }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
           INTEGRATION_REQUIRED: ${{ needs.changes.outputs.integration }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           FRONTEND_REQUIRED: ${{ needs.changes.outputs.desktop }}
           DESKTOP_RESULT: ${{ needs.desktop.result }}
           DESKTOP_REQUIRED: ${{ needs.changes.outputs.desktop }}
+          DESKTOP_WINDOWS_BUILD_RESULT: ${{ needs.desktop-windows-build.result }}
+          DESKTOP_WINDOWS_BUILD_REQUIRED: ${{ needs.changes.outputs.desktop_windows }}
+          DESKTOP_WINDOWS_CHECK_RESULT: ${{ needs.desktop-windows-check.result }}
+          DESKTOP_WINDOWS_CHECK_REQUIRED: ${{ needs.changes.outputs.desktop_windows }}
+          DESKTOP_WINDOWS_RESULT: ${{ needs.desktop-windows.result }}
+          DESKTOP_WINDOWS_REQUIRED: ${{ needs.changes.outputs.desktop_windows }}
           DESKTOP_UPDATER_RESULT: ${{ needs.desktop-updater.result }}
           DESKTOP_UPDATER_REQUIRED: ${{ needs.changes.outputs.desktop }}
           ANDROID_RESULT: ${{ needs.android.result }}

@@ -17,7 +17,7 @@ RUNNER = ROOT / ".github/scripts/run-rust-test-shard.sh"
 
 
 class RustTestShardRunnerTests(unittest.TestCase):
-    def run_runner(self, *args: str, cargo_exit: int = 0, summary: bool = False, target: str = "", write_junit: bool = False, broken_python3: bool = False) -> subprocess.CompletedProcess[str]:
+    def run_runner(self, *args: str, cargo_exit: int = 0, summary: bool = False, target: str = "", write_junit: bool = False, broken_python3: bool = False, archive: str = "") -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_path = pathlib.Path(temporary_directory)
             captured_arguments = temporary_path / "cargo-arguments"
@@ -46,6 +46,7 @@ class RustTestShardRunnerTests(unittest.TestCase):
             }
             environment.pop("GITHUB_STEP_SUMMARY", None)
             environment.pop("CARGO_TARGET_DIR", None)
+            environment["PEPPY_NEXTEST_ARCHIVE"] = archive
             if summary:
                 environment["GITHUB_STEP_SUMMARY"] = str(temporary_path / "summary")
             if target:
@@ -96,6 +97,41 @@ class RustTestShardRunnerTests(unittest.TestCase):
                 "--partition", "hash:4/4",
             ],
         )
+
+    def test_archive_commands_extract_to_target_parent(self) -> None:
+        for lane, parent in [("workspace", ROOT), ("desktop", ROOT / "apps/desktop/src-tauri")]:
+            with self.subTest(lane=lane):
+                result = self.run_runner(lane, "2", "4", archive="/tmp/tests.tar.zst")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.cargo_arguments, [
+                    "nextest", "run", "--archive-file", "/tmp/tests.tar.zst",
+                    "--extract-to", str(parent), "--extract-overwrite",
+                    "--profile", "ci", "--config-file", str(ROOT / ".config/nextest.toml"),
+                    "--partition", "hash:2/4",
+                ])
+
+    def test_archive_reports_junit_and_propagates_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            target = pathlib.Path(parent) / "target"
+            (target / "nextest/ci").mkdir(parents=True)
+            result = self.run_runner("desktop", "2", "4", cargo_exit=37, summary=True,
+                                     target=str(target), write_junit=True, archive="/tmp/tests.tar.zst")
+        self.assertEqual(result.returncode, 37)
+        self.assertIn("slow", result.summary)
+        self.assertEqual(result.cargo_arguments[5], parent)
+
+    def test_empty_archive_uses_normal_mode(self) -> None:
+        result = self.run_runner("workspace", "1", "1", archive="")
+        self.assertIn("--workspace", result.cargo_arguments)
+        self.assertNotIn("--archive-file", result.cargo_arguments)
+
+    def test_archive_rejects_target_dir_with_nonstandard_basename(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            result = self.run_runner("workspace", "1", "1",
+                                     target=str(pathlib.Path(parent) / "custom-output"),
+                                     archive="/tmp/tests.tar.zst")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.cargo_arguments, [])
 
     def test_forwards_each_canonical_shard_argument(self) -> None:
         partitions = set()
