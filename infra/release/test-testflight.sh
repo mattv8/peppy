@@ -42,11 +42,15 @@ cat >/dev/null
 output=''
 connect=false
 max_time=''
+method=GET url='' data=''
 while (( $# )); do
   case "$1" in
     --output) output="$2"; shift 2 ;;
     --connect-timeout) [[ "$2" == 10 ]]; connect=true; shift 2 ;;
     --max-time) max_time="$2"; shift 2 ;;
+    --request) method="$2"; shift 2 ;;
+    --data-binary) data="$2"; shift 2 ;;
+    https://*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
@@ -54,19 +58,43 @@ done
 exec 3>&1
 exec > "$output"
 [[ "$(stat -f %Lp "$API_PRIVATE_KEYS_DIR/AuthKey_TESTKEY.p8" 2>/dev/null || stat -c %a "$API_PRIVATE_KEYS_DIR/AuthKey_TESTKEY.p8")" == 600 ]]
+if [[ "$url" == *betaBuildLocalizations* ]]; then
+  if [[ "${CASE:-}" == processing ]]; then
+    [[ "$(cat "$TEST_DIR/count")" -ge 2 ]] || { echo 'localization requested before VALID' >&2; exit 1; }
+  fi
+  printf '%s %s\n' "$method" "$url" >> "$TEST_DIR/localization-calls"
+  if [[ "${CASE:-}" == localization-error ]]; then echo 400 >&3; exit 22; fi
+  if [[ "$method" == GET ]]; then
+    if [[ "${CASE:-}" == localization-existing || "${CASE:-}" == patch-error ]]; then
+      echo '{"data":[{"id":"loc-1","attributes":{"locale":"en-US"}}],"links":{}}'
+    else
+      echo '{"data":[],"links":{}}'
+    fi
+  else
+    [[ "$data" == @* ]]
+    cp "${data#@}" "$TEST_DIR/localization-$(printf '%s' "$method" | tr 'A-Z' 'a-z')"
+    case "${CASE:-}" in
+      post-error) [[ "$method" == POST ]]; echo 400 >&3; exit 22 ;;
+      patch-error) [[ "$method" == PATCH ]]; echo 503 >&3; exit 22 ;;
+      write-transport) [[ "$method" == POST ]]; echo 000 >&3; exit 28 ;;
+    esac
+    echo '{"data":{"id":"loc-1","type":"betaBuildLocalizations"}}'
+  fi
+  echo 200 >&3; exit
+fi
 count=0
 [[ ! -f "$TEST_DIR/count" ]] || count="$(cat "$TEST_DIR/count")"
 count=$((count + 1))
 echo "$count" > "$TEST_DIR/count"
 case "${CASE:-}" in
-  processing) if [[ "$count" == 1 ]]; then echo '{"data":[{"attributes":{"processingState":"PROCESSING"}}]}'; else echo '{"data":[{"attributes":{"processingState":"VALID"}}]}'; fi; echo 200 >&3; exit ;;
+  processing) if [[ "$count" == 1 ]]; then echo '{"data":[{"id":"build-1","attributes":{"processingState":"PROCESSING"}}]}'; else echo '{"data":[{"id":"build-1","attributes":{"processingState":"VALID"}}]}'; fi; echo 200 >&3; exit ;;
   failed) echo '{"data":[{"attributes":{"processingState":"FAILED"}}]}'; echo 200 >&3; exit ;;
-  retry) if [[ "$count" == 1 ]]; then echo 000 >&3; exit 28; fi; echo '{"data":[{"attributes":{"processingState":"VALID"}}]}'; echo 200 >&3; exit ;;
-  server) if [[ "$count" == 1 ]]; then echo 503 >&3; exit 22; fi; echo '{"data":[{"attributes":{"processingState":"VALID"}}]}'; echo 200 >&3; exit ;;
+  retry) if [[ "$count" == 1 ]]; then echo 000 >&3; exit 28; fi; echo '{"data":[{"id":"build-1","attributes":{"processingState":"VALID"}}]}'; echo 200 >&3; exit ;;
+  server) if [[ "$count" == 1 ]]; then echo 503 >&3; exit 22; fi; echo '{"data":[{"id":"build-1","attributes":{"processingState":"VALID"}}]}'; echo 200 >&3; exit ;;
   deadline) exit 28 ;;
 esac
 if [[ "${EXISTING:-false}" == true || "$count" -gt 1 ]]; then
-  printf '%s\n' '{"data":[{"attributes":{"processingState":"VALID"}}]}'
+  printf '%s\n' '{"data":[{"id":"build-1","attributes":{"processingState":"VALID"}}]}'
 else
   printf '%s\n' '{"data":[]}'
 fi
@@ -81,6 +109,14 @@ EOF
 chmod +x "$tmp/bin/curl" "$tmp/bin/xcrun"
 bash "$upload" "$tmp/app.pkg" 1.2.3 1002003
 [[ -f "$tmp/upload-args" && ! -e "$tmp/runner/private_keys/AuthKey_TESTKEY.p8" ]]
+[[ -f "$tmp/localization-post" ]] || { echo 'VALID build must create TestFlight localization' >&2; exit 1; }
+python3 - "$tmp/localization-post" "$root/packaging/macos/app-store/what-to-test.txt" <<'PY'
+import json, pathlib, sys
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())["data"]
+assert data["type"] == "betaBuildLocalizations"
+assert data["attributes"] == {"locale": "en-US", "whatsNew": pathlib.Path(sys.argv[2]).read_text()}
+assert data["relationships"]["build"]["data"] == {"type": "builds", "id": "build-1"}
+PY
 rm "$tmp/upload-args" "$tmp/count"
 EXISTING=true bash "$upload" "$tmp/app.pkg" 1.2.3 1002003
 [[ ! -e "$tmp/upload-args" && ! -e "$tmp/runner/private_keys/AuthKey_TESTKEY.p8" ]]
@@ -90,9 +126,11 @@ chmod +x "$tmp/bin/sleep"
 CASE=processing bash "$upload" "$tmp/app.pkg" 1.2.3 1002003
 [[ ! -e "$tmp/upload-args" && "$(cat "$tmp/count")" -ge 2 ]]
 rm "$tmp/count"
+rm -f "$tmp/localization-calls"
 if CASE=failed bash "$upload" "$tmp/app.pkg" 1.2.3 1002003; then
   echo 'accepted failed existing build' >&2; exit 1
 fi
+[[ ! -e "$tmp/localization-calls" ]] || { echo 'localized a failed build' >&2; exit 1; }
 rm "$tmp/count"
 CASE=retry bash "$upload" "$tmp/app.pkg" 1.2.3 1002003
 [[ "$(cat "$tmp/count")" -ge 2 ]]
@@ -102,5 +140,43 @@ CASE=server bash "$upload" "$tmp/app.pkg" 1.2.3 1002003
 rm "$tmp/count"
 if CASE=deadline TESTFLIGHT_TEST_DEADLINE_SECONDS=1 bash "$upload" "$tmp/app.pkg" 1.2.3 1002003; then
   echo 'accepted expired deadline' >&2; exit 1
+fi
+rm -f "$tmp/count" "$tmp/localization-patch"
+CASE=localization-existing EXISTING=true bash "$upload" "$tmp/app.pkg" 1.2.3 1002003
+python3 - "$tmp/localization-patch" <<'PY'
+import json, pathlib, sys
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())["data"]
+assert data["type"] == "betaBuildLocalizations" and data["id"] == "loc-1"
+assert data["attributes"]["whatsNew"]
+PY
+rm -f "$tmp/count"
+if CASE=localization-error EXISTING=true bash "$upload" "$tmp/app.pkg" 1.2.3 1002003; then
+  echo 'accepted localization API error' >&2; exit 1
+fi
+for scenario in post-error patch-error write-transport; do
+  rm -f "$tmp/count" "$tmp/localization-calls"
+  if CASE="$scenario" EXISTING=true TESTFLIGHT_TEST_DEADLINE_SECONDS=3 bash "$upload" "$tmp/app.pkg" 1.2.3 1002003; then
+    echo "accepted $scenario write failure" >&2; exit 1
+  fi
+  case "$scenario" in patch-error) method=PATCH ;; *) method=POST ;; esac
+  expected_calls="$(printf 'GET https://api.appstoreconnect.apple.com/v1/builds/build-1/betaBuildLocalizations\n%s https://api.appstoreconnect.apple.com/v1/betaBuildLocalizations' "$method")"
+  [[ "$method" != PATCH ]] || expected_calls="$expected_calls/loc-1"
+  [[ "$(cat "$tmp/localization-calls")" == "$expected_calls" ]] || {
+    echo "$scenario must make one localization GET and one $method attempt" >&2; exit 1
+  }
+  for payload in "$RUNNER_TEMP"/testflight-payload.*; do
+    [[ ! -e "$payload" ]] || { echo "$scenario left a payload file" >&2; exit 1; }
+  done
+done
+mkdir -p "$tmp/fixture/infra/release" "$tmp/fixture/packaging/macos/app-store"
+cp "$upload" "$helper" "$tmp/fixture/infra/release/"
+notes="$tmp/fixture/packaging/macos/app-store/what-to-test.txt"
+python3 -c 'print("a" * 4001)' > "$notes"
+if EXISTING=true bash "$tmp/fixture/infra/release/upload-testflight.sh" "$tmp/app.pkg" 1.2.3 1002003; then
+  echo 'accepted oversized notes' >&2; exit 1
+fi
+: > "$notes"
+if EXISTING=true bash "$tmp/fixture/infra/release/upload-testflight.sh" "$tmp/app.pkg" 1.2.3 1002003; then
+  echo 'accepted empty notes' >&2; exit 1
 fi
 echo 'TestFlight validation tests passed'
