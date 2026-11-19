@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { UpdateStatus } from "./update-contract";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import type { Distribution, UpdateStatus } from "./update-contract";
 import { errorCode, errorText } from "../bridge/bridgeErrors";
 
 const UPDATE_EVENT = "peppy://update-state";
@@ -65,6 +65,42 @@ export function useUpdateActivity(enabled: boolean): void {
   }, [enabled]);
 }
 
+let resolvedDistribution: Distribution | undefined;
+let distributionRead: Promise<Distribution> | undefined;
+const distributionListeners = new Set<() => void>();
+
+const recordDistribution = (distribution: Distribution) => {
+  if (resolvedDistribution === distribution) return;
+  resolvedDistribution = distribution;
+  distributionListeners.forEach(listener => listener());
+};
+
+const readDistribution = () => {
+  distributionRead ??= updateApi.status().then(status => {
+    recordDistribution(status.distribution);
+    return status.distribution;
+  }, error => {
+    distributionRead = undefined;
+    throw error;
+  });
+  return distributionRead;
+};
+
+const subscribeDistribution = (listener: () => void) => {
+  distributionListeners.add(listener);
+  return () => { distributionListeners.delete(listener); };
+};
+
+export function useUpdateDistribution(enabled: boolean): Distribution | undefined {
+  const distribution = useSyncExternalStore(subscribeDistribution, () => resolvedDistribution);
+
+  useEffect(() => {
+    if (enabled && !resolvedDistribution) void readDistribution().catch(() => undefined);
+  }, [enabled]);
+
+  return enabled ? distribution : undefined;
+}
+
 export function useUpdateStatus(enabled: boolean) {
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [error, setError] = useState("");
@@ -87,6 +123,7 @@ export function useUpdateStatus(enabled: boolean) {
       settledActionAtStart === settledActionGeneration.current;
     try {
       const next = await updateApi.status();
+      recordDistribution(next.distribution);
       if (canApply()) {
         setStatus(next);
         if (explicit || !actionError.current) {
@@ -115,6 +152,7 @@ export function useUpdateStatus(enabled: boolean) {
     actionError.current = false;
     try {
       const next = await action();
+      recordDistribution(next.distribution);
       if (mounted.current) { actionError.current = false; setStatus(next); setError(""); }
     } catch (error) {
       if (mounted.current) { actionError.current = true; setError(updateErrorText(error)); }

@@ -82,27 +82,11 @@ describe("UpdatesSettings", () => {
     expect(screen.queryByText("Your update check is complete.")).not.toBeInTheDocument();
   });
 
-  it("shows only the version and App Store delivery copy for App Store installs", () => {
-    vi.mocked(useUpdateStatus).mockReturnValue(result({
-      ...UPDATE_STATUS_SERDE_FIXTURE,
-      distribution: "app_store",
-      phase: "disabled",
-      channel: "disabled",
-      automatic: false,
-      lastCheckedAt: "2026-10-16T12:00:00Z",
-      message: "Updates are delivered by the App Store.",
-    }));
+  it("renders nothing for App Store installs", () => {
+    vi.mocked(useUpdateStatus).mockReturnValue(result({ ...UPDATE_STATUS_SERDE_FIXTURE, distribution: "app_store" }));
     const { container } = render(<UpdatesSettings />);
 
-    expect(screen.getByRole("heading", { name: "Updates" })).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Updates are delivered by the App Store.");
-    expect(screen.getByText(`Peppy ${UPDATE_STATUS_SERDE_FIXTURE.currentVersion}`)).toBeInTheDocument();
-    expect(container.querySelector("#settings-updates")).toHaveAttribute("data-distribution", "app_store");
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Automatically download updates")).toBeNull();
-    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
-    expect(screen.queryByText(/Last checked:/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/channel|stable|disabled/i)).not.toBeInTheDocument();
+    expect(container).toBeEmptyDOMElement();
   });
 
   it("keeps a direct install's update status and controls", () => {
