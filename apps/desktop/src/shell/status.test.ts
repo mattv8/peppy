@@ -1,9 +1,35 @@
 import { describe, expect, it } from "vitest";
 import type { DesktopSnapshot } from "../bridge/bridge";
-import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./status";
+import { connectionText, historyStatus, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./status";
 
 type Connection = DesktopSnapshot["connection"];
 type EncryptionState = DesktopSnapshot["encryption"]["state"];
+
+describe("history status", () => {
+  const progress = { phase: "receiving" as const, receivedThrough: "0", processedThrough: "0" };
+
+  it("formats valid snapshot counts", () => {
+    expect(historyStatus({ ...progress, snapshotReceived: "38400", snapshotExpected: "108708" }))
+      .toEqual({ phase: "receiving", value: `Loading ${new Intl.NumberFormat().format(38400)} of ${new Intl.NumberFormat().format(108708)} items` });
+    expect(historyStatus({ ...progress, snapshotReceived: "0", snapshotExpected: "1" }))
+      .toEqual({ phase: "receiving", value: "Loading 0 of 1 items" });
+  });
+
+  it.each([
+    [undefined, undefined], ["1", undefined], [undefined, "1"], ["-1", "1"], ["1", "0"],
+    ["2", "1"], ["1.5", "2"], ["1", "2.5"], ["NaN", "2"], ["9007199254740992", "9007199254740992"],
+  ])("omits invalid counts %s of %s", (snapshotReceived, snapshotExpected) => {
+    expect(historyStatus({ ...progress, snapshotReceived, snapshotExpected }))
+      .toEqual({ phase: "receiving", value: "Loading" });
+  });
+
+  it("shows applying but not current, waiting for keys, or absent progress", () => {
+    expect(historyStatus({ ...progress, phase: "applying" })).toEqual({ phase: "applying", value: "Organizing" });
+    expect(historyStatus({ ...progress, phase: "waitingForKeys" })).toBeUndefined();
+    expect(historyStatus({ ...progress, phase: "current" })).toBeUndefined();
+    expect(historyStatus()).toBeUndefined();
+  });
+});
 
 describe("status severity", () => {
   const connectionStates: Connection["state"][] = ["connected", "offline", "missing-native-host", "error"];

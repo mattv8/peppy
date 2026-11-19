@@ -128,7 +128,7 @@ import { SetupLanding, savedSetupMode } from "./setup/SetupLanding";
 import { AppLockScreen, AppLockSettings } from "./shell/AppLock";
 import { UpdatesSettings } from "./updates/UpdatesSettings";
 import { isTauriUpdateHost, useUpdateActivity } from "./updates/updates";
-import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./shell/status";
+import { connectionText, historyStatus, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./shell/status";
 import { SyncTooLargeNotice } from "./shell/SyncTooLargeNotice";
 import { isSettingUp, liveSettingUpGatewayFor, resolveStoredRoute, settingUpGatewayFor } from "./setup/settingUpRoute";
 import { DEFAULT_MMS_LIMIT_BYTES, availabilityProblem, gatewayAvailability, importingRefusal, routeProblem, type RouteChoice } from "./setup/routeProblem";
@@ -2168,10 +2168,12 @@ function SettingsView({
 function StatusDetails({
   connection,
   encryption,
+  syncProgress,
   serverUnreachable = false,
 }: {
   connection?: DesktopSnapshot["connection"];
   encryption?: DesktopSnapshot["encryption"]["state"];
+  syncProgress?: DesktopSnapshot["syncProgress"];
   serverUnreachable?: boolean;
 }) {
   if (!connection || !encryption)
@@ -2183,11 +2185,16 @@ function StatusDetails({
       ? <LockKeyhole size={14} aria-hidden />
       : <Lock size={14} aria-hidden />;
   const label = connectionText(connection);
+  const history = encryption !== "locked" ? historyStatus(syncProgress) : undefined;
   return (
     <div className="status-details" data-status-details>
       <div className="status-details-row" data-disclosure="sync-state" data-sync-state={encryption} title={text}>
         {icon}<span>{text}</span>
       </div>
+      {history && <div className="status-details-row" data-disclosure="history" data-history-phase={history.phase}>
+        <History size={14} aria-hidden />
+        <dl className="status-details-pair"><dt>History</dt><dd>{history.value}</dd></dl>
+      </div>}
       <div className="status-details-row" data-disclosure="carrier-sms" title="Carrier SMS/MMS not end-to-end encrypted">
         <ShieldAlert size={14} aria-hidden />
         <span>Carrier SMS/MMS not end-to-end encrypted</span>
@@ -6170,7 +6177,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     ? {
         tone: statusTone(snapshot.connection, snapshot.encryption.state, serverOffline),
         summary: statusSummary(snapshot.connection, snapshot.encryption.state),
-        details: <StatusDetails connection={snapshot.connection} encryption={snapshot.encryption.state} serverUnreachable={serverOffline} />,
+        details: <StatusDetails connection={snapshot.connection} encryption={snapshot.encryption.state} syncProgress={snapshot.syncProgress} serverUnreachable={serverOffline} />,
       }
     : {
         tone: "neutral" as const,
