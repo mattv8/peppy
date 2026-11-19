@@ -524,7 +524,7 @@ describe("SendAgainPopover: close, focus and keyboard", () => {
     openSendAgain();
     fireEvent.click(confirmButton());
     await waitFor(() => expect(popover()).toBeNull());
-    expect(document.querySelector('[data-message-send-again-done="m1"]')).toHaveFocus();
+    await waitFor(() => expect(document.querySelector('[data-message-send-again-done="m1"]')).toHaveFocus());
   });
 
   it("does not steal focus after success when the user had moved elsewhere", async () => {
