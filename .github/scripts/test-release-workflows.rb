@@ -513,9 +513,25 @@ stable = ci_jobs.fetch('stable-release')
 assert.call(stable.fetch('needs').sort == %w[gate publish-production-mcp publish-production-relay publish-production-server version], 'stable release must wait for the gate and all three edge publishers')
 assert.call(ci_jobs.fetch('notify-hosted-production').fetch('needs').sort == %w[gate publish-production-mcp publish-production-relay publish-production-server], 'hosted dispatch must keep its server and relay payload contract and wait for the MCP image')
 assert.call(stable.fetch('permissions') == { 'contents' => 'write', 'actions' => 'write', 'attestations' => 'write', 'id-token' => 'write' }, 'stable release must grant its nested publisher provenance permissions and the TestFlight dispatch')
-testflight_dispatch = load_workflow.('release.yml').fetch('jobs').fetch('dispatch-testflight')
-assert.call(testflight_dispatch.fetch('permissions') == { 'actions' => 'write', 'contents' => 'read' }, 'TestFlight dispatch must request only actions: write, which the stable-release caller grants')
-assert.call(testflight_dispatch.fetch('continue-on-error') == true, 'a TestFlight dispatch failure must not fail the release')
+testflight_call = load_workflow.('release.yml').fetch('jobs')['publish-testflight']
+assert.call(!testflight_call.nil?, 'release must call TestFlight directly')
+assert.call(testflight_call.fetch('needs') == %w[prepare publish] && testflight_call.fetch('uses') == './.github/workflows/testflight.yml', 'TestFlight must follow desktop publication through a reusable workflow')
+assert.call(testflight_call.fetch('permissions') == { 'contents' => 'read' } && !testflight_call.key?('continue-on-error'), 'TestFlight failures must fail the release with read-only permissions')
+assert.call(testflight_call.fetch('if') == "${{ !inputs.dry_run && needs.publish.result == 'success' && needs.prepare.outputs.desktop_existing != 'true' }}", 'TestFlight must run only for a new non-dry-run desktop release')
+assert.call(testflight_call.fetch('with') == { 'version' => '${{ needs.prepare.outputs.version }}', 'ref' => '${{ needs.prepare.outputs.sha }}' }, 'TestFlight must use the prepared version and SHA')
+testflight = load_workflow.call('testflight.yml')
+testflight_secrets = %w[APPLE_MAS_CERTIFICATE_P12 APPLE_MAS_CERTIFICATE_PASSWORD APPLE_MAS_INSTALLER_CERTIFICATE APPLE_MAS_PROVISIONING_PROFILE_BASE64 APPLE_MAS_SIGNING_IDENTITY APPLE_MAS_INSTALLER_IDENTITY APPLE_ASC_KEY_ID APPLE_ASC_ISSUER_ID APPLE_ASC_PRIVATE_KEY]
+assert.call(testflight_call.fetch('secrets') == testflight_secrets.to_h { |name| [name, "${{ secrets.#{name} }}"] }, 'TestFlight call must forward its named environment secrets')
+assert.call(testflight.fetch(true).fetch('workflow_call').fetch('secrets').keys.sort == testflight_secrets.sort, 'TestFlight callable interface must declare all forwarded secrets')
+%w[version ref].each do |input|
+  %w[workflow_call workflow_dispatch].each do |event|
+    definition = testflight.fetch(true).fetch(event).fetch('inputs').fetch(input)
+    assert.call(definition['required'] == true && definition['type'] == 'string', "TestFlight #{event} must require string #{input}")
+  end
+end
+%w[publish-android publish-play publish-server-image publish-relay-image publish-mcp-image].each do |name|
+  assert.call(!Array(load_workflow.call('release.yml').fetch('jobs').fetch(name)['needs']).include?('publish-testflight'), "#{name} must not wait on TestFlight")
+end
 assert.call(stable.fetch('concurrency').fetch('group') == 'stable-release', 'automatic stable release must serialize with manual release')
 assert.call(stable.fetch('with') == { 'bump' => 'auto', 'version' => '', 'dry_run' => false }, 'automatic release must use the safe automatic inputs')
 
