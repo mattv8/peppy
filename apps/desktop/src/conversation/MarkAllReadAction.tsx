@@ -1,6 +1,9 @@
 import { type FocusEvent, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { CheckCheck, X } from "@peppy/desktop-ui";
+import { TOAST_DISMISS_MS } from "../notices/useNoticeDismissal";
+
+export { TOAST_DISMISS_MS } from "../notices/useNoticeDismissal";
 
 type Props = {
   unreadCount: number;
@@ -14,7 +17,6 @@ type Props = {
 type Notice = "success" | "up-to-date" | "mutation" | "mutation-refresh" | "refresh" | "outcome";
 
 const CANONICAL_DECIMAL = /^(0|[1-9][0-9]*)$/;
-export const TOAST_DISMISS_MS = 4000;
 
 export function MarkAllReadAction({ unreadCount, enabled, markAllRead, refresh, onFocusFallback, toastHost }: Props) {
   const [confirming, setConfirming] = useState(false);

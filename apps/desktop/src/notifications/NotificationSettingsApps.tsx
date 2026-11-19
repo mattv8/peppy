@@ -66,7 +66,7 @@ export function NotificationSettingsApps({ apps, notifications, sources, busy, o
   return <>
     {mutedApps.length > 0 && <section id="notification-muted-app-list" aria-label="Muted">
       <h4>Muted</h4>
-      <ul>{mutedApps.map(renderRow)}</ul>
+      <ul id="notification-muted-apps">{mutedApps.map(renderRow)}</ul>
     </section>}
     {unmutedApps.length > 0 && <details id="notification-app-rules-disclosure" className="settings-disclosure">
       <summary>All apps ({apps.length})</summary>
@@ -75,9 +75,9 @@ export function NotificationSettingsApps({ apps, notifications, sources, busy, o
         {phones.size > 1
           ? [...phones].map(phoneId => {
             const phoneApps = visibleApps.filter(app => app.sourceDeviceId === phoneId);
-            return phoneApps.length > 0 && <li key={phoneId} className="notification-app-phone-group">
+            return phoneApps.length > 0 && <li key={phoneId} data-notification-app-phone={phoneId} className="notification-app-phone-group">
               <h4>{notificationSourceName(phoneId, sources, sourceIds)}</h4>
-              <ul>{phoneApps.map(renderRow)}</ul>
+              <ul data-notification-app-phone-list={phoneId}>{phoneApps.map(renderRow)}</ul>
             </li>;
           })
           : visibleApps.map(renderRow)}

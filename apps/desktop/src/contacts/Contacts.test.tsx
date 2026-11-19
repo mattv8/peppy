@@ -402,7 +402,7 @@ describe("ContactsView", () => {
       render(<ContactsView />);
 
       await waitFor(() => {
-        expect(screen.getByText("Pixel 8")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: /Pixel 8/ })).toHaveTextContent("Google");
       });
     });
   });
@@ -548,7 +548,7 @@ describe("ContactsView", () => {
       await waitFor(() => {
         const calls = vi.mocked(bridge.submit_contact_edit).mock.calls;
         const call = calls[calls.length - 1][0];
-        expect(call.patches).toBeDefined();
+        expect(call.patches).toContainEqual({ field: "givenName", value: "Bob" });
       });
     });
 
@@ -636,6 +636,7 @@ describe("ContactsView", () => {
         const call = calls[calls.length - 1][0];
         expect(call.kind).toBe("update");
         expect(call.contactId).toBe("contact-aurora");
+        expect(call.baseRevision).toBe("1");
       });
     });
   });

@@ -149,6 +149,7 @@ import { MediaLightbox } from "./media/MediaLightbox";
 import { MediaPanel, type MediaPageItem as GalleryMediaPageItem } from "./media/MediaPanel";
 import { MediaGrid } from "./media/MediaGrid";
 import { MediaTile } from "./media/MediaTile";
+import { expiryText } from "./media/publicCopyExpiry";
 import { originalPending } from "./media/mediaState";
 import { ConversationViewTabs, type ConversationView as ConversationTab } from "./ConversationViewTabs";
 import { MediaActionsProvider, type SaveOutcome as GallerySaveOutcome } from "./media/MediaActionsContext";
@@ -500,14 +501,6 @@ function mergeAnchoredMessages(existing: MessageView[], refreshed: MessageView[]
   return mergeMessages(prefix, authoritativeRows);
 }
 
-function expiryText(seconds: number): string {
-  if (seconds <= 0)
-    return "No expiry was reported; revoke it on the server when it is no longer needed.";
-  if (seconds < 3600) return `Expires in ${Math.ceil(seconds / 60)} min.`;
-  if (seconds < 172800) return `Expires in ${Math.round(seconds / 3600)} h.`;
-  return `Expires in ${Math.round(seconds / 86400)} days.`;
-}
-
 function attachmentState(file: AttachmentView): string {
   if (file.state === "failed")
     return `Failed${file.error ? `: ${file.error}` : ""}`;
@@ -842,7 +835,7 @@ export function MessageMeta({ message: source, hideTime = false, onEditResend, o
     {resend && resend.earlierRisk !== "none" && <span className="message-resend-warning"><TriangleAlert size={12} aria-hidden />{resend.earlierRisk === "sent" ? peppyCopy.message_send_earlier_was_sent : peppyCopy.message_send_earlier_may_have_sent}</span>}
     </>}
     {dialog === "details" && recovery && <Modal id={`send-details-${message.id}`} title={statusLabel} opener={detailsOpener} onDismiss={closeDialog} actions={<button type="button" className="secondary-button" onClick={closeDialog}>{peppyCopy.message_send_history_close}</button>}><p>{SEND_RECOVERY_REASON[recovery.kind]}</p></Modal>}
-    {dialog === "history" && resend && <Modal id={`send-history-${message.id}`} title={peppyCopy.message_send_history_title} opener={historyOpener} onDismiss={closeDialog} actions={<button type="button" className="secondary-button" onClick={closeDialog}>{peppyCopy.message_send_history_close}</button>}><ul className="message-send-history">{[...resend.attempts].reverse().map((attempt, index) => {
+    {dialog === "history" && resend && <Modal id={`send-history-${message.id}`} title={peppyCopy.message_send_history_title} opener={historyOpener} onDismiss={closeDialog} actions={<button type="button" className="secondary-button" onClick={closeDialog}>{peppyCopy.message_send_history_close}</button>}><ul className="message-send-history" data-send-history-list={message.id}>{[...resend.attempts].reverse().map((attempt, index) => {
       const time = messageTime(attempt).displayedTime;
       const label = attempt.sendRecovery ? SEND_RECOVERY_STATUS[attempt.sendRecovery.kind].label : attempt.status ? STATUS_LABEL[attempt.status] : undefined;
       const tone = attempt.sendRecovery ? SEND_RECOVERY_STATUS[attempt.sendRecovery.kind].tone : attempt.status === "failed-before-submit" || attempt.status === "failed-confirmed" ? "error" : attempt.status === "unknown" ? "warning" : undefined;
