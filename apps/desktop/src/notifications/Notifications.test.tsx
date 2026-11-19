@@ -513,6 +513,29 @@ describe("NotificationsView", () => {
     await waitFor(() => expect(view.onSeen).toHaveBeenCalledTimes(1));
   });
 
+  it("keeps an unseen row tinted unread after onSeen resolves and the row reports seen", async () => {
+    let callback!: IntersectionObserverCallback;
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(next: IntersectionObserverCallback) { callback = next; }
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+      takeRecords() { return []; }
+      root = null;
+      rootMargin = "0px";
+      thresholds = [];
+    });
+    const view = props([notification("phone-a")]);
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    const { rerender } = render(<NotificationsView {...view} />);
+    expect(screen.getByRole("article")).toHaveAttribute("data-read-state", "unread");
+    const row = screen.getByRole("article");
+    act(() => callback([{ target: row, isIntersecting: true } as unknown as IntersectionObserverEntry], {} as IntersectionObserver));
+    await waitFor(() => expect(view.onSeen).toHaveBeenCalledTimes(1));
+    rerender(<NotificationsView {...view} notifications={[notification("phone-a", "chat", { seen: true })]} />);
+    expect(screen.getByRole("article")).toHaveAttribute("data-read-state", "unread");
+  });
+
   describe("seen tracking after rows leave the feed (L11)", () => {
     let callbacks: IntersectionObserverCallback[];
 

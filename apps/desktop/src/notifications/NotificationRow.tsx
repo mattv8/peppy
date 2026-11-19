@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { BellOff, Clock, formatDateTime, formatElapsedShort, isoDateTime, X } from "@peppy/desktop-ui";
 import type { AppFilter, MirroredNotification, NotificationTarget } from "../bridge/bridge";
 import type { OneTimeCodeTarget } from "@peppy/desktop-ui/bridge-contracts";
@@ -16,7 +16,7 @@ export type NotificationRowProps = {
   notification: MirroredNotification;
   labels: NotificationLabels;
   filter: AppFilter;
-  isNew: boolean;
+  unread: boolean;
   showPhone: boolean;
   query: string;
   onDismiss(target: NotificationTarget): void;
@@ -43,8 +43,29 @@ function highlightedText(text: string, query: string): ReactNode[] {
   );
 }
 
+function NotificationRowText({ id, text, query }: { id: string; text: string; query: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const clamped = !expanded && !query.trim();
+  useLayoutEffect(() => {
+    const el = textRef.current;
+    if (!el || !clamped) return;
+    const measure = () => setOverflowing(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [clamped, text]);
+  return <>
+    <span id={id} ref={textRef} className="notif-row-text" data-clamped={clamped || undefined}>{highlightedText(text, query)}</span>
+    {!query.trim() && (overflowing || expanded) && <button type="button" className="notif-row-more" aria-expanded={expanded} aria-controls={id} onClick={() => setExpanded(!expanded)}>{expanded ? "Show less" : "Show more"}</button>}
+  </>;
+}
+
 export function NotificationRow({
-  notification, labels, filter, isNew, showPhone, query, onDismiss, onMute, onCopy, onAction, hideAppName,
+  notification, labels, filter, unread, showPhone, query, onDismiss, onMute, onCopy, onAction, hideAppName,
 }: NotificationRowProps) {
   const pending = notification.dismissalPending;
   const key = notificationTuple(notification.target.sourceDeviceId, notification.target.notificationKey, notification.target.lifetime);
@@ -70,6 +91,7 @@ export function NotificationRow({
     data-device-id={notification.target.sourceDeviceId}
     data-notification-key={notification.target.notificationKey}
     data-dismiss-state={pending ? "pending" : "idle"}
+    data-read-state={unread ? "unread" : "read"}
     data-notification-target={JSON.stringify(notification.target)}
     className="notif-row"
     aria-labelledby={titleId}
@@ -77,12 +99,13 @@ export function NotificationRow({
   >
     <NotificationAppIcon appName={appName} base64={notification.appIconPngBase64} />
     <div className="notif-row-body" id={metaId}>
+      {unread && <span className="visually-hidden">Unread, </span>}
       <span className="notif-row-app-source" data-stack-app-name-hidden={hideAppName || undefined}>
         {!hideAppName && <b>{appName}</b>}
         {showPhone && <span className="notif-phone-badge">{phoneName}</span>}
       </span>
-      <b id={titleId} className="notif-row-title" data-new={isNew || undefined}>{highlightedText(title, query)}</b>
-      <span className="notif-row-text">{highlightedText(notification.text, query)}</span>
+      <b id={titleId} className="notif-row-title">{highlightedText(title, query)}</b>
+      <NotificationRowText id={`notif-text-${key}`} text={notification.text} query={query} />
       {notification.oneTimeCode && <OneTimeCodeButton
         key={`${key}:${notification.oneTimeCode}`}
         variant="notification"
