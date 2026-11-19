@@ -21,6 +21,11 @@ updates:
     directory: /apps/android
     schedule:
       interval: weekly
+    # android-all-instrumented images are pinned per SDK (APIs 26, 30, 31, 34, 35) in
+    # apps/android/app/build.gradle.kts; a bump would collapse them to one SDK. Change
+    # these pins only together with the Robolectric SDK coverage.
+    ignore:
+      - dependency-name: "org.robolectric:android-all-instrumented"
     groups:
       android-build-tooling:
         patterns:

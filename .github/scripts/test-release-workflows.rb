@@ -873,6 +873,18 @@ Dir.mktmpdir('peppy-android-release-test') do |fixture|
   assert.call(play_invocation.count('-PpeppyGoogleMessagesLink=true') == 1, 'trusted Play Android build must enable the Google Messages link exactly once')
 end
 
+dependabot = YAML.load_file(File.join(root, 'dependabot.yml'))
+dependabot_updates = dependabot.fetch('updates')
+android_gradle_updates = dependabot_updates.select { |update| update['package-ecosystem'] == 'gradle' && update['directory'] == '/apps/android' }
+assert.call(android_gradle_updates.length == 1, 'Dependabot must configure exactly one Android Gradle update')
+android_gradle_ignore = android_gradle_updates.first.fetch('ignore', nil)
+assert.call(android_gradle_ignore == [{ 'dependency-name' => 'org.robolectric:android-all-instrumented' }], 'Android Gradle Dependabot must ignore only the exact android-all-instrumented SDK fixture dependency, without version or update-type filters')
+assert.call(dependabot_updates.all? { |update| update['package-ecosystem'] == 'gradle' || !update.key?('ignore') }, 'Dependabot must not add ignore rules outside the Android Gradle update')
+assert.call(android_gradle_ignore.none? { |entry| File.fnmatch?(entry.fetch('dependency-name'), 'org.robolectric:robolectric') }, 'Dependabot must keep automatic updates for the Robolectric library')
+android_build_text = File.read(File.join(root, '..', 'apps', 'android', 'app', 'build.gradle.kts'))
+robolectric_sdk_fixtures = android_build_text.scan(/"org\.robolectric:android-all-instrumented:([^"]+)"/).flatten
+assert.call(robolectric_sdk_fixtures.length == 5 && robolectric_sdk_fixtures.uniq.length == 5, 'Robolectric SDK fixtures must remain five distinct android-all-instrumented images')
+
 component_state_test = File.join(__dir__, 'test-release-component-state.sh')
 _, stderr, status = Open3.capture3('bash', component_state_test)
 assert.call(status.success?, "component-state fixtures must pass through the maintained helper: #{stderr}")
