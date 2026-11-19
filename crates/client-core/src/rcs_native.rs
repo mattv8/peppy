@@ -59,7 +59,7 @@ fn pending_commands_for(
         return Ok(Vec::new());
     };
     let mut query = conn.prepare(
-        "SELECT l.local_order,l.command_id FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.key_epoch=? AND NOT EXISTS (SELECT 1 FROM send_cancellations c WHERE c.command_id=l.command_id AND c.state IN ('requested','confirmed')) AND (l.local_order>? OR (l.local_order=? AND l.command_id>?)) ORDER BY l.local_order,l.command_id LIMIT ?",
+        "SELECT l.local_order,l.command_id FROM command_ledger l LEFT JOIN attempts a ON a.command_id=l.command_id WHERE a.command_id IS NULL AND l.historical=0 AND l.retired=0 AND l.key_epoch=? AND NOT EXISTS (SELECT 1 FROM send_cancellations c WHERE c.command_id=l.command_id AND c.state IN ('requested','confirmed')) AND (l.local_order>? OR (l.local_order=? AND l.command_id>?)) ORDER BY l.local_order,l.command_id LIMIT ?",
     )?;
     // The client store mutex prevents ledger growth during this scan. Each batch advances the
     // keyset cursor, so one call examines at most the qualifying raw rows present on entry.

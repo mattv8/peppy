@@ -4172,6 +4172,19 @@ impl NativeClient {
         with_client(&self.client, Client::retire_swallowed_commands)
     }
 
+    pub fn retire_unattempted_commands_from_producers(
+        &self,
+        producers: Vec<String>,
+    ) -> Result<u32, MobileBindingsError> {
+        let ids = producers
+            .iter()
+            .map(|producer| parse_id(producer))
+            .collect::<Result<Vec<_>, _>>()?;
+        with_client(&self.client, |client| {
+            client.retire_unattempted_commands_from_producers(&ids)
+        })
+    }
+
     /// Whether the last retirement stopped at a bound, so a later pass should retire again.
     pub fn swallowed_retirement_more_remains(&self) -> Result<bool, MobileBindingsError> {
         with_client(&self.client, Client::swallowed_retirement_more_remains)
@@ -5538,6 +5551,23 @@ mod tests {
             .unwrap();
         assert_eq!(second.message_id, again.message_id);
         assert_eq!(native.messages(provider.conversation_id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn retire_producers_rejects_invalid_ids() {
+        let path = TempDatabase::new(format!("peppy-retire-{}.db", uuid::Uuid::new_v4()));
+        let native = open_at(
+            &path,
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+        );
+        assert!(matches!(
+            native.retire_unattempted_commands_from_producers(vec![
+                uuid::Uuid::new_v4().to_string(),
+                "invalid".into()
+            ]),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
     }
 
     #[test]

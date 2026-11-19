@@ -35,6 +35,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import uniffi.peppy_mobile_bindings.NativeCarrierCommand
 import uniffi.peppy_mobile_bindings.gatewayPendingNativeRcsCommands
 import uniffi.peppy_mobile_bindings.gatewayPendingRcsMediaCommands
+import uniffi.peppy_mobile_bindings.NativeClient
+import dev.peppy.mobile.gateway.cachedProducerRetirement
+import dev.peppy.mobile.gateway.revocationCheckedCandidates
 import uniffi.peppy_mobile_bindings.gatewayNextRcsMediaAttachment
 import uniffi.peppy_mobile_bindings.gatewayDecryptRcsAttachmentToFile
 import uniffi.peppy_mobile_bindings.gatewayMarkRcsMediaUploading
@@ -145,15 +148,24 @@ class GoogleMessagesLinkService : Service() {
             alive = { isCurrent(lifecycleGeneration) },
             run = ::runTargetedBootstrap,
         )
+        var retireText: () -> Boolean = { false }
         nativeRcsSendWork = RcsNativeSendWork(
             enabled = ::nativeRcsEnabled,
             candidates = {
-                runPendingGroupCreates()
                 NativeGateway.open(applicationContext)
                     ?.let { client ->
+                        val cached = cachedProducerRetirement(applicationContext, client)
+                        var checked = false
+                        val retire = { checked = true; cached() }
+                        retireText = retire
+                        runPendingGroupCreates(client, retire)
+                        if (checked) retire()
                         val pending = client.pendingCommands()
                         carrierProofWakes.retainPendingCommands(pending.map { it.commandId }.toSet())
-                        gatewayPendingNativeRcsCommands(client).also { candidates ->
+                        revocationCheckedCandidates(
+                            read = { gatewayPendingNativeRcsCommands(client) },
+                            retire = retire,
+                        ).also { candidates ->
                             val code = when {
                                 candidates.isNotEmpty() -> "candidates"
                                 pending.isNotEmpty() -> "pending_without_candidates"
@@ -166,23 +178,34 @@ class GoogleMessagesLinkService : Service() {
                     .orEmpty()
                     .map { RcsNativeCommand(it.commandId, it.conversationId, it.recipient) }
             },
-            execute = ::runNativeRcsSend,
+            execute = { command -> retireText(); runNativeRcsSend(command) },
             current = { isCurrent(lifecycleGeneration) },
             executor = NATIVE_RCS_SEND_EXECUTOR,
             carrierHandoffRequested = { carrierHandoffRequested.getAndSet(false) },
         )
         mediaFiles = RcsMediaPrivateFiles(applicationContext).also { it.sweep() }
         mediaQueue = RcsMediaTransferQueue(NATIVE_RCS_MEDIA_EXECUTOR)
+        var retireMedia: () -> Boolean = { false }
         mediaRcsSendWork = RcsNativeSendWork(
             enabled = ::nativeRcsEnabled,
             candidates = {
-                runPendingGroupCreates()
                 NativeGateway.open(applicationContext)
-                    ?.let { gatewayPendingRcsMediaCommands(it, testHooks.currentTimeMillis()) }
+                    ?.let { client ->
+                        val cached = cachedProducerRetirement(applicationContext, client)
+                        var checked = false
+                        val retire = { checked = true; cached() }
+                        retireMedia = retire
+                        runPendingGroupCreates(client, retire)
+                        if (checked) retire()
+                        revocationCheckedCandidates(
+                            read = { gatewayPendingRcsMediaCommands(client, testHooks.currentTimeMillis()) },
+                            retire = retire,
+                        )
+                    }
                     .orEmpty()
                     .map { RcsNativeCommand(it.commandId, it.conversationId, it.recipient) }
             },
-            execute = ::runMediaRcsSend,
+            execute = { command -> retireMedia(); runMediaRcsSend(command) },
             current = { isCurrent(lifecycleGeneration) },
             executor = NATIVE_RCS_SEND_EXECUTOR,
         )
@@ -521,12 +544,16 @@ class GoogleMessagesLinkService : Service() {
      * Carrier-pending group texts whose create is needed. Core decides with its own rules; a non-create answer
      * skips the permit, so this changes no state unless core issues one.
      */
-    private fun runPendingGroupCreates() {
+    private fun runPendingGroupCreates(client: NativeClient, retire: () -> Boolean) {
         if (!nativeRcsEnabled()) return
-        val client = NativeGateway.open(applicationContext) ?: return
-        val groupCommands = runCatching { client.pendingCommands() }.getOrDefault(emptyList()).filter {
-            it.message.transport == "mms" && it.message.recipients.size >= 2
-        }
+        val groupCommands = revocationCheckedCandidates(
+            read = {
+                runCatching { client.pendingCommands() }.getOrDefault(emptyList()).filter {
+                    it.message.transport == "mms" && it.message.recipients.size >= 2
+                }
+            },
+            retire = retire,
+        )
         // The link handle is opened only when a group text is actually waiting.
         if (groupCommands.isEmpty()) return
         val lease = LinkRuntime.handleLease(this) ?: return
@@ -537,7 +564,10 @@ class GoogleMessagesLinkService : Service() {
             reconcile = { refreshConversationIndex(lease) && reconcileRcsGroups(lease) },
             clock = RcsWallClock,
         )
-        groupCommands.forEach { creates.create(it.message.conversationId, it.commandId) }
+        groupCommands.forEach {
+            retire()
+            creates.create(it.message.conversationId, it.commandId)
+        }
     }
 
     /** Runs one keyed target on the bootstrap executor. Lease or generation loss stops the drain pass. */

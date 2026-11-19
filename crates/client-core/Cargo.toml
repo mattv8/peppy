@@ -13,6 +13,10 @@ name = "integration"
 path = "tests/integration.rs"
 
 [[test]]
+name = "revoked_producer_commands"
+path = "tests/revoked_producer_commands.rs"
+
+[[test]]
 name = "ephemeral"
 path = "tests/ephemeral.rs"
 
