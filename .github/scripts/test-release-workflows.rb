@@ -26,6 +26,69 @@ assert.call(ci_jobs.fetch('gate').fetch('needs').include?('google-messages-go'),
 gate_environment = ci_jobs.fetch('gate').fetch('steps').find { |step| step['name'] == 'Evaluate CI gate' }.fetch('env')
 assert.call(gate_environment.fetch('GOOGLE_MESSAGES_GO_RESULT') == '${{ needs.google-messages-go.result }}' && gate_environment.fetch('GOOGLE_MESSAGES_GO_REQUIRED') == '${{ needs.changes.outputs.android }}', 'the Go result must be evaluated by the common required-job gate')
 assert.call(ci_jobs.fetch('desktop').fetch('timeout-minutes') == 60, 'public CI desktop must allow 60 minutes uniformly for native cold-cache builds')
+desktop_linux_setup_steps = ci_jobs.fetch('desktop').fetch('steps').select { |step| step['run']&.include?('sudo apt-get update') }
+assert.call(desktop_linux_setup_steps.length == 1, 'desktop must have exactly one Linux apt setup command')
+desktop_linux_setup = desktop_linux_setup_steps.first.fetch('run')
+desktop_linux_packages = %w[build-essential pkg-config libsqlite3-dev libssl-dev libsodium-dev libsecret-1-dev libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev]
+Dir.mktmpdir('desktop-apt-index-refresh') do |fixture|
+  bin = File.join(fixture, 'bin')
+  FileUtils.mkdir_p(bin)
+  File.write(File.join(bin, 'sudo'), <<~'SH')
+    #!/bin/bash
+    set -euo pipefail
+    printf '%s\n' "$*" >> "$PEPPY_TEST_SUDO_LOG"
+    exec "$@"
+  SH
+  File.write(File.join(bin, 'apt-get'), <<~'SH')
+    #!/bin/bash
+    set -euo pipefail
+    printf '%s\n' "$*" >> "$PEPPY_TEST_APT_LOG"
+    case "$1" in
+      update)
+        # Modelled APT behaviour: without --error-on=any a failed index refresh only warns and succeeds.
+        strict=false
+        for argument in "$@"; do
+          [[ "$argument" == --error-on=any ]] && strict=true
+        done
+        if [[ -n "${APT_UPDATE_FAILURE:-}" ]]; then
+          echo 'E: Failed to fetch http://archive.ubuntu.com/ubuntu/dists/noble-updates/InRelease  503' >&2
+          if [[ "$strict" == true ]]; then
+            exit 100
+          fi
+          echo 'W: Some index files failed to download. They have been ignored, or old ones used instead.' >&2
+        fi
+        ;;
+      install)
+        [[ -z "${APT_INSTALL_FAILURE:-}" ]] || exit 42
+        ;;
+      *)
+        exit 97
+        ;;
+    esac
+  SH
+  [File.join(bin, 'sudo'), File.join(bin, 'apt-get')].each { |path| File.chmod(0o755, path) }
+  run_linux_setup = lambda do |environment|
+    sudo_log = File.join(fixture, 'sudo.log')
+    apt_log = File.join(fixture, 'apt.log')
+    [sudo_log, apt_log].each { |path| File.write(path, '') }
+    _, stderr, status = Open3.capture3(
+      environment.merge('PATH' => "#{bin}:/usr/bin:/bin", 'PEPPY_TEST_SUDO_LOG' => sudo_log, 'PEPPY_TEST_APT_LOG' => apt_log),
+      'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', desktop_linux_setup,
+      chdir: fixture
+    )
+    [status, stderr, File.readlines(sudo_log, chomp: true), File.readlines(apt_log, chomp: true)]
+  end
+  expected_apt_calls = ['update --error-on=any', "install --yes #{desktop_linux_packages.join(' ')}"]
+
+  status, stderr, sudo_calls, apt_calls = run_linux_setup.call('APT_UPDATE_FAILURE' => '1')
+  assert.call(status.exitstatus == 100 && apt_calls == ['update --error-on=any'] && sudo_calls == ['apt-get update --error-on=any'], "Linux desktop setup must fail closed on an APT index refresh failure before installing packages: #{stderr}")
+
+  status, stderr, sudo_calls, apt_calls = run_linux_setup.call({})
+  assert.call(status.success? && apt_calls == expected_apt_calls && sudo_calls == ['apt-get update --error-on=any', "apt-get install --yes #{desktop_linux_packages.join(' ')}"], "healthy Linux desktop setup must refresh strictly and install the existing package list: #{stderr}")
+
+  status, stderr, _, apt_calls = run_linux_setup.call('APT_INSTALL_FAILURE' => '1')
+  assert.call(status.exitstatus == 42 && apt_calls == expected_apt_calls, "Linux desktop package installation failure must propagate: #{stderr}")
+end
 android_ci = load_workflow.call('test-android.yml')
 android_ci_jobs = android_ci.fetch('jobs')
 android_call = ci_jobs.fetch('android')
