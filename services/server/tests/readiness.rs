@@ -79,7 +79,11 @@ async fn put_file_signs_and_requires_the_sse_acknowledgement() {
     std::fs::write(file.path(), b"private file bytes").unwrap();
 
     Storage::new(&config)
-        .put_file("object", file.path().to_path_buf())
+        .put_file(
+            "object",
+            file.path().to_path_buf(),
+            b"private file bytes".len() as u64,
+        )
         .await
         .unwrap();
     server.await.unwrap();

@@ -1270,8 +1270,21 @@ async fn public_copy_revalidates_the_exact_bearer_after_its_body_and_vault_lock(
 }
 
 fn spool_entries() -> usize {
-    let directory = std::env::temp_dir().join(format!("peppy-spool-{}", std::process::id()));
-    std::fs::read_dir(directory).map_or(0, |entries| entries.count())
+    let prefix = format!("peppy-spool-{}-", std::process::id());
+    let mut directories = std::fs::read_dir(std::env::temp_dir())
+        .expect("read temporary directory")
+        .map(|entry| entry.expect("read temporary directory entry"))
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix));
+    let Some(directory) = directories.next() else {
+        return 0;
+    };
+    assert!(
+        directories.next().is_none(),
+        "multiple spool directories for this process"
+    );
+    std::fs::read_dir(directory.path())
+        .expect("read spool directory")
+        .count()
 }
 
 fn png(bytes: usize) -> Vec<u8> {
@@ -2374,6 +2387,20 @@ async fn private_attachment_downloads_validate_and_serve_single_byte_ranges() {
         );
     }
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn put_file_rejects_spool_length_mismatch() {
+    let config = Config::from_env().unwrap().s3.unwrap();
+    let storage = peppy_server::storage::Storage::new(&config);
+    let path = std::env::temp_dir().join(format!("peppy-length-test-{}", Uuid::new_v4()));
+    std::fs::write(&path, b"abc").unwrap();
+    let result = storage.put_file("length-test", path.clone(), 4).await;
+    std::fs::remove_file(path).unwrap();
+    assert!(matches!(
+        result,
+        Err(peppy_server::storage::StorageError::Invalid(_))
+    ));
 }
 
 struct VersionedTestBucket {
