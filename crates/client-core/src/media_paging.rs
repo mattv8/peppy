@@ -160,7 +160,7 @@ fn anchor_rows(
     let mut query = conn.prepare(
         "SELECT m.payload,m.sort_at_ms,m.local_order,m.id,ma.position,ma.attachment_id \
          FROM messages m JOIN message_attachments ma ON ma.message_id=m.id \
-         WHERE m.conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND ma.attachment_id=?2 AND (?3 IS NULL OR m.id=?3) \
+         WHERE m.effective_conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND ma.attachment_id=?2 AND (?3 IS NULL OR m.id=?3) \
          ORDER BY m.sort_at_ms,m.local_order,m.id,ma.position LIMIT 2",
     )?;
     query
@@ -185,7 +185,7 @@ fn newer_rows(
     let mut query = conn.prepare(
         "SELECT m.payload,m.sort_at_ms,m.local_order,m.id,ma.position,ma.attachment_id \
          FROM messages m JOIN message_attachments ma ON ma.message_id=m.id \
-         WHERE m.conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (m.sort_at_ms>?2 OR (m.sort_at_ms=?2 AND \
+         WHERE m.effective_conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (m.sort_at_ms>?2 OR (m.sort_at_ms=?2 AND \
          (m.local_order>?3 OR (m.local_order=?3 AND (m.id>?4 OR (m.id=?4 AND ma.position>?5)))))) \
          ORDER BY m.sort_at_ms,m.local_order,m.id,ma.position LIMIT ?6",
     )?;
@@ -214,7 +214,7 @@ fn older_rows(
     let mut query = conn.prepare(
         "SELECT m.payload,m.sort_at_ms,m.local_order,m.id,ma.position,ma.attachment_id \
          FROM messages m JOIN message_attachments ma ON ma.message_id=m.id \
-         WHERE m.conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (m.sort_at_ms<?2 OR (m.sort_at_ms=?2 AND \
+         WHERE m.effective_conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (m.sort_at_ms<?2 OR (m.sort_at_ms=?2 AND \
          (m.local_order<?3 OR (m.local_order=?3 AND (m.id<?4 OR (m.id=?4 AND ma.position<?5)))))) \
          ORDER BY m.sort_at_ms DESC,m.local_order DESC,m.id DESC,ma.position DESC LIMIT ?6",
     )?;
@@ -262,4 +262,88 @@ fn media_page_item(conn: &Connection, row: MediaRow) -> Result<MediaPageItem, Er
             attachment_position: u32::try_from(position).map_err(|_| Error::Database)?,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        ClientConfig, DatabaseKey, DeviceId, Direction, MessagePayload, SourceSequence, Transport,
+        VaultId,
+    };
+    use peppy_domain::MessageRecord;
+
+    #[test]
+    fn merged_media_anchor_pages_across_original_conversations() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let device = DeviceId::new();
+        let client = Client::open(
+            ClientConfig {
+                database_path: dir.path().join("media.db"),
+                vault_id: VaultId::new(),
+                device_id: device,
+            },
+            DatabaseKey::new(&[31; 32]).unwrap(),
+        )
+        .unwrap();
+        let survivor = ConversationId::new();
+        let source = ConversationId::new();
+        let mut rows = Vec::new();
+        {
+            let store = client.lock().unwrap();
+            for (index, original) in [survivor, source, survivor].into_iter().enumerate() {
+                let message_id = MessageId::new();
+                let attachment_id = AttachmentId::new();
+                let payload = MessagePayload {
+                    record: MessageRecord {
+                        message_id,
+                        conversation_id: original,
+                        source_sequence: SourceSequence(index as u64 + 1),
+                        attachments: vec![],
+                    },
+                    source_device_id: device,
+                    provider_message_id: None,
+                    sender_address: Some("+15555550100".into()),
+                    recipients: vec![],
+                    subject: None,
+                    body: String::new(),
+                    transport: Transport::Mms,
+                    direction: Direction::Incoming,
+                    rcs_capture: false,
+                    imported: false,
+                    sent_at_ms: None,
+                    ordered_at_ms: None,
+                    mms_context: None,
+                };
+                store.conn.execute(
+                    "INSERT INTO attachments(attachment_id,state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,stream_version,file_key) VALUES(?,'available','image/png','image.png',0,0,'',1,?)",
+                    params![attachment_id.to_string(), vec![0_u8; 32]],
+                ).unwrap();
+                store.conn.execute(
+                    "INSERT INTO messages(id,conversation_id,effective_conversation_id,source_device_id,source_sequence,payload,seen,sort_at_ms) VALUES(?,?,?,?,?,?,0,?)",
+                    params![message_id.to_string(), original.to_string(), survivor.to_string(), device.to_string(), index as i64 + 1, serde_json::to_string(&payload).unwrap(), index as i64 + 1],
+                ).unwrap();
+                store.conn.execute(
+                    "INSERT INTO message_attachments(message_id,position,attachment_id) VALUES(?,0,?)",
+                    params![message_id.to_string(), attachment_id.to_string()],
+                ).unwrap();
+                rows.push((message_id, attachment_id));
+            }
+        }
+        let around = client.media_page_around(survivor, rows[1].1, 3).unwrap();
+        assert_eq!(around.target.message.record.message_id, rows[1].0);
+        assert_eq!(around.older[0].message.record.message_id, rows[0].0);
+        assert_eq!(around.newer[0].message.record.message_id, rows[2].0);
+        let at = client
+            .media_page_around_at(survivor, rows[1].0, rows[1].1, 1)
+            .unwrap();
+        let newer = client
+            .media_page_newer(survivor, at.newer_cursor.as_ref().unwrap(), 1)
+            .unwrap();
+        assert_eq!(newer.items[0].message.record.message_id, rows[2].0);
+        let older = client
+            .media_page(survivor, at.older_cursor.as_ref(), 1)
+            .unwrap();
+        assert_eq!(older.items[0].message.record.message_id, rows[0].0);
+    }
 }

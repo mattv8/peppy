@@ -32,6 +32,7 @@ mod contact_sync_requests;
 mod contacts;
 mod conversation_folders;
 mod conversation_match;
+mod conversation_merge;
 mod conversation_pinning;
 mod conversation_tones;
 mod deferred_media;
@@ -236,7 +237,7 @@ pub use vault_identity::{
 };
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 63;
+const SCHEMA_VERSION: i64 = 64;
 const PENDING_COMMAND_ELIGIBILITY: &str = "a.command_id IS NULL AND l.historical=0 AND l.retired=0 AND l.subscription_id<>'' AND l.key_epoch=? AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id) AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.command_id=l.command_id AND x.target_gateway_id=? AND x.state IN ('requested','confirmed'))";
 #[cfg(test)]
 thread_local! {
@@ -4050,6 +4051,15 @@ impl Client {
         target.map(|target| parse(&target)).transpose()
     }
 
+    /// Performs at most `budget` units of local conversation convergence work.
+    pub fn converge_conversations(&self, budget: usize) -> Result<bool, Error> {
+        let mut guard = self.lock()?;
+        if budget > 0 {
+            set_meta(&guard.conn, "conversation_merge_dirty", "1")?;
+        }
+        conversation_merge::converge(&mut guard.conn, budget)
+    }
+
     /// Deletes only an empty, recipientless draft-only conversation. Missing non-forwarded drafts
     /// are already gone and therefore succeed; a forwarded ID remains actionable as DraftMoved.
     pub fn discard_compose_draft(
@@ -4333,9 +4343,14 @@ impl Client {
         let message = self.message_by_id(message_id)?.ok_or(Error::NotFound)?;
         match (message.payload.transport, message.payload.direction) {
             (_, Direction::Outgoing) => Ok(message.payload.recipients),
-            (Transport::Mms, Direction::Incoming) => self
-                .mms_reply_context(message.payload.record.conversation_id)
-                .map(|context| context.recipients),
+            (Transport::Mms, Direction::Incoming) => {
+                let conversation_id = conversation_merge::survivor(
+                    &self.lock()?.conn,
+                    message.payload.record.conversation_id,
+                )?;
+                self.mms_reply_context(conversation_id)
+                    .map(|context| context.recipients)
+            }
             (_, Direction::Incoming) => message
                 .payload
                 .sender_address
@@ -5332,6 +5347,11 @@ impl Client {
         advance_processed_frontier(&tx)?;
         attachment_retention::complete_processed_restores(&tx)?;
         tx.commit()?;
+        if report.applied > 0 {
+            set_meta(conn, "conversation_merge_dirty", "1")?;
+        }
+        // Every host applies sync records; keep maintenance to eight small work units per pass.
+        conversation_merge::converge(conn, 8)?;
         Ok(report)
     }
 
@@ -5372,7 +5392,10 @@ impl Client {
         };
         Ok(SyncWorkStatus {
             pending_seal,
-            pending_apply: pending_snapshot || projection_work || pending_journal,
+            pending_apply: pending_snapshot
+                || projection_work
+                || pending_journal
+                || conversation_merge::has_work(&store.conn)?,
             pending_snapshot,
         })
     }
@@ -7039,7 +7062,7 @@ impl Client {
     pub fn list_conversations(&self) -> Result<Vec<Conversation>, Error> {
         let s = self.lock()?;
         let mut query = s.conn.prepare(
-            &format!("WITH newest AS (SELECT conversation_id,SUM(seen=0) AS unread,MAX(sort_at_ms) AS sort_at_ms FROM messages m WHERE NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') GROUP BY conversation_id) SELECT c.conversation_id,c.unread,COALESCE(p.pinned,0),{} FROM newest c LEFT JOIN conversation_pins p ON p.conversation_id=c.conversation_id LEFT JOIN conversation_folders f ON f.conversation_id=c.conversation_id ORDER BY c.sort_at_ms DESC,(SELECT MAX(n.local_order) FROM messages n WHERE n.conversation_id=c.conversation_id AND n.sort_at_ms=c.sort_at_ms AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=n.id AND x.state='confirmed')) DESC", conversation_folders::effective_folder_sql("c.sort_at_ms")),
+            &format!("WITH newest AS (SELECT effective_conversation_id AS conversation_id,SUM(seen=0) AS unread,MAX(sort_at_ms) AS sort_at_ms FROM messages m WHERE NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') GROUP BY effective_conversation_id) SELECT c.conversation_id,c.unread,COALESCE((SELECT p.pinned FROM conversation_pins p WHERE COALESCE((SELECT target_id FROM conversation_merges WHERE source_id=p.conversation_id),p.conversation_id)=c.conversation_id ORDER BY p.logical_revision DESC,p.writer_device_id DESC,p.source_sequence DESC,p.conversation_id DESC LIMIT 1),0),{} FROM newest c LEFT JOIN conversation_folders f ON f.conversation_id=({}) ORDER BY c.sort_at_ms DESC,(SELECT MAX(n.local_order) FROM messages n WHERE n.effective_conversation_id=c.conversation_id AND n.sort_at_ms=c.sort_at_ms AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=n.id AND x.state='confirmed')) DESC", conversation_folders::effective_folder_sql("c.sort_at_ms"), conversation_folders::winner_sql("c.conversation_id")),
         )?;
         let rows = query
             .query_map([], |r| {
@@ -7092,9 +7115,9 @@ impl Client {
         ids: &[MessageId],
     ) -> Result<bool, Error> {
         let store = self.lock()?;
-        let mut query = store
-            .conn
-            .prepare("SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1 AND conversation_id=?2)")?;
+        let mut query = store.conn.prepare(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1 AND effective_conversation_id=?2)",
+        )?;
         for id in ids {
             let belongs: bool = query.query_row(
                 params![id.to_string(), conversation_id.to_string()],
@@ -7117,7 +7140,7 @@ impl Client {
         store
             .conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM messages m JOIN message_attachments ma ON ma.message_id=m.id WHERE m.conversation_id=?1 AND ma.attachment_id=?2)",
+                "SELECT EXISTS(SELECT 1 FROM messages m JOIN message_attachments ma ON ma.message_id=m.id WHERE m.effective_conversation_id=?1 AND ma.attachment_id=?2)",
                 params![conversation_id.to_string(), attachment_id.to_string()],
                 |row| row.get(0),
             )
@@ -7208,7 +7231,7 @@ impl Client {
         }
         let store = self.lock()?;
         let mut query = store.conn.prepare(
-            "SELECT m.payload,m.sort_at_ms,m.local_order,m.id,ma.position,ma.attachment_id FROM messages m JOIN message_attachments ma ON ma.message_id=m.id WHERE m.conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (?2 IS NULL OR m.sort_at_ms < ?2 OR (m.sort_at_ms=?2 AND (m.local_order < ?3 OR (m.local_order=?3 AND (m.id < ?4 OR (m.id=?4 AND ma.position < ?5)))))) ORDER BY m.sort_at_ms DESC,m.local_order DESC,m.id DESC,ma.position DESC LIMIT ?6",
+            "SELECT m.payload,m.sort_at_ms,m.local_order,m.id,ma.position,ma.attachment_id FROM messages m JOIN message_attachments ma ON ma.message_id=m.id WHERE m.effective_conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (?2 IS NULL OR m.sort_at_ms < ?2 OR (m.sort_at_ms=?2 AND (m.local_order < ?3 OR (m.local_order=?3 AND (m.id < ?4 OR (m.id=?4 AND ma.position < ?5)))))) ORDER BY m.sort_at_ms DESC,m.local_order DESC,m.id DESC,ma.position DESC LIMIT ?6",
         )?;
         let rows = query
             .query_map(
@@ -7346,7 +7369,7 @@ impl Client {
                 let row: Option<(String, String)> = store
                     .conn
                     .query_row(
-                        "SELECT payload,conversation_id FROM messages WHERE id=?",
+                        "SELECT payload,effective_conversation_id FROM messages WHERE id=?",
                         [message_id],
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
@@ -7359,10 +7382,10 @@ impl Client {
                     return Ok(None);
                 }
                 let effective_folder = conversation_folders::effective_folder_sql(
-                    "(SELECT MAX(m.sort_at_ms) FROM messages m WHERE m.conversation_id=f.conversation_id)",
+                    "(SELECT MAX(m.sort_at_ms) FROM messages m WHERE m.effective_conversation_id=?1)",
                 );
                 let spam: bool = store.conn.query_row(
-                    &format!("SELECT EXISTS(SELECT 1 FROM conversation_folders f WHERE f.conversation_id=? AND ({effective_folder})='spam')"),
+                    &format!("SELECT EXISTS(SELECT 1 FROM conversation_folders f WHERE f.conversation_id=({}) AND ({effective_folder})='spam')", conversation_folders::winner_sql("?1")),
                     [&conversation_id],
                     |row| row.get(0),
                 )?;
@@ -7393,7 +7416,7 @@ impl Client {
     /// Freezes the IDs currently unread in batches that keep later writes bounded.
     pub fn unread_message_batches(&self) -> Result<Vec<Vec<MessageId>>, Error> {
         let store = self.lock()?;
-        let mut query = store.conn.prepare(&format!("SELECT id FROM messages WHERE seen=0 AND conversation_id NOT IN (SELECT f.conversation_id FROM conversation_folders f WHERE ({})!='inbox')", conversation_folders::effective_folder_sql("(SELECT MAX(m.sort_at_ms) FROM messages m WHERE m.conversation_id=f.conversation_id)")))?;
+        let mut query = store.conn.prepare(&format!("SELECT msg.id FROM messages msg WHERE msg.seen=0 AND NOT EXISTS (SELECT 1 FROM conversation_folders f WHERE f.conversation_id=({}) AND ({})!='inbox')", conversation_folders::winner_sql("msg.effective_conversation_id"), conversation_folders::effective_folder_sql("(SELECT MAX(m.sort_at_ms) FROM messages m WHERE m.effective_conversation_id=msg.effective_conversation_id)")))?;
         let ids = query
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -7458,7 +7481,7 @@ impl Client {
 
     pub fn unread_count(&self, conversation_id: ConversationId) -> Result<u64, Error> {
         let count: i64 = self.lock()?.conn.query_row(
-            "SELECT COUNT(*) FROM messages WHERE conversation_id=? AND seen=0",
+            "SELECT COUNT(*) FROM messages WHERE effective_conversation_id=? AND seen=0",
             params![conversation_id.to_string()],
             |r| r.get(0),
         )?;
@@ -8902,22 +8925,23 @@ macro_rules! message_select {
 // Every history read uses one total order: the non-null `sort_at_ms` key (actual provider time
 // when known, otherwise local insertion time), then `local_order` as a deterministic tiebreak.
 /// Message rows for an id list within one conversation (`?1` conversation, `?2` JSON id array).
-pub(crate) const MESSAGE_IDS_SELECT: &str =
-    message_select!("WHERE m.conversation_id=?1 AND m.id IN (SELECT value FROM json_each(?2))");
+pub(crate) const MESSAGE_IDS_SELECT: &str = message_select!(
+    "WHERE m.effective_conversation_id=?1 AND m.id IN (SELECT value FROM json_each(?2))"
+);
 const MESSAGE_FULL_SELECT: &str = message_select!(
-    "WHERE m.conversation_id=? AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') ORDER BY m.sort_at_ms,m.local_order"
+    "WHERE m.effective_conversation_id=? AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') ORDER BY m.sort_at_ms,m.local_order"
 );
 const LATEST_MESSAGE_SELECT: &str = message_select!(
-    "WHERE m.conversation_id=? AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') ORDER BY m.sort_at_ms DESC,m.local_order DESC LIMIT 1"
+    "WHERE m.effective_conversation_id=? AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') ORDER BY m.sort_at_ms DESC,m.local_order DESC LIMIT 1"
 );
 const MESSAGE_BY_ID_SELECT: &str = message_select!(
     "WHERE m.id=? AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') LIMIT 1"
 );
 const MESSAGE_PAGE_SELECT: &str = message_select!(
-    "WHERE m.conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (?2 IS NULL OR m.sort_at_ms < ?2 OR (m.sort_at_ms = ?2 AND m.local_order < ?3)) ORDER BY m.sort_at_ms DESC,m.local_order DESC LIMIT ?4"
+    "WHERE m.effective_conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (?2 IS NULL OR m.sort_at_ms < ?2 OR (m.sort_at_ms = ?2 AND m.local_order < ?3)) ORDER BY m.sort_at_ms DESC,m.local_order DESC LIMIT ?4"
 );
 const MESSAGE_SINCE_SELECT: &str = message_select!(
-    "WHERE m.conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (m.sort_at_ms > ?2 OR (m.sort_at_ms = ?2 AND m.local_order >= ?3)) ORDER BY m.sort_at_ms,m.local_order"
+    "WHERE m.effective_conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (m.sort_at_ms > ?2 OR (m.sort_at_ms = ?2 AND m.local_order >= ?3)) ORDER BY m.sort_at_ms,m.local_order"
 );
 
 fn cancellation_state_code(state: SendCancellationState) -> &'static str {
@@ -9310,7 +9334,7 @@ fn history_anchor_order(
     message_id: MessageId,
 ) -> Result<HistoryAnchor, Error> {
     conn.query_row(
-        "SELECT sort_at_ms,local_order FROM messages WHERE id=? AND conversation_id=?",
+        "SELECT sort_at_ms,local_order FROM messages WHERE id=? AND effective_conversation_id=?",
         params![message_id.to_string(), conversation_id.to_string()],
         |row| {
             Ok(HistoryAnchor {
@@ -11023,6 +11047,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(REACTION_STAGING_MIGRATION_62)?;
             tx.execute_batch(REACTION_STAGING_MIGRATION_63)?;
             tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
+            apply_conversation_merge_migration(&tx)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -11180,6 +11205,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(REACTION_STAGING_MIGRATION_62)?;
             tx.execute_batch(REACTION_STAGING_MIGRATION_63)?;
             tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
+            apply_conversation_merge_migration(&tx)?;
             attachment_retention::initialize(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -11187,6 +11213,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
         Some(62) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(REACTION_STAGING_MIGRATION_63)?;
+            apply_conversation_merge_migration(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
@@ -11194,6 +11221,13 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(REACTION_STAGING_MIGRATION_62)?;
             tx.execute_batch(REACTION_STAGING_MIGRATION_63)?;
+            apply_conversation_merge_migration(&tx)?;
+            tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
+            tx.commit()?;
+        }
+        Some(63) => {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            apply_conversation_merge_migration(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
@@ -11205,6 +11239,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     attachment_retention::initialize(conn)?;
     mcp_commands::initialize(conn)?;
     rcs_mirror::initialize(conn)?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS rcs_mirror_ids_conversation ON rcs_mirror_ids(conversation_id)",
+    )?;
     media_cache::initialize(conn)?;
     draft_sync::repair_unqueued_intent_media_references(conn)?;
     deferred_media::initialize(conn)?;
@@ -11260,6 +11297,66 @@ fn install_snapshot_apply_index(conn: &Connection) -> Result<(), Error> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS journal_apply_eligible ON journal(key_epoch,cursor) WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated';",
     )?;
+    Ok(())
+}
+
+fn apply_conversation_merge_migration(conn: &Connection) -> Result<(), Error> {
+    let initialize_counts = !table_exists(conn, "conversation_message_counts")?;
+    add_column_if_missing(
+        conn,
+        "messages",
+        "effective_conversation_id TEXT NOT NULL DEFAULT ''",
+    )?;
+    conn.execute_batch(
+        "UPDATE messages SET effective_conversation_id=conversation_id WHERE effective_conversation_id='';
+         CREATE INDEX IF NOT EXISTS messages_effective_conversation ON messages(effective_conversation_id, local_order);
+         CREATE INDEX IF NOT EXISTS messages_effective_chronological ON messages(effective_conversation_id, actual_sent_at_ms, local_order);
+         CREATE INDEX IF NOT EXISTS messages_effective_sort ON messages(effective_conversation_id, sort_at_ms, local_order);
+         CREATE TRIGGER IF NOT EXISTS messages_effective_default AFTER INSERT ON messages
+         WHEN NEW.effective_conversation_id=''
+         BEGIN UPDATE messages SET effective_conversation_id=NEW.conversation_id WHERE id=NEW.id; END;
+         CREATE TABLE IF NOT EXISTS conversation_merges(source_id TEXT PRIMARY KEY, target_id TEXT NOT NULL);
+         CREATE INDEX IF NOT EXISTS conversation_merges_target ON conversation_merges(target_id);
+         CREATE TABLE IF NOT EXISTS conversation_merge_jobs(source_id TEXT PRIMARY KEY, target_id TEXT NOT NULL, cursor INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'moving', member_id TEXT NOT NULL DEFAULT '');
+         CREATE TABLE IF NOT EXISTS conversation_merge_job_members(source_id TEXT NOT NULL, member_id TEXT NOT NULL, PRIMARY KEY(source_id,member_id));
+         CREATE TABLE IF NOT EXISTS conversation_counterparts(conversation_id TEXT PRIMARY KEY, canonical_address TEXT, counterparts INTEGER NOT NULL, carrier_only INTEGER NOT NULL, has_group INTEGER NOT NULL, message_count INTEGER NOT NULL);
+         CREATE INDEX IF NOT EXISTS conversation_counterparts_address ON conversation_counterparts(canonical_address);
+         CREATE TABLE IF NOT EXISTS conversation_counterpart_messages(message_id TEXT PRIMARY KEY, unresolved INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0, conversation_id TEXT NOT NULL DEFAULT '');
+         CREATE INDEX IF NOT EXISTS conversation_counterpart_unresolved ON conversation_counterpart_messages(unresolved,generation);
+         CREATE INDEX IF NOT EXISTS conversation_counterpart_unresolved_conversation ON conversation_counterpart_messages(conversation_id,unresolved);
+         CREATE TABLE IF NOT EXISTS conversation_message_counts(conversation_id TEXT PRIMARY KEY, total INTEGER NOT NULL, processed INTEGER NOT NULL);
+         CREATE TRIGGER IF NOT EXISTS conversation_counts_insert AFTER INSERT ON messages BEGIN
+           INSERT INTO conversation_message_counts(conversation_id,total,processed) VALUES(NEW.conversation_id,1,0)
+             ON CONFLICT(conversation_id) DO UPDATE SET total=total+1;
+         END;
+         CREATE TRIGGER IF NOT EXISTS conversation_counts_delete AFTER DELETE ON messages BEGIN
+           UPDATE conversation_counterpart_messages SET conversation_id=OLD.conversation_id WHERE message_id=OLD.id AND conversation_id='';
+           DELETE FROM conversation_counterpart_messages WHERE message_id=OLD.id;
+           UPDATE conversation_message_counts SET total=total-1 WHERE conversation_id=OLD.conversation_id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS conversation_processed_insert AFTER INSERT ON conversation_counterpart_messages WHEN NEW.unresolved=0 BEGIN
+           UPDATE conversation_message_counts SET processed=processed+1 WHERE conversation_id=(SELECT conversation_id FROM messages WHERE id=NEW.message_id);
+         END;
+         CREATE TRIGGER IF NOT EXISTS conversation_processed_delete AFTER DELETE ON conversation_counterpart_messages WHEN OLD.unresolved=0 BEGIN
+           UPDATE conversation_message_counts SET processed=processed-1 WHERE conversation_id=COALESCE(NULLIF(OLD.conversation_id,''),(SELECT conversation_id FROM messages WHERE id=OLD.message_id));
+         END;
+         CREATE TRIGGER IF NOT EXISTS conversation_own_address_insert AFTER INSERT ON mms_own_addresses BEGIN
+           INSERT INTO metadata(k,v) VALUES('conversation_mms_generation','1') ON CONFLICT(k) DO UPDATE SET v=CAST(v AS INTEGER)+1;
+         END;
+         CREATE TRIGGER IF NOT EXISTS conversation_own_address_update AFTER UPDATE OF address ON mms_own_addresses WHEN OLD.address<>NEW.address BEGIN
+           INSERT INTO metadata(k,v) VALUES('conversation_mms_generation','1') ON CONFLICT(k) DO UPDATE SET v=CAST(v AS INTEGER)+1;
+         END;",
+    )?;
+    if initialize_counts {
+        conn.execute_batch(
+            "INSERT INTO conversation_message_counts(conversation_id,total,processed)
+             SELECT conversation_id,COUNT(*),0 FROM messages GROUP BY conversation_id;
+             UPDATE conversation_message_counts SET processed=(
+               SELECT COUNT(*) FROM messages m JOIN conversation_counterpart_messages p ON p.message_id=m.id
+               WHERE m.conversation_id=conversation_message_counts.conversation_id AND p.unresolved=0
+             );",
+        )?;
+    }
     Ok(())
 }
 
@@ -12200,7 +12297,9 @@ fn apply_record(
         ) => {
             rcs_receive::apply_replicated_reported(conn, message_id, rcs_reported)?;
         }
-        (EnvelopePurpose::Event, PrivatePayload::RcsConversationMetadata(metadata)) => {
+        (EnvelopePurpose::Event, PrivatePayload::RcsConversationMetadata(mut metadata)) => {
+            metadata.conversation_id =
+                conversation_merge::survivor(conn, metadata.conversation_id)?;
             if !rcs_receive::apply_replicated_metadata(
                 conn,
                 &metadata,
@@ -12230,7 +12329,9 @@ fn apply_record(
                 return Ok(Some(Q::InvalidPayload));
             }
         }
-        (EnvelopePurpose::Event, PrivatePayload::RcsLinkEligibility(eligibility)) => {
+        (EnvelopePurpose::Event, PrivatePayload::RcsLinkEligibility(mut eligibility)) => {
+            eligibility.eligibility.conversation_id =
+                conversation_merge::survivor(conn, eligibility.eligibility.conversation_id)?;
             if !rcs_capability::apply_eligibility(
                 conn,
                 &eligibility.eligibility,
@@ -12842,7 +12943,7 @@ fn apply_record(
             sender_blocklist::apply_request(
                 conn,
                 request_id,
-                conversation_id,
+                conversation_merge::survivor(conn, conversation_id)?,
                 &numbers,
                 &target_device_id,
                 sender_blocklist::RequestFreshness {
@@ -13120,10 +13221,11 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
         .or(message.ordered_at_ms.filter(|time| *time > 0))
         .unwrap_or_else(notifications::now_ms);
     let inserted = conn.execute(
-        "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,provider_message_id,payload,actual_sent_at_ms,sort_at_ms,seen) VALUES(?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO messages(id,conversation_id,effective_conversation_id,source_device_id,source_sequence,provider_message_id,payload,actual_sent_at_ms,sort_at_ms,seen) VALUES(?,?,?,?,?,?,?,?,?,?)",
         params![
             id,
             message.record.conversation_id.to_string(),
+            conversation_merge::survivor(conn, message.record.conversation_id)?.to_string(),
             message.source_device_id.to_string(),
             to_i64(message.record.source_sequence.0)?,
             message.provider_message_id,
@@ -13143,6 +13245,7 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
         Err(error) => return Err(error.into()),
     }
     message_origin::index_message(conn, message)?;
+    conversation_merge::summarize(conn, message)?;
     if !message.record.attachments.is_empty() {
         let mut insert_attachment = conn.prepare(
             "INSERT INTO message_attachments(message_id,position,attachment_id) VALUES(?,?,?)",
@@ -13162,10 +13265,29 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
             .first()
             .filter(|_| message.recipients.len() == 1),
     };
-    if message.mms_context.is_none()
-        && let Some(address) = address
-    {
-        index_address(conn, address, message.record.conversation_id)?;
+    if message.transport == Transport::Mms {
+        let region = conversation_match::identity_region(conn)?;
+        let mut own_addresses = conversation_match::OwnAddressCache::new();
+        if let Some(participants) = conversation_match::message_recipient_set(
+            conn,
+            message,
+            Some(&region),
+            &mut own_addresses,
+        )? && participants.len() == 1
+            && let Some(address) = participants.first()
+        {
+            index_address(
+                conn,
+                address,
+                conversation_merge::survivor(conn, message.record.conversation_id)?,
+            )?;
+        }
+    } else if let Some(address) = address {
+        index_address(
+            conn,
+            address,
+            conversation_merge::survivor(conn, message.record.conversation_id)?,
+        )?;
     }
     Ok(Inserted::New)
 }
@@ -13209,16 +13331,17 @@ fn index_address(
 
 fn queue_message_banner(conn: &Connection, message: &MessagePayload) -> Result<(), Error> {
     notifications::prune_banners(conn)?;
+    let conversation_id = conversation_merge::survivor(conn, message.record.conversation_id)?;
     if message.direction != Direction::Incoming
         || message.imported
         || !notifications::banner_is_fresh(message.sent_at_ms, notifications::now_ms())
-        || conn.query_row("SELECT EXISTS(SELECT 1 FROM conversation_folders WHERE conversation_id=? AND folder='spam')", [message.record.conversation_id.to_string()], |row| row.get::<_, bool>(0))?
+        || conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM conversation_folders WHERE conversation_id=({}) AND folder='spam')", conversation_folders::winner_sql("?1")), [conversation_id.to_string()], |row| row.get::<_, bool>(0))?
     {
         return Ok(());
     }
     conn.execute(
         "INSERT OR IGNORE INTO banner_candidates(id,kind,conversation_id,title,body,created_at) VALUES(?, 'message', ?, ?, ?, ?)",
-        params![message.record.message_id.to_string(), message.record.conversation_id.to_string(), message.sender_address.clone().unwrap_or_else(|| "New message".into()), message.body, notifications::now_ms()],
+        params![message.record.message_id.to_string(), conversation_id.to_string(), message.sender_address.clone().unwrap_or_else(|| "New message".into()), message.body, notifications::now_ms()],
     )?;
     Ok(())
 }
@@ -16534,6 +16657,16 @@ fn redirect_target(
             &format!("SELECT {target} FROM compose_draft_redirects WHERE {source}=?{scope} ORDER BY rowid DESC LIMIT 1"),
             params![current], |row| row.get(0),
         ).optional()?;
+        let next = if next.is_none() && !by_draft {
+            conn.query_row(
+                "SELECT target_id FROM conversation_merges WHERE source_id=?",
+                params![current],
+                |row| row.get(0),
+            )
+            .optional()?
+        } else {
+            next
+        };
         let Some(next) = next else {
             return Ok(found.then_some(current));
         };
@@ -18900,7 +19033,7 @@ mod tests {
     fn message_status_select_pairs_earliest_command_state_and_time() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE messages(local_order INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, conversation_id TEXT NOT NULL, payload TEXT NOT NULL, seen INTEGER NOT NULL, sort_at_ms INTEGER NOT NULL); \
+            "CREATE TABLE messages(local_order INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, conversation_id TEXT NOT NULL, effective_conversation_id TEXT NOT NULL, payload TEXT NOT NULL, seen INTEGER NOT NULL, sort_at_ms INTEGER NOT NULL); \
              CREATE TABLE commands(command_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, gateway_device_id TEXT NOT NULL); \
              CREATE TABLE send_status(command_id TEXT NOT NULL, producer_device_id TEXT NOT NULL, producer_sequence INTEGER NOT NULL, state TEXT NOT NULL, status_at_ms INTEGER, refusal_reason TEXT, PRIMARY KEY(command_id, producer_device_id)); \
              CREATE TABLE send_cancellations(message_id TEXT PRIMARY KEY, command_id TEXT NOT NULL, target_gateway_id TEXT NOT NULL, state TEXT NOT NULL); \
@@ -18911,7 +19044,7 @@ mod tests {
         let message_id = MessageId::new();
         let gateway_id = DeviceId::new();
         conn.execute(
-            "INSERT INTO messages(local_order,id,conversation_id,payload,seen,sort_at_ms) VALUES(1,?,?, '{}',1,1)",
+            "INSERT INTO messages(local_order,id,conversation_id,effective_conversation_id,payload,seen,sort_at_ms) VALUES(1,?,?2,?2, '{}',1,1)",
             params![message_id.to_string(), conversation_id.to_string()],
         )
         .unwrap();
@@ -23028,6 +23161,134 @@ mod tests {
             cache_only.seal_computer_handoff(&sender, &computer_context),
             Err(Error::KeysUnavailable)
         ));
+    }
+
+    #[test]
+    fn merged_conversation_readers_share_history_and_search() {
+        use peppy_crypto::create_vault_check_header;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("merged-readers.db"),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[9; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let survivor = ConversationId::new();
+        let source = ConversationId::new();
+        let first = client
+            .capture_incoming(IncomingSms {
+                conversation_id: Some(survivor),
+                sender_address: "+15555550100".into(),
+                body: "needle first".into(),
+                provider_message_id: Some("merged-first".into()),
+                imported: false,
+            })
+            .unwrap();
+        let second = client
+            .capture_incoming(IncomingSms {
+                conversation_id: Some(source),
+                sender_address: "+15555550101".into(),
+                body: "needle second".into(),
+                provider_message_id: Some("merged-second".into()),
+                imported: false,
+            })
+            .unwrap();
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO conversation_merges(source_id,target_id) VALUES(?,?)",
+                    params![source.to_string(), survivor.to_string()],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE messages SET effective_conversation_id=? WHERE conversation_id=?",
+                    params![survivor.to_string(), source.to_string()],
+                )
+                .unwrap();
+        }
+        let conversations = client.list_conversations().unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].conversation_id, survivor);
+        assert_eq!(client.unread_count(survivor).unwrap(), 2);
+        let page = client.messages_page(survivor, None, 1).unwrap();
+        assert!(page.has_more);
+        assert_eq!(
+            page.messages[0].payload.record.message_id,
+            second.message_id
+        );
+        let older = client
+            .messages_page(survivor, Some(second.message_id), 1)
+            .unwrap();
+        assert_eq!(
+            older.messages[0].payload.record.message_id,
+            first.message_id
+        );
+        assert!(
+            client
+                .messages_belong_to_conversation(survivor, &[second.message_id])
+                .unwrap()
+        );
+        assert_eq!(
+            client
+                .messages_since(survivor, first.message_id)
+                .unwrap()
+                .len(),
+            2
+        );
+        let window = client
+            .load_message_window(MessageWindowRequest::Around {
+                conversation_id: survivor.to_string(),
+                message_id: second.message_id.to_string(),
+            })
+            .unwrap();
+        assert_eq!(window.messages.len(), 2);
+        {
+            let store = client.lock().unwrap();
+            assert_eq!(
+                conversation_match::conversation_for_recipients(
+                    &store.conn,
+                    &["+15555550101".into()]
+                )
+                .unwrap(),
+                Some(survivor),
+            );
+        }
+        let search = client
+            .search_local(LocalSearchRequest {
+                query: "155555501".into(),
+                kind: Some(SearchKind::Conversation),
+                cursor: None,
+                limit: Some(10),
+            })
+            .unwrap();
+        assert!(
+            matches!(search.items.as_slice(), [LocalSearchHit::Conversation { conversation_id, .. }] if conversation_id == &survivor.to_string())
+        );
+        let search = client
+            .search_local(LocalSearchRequest {
+                query: "needle".into(),
+                kind: Some(SearchKind::Message),
+                cursor: None,
+                limit: Some(10),
+            })
+            .unwrap();
+        assert_eq!(search.items.len(), 2);
+        assert!(search.items.iter().all(|hit| matches!(hit, LocalSearchHit::Message { conversation_id, .. } if conversation_id == &survivor.to_string())));
     }
 
     #[test]

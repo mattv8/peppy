@@ -20,6 +20,8 @@ fn roll_back_migrations_after_version_25(conn: &rusqlite::Connection) {
          DROP INDEX IF EXISTS messages_search_metadata;
          DROP INDEX IF EXISTS messages_latest_mms;
          DROP INDEX IF EXISTS messages_latest_mms_context;
+         DROP INDEX IF EXISTS messages_effective_latest_mms;
+         DROP INDEX IF EXISTS messages_effective_latest_mms_context;
          DROP TABLE IF EXISTS local_search_fts;
          DELETE FROM metadata WHERE k IN ('search_remaining','search_generation','search_backfill_highwater','search_backfill_watermark');
          DROP TABLE mms_backfill_remote_capacity;
@@ -851,6 +853,7 @@ fn version_17_upgrade_seeds_legacy_policy_only_once() {
          DROP TABLE sms_acquisitions; DROP TABLE sms_provider_aliases; \
          DROP TABLE sms_scan_checkpoints; DROP TABLE sms_reconciliation_scans; \
          DROP TABLE sms_broadcast_aliases; DROP INDEX messages_sort; \
+         DROP INDEX messages_effective_sort; DROP INDEX messages_effective_chronological; \
          ALTER TABLE messages DROP COLUMN sort_at_ms; ALTER TABLE messages DROP COLUMN actual_sent_at_ms; \
          DROP INDEX attempts_time; ALTER TABLE attempts DROP COLUMN attempted_at_ms; \
          UPDATE schema_meta SET version=17;",

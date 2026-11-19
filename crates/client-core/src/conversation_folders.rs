@@ -30,6 +30,12 @@ pub(super) fn effective_folder_sql(latest: &str) -> String {
     )
 }
 
+pub(super) fn winner_sql(conversation: &str) -> String {
+    format!(
+        "SELECT f2.conversation_id FROM conversation_folders f2 WHERE COALESCE((SELECT target_id FROM conversation_merges WHERE source_id=f2.conversation_id),f2.conversation_id)={conversation} ORDER BY f2.logical_revision DESC,f2.writer_device_id DESC,f2.source_sequence DESC,f2.conversation_id DESC LIMIT 1"
+    )
+}
+
 pub(super) fn valid_event(
     conversation_id: ConversationId,
     folder: ConversationFolder,
@@ -65,9 +71,10 @@ pub(super) fn apply(
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0);
     set_meta(conn, CLOCK, &clock.max(revision).to_string())?;
-    let changed = conn.execute("INSERT INTO conversation_folders(conversation_id,folder,archived_through_ms,logical_revision,writer_device_id,producer_device_id,source_sequence) VALUES(?,?,?,?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET folder=excluded.folder,archived_through_ms=excluded.archived_through_ms,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>conversation_folders.logical_revision OR (excluded.logical_revision=conversation_folders.logical_revision AND excluded.writer_device_id>conversation_folders.writer_device_id)", params![conversation_id.to_string(), folder.as_str(), archived_through_ms, revision, writer, producer, sequence])?;
+    let changed = conn.execute("INSERT INTO conversation_folders(conversation_id,folder,archived_through_ms,logical_revision,writer_device_id,producer_device_id,source_sequence) VALUES(?,?,?,?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET folder=excluded.folder,archived_through_ms=excluded.archived_through_ms,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>conversation_folders.logical_revision OR (excluded.logical_revision=conversation_folders.logical_revision AND (excluded.writer_device_id>conversation_folders.writer_device_id OR (excluded.writer_device_id=conversation_folders.writer_device_id AND excluded.source_sequence>conversation_folders.source_sequence)))", params![conversation_id.to_string(), folder.as_str(), archived_through_ms, revision, writer, producer, sequence])?;
     if changed > 0 && folder == ConversationFolder::Spam {
-        conn.execute("DELETE FROM banner_candidates WHERE acknowledged=0 AND kind='message' AND conversation_id=?", [conversation_id.to_string()])?;
+        let survivor = conversation_merge::survivor(conn, conversation_id)?;
+        conn.execute(&format!("DELETE FROM banner_candidates WHERE acknowledged=0 AND kind='message' AND COALESCE((SELECT target_id FROM conversation_merges WHERE source_id=banner_candidates.conversation_id),conversation_id)=?1 AND (SELECT folder FROM conversation_folders WHERE conversation_id=({}))='spam'", winner_sql("?1")), [survivor.to_string()])?;
     }
     Ok(())
 }
@@ -88,7 +95,7 @@ impl Client {
         }
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let archived_through_ms: Option<i64> = tx.query_row(
-            "SELECT MAX(sort_at_ms) FROM messages WHERE conversation_id=?",
+            "SELECT MAX(sort_at_ms) FROM messages WHERE effective_conversation_id=?",
             [conversation_id.to_string()],
             |row| row.get(0),
         )?;
@@ -102,11 +109,10 @@ impl Client {
             .unwrap_or(0);
         let existing: Option<i64> = tx
             .query_row(
-                "SELECT logical_revision FROM conversation_folders WHERE conversation_id=?",
+                "SELECT MAX(logical_revision) FROM conversation_folders WHERE COALESCE((SELECT target_id FROM conversation_merges WHERE source_id=conversation_folders.conversation_id),conversation_id)=?",
                 [conversation_id.to_string()],
                 |row| row.get(0),
-            )
-            .optional()?;
+            )?;
         let base_revision = clock.max(
             existing
                 .and_then(|value| u64::try_from(value).ok())

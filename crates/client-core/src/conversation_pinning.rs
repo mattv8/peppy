@@ -32,7 +32,7 @@ pub(super) fn apply(
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0);
     set_meta(conn, CLOCK, &clock.max(revision).to_string())?;
-    conn.execute("INSERT INTO conversation_pins(conversation_id,pinned,logical_revision,writer_device_id,producer_device_id,source_sequence) VALUES(?,?,?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET pinned=excluded.pinned,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>conversation_pins.logical_revision OR (excluded.logical_revision=conversation_pins.logical_revision AND excluded.writer_device_id>conversation_pins.writer_device_id)", params![conversation_id.to_string(), pinned, revision, writer, producer, sequence])?;
+    conn.execute("INSERT INTO conversation_pins(conversation_id,pinned,logical_revision,writer_device_id,producer_device_id,source_sequence) VALUES(?,?,?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET pinned=excluded.pinned,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>conversation_pins.logical_revision OR (excluded.logical_revision=conversation_pins.logical_revision AND (excluded.writer_device_id>conversation_pins.writer_device_id OR (excluded.writer_device_id=conversation_pins.writer_device_id AND excluded.source_sequence>conversation_pins.source_sequence)))", params![conversation_id.to_string(), pinned, revision, writer, producer, sequence])?;
     Ok(())
 }
 
@@ -52,7 +52,7 @@ impl Client {
         }
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=?)",
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE effective_conversation_id=?)",
             [conversation_id.to_string()],
             |row| row.get(0),
         )?;
@@ -64,11 +64,10 @@ impl Client {
             .unwrap_or(0);
         let existing: Option<i64> = tx
             .query_row(
-                "SELECT logical_revision FROM conversation_pins WHERE conversation_id=?",
+                "SELECT MAX(logical_revision) FROM conversation_pins WHERE COALESCE((SELECT target_id FROM conversation_merges WHERE source_id=conversation_pins.conversation_id),conversation_id)=?",
                 [conversation_id.to_string()],
                 |row| row.get(0),
-            )
-            .optional()?;
+            )?;
         let base_revision = clock.max(
             existing
                 .and_then(|value| u64::try_from(value).ok())

@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use std::collections::BTreeSet;
 use tempfile::TempDir;
 
-const CURRENT_SCHEMA_VERSION: i64 = 63;
+const CURRENT_SCHEMA_VERSION: i64 = 64;
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -73,6 +73,41 @@ fn schema_shape(connection: &Connection) -> BTreeSet<String> {
     shape
 }
 
+/// The merge migration's definitions, including triggers and the effective-column default.
+fn merge_schema_shape(connection: &Connection) -> BTreeSet<String> {
+    let mut shape: BTreeSet<String> = connection
+        .prepare(
+            "SELECT type || ' ' || name || ' ' || sql FROM sqlite_master
+             WHERE name IN ('conversation_merges','conversation_merges_target',
+                 'conversation_merge_jobs','conversation_counterparts',
+                 'conversation_merge_job_members','conversation_message_counts',
+                 'conversation_counterparts_address','conversation_counterpart_messages',
+                 'conversation_counterpart_unresolved','conversation_counterpart_unresolved_conversation',
+                 'messages_effective_conversation','messages_effective_chronological',
+                 'messages_effective_sort','messages_effective_default',
+                 'messages_effective_latest_mms','messages_effective_latest_mms_context',
+                 'conversation_own_address_insert','conversation_own_address_update',
+                 'conversation_counts_insert','conversation_counts_delete',
+                 'conversation_processed_insert','conversation_processed_delete',
+                 'rcs_mirror_ids_conversation')",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let column: String = connection
+        .query_row(
+            "SELECT type || ':' || \"notnull\" || ':' || COALESCE(dflt_value,'<null>') FROM pragma_table_info('messages') WHERE name='effective_conversation_id'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    shape.insert(format!("messages.effective_conversation_id {column}"));
+    assert_eq!(shape.len(), 24, "missing merge schema objects");
+    shape
+}
+
 fn fresh_shape() -> BTreeSet<String> {
     let directory = TempDir::new().unwrap();
     let config = config_at(&directory, "fresh.db");
@@ -95,6 +130,15 @@ fn upgrade_fixture(name: &str, source_version: i64) -> (TempDir, ClientConfig, B
     drop(open(&config));
     let upgraded = raw_connection(&config.database_path);
     assert_eq!(schema_version(&upgraded), CURRENT_SCHEMA_VERSION, "{name}");
+    let fresh_directory = TempDir::new().unwrap();
+    let fresh_config = config_at(&fresh_directory, "fresh.db");
+    drop(open(&fresh_config));
+    let fresh = raw_connection(&fresh_config.database_path);
+    assert_eq!(
+        merge_schema_shape(&upgraded),
+        merge_schema_shape(&fresh),
+        "{name}"
+    );
     let shape = schema_shape(&upgraded);
     (directory, config, shape)
 }

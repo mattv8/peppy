@@ -34,7 +34,7 @@ fn insert_sms_history(conn: &mut Connection, conversation: ConversationId) {
     let transaction = conn.transaction().unwrap();
     {
         let mut insert = transaction.prepare(
-            "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,payload,seen,sort_at_ms) VALUES(?,?,?,?,?,0,?)",
+            "INSERT INTO messages(id,conversation_id,effective_conversation_id,source_device_id,source_sequence,payload,seen,sort_at_ms) VALUES(?1,?2,?2,?3,?4,?5,0,?6)",
         ).unwrap();
         let source = DeviceId::new().to_string();
         for sequence in 1..=SMS_ROWS {
@@ -57,7 +57,7 @@ fn insert_sms_history(conn: &mut Connection, conversation: ConversationId) {
 fn partial_indexes_bound_sms_only_reply_lookup_work() {
     let mut conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
-        "CREATE TABLE messages(local_order INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,conversation_id TEXT NOT NULL,source_device_id TEXT NOT NULL,source_sequence INTEGER NOT NULL,payload TEXT NOT NULL,seen INTEGER NOT NULL,sort_at_ms INTEGER NOT NULL); CREATE INDEX messages_sort ON messages(conversation_id,sort_at_ms,local_order);",
+        "CREATE TABLE messages(local_order INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,conversation_id TEXT NOT NULL,effective_conversation_id TEXT NOT NULL,source_device_id TEXT NOT NULL,source_sequence INTEGER NOT NULL,payload TEXT NOT NULL,seen INTEGER NOT NULL,sort_at_ms INTEGER NOT NULL); CREATE INDEX messages_sort ON messages(effective_conversation_id,sort_at_ms,local_order);",
     ).unwrap();
     let conversation = ConversationId::new();
     insert_sms_history(&mut conn, conversation);
@@ -77,10 +77,12 @@ fn partial_indexes_bound_sms_only_reply_lookup_work() {
         contextual_steps <= MAX_INDEXED_VM_STEPS,
         "contextual MMS used {contextual_steps} VM steps"
     );
-    assert!(query_plan(&conn, LATEST_MMS_SQL, conversation).contains("messages_latest_mms"));
+    assert!(
+        query_plan(&conn, LATEST_MMS_SQL, conversation).contains("messages_effective_latest_mms")
+    );
     assert!(
         query_plan(&conn, LATEST_CONTEXTUAL_MMS_SQL, conversation)
-            .contains("messages_latest_mms_context")
+            .contains("messages_effective_latest_mms_context")
     );
 }
 
@@ -113,7 +115,7 @@ fn indexes_preserve_reply_metadata_and_source_sim_guard() {
         store
             .conn
             .execute_batch(
-                "DROP INDEX messages_latest_mms; DROP INDEX messages_latest_mms_context;",
+                "DROP INDEX messages_effective_latest_mms; DROP INDEX messages_effective_latest_mms_context;",
             )
             .unwrap();
     }
