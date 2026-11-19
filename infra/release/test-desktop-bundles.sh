@@ -140,7 +140,22 @@ if [ "$1" = import ]; then
     import_count=$((import_count + 1))
     printf '%s' "$import_count" > "$IMPORT_COUNT"
   fi
+  format='' type=''
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -f) format=$2; shift 2 ;;
+      -t) type=$2; shift 2 ;;
+      -k|-P|-T) shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [ "$format" != pkcs12 ] || [ "$type" != agg ]; then
+    printf 'security import requires explicit PKCS12 aggregate format\n' >&2
+    exit 72
+  fi
   [ "${PEPPY_APP_STORE_FAIL-}" != "import-$import_count" ] || exit 73
+  exit 0
 fi
 if [ "$1" = cms ]; then
   printf '<plist><dict><key>Entitlements</key><dict><key>com.apple.developer.team-identifier</key><string>%s</string><key>com.apple.application-identifier</key><string>%s</string></dict></dict></plist>\n' "${SECURITY_PROFILE_TEAM-team}" "${SECURITY_PROFILE_APPLICATION_IDENTIFIER-team.org.peppy.desktop}"
@@ -685,11 +700,18 @@ assert_app_store_cleanup() {
 assert_app_store_cleanup '' 0
 assert_app_store_cleanup allocation-2 76
 assert_app_store_cleanup import-1 73
+grep -Fq 'App Store application certificate import failed' "$app_store_cleanup_dir/output"
 assert_app_store_cleanup import-2 73
+grep -Fq 'App Store installer certificate import failed' "$app_store_cleanup_dir/output"
 assert_app_store_cleanup sign 74
 assert_app_store_cleanup verify 74
 assert_app_store_cleanup package 75
+test "$(SECURITY_DELETE_EXIT=99 run_app_store_cleanup_case "$script_dir/build-desktop-bundles.sh" import-1 73)" = 73
+grep -Fq 'App Store application certificate import failed' "$app_store_cleanup_dir/output"
+test -z "$(find "$app_store_cleanup_dir/private" -type f -print -quit)"
+grep -Fqx 'list-keychains -d user -s original.keychain-db' "$app_store_cleanup_dir/search-list"
 test "$(SECURITY_DELETE_EXIT=99 run_app_store_cleanup_case "$script_dir/build-desktop-bundles.sh" import-2 73)" = 73
+grep -Fq 'App Store installer certificate import failed' "$app_store_cleanup_dir/output"
 test -z "$(find "$app_store_cleanup_dir/private" -type f -print -quit)"
 grep -Fqx 'list-keychains -d user -s original.keychain-db' "$app_store_cleanup_dir/search-list"
 
