@@ -380,6 +380,11 @@ async fn validate_vault_identity_runtime_privileges(pool: &PgPool) -> Result<(),
     Ok(())
 }
 
+/// Validates the canonical tenant policies used by hosted runtime assemblies.
+pub async fn validate_hosted_tenant_policies(pool: &PgPool) -> Result<(), RlsError> {
+    validate_rls_schema(pool, false).await
+}
+
 async fn validate_rls_schema(pool: &PgPool, community: bool) -> Result<(), RlsError> {
     let (table_count, all_enabled, no_force): (i64, bool, bool) = sqlx::query_as(
         "SELECT count(*), COALESCE(bool_and(relrowsecurity), false), COALESCE(bool_and(NOT relforcerowsecurity), false) FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relname = ANY($1)",
