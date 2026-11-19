@@ -108,12 +108,21 @@ fn purchase_options_for(distribution: Distribution, storefront: Option<&str>) ->
     }
 }
 
-async fn current_options() -> PurchaseOptions {
+pub(crate) async fn current_options() -> PurchaseOptions {
     if Distribution::detect() != Distribution::AppStore {
         return purchase_options_for(Distribution::Direct, None);
     }
     let storefront = storekit::storefront_country().await.ok().flatten();
     purchase_options_for(Distribution::AppStore, storefront.as_deref())
+}
+
+/// Refuses website billing links unless the current build and storefront allow website purchasing.
+pub(crate) fn require_website_billing(options: PurchaseOptions) -> BridgeResult<()> {
+    if options.website {
+        Ok(())
+    } else {
+        Err(unsupported())
+    }
 }
 
 fn http(origin: &str) -> BridgeResult<reqwest::Client> {
@@ -699,6 +708,22 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn website_billing_guard_refuses_only_when_website_purchasing_is_off() {
+        assert!(require_website_billing(purchase_options_for(Distribution::Direct, None)).is_ok());
+        assert!(require_website_billing(purchase_options_for(
+            Distribution::AppStore,
+            Some("USA")
+        ))
+        .is_ok());
+        let error = require_website_billing(purchase_options_for(
+            Distribution::AppStore,
+            Some("CAN"),
+        ))
+        .unwrap_err();
+        assert_eq!(error.code, "unsupported");
     }
 
     #[tokio::test]

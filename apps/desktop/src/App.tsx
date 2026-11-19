@@ -135,7 +135,7 @@ import { DEFAULT_MMS_LIMIT_BYTES, availabilityProblem, gatewayAvailability, impo
 import { fileSize } from "./fileSize";
 import { formatCopy } from "./generated/peppyCopy";
 import { SystemRibbon, SystemRibbonAnnouncement, SystemRibbonStrip } from "./notices/SystemRibbon";
-import { openAccountManageUrl, resolveSystemRibbon } from "./notices/systemRibbonModel";
+import { openAccountManageUrl, resolveSystemRibbon, type RibbonActionContext, type RibbonBillingFacts } from "./notices/systemRibbonModel";
 import { useAccountNotice } from "./notices/useAccountNotice";
 import { AppNoticeBanner, type AppNotice } from "./notices/AppNoticeBanner";
 import { MarkAllReadAction } from "./conversation/MarkAllReadAction";
@@ -5392,7 +5392,35 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
 
   const accountIdentityKey = snapshot ? `${snapshot.connection.origin ?? ""}|${snapshot.sessionScopeId ?? ""}` : null;
   const accountNotice = useAccountNotice(accountIdentityKey);
+  const setupCode = snapshot?.connection.errorCode;
+  const nativeCredentialed = snapshot?.mode === "native" && !["server-required", "credentials-required", "revoked"].includes(setupCode ?? "");
+  const enrolled = Boolean(snapshot && (nativeCredentialed || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state !== "preview")));
   const [ribbonOpenFailed, setRibbonOpenFailed] = useState(false);
+  const [ribbonBilling, setRibbonBilling] = useState<(RibbonBillingFacts & { identityKey: string }) | null>(null);
+  const accountNoticeKind = accountNotice.notice?.kind ?? null;
+
+  /* A failed open belongs to the account that showed it. */
+  useEffect(() => {
+    setRibbonOpenFailed(false);
+  }, [accountIdentityKey]);
+
+  /* Native and enrolled only. Refetches when a notice appears or changes kind, so a failed read is not kept for the session. */
+  useEffect(() => {
+    if (browserHost || !enrolled || !accountIdentityKey) return;
+    let active = true;
+    const identityKey = accountIdentityKey;
+    void Promise.allSettled([bridge.billing_summary(), bridge.purchase_options()]).then(([summary, options]) => {
+      if (!active) return;
+      setRibbonBilling({
+        identityKey,
+        provider: summary.status === "fulfilled" ? summary.value.provider : null,
+        websitePurchase: options.status === "fulfilled" ? options.value.website : null,
+      });
+    });
+    return () => { active = false; };
+  }, [browserHost, enrolled, accountIdentityKey, accountNoticeKind]);
+  /* Facts read for another account are unresolved, in the same render as the identity change. */
+  const ribbonFacts = ribbonBilling?.identityKey === accountIdentityKey ? ribbonBilling : null;
 
   /* Locked snapshots carry no conversations, contacts, or notifications, so nothing else renders. */
   if (!browserHost && (lockCode === "app-locked" || lockCode === "secure-store-unavailable" || lockCode === "app-lock-checking"))
@@ -5408,8 +5436,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   if (loading && composerConversation)
     return <main ref={mainRef} id="composer-shell" data-platform={platform}><StartupScreen variant="composer" progress={launchProgress} /></main>;
 
-  const setupCode = snapshot?.connection.errorCode;
-  const nativeCredentialed = snapshot?.mode === "native" && !["server-required", "credentials-required", "revoked"].includes(setupCode ?? "");
   const canUnlock = snapshot?.mode === "native"
     ? snapshot.encryption.state !== "unlocked" && nativeCredentialed
     : browserHost && snapshot?.mode === "browser" && (snapshot.encryption.state === "locked" || snapshot.encryption.state === "mismatch");
@@ -5420,13 +5446,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const showingMobileConversationList = narrowConversationListMode && (!selected || mobileConversationListOpen);
   const hideThreadList = settingsOpen || notificationsOpen || contactsOpen || (narrowConversationListMode ? !showingMobileConversationList : listCollapsed);
   const threadListToastHost = hideThreadList ? undefined : threadListHost;
-  const enrolled = Boolean(snapshot && (nativeCredentialed || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state !== "preview")));
   const serverOffline = Boolean(snapshot && enrolled && isServerUnreachable(snapshot.connection));
   const accountNoticeShown = enrolled ? accountNotice.notice : null;
-  const systemRibbon = resolveSystemRibbon(serverOffline, accountNoticeShown, Date.now());
+  const ribbonActionContext: RibbonActionContext = { browserHost, billing: ribbonFacts };
+  const systemRibbon = resolveSystemRibbon(serverOffline, accountNoticeShown, Date.now(), ribbonActionContext);
   const accountReadOnly = accountNoticeShown?.severity === "error";
   const openRibbonAction = () => {
-    void openAccountManageUrl(systemRibbon?.actionUrl ?? null, browserHost, bridge.open_external_url).then(opened => setRibbonOpenFailed(!opened));
+    const opened = systemRibbon?.actionTarget === "appStore"
+      ? bridge.open_store_subscriptions().then(() => true, () => false)
+      : openAccountManageUrl(systemRibbon?.actionUrl ?? null, browserHost, bridge.open_external_url);
+    void opened.then(success => setRibbonOpenFailed(!success));
   };
   const attachments: Attachment[] = content.attachmentIds.map((id) => {
     const attachment = attachmentViews[id] ?? { id, name: "Attached file", state: "pending" };

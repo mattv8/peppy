@@ -12,6 +12,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { conversationAvatar, formatDateTime, isoDateTime, paletteIndex } from "@peppy/desktop-ui";
 import { App, DraftStore, nextComposerDraftIdentity, searchRecipientSuggestions, visiblePendingSends, type PendingSend } from "./App";
+import { peppyCopy } from "./generated/peppyCopy";
 import {
   bridge,
   fixtureBridge,
@@ -7160,6 +7161,125 @@ describe("desktop presentation controls", () => {
       "data-collapsed",
       "true",
     );
+  });
+});
+
+describe("account ribbon action", () => {
+  const origin = "https://example.test";
+  const otherOrigin = "https://other.example.test";
+  const signedOut = { available: false, signedIn: false, accountLabel: null, classification: null, entitlement: null, access: null, hasVault: false, resumable: false } as const;
+  const pastDue = { kind: "read_only_past_due", severity: "error", deadline: null, manageUrl: "https://peppy.pro/account", dismissible: false, snoozeKey: "read_only_past_due:none" } as const;
+  const billing = (provider: "apple" | "none") => ({ provider, manageableIn: provider === "apple" ? "app_store" : "none", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false }) as const;
+  const appStoreAction = `${peppyCopy.account_read_only_past_due_action}, ${peppyCopy.store_manage_cta}`;
+  let current: DesktopSnapshot;
+
+  /* Enrolled native desktop on the given origin; `current` lets a later hint switch accounts. */
+  const enrollAt = async (connectionOrigin: string) => {
+    const snapshot = await fixtureBridge.load_state();
+    current = { ...snapshot, activeConversationId: undefined, connection: { state: "connected", origin: connectionOrigin }, encryption: { state: "unlocked" } };
+    vi.spyOn(bridge, "load_state").mockImplementation(async () => current);
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(signedOut);
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue({ mode: "community", stage: "server" });
+  };
+
+  it("sends an Apple-billed recovery notice to App Store management, not the website", async () => {
+    await enrollAt(origin);
+    vi.spyOn(bridge, "account_access").mockResolvedValue({ kind: "notice", notice: pastDue });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue(billing("apple"));
+    vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: true, website: true });
+    const openStore = vi.spyOn(bridge, "open_store_subscriptions").mockResolvedValue(undefined);
+    const openExternal = vi.spyOn(bridge, "open_external_url").mockResolvedValue(undefined);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: appStoreAction }));
+    await waitFor(() => expect(openStore).toHaveBeenCalledTimes(1));
+    expect(openExternal).not.toHaveBeenCalled();
+  });
+
+  it("shows no ribbon action for a non-Apple account outside the website storefront", async () => {
+    await enrollAt(origin);
+    vi.spyOn(bridge, "account_access").mockResolvedValue({ kind: "notice", notice: pastDue });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue(billing("none"));
+    const purchaseOptions = vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: true, website: false });
+    render(<App />);
+    await screen.findByText(peppyCopy.account_read_only_past_due_title);
+    await waitFor(() => expect(purchaseOptions).toHaveBeenCalled());
+    await act(async () => undefined);
+    expect(document.getElementById("system-ribbon-action")).toBeNull();
+  });
+
+  it("shows no ribbon action until billing resolves", async () => {
+    await enrollAt(origin);
+    vi.spyOn(bridge, "account_access").mockResolvedValue({ kind: "notice", notice: pastDue });
+    let answerBilling!: (value: ReturnType<typeof billing>) => void;
+    vi.spyOn(bridge, "billing_summary").mockReturnValue(new Promise(resolve => { answerBilling = resolve; }));
+    vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: true, website: true });
+    render(<App />);
+    await screen.findByText(peppyCopy.account_read_only_past_due_title);
+    expect(document.getElementById("system-ribbon-action")).toBeNull();
+    await act(async () => answerBilling(billing("apple")));
+    expect(await screen.findByRole("button", { name: appStoreAction })).toBeInTheDocument();
+  });
+
+  it("keeps the App Store action when purchase options fail to load", async () => {
+    await enrollAt(origin);
+    vi.spyOn(bridge, "account_access").mockResolvedValue({ kind: "notice", notice: pastDue });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue(billing("apple"));
+    vi.spyOn(bridge, "purchase_options").mockRejectedValue(new Error("unavailable"));
+    render(<App />);
+    expect(await screen.findByRole("button", { name: appStoreAction })).toBeInTheDocument();
+  });
+
+  it("refetches billing once a notice arrives after a transient billing failure", async () => {
+    await enrollAt(origin);
+    let answerNotice!: (value: { kind: "notice"; notice: typeof pastDue }) => void;
+    const noticeReply = new Promise<{ kind: "notice"; notice: typeof pastDue }>(resolve => { answerNotice = resolve; });
+    vi.spyOn(bridge, "account_access").mockReturnValue(noticeReply);
+    const billingSummary = vi.spyOn(bridge, "billing_summary").mockRejectedValueOnce(new Error("offline")).mockResolvedValue(billing("apple"));
+    vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: true, website: false });
+    render(<App />);
+    await waitFor(() => expect(billingSummary).toHaveBeenCalledTimes(1));
+    await act(async () => answerNotice({ kind: "notice", notice: pastDue }));
+    await screen.findByText(peppyCopy.account_read_only_past_due_title);
+    await waitFor(() => expect(billingSummary).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("button", { name: appStoreAction })).toBeInTheDocument();
+    expect(billingSummary).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not show another account's billing facts while the new account's billing is pending", async () => {
+    await enrollAt(origin);
+    vi.spyOn(bridge, "account_access").mockResolvedValue({ kind: "notice", notice: pastDue });
+    const pending: Array<(value: ReturnType<typeof billing>) => void> = [];
+    vi.spyOn(bridge, "billing_summary")
+      .mockResolvedValueOnce(billing("apple"))
+      .mockImplementation(() => new Promise(resolve => { pending.push(resolve); }));
+    vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: true, website: true });
+    render(<App />);
+    expect(await screen.findByRole("button", { name: appStoreAction })).toBeInTheDocument();
+
+    await enrollAt(otherOrigin);
+    await act(async () => hint?.());
+    await screen.findByText(peppyCopy.account_read_only_past_due_title);
+    await waitFor(() => expect(pending.length).toBeGreaterThan(0));
+    expect(document.getElementById("system-ribbon-action")).toBeNull();
+
+    await act(async () => pending.forEach(resolve => resolve(billing("apple"))));
+    expect(await screen.findByRole("button", { name: appStoreAction })).toBeInTheDocument();
+  });
+
+  it("clears a failed App Store open when the account changes", async () => {
+    await enrollAt(origin);
+    vi.spyOn(bridge, "account_access").mockResolvedValue({ kind: "notice", notice: pastDue });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue(billing("apple"));
+    vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: true, website: true });
+    vi.spyOn(bridge, "open_store_subscriptions").mockRejectedValueOnce(new Error("denied"));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: appStoreAction }));
+    expect(await screen.findByText(peppyCopy.store_manage_failed)).toBeInTheDocument();
+
+    await enrollAt(otherOrigin);
+    await act(async () => hint?.());
+    expect(await screen.findByRole("button", { name: appStoreAction })).toBeInTheDocument();
+    expect(screen.queryByText(peppyCopy.store_manage_failed)).not.toBeInTheDocument();
   });
 });
 
