@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { StrictMode, useLayoutEffect, useState } from "react";
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SyncProgress as SyncProgressSnapshot } from "./bridge-contracts";
 import { HIDE_LINGER_MS, SHOW_DELAY_MS, SyncProgress } from "./SyncProgress";
@@ -20,7 +20,6 @@ const progress = (overrides: Partial<SyncProgressSnapshot> = {}): SyncProgressSn
 const banner = () => document.querySelector<HTMLElement>("[data-sync-progress]");
 const announcement = () => document.querySelector<HTMLElement>("[data-sync-announcement]");
 const region = () => screen.queryByRole("region", { name: "History sync" });
-const details = () => document.querySelector<HTMLDetailsElement>("[data-sync-details]");
 
 function SyncProgressThatBecomesCurrent() {
   const [syncProgress, setSyncProgress] = useState(progress());
@@ -45,32 +44,27 @@ describe("SyncProgress", () => {
     expect(region()).toBeNull();
   });
 
-  it("shows a one-line truthful receiving label with cursors collapsed", () => {
+  it("shows a one-line truthful receiving label", () => {
     render(<SyncProgress progress={progress()} />);
     const section = region();
     expect(section).toHaveAttribute("data-sync-phase", "receiving");
     const title = section!.querySelector("[data-sync-title]");
     expect(title).toHaveTextContent("Loading your history…");
     expect(title?.textContent).toBe("Loading your history…");
-    expect(details()).not.toHaveAttribute("open");
   });
 
-  it("shows receiving counts as a determinate progress bar and replaces cursor details", () => {
+  it("shows receiving counts as a determinate progress bar", () => {
     render(<SyncProgress progress={progress({ snapshotReceived: "42000", snapshotExpected: "108882" })} />);
     expect(screen.getByRole("progressbar", { name: "Loading your history" })).toHaveAttribute("value", "42000");
     expect(screen.getByRole("progressbar", { name: "Loading your history" })).toHaveAttribute("max", "108882");
     expect(document.querySelector("[data-sync-count]")).toHaveTextContent("42,000 of 108,882 items");
-    const disclosure = within(details()!);
-    expect(disclosure.getByText("Downloaded")).toBeInTheDocument();
-    expect(disclosure.getByText("Expected")).toBeInTheDocument();
-    expect(disclosure.queryByText("Received through")).toBeNull();
   });
 
-  it("shows an indeterminate organizing bar with no count while organizing a counted import", () => {
+  it("shows an indeterminate organizing bar without snapshot counts", () => {
     const { rerender } = render(<SyncProgress progress={progress()} />);
     expect(screen.queryByRole("progressbar")).toBeNull();
     expect(document.querySelector("[data-sync-count]")).toBeNull();
-    rerender(<SyncProgress progress={progress({ phase: "applying", snapshotReceived: "42", snapshotExpected: "108" })} />);
+    rerender(<SyncProgress progress={progress({ phase: "applying" })} />);
     const bar = screen.getByRole("progressbar", { name: "Organizing downloaded history" });
     expect(bar).not.toHaveAttribute("value");
     expect(bar).not.toHaveAttribute("max");
@@ -81,31 +75,12 @@ describe("SyncProgress", () => {
     render(<SyncProgress progress={progress({ snapshotReceived: "0", snapshotExpected: "0" })} />);
     expect(screen.queryByRole("progressbar")).toBeNull();
     expect(document.querySelector("[data-sync-count]")).toBeNull();
-    expect(document.querySelector("[data-sync-processed]")).toBeInTheDocument();
+    expect(region()).toHaveAttribute("data-sync-phase", "receiving");
   });
 
-  it("keeps huge cursor strings exact inside the details disclosure", () => {
-    render(<SyncProgress progress={progress()} />);
-    const disclosure = within(details()!);
-    expect(disclosure.getByText(HUGE_RECEIVED)).toHaveAttribute("data-sync-received");
-    expect(disclosure.getByText(HUGE_PROCESSED)).toHaveAttribute("data-sync-processed");
-    expect(disclosure.getByText(HUGE_TARGET)).toHaveAttribute("data-sync-target");
-    expect(disclosure.getByText(HUGE_RECEIVED).textContent).toBe(HUGE_RECEIVED);
-  });
-
-  it("keeps very large decimal cursors exact without Number conversion", () => {
-    const received = "18446744073709551616000000000000000001";
-    render(<SyncProgress progress={progress({ receivedThrough: received, processedThrough: "0", targetHighWater: "18446744073709551616000000000000000009" })} />);
-    const disclosure = within(details()!);
-    expect(disclosure.getByText(received)).toBeInTheDocument();
-    expect(disclosure.getByText("0")).toBeInTheDocument();
-    expect(disclosure.getByText("18446744073709551616000000000000000009")).toBeInTheDocument();
-  });
-
-  it("omits the target row when the target is unknown", () => {
+  it("shows the organizing title when the target is unknown", () => {
     render(<SyncProgress progress={progress({ phase: "applying", targetHighWater: undefined })} />);
     expect(region()).toHaveAttribute("data-sync-phase", "applying");
-    expect(region()!.querySelector("[data-sync-target]")).toBeNull();
     expect(region()!.querySelector("[data-sync-title]")?.textContent).toBe("Organizing downloaded history…");
   });
 
@@ -117,19 +92,23 @@ describe("SyncProgress", () => {
     expect(section!.textContent).not.toMatch(/complete|up to date|finished|done/i);
   });
 
-  it("uses the availability note instead of claiming existing conversations", () => {
-    render(<SyncProgress progress={progress()} />);
-    const section = region()!;
-    expect(section.textContent).toContain("You can use conversations as they become available.");
-    expect(section.textContent).not.toMatch(/already have|stay available/i);
-    expect(section.textContent).not.toMatch(/%|messages?\b/i);
+  it("does not render a details disclosure in any active phase", () => {
+    const states = [
+      progress({ snapshotReceived: "42", snapshotExpected: "108" }),
+      progress(),
+      progress({ phase: "applying" }),
+      progress({ phase: "waitingForKeys" }),
+    ];
+    const { rerender } = render(<SyncProgress progress={states[0]} />);
+    for (const state of states) {
+      rerender(<SyncProgress progress={state} />);
+      expect(region()).toHaveAttribute("data-sync-phase", state.phase);
+      expect(region()!.querySelector("details")).toBeNull();
+    }
   });
 
-  it("has an accessible native disclosure with no focus stealing when progress updates", () => {
+  it("does not steal focus when progress updates", () => {
     const { rerender } = render(<><input aria-label="Search" /><SyncProgress progress={progress()} /></>);
-    const summary = screen.getByText("Sync details");
-    expect(summary.tagName).toBe("SUMMARY");
-    expect(summary).not.toHaveAttribute("tabindex", "-1");
     const input = screen.getByRole("textbox", { name: "Search" });
     input.focus();
     expect(input).toHaveFocus();
@@ -188,9 +167,13 @@ describe("SyncProgress", () => {
   it("lingers after current, then hides and announces completion", () => {
     vi.useFakeTimers();
     const { rerender } = render(<SyncProgress progress={progress()} />);
-    rerender(<SyncProgress progress={progress({ phase: "current", receivedThrough: "200" })} />);
-    expect(region()).toHaveAttribute("data-sync-phase", "receiving");
-    expect(region()).toHaveTextContent("200");
+    rerender(<SyncProgress progress={progress({ phase: "current", snapshotReceived: "2", snapshotExpected: "10" })} />);
+    expect(region()).toHaveAttribute("data-sync-phase", "current");
+    expect(region()).toHaveTextContent("History is up to date");
+    expect(region()?.querySelector(".lucide-check")).not.toBeNull();
+    expect(region()?.querySelector(".busy-indicator-icon")).toBeNull();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(document.querySelector("[data-sync-count]")).toBeNull();
     act(() => vi.advanceTimersByTime(HIDE_LINGER_MS - 1));
     expect(banner()).not.toBeNull();
     act(() => vi.advanceTimersByTime(1));
@@ -219,6 +202,8 @@ describe("SyncProgress", () => {
     vi.useFakeTimers();
     const { rerender } = render(<SyncProgress progress={progress()} />);
     rerender(<SyncProgress />);
+    expect(region()).toHaveAttribute("data-sync-phase", "receiving");
+    expect(region()).not.toHaveTextContent("History is up to date");
     act(() => vi.advanceTimersByTime(HIDE_LINGER_MS));
     expect(banner()).toBeNull();
     expect(announcement()).toHaveTextContent("Loading your history.");
