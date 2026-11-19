@@ -7527,12 +7527,22 @@ describe("notification bulk dismissal", () => {
     ...overrides,
   });
 
-  it("disables bulk dismissal for locked or ineligible notifications", async () => {
+  it("hides bulk dismissal while notifications are locked", async () => {
     host.encryption = { state: "locked" };
     host.notifications = [notification(1)];
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
-    expect(screen.getByRole("button", { name: "Dismiss all" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Dismiss all" })).not.toBeInTheDocument();
+    expect(screen.getByText("Sync is locked")).toBeInTheDocument();
+  });
+
+  it("removes the thread header for notifications and restores it for conversations", async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
+    expect(document.getElementById("thread-pane-header")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Notifications" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+    expect(document.getElementById("thread-pane-header")).toBeInTheDocument();
   });
 
   it("disables bulk dismissal when unlocked notifications are all pending, nondismissible, or muted", async () => {
@@ -7570,16 +7580,14 @@ describe("notification bulk dismissal", () => {
     expect(screen.getByRole("button", { name: "Dismiss all" })).toBeEnabled();
   });
 
-  it("calls, refreshes, and positions the eligible bulk action in the header", async () => {
+  it("calls, refreshes, and positions the eligible bulk action in the toolbar", async () => {
     host.notifications = [notification(1)];
     const dismissAll = vi.spyOn(bridge, "dismiss_all_notifications").mockResolvedValue();
     const load = vi.mocked(bridge.load_state);
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
     const bulk = screen.getByRole("button", { name: "Dismiss all" });
-    expect(bulk).toHaveClass("btn");
-    expect(bulk.closest("#thread-pane-header")).not.toBeNull();
-    expect(bulk.closest(".header-actions")).toBeNull();
+    expect(bulk.closest("#notifications-toolbar")).not.toBeNull();
     const initialLoads = load.mock.calls.length;
     fireEvent.click(bulk);
     await waitFor(() => expect(dismissAll).toHaveBeenCalledTimes(1));

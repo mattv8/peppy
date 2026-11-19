@@ -41,7 +41,7 @@ export function dismissibleNotifications(notifications: MirroredNotification[], 
 
 export function NotificationsView({
   notifications, filters, sources, locked, onDismiss, onMute, onSeen, onCopyOneTimeCode, onSettings, onManageApps,
-  onDismissMany, query, onClearQuery, appFilter, onAppFilter, focusRequest, onFocusResult, displayTitle,
+  onDismissMany, query, onClearQuery, appFilter, onAppFilter, focusRequest, onFocusResult, displayTitle, dismissAll,
 }: {
   notifications: MirroredNotification[];
   filters: AppFilter[];
@@ -61,6 +61,7 @@ export function NotificationsView({
   focusRequest?: FocusRequest;
   onFocusResult?(requestId: string, found: boolean): void;
   displayTitle(title: string): string;
+  dismissAll?: { label: string; disabled: boolean; onDismissAll(): void };
 }) {
   const feedRef = useRef<HTMLDivElement>(null);
   const visible = useRef(new Map<string, NotificationTarget>());
@@ -216,13 +217,14 @@ export function NotificationsView({
     };
   };
 
-  if (locked) return <section id="notifications-view" role="region" aria-label="Notifications"><NotificationLockedState /></section>;
+  if (locked) return <section id="notifications-view" role="region" aria-label="Notifications"><h1 className="visually-hidden">Notifications</h1><NotificationLockedState /></section>;
 
   const filtersByApp = new Map(filters.map(filter => [notificationMuteKey(filter.sourceDeviceId, filter.packageName), filter]));
   const chips = notificationFilterChips(queryMatches, labels.appName);
   const feedProps = { labels, filtersByApp, newKeys: newKeys.current, showPhone, query, onDismiss, onMute, onCopy: onCopyOneTimeCode, onAction: rememberNeighbor };
   return <section id="notifications-view" role="region" aria-label="Notifications">
-    <NotificationFilterBar chips={chips} appFilter={appFilter} onAppFilter={onAppFilter} arrangement={arrangement} onArrangement={setArrangement} />
+    <h1 className="visually-hidden">Notifications</h1>
+    <NotificationFilterBar chips={chips} appFilter={appFilter} onAppFilter={onAppFilter} arrangement={arrangement} onArrangement={setArrangement} dismissAll={dismissAll} />
     {query && <p id="notifications-search-status">{shown.length} notification{shown.length === 1 ? "" : "s"} match{shown.length === 1 ? "es" : ""} “{query}”</p>}
     <div id="notifications-announcer" className="visually-hidden" aria-live="polite">
       {query ? `${shown.length} notifications match “${query}”` : appFilter ? `Showing ${shown.length} ${chips.find(chip => chip.packageName === appFilter)?.name ?? "app"} notifications` : ""}
@@ -230,10 +232,10 @@ export function NotificationsView({
     {!shown.length ? (query
       ? <NotificationNoMatch query={query} onClearQuery={onClearQuery} />
       : <NotificationEmptyState filters={filters} hasNotifications={notifications.length > 0} onSettings={onSettings} onManageApps={onManageApps} />
-    ) : <div id="notifications-feed" ref={feedRef} aria-label="Notification feed"><div className="notifications-feed-column">
+    ) : <div id="notifications-feed" ref={feedRef} aria-label="Notification feed">
       {arrangement === "time"
         ? <NotificationSections notifications={shown} {...feedProps} />
         : <NotificationStacks stacks={stacks} expanded={expandedStacks} focusStackKey={focusStackKey} onExpanded={key => setExpandedStacks(current => current.has(key) ? new Set([...current].filter(value => value !== key)) : new Set([...current, key]))} onDismissMany={onDismissMany} {...feedProps} />}
-    </div></div>}
+    </div>}
   </section>;
 }
