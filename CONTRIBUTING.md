@@ -275,6 +275,8 @@ Run final checks with `--locked`. Do not hand-edit `Cargo.lock`; only Cargo may 
 
 Rust and Android test job summaries show the slowest tests. The CI timing-report job summary shows job queue and run times. To inspect any run locally, authenticate `gh` and run `python3 .github/scripts/ci-timing-report.py run --repo mattv8/peppy-platform --run-id <id>`.
 
+A `production` push reruns path-scoped validation unless verified reuse applies. Reuse requires all of these: the pushed tree equals the tree of a merged PR head whose PR CI passed `gate`; the production push does not change any gate-defining file (`ci.yml`, `ci-scope.sh`, `ci-gate.sh`, `ci-reuse.py`, or `ci-paths-filter.yml`); and the newest completed, non-cancelled nightly or dispatched full run on `production` passed `gate`. A red or missing full run disables reuse until a full run is green. The nightly scheduled full run on `production` refreshes that evidence. To force a full run now, dispatch CI on `production`. The `gate` job summary shows the decision: reused from a named run, or full validation with the reason.
+
 ## Dependency management
 
 Declare shared JavaScript versions in the `catalog` in `pnpm-workspace.yaml` and use `catalog:` in package dependency declarations. Keep package-specific dependencies in their owning manifest and retain the root `pnpm-lock.yaml`. Catalog updates to React and react-dom change peer contracts; verify that `packages/desktop-ui/package.json` peer ranges remain compatible after catalog updates.
@@ -291,7 +293,7 @@ Native clients enroll through first-run setup, the single Connect your phone QR,
 
 ## Branches and pull requests
 
-Branch from `production`, use Conventional Commit messages on each commit, and open a pull request to `production` (or use `staging` for prerelease integration). Pull requests are required for both `production` and `staging`. The `gate` check must pass and the branch must be up to date for everyone; use **Update branch** when needed. Production requires rebase merging because of linear history; staging also allows merge commits. Squash merges are disabled. Branches auto-delete after merging. PR CI runs only jobs affected by changed paths; pushes to `staging` publish prereleases after `gate`; production pushes advance the community edge image.
+Branch from `production`, use Conventional Commit messages on each commit, and open a pull request to `production` (or use `staging` for prerelease integration). Pull requests are required for both `production` and `staging`. The `gate` check must pass and the branch must be up to date for everyone; use **Update branch** when needed. Production requires rebase merging because of linear history; staging also allows merge commits. Squash merges are disabled. Branches auto-delete after merging. PR CI runs only jobs affected by changed paths. A `production` push reuses the merged PR's validation only under the conditions in [CI timing](#ci-timing); otherwise it runs full validation. Pushes to `staging` publish prereleases after `gate`; production pushes advance the community edge image.
 
 Review and merge rules for pull requests to `production` and `staging`:
 
