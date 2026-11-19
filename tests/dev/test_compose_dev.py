@@ -480,7 +480,7 @@ class ComposeDevelopmentTests(unittest.TestCase):
         )
         self.assertNotIn("export PEPPY_SERVER_IMAGE", justfile)
         self.assertIn("backup destination:\n    ./infra/compose/backup.sh {{ quote(destination) }}", justfile)
-        self.assertIn("restore archive project:\n    ./infra/compose/restore.sh {{ quote(archive) }} {{ quote(project) }}", justfile)
+        self.assertIn('restore archive project:\n    PEPPY_RESTORE_MANIFEST_SHA256="${PEPPY_RESTORE_MANIFEST_SHA256:-}" ./infra/compose/restore.sh {{ quote(archive) }} {{ quote(project) }}', justfile)
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
     def test_caddy_overlay_mount_and_public_host(self):

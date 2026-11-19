@@ -249,4 +249,8 @@ json.dump({"format_version": 2, "created_at_utc": stamp, "source_project": proje
 PY
 ( cd "$backup_dir" && shasum -a 256 manifest.json "${artifacts[@]}" > manifest.sha256 )
 chmod 600 "$backup_dir"/*
+manifest_digest=$(shasum -a 256 "$backup_dir/manifest.sha256" | awk '{print $1}')
+printf 'PEPPY_BACKUP_MANIFEST_SHA256=%s\n' "$manifest_digest" | tee "$backup_dir.manifest.sha256"
+chmod 600 "$backup_dir.manifest.sha256"
+echo "Store the manifest digest separately from the backup." >&2
 echo "Backup written to $backup_dir" >&2

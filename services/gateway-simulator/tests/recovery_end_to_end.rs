@@ -652,12 +652,17 @@ async fn encrypted_mms_survives_volume_restore_without_historical_carrier_effect
     let backup_script =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../infra/compose/backup.sh");
     let backup_parent_arg = backup_parent.to_str().unwrap();
-    run_recovery_script(
+    let backup_output = run_recovery_script(
         &source.path,
         &backup_script,
         &[backup_parent_arg],
         "reviewed-backup",
     );
+    let backup_stdout = String::from_utf8(backup_output.stdout).unwrap();
+    let manifest_digest = backup_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("PEPPY_BACKUP_MANIFEST_SHA256="))
+        .expect("backup must emit the manifest digest");
     let archive = fs::read_dir(backup_parent)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -673,10 +678,14 @@ async fn encrypted_mms_survives_volume_restore_without_historical_carrier_effect
     assert_eq!(target.container_state("api"), "created");
     assert_eq!(target.container_state("migrate"), "created");
     let archive_arg = archive.to_str().unwrap();
-    run_recovery_script(
-        &target.path,
-        &restore_script,
-        &[archive_arg, &target.project],
+    checked(
+        Command::new("bash")
+            .current_dir(&target.path)
+            .arg(&restore_script)
+            .args([archive_arg, &target.project])
+            .env("PEPPY_RESTORE_MANIFEST_SHA256", manifest_digest)
+            .output()
+            .unwrap(),
         "reviewed-restore",
     );
     let running_after_restore = target.running_services();
