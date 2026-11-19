@@ -166,7 +166,12 @@ impl Storage {
     }
 
     /// Streams a spooled file to `key` with a signed content hash and length.
-    pub async fn put_file(&self, key: &str, path: PathBuf) -> Result<(), StorageError> {
+    pub async fn put_file(
+        &self,
+        key: &str,
+        path: PathBuf,
+        expected_length: u64,
+    ) -> Result<(), StorageError> {
         let mut file = tokio::fs::File::open(path)
             .await
             .map_err(|_| StorageError::Invalid("unable to open S3 upload file"))?;
@@ -175,6 +180,9 @@ impl Storage {
             .await
             .map_err(|_| StorageError::Invalid("unable to inspect S3 upload file"))?
             .len();
+        if length != expected_length {
+            return Err(StorageError::Invalid("S3 upload file length mismatch"));
+        }
         let mut digest = Sha256::new();
         let mut buffer = vec![0_u8; 64 * 1024];
         loop {
@@ -1249,7 +1257,7 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().expect("temporary file");
         file.write_all(&[7_u8; 1024]).expect("write body");
         storage
-            .put_file("private/v/o", file.path().to_path_buf())
+            .put_file("private/v/o", file.path().to_path_buf(), 1024)
             .await
             .expect("local stub accepts the upload");
         let request = tokio::time::timeout(Duration::from_secs(10), server)
@@ -1299,7 +1307,7 @@ mod tests {
         let key = format!("storage-contract/{}", uuid::Uuid::new_v4());
         let result: Result<(), String> = async {
             storage
-                .put_file(&key, file.path().to_path_buf())
+                .put_file(&key, file.path().to_path_buf(), OBJECT_BYTES as u64)
                 .await
                 .map_err(|error| error.to_string())?;
             if storage

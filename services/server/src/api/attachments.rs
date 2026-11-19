@@ -15,6 +15,7 @@
 use std::{
     fs::File,
     path::PathBuf,
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
@@ -167,9 +168,50 @@ fn upload_slot(state: &ApiState) -> ApiResult<tokio::sync::OwnedSemaphorePermit>
         .map_err(|_| ApiError(StatusCode::TOO_MANY_REQUESTS, "too_many_uploads"))
 }
 
-/// Process-scoped spool directory, so leftovers are attributable and testable.
-fn spool_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("peppy-spool-{}", std::process::id()))
+/// Creates and verifies a private process-scoped spool directory once.
+fn spool_dir() -> std::io::Result<PathBuf> {
+    static DIRECTORY: Mutex<Option<PathBuf>> = Mutex::new(None);
+    let mut directory = DIRECTORY.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(path) = directory.as_ref() {
+        return Ok(path.clone());
+    }
+
+    // UUID v4 has fixed version and variant bits; take only its random bytes.
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    let mut random = [0_u8; 16];
+    random[..6].copy_from_slice(&first.as_bytes()[..6]);
+    random[6..13].copy_from_slice(&first.as_bytes()[9..]);
+    random[13..].copy_from_slice(&second.as_bytes()[..3]);
+    let path = std::env::temp_dir().join(format!(
+        "peppy-spool-{}-{}",
+        std::process::id(),
+        hex::encode(random)
+    ));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&path)?;
+    let metadata = std::fs::symlink_metadata(&path)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other("invalid spool directory"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        unsafe extern "C" {
+            fn geteuid() -> u32;
+        }
+        // SAFETY: geteuid has no arguments and no preconditions.
+        if metadata.uid() != unsafe { geteuid() } || metadata.mode() & 0o7777 != 0o700 {
+            return Err(std::io::Error::other("unsafe spool directory permissions"));
+        }
+    }
+    *directory = Some(path.clone());
+    Ok(path)
 }
 
 /// A request-body spool file removed on drop, including when the request
@@ -182,14 +224,13 @@ struct Spool {
 impl Spool {
     async fn create() -> ApiResult<Self> {
         let unavailable = || ApiError(StatusCode::SERVICE_UNAVAILABLE, "upload_spool_unavailable");
-        let directory = spool_dir();
-        tokio::fs::create_dir_all(&directory)
-            .await
-            .map_err(|_| unavailable())?;
+        let directory = spool_dir().map_err(|_| unavailable())?;
         let path = directory.join(Uuid::new_v4().to_string());
-        let file = tokio::fs::File::create(&path)
-            .await
-            .map_err(|_| unavailable())?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let file = options.open(&path).await.map_err(|_| unavailable())?;
         Ok(Self {
             path,
             file: Some(file),
@@ -651,7 +692,10 @@ pub(super) async fn upload_attachment(
     // delete the object another attempt attached or finalized.
     let key = format!("private/{}/{}", principal.vault, Uuid::new_v4());
     record_intent(&s.db, &key, principal.vault, "upload_attempt").await?;
-    if let Err(error) = store.put_file(&key, spool.path.clone()).await {
+    if let Err(error) = store
+        .put_file(&key, spool.path.clone(), received as u64)
+        .await
+    {
         queue_now(&s.db, &key, principal.vault, "upload_attempt").await;
         return Err(storage_failure(
             error,
@@ -1508,7 +1552,7 @@ pub(super) async fn create_public_copy(
         .await
         .map_err(|error| database_unavailable(&error, "public_copy_admit_commit"))?;
 
-    if let Err(error) = store.put_file(&key, spool.path.clone()).await {
+    if let Err(error) = store.put_file(&key, spool.path.clone(), bytes as u64).await {
         retire_failed_copy(&s.db, share_id, &key, principal.vault).await;
         return Err(storage_failure(
             error,
@@ -1878,6 +1922,61 @@ mod tests {
         assert_eq!(safe_public_name(".."), None);
         assert_eq!(image_media_type(b"<svg/>"), None);
         assert_eq!(image_media_type(b"\x89PNG\r\n\x1a\nx"), Some("image/png"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_spool_directory_initialization_returns_one_path() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    spool_dir().unwrap()
+                })
+            })
+            .collect();
+        barrier.wait();
+        let paths: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(paths[0], paths[1]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spool_directory_and_files_are_private() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (first, second) = tokio::join!(Spool::create(), Spool::create());
+        let first = first.unwrap();
+        let second = second.unwrap();
+        let directory = first.path.parent().unwrap();
+        assert_eq!(directory, second.path.parent().unwrap());
+        let name = directory.file_name().unwrap().to_str().unwrap();
+        let suffix = name
+            .strip_prefix(&format!("peppy-spool-{}-", std::process::id()))
+            .expect("spool directory must include the process ID");
+        assert_eq!(suffix.len(), 32);
+        assert!(suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let metadata = std::fs::symlink_metadata(directory).unwrap();
+        assert!(metadata.file_type().is_dir());
+        assert!(!metadata.file_type().is_symlink());
+        assert_eq!(metadata.mode() & 0o7777, 0o700);
+        let uid = std::process::Command::new("id").arg("-u").output().unwrap();
+        assert!(uid.status.success());
+        let uid: u32 = std::str::from_utf8(&uid.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(metadata.uid(), uid);
+        assert_eq!(
+            std::fs::metadata(&first.path).unwrap().mode() & 0o7777,
+            0o600
+        );
     }
 
     #[tokio::test]
