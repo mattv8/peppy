@@ -132,7 +132,8 @@ struct ContactMediaTransfer: Sendable {
     // MARK: Download
 
     /// Downloads the requested pending attachments (all when `only` is nil). Returns ids whose
-    /// remote object is gone (404), which callers must not retry hot.
+    /// remote object was exactly removed by storage policy (410); callers must not retry those hot.
+    /// A generic 404 is not returned and remains retryable.
     func download(only: Set<String>?, meter: inout RequestMeter, report: inout ContactMediaReport) async throws -> Set<String> {
         var gone = Set<String>()
         for object in try client.pendingDownloads() where only?.contains(object.attachmentId) ?? true {

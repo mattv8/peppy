@@ -43,7 +43,6 @@ func (link *Link) hasTypingOutboundVerificationLocked() bool {
 }
 
 func (link *Link) hasGroupsVerificationLocked() bool {
-	// Groups stay unminted: group chats are not built.
 	return link.hasVerificationCapabilityLocked(verificationCapabilityGroups)
 }
 

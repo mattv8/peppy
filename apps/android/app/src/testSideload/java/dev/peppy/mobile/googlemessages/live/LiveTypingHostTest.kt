@@ -249,6 +249,8 @@ class LiveTypingHostTest {
         secondCallback.onMessage(secondSocket, "{\"type\":\"membership_response\",\"version\":1,\"connection_id\":\"$connectionId\",\"challenge_id\":\"$nextChallenge\",\"membership_version\":\"1\",\"roster\":[${device(local)}]}")
         executor.runLast()
 
+        executor.runAll()
+        assertTrue(firstSocket.sent.none { it == "{}" })
         assertTrue(secondSocket.sent.none { it == "{}" })
         host.stop()
         executor.runAll()

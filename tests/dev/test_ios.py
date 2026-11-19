@@ -130,13 +130,37 @@ esac
     def calls(self):
         return self.log.read_text() if self.log.exists() else ""
 
+    def executed_verbs(self):
+        """Return the command verb of each logged record, ignoring path arguments."""
+        verbs = []
+        for line in self.calls().splitlines():
+            words = line.split()
+            if words[:2] == ["xcrun", "simctl"]:
+                verbs.append(words[2] if len(words) > 2 else "")
+            elif words:
+                verbs.append(words[0])
+        return verbs
+
     def test_check_selects_explicit_udid_without_mutating_simulator(self):
         result = self.run_helper(PEPPY_IOS_SIMULATOR="A")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"developer={self.developer}", self.calls())
         self.assertIn("A", result.stdout)
+        verbs = self.executed_verbs()
         for effect in ("backend", "bootstatus", "install", "launch", "cargo", "open"):
-            self.assertNotIn(effect, self.calls())
+            self.assertNotIn(effect, verbs)
+
+    def test_check_ignores_open_in_developer_path(self):
+        workspace = self.root / "open workspace/Xcode27.app"
+        developer = workspace / "Contents/Developer"
+        (developer / "usr/bin").mkdir(parents=True)
+        (workspace / "Contents/Applications/DeviceHub.app").mkdir(parents=True)
+        for name in ("xcodebuild", "xcrun"):
+            (developer / "usr/bin" / name).symlink_to(self.tools / name)
+        result = self.run_helper(PEPPY_IOS_SIMULATOR="A", DEVELOPER_DIR=str(developer))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"developer={developer}", self.calls())
+        self.assertNotIn("open", self.executed_verbs())
 
     def test_selected_full_xcode_with_nonstandard_name_is_preserved(self):
         self.env.pop("DEVELOPER_DIR")

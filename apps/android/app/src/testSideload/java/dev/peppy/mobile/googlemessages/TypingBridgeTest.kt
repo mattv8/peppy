@@ -107,7 +107,7 @@ class TypingBridgeTest {
         bridge.onFrame("repeat")
 
         assertEquals(1, effects.size)
-        assertTrue(effects.single().deadlineMono - effects.single().clock.nowMs() <= 5_000UL || effects.single().deadlineMono > 5_000UL)
+        assertEquals(9_999_999UL, effects.single().deadlineMono)
     }
 
     @Test fun `disable retires core and transport and no later frame reaches Google`() {
