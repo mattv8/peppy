@@ -11,7 +11,7 @@ use peppy_crypto::KeyProfile;
 use peppy_hosted_api::enrollment::VAULT_REQUEST_HEADER;
 use peppy_server::{ServerBuilder, config::Config};
 use serde_json::{Value, json};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions};
 use tower::ServiceExt;
 use url::Url;
 use uuid::Uuid;
@@ -41,7 +41,8 @@ impl Fixture {
             .unwrap();
         let mut url: Url = database_url.parse().unwrap();
         url.query_pairs_mut()
-            .append_pair("options", &format!("-csearch_path={schema}"));
+            .append_pair("options", &format!("-csearch_path={schema}"))
+            .append_pair("application_name", &schema);
         let pool = PgPoolOptions::new()
             .max_connections(8)
             .connect(url.as_str())
@@ -87,12 +88,93 @@ impl Fixture {
 
     async fn cleanup(self) {
         self.pool.close().await;
+        // Wait for fixture backends to exit before dropping their schema.
+        sqlx::query(
+            "SELECT pg_terminate_backend(pid, 10000) FROM pg_stat_activity WHERE application_name=$1",
+        )
+        .bind(&self.schema)
+        .execute(&self.admin)
+        .await
+        .unwrap();
+        let backend_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name=$1)",
+        )
+        .bind(&self.schema)
+        .fetch_one(&self.admin)
+        .await
+        .unwrap();
+        assert!(!backend_exists, "fixture backend survived termination");
         sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
             .execute(&self.admin)
             .await
             .unwrap();
         self.admin.close().await;
     }
+}
+
+#[tokio::test]
+async fn fixture_cleanup_terminates_owned_backends() {
+    let fixture = Fixture::new().await;
+    let mut owned = PgConnection::connect_with(&fixture.pool.connect_options())
+        .await
+        .unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut owned)
+        .await
+        .unwrap();
+    let mut observer = PgConnection::connect(&std::env::var("TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+
+    fixture.cleanup().await;
+    let observer_works: i32 = sqlx::query_scalar("SELECT 1")
+        .fetch_one(&mut observer)
+        .await
+        .unwrap();
+    let backend_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)")
+            .bind(pid)
+            .fetch_one(&mut observer)
+            .await
+            .unwrap();
+    let _ = owned.close().await;
+    observer.close().await.unwrap();
+
+    assert_eq!(observer_works, 1);
+    assert!(!backend_exists, "fixture backend survived cleanup");
+}
+
+#[tokio::test]
+async fn fixture_cleanup_accepts_false_termination_for_gone_backend() {
+    let fixture = Fixture::new().await;
+    let schema = fixture.schema.clone();
+    sqlx::query(&format!(
+        "CREATE FUNCTION {schema}.pg_terminate_backend(integer, bigint) RETURNS boolean \
+         LANGUAGE plpgsql AS $$ BEGIN \
+         PERFORM pg_catalog.pg_terminate_backend($1, $2); RETURN false; END $$"
+    ))
+    .execute(&fixture.admin)
+    .await
+    .unwrap();
+    sqlx::query(&format!("SET search_path TO {schema}, pg_catalog"))
+        .execute(&fixture.admin)
+        .await
+        .unwrap();
+    let owned = PgConnection::connect_with(&fixture.pool.connect_options())
+        .await
+        .unwrap();
+    let mut observer = PgConnection::connect(&std::env::var("TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+
+    let result = tokio::spawn(fixture.cleanup()).await;
+    let _ = owned.close().await;
+    sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .execute(&mut observer)
+        .await
+        .unwrap();
+    observer.close().await.unwrap();
+    assert!(result.is_ok(), "fixture cleanup failed: {result:?}");
 }
 
 async fn send(
