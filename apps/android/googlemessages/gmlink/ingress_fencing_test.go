@@ -400,10 +400,7 @@ func (*reentrantCloseHost) ShowEmoji(string, int64, int64) {}
 
 func TestHostEventCanReenterClose(t *testing.T) {
 	host := &reentrantCloseHost{closed: make(chan struct{})}
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	link := openTestLink(t, nil, host)
 	host.link = link
 
 	done := make(chan struct{})
@@ -425,10 +422,7 @@ func TestHostEventCanReenterClose(t *testing.T) {
 
 func TestTerminalHostEventCanReenterClose(t *testing.T) {
 	host := &reentrantCloseHost{closed: make(chan struct{})}
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	link := openTestLink(t, nil, host)
 	host.link = link
 	link.mu.Lock()
 	link.state = stateLinked

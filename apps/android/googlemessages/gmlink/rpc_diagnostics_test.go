@@ -16,11 +16,7 @@ func TestConversationPageDiagnosticsPreserveResultsAndUseClosedCodes(t *testing.
 	} {
 		for _, failed := range []bool{false, true} {
 			host := &testHost{}
-			link, err := Open(nil, host)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(link.Close)
+			link := openTestLink(t, nil, host)
 			request := &gmproto.ListConversationsRequest{Folder: folder, Count: 25, Cursor: &gmproto.Cursor{LastItemID: "private-cursor"}}
 			response := &gmproto.ListConversationsResponse{}
 			var loadError error
@@ -78,11 +74,7 @@ func TestRPCDiagnosticStagesUseOnlyTheClosedVocabulary(t *testing.T) {
 func TestRPCObserverIsInstalledOnPairingAndRuntimeClients(t *testing.T) {
 	for _, runtime := range []bool{false, true} {
 		host := &testHost{}
-		link, err := Open(nil, host)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(link.Close)
+		link := openTestLink(t, nil, host)
 		var client *libgm.Client
 		if runtime {
 			client = link.newRuntimeClient(libgm.NewAuthData(), link.generation)

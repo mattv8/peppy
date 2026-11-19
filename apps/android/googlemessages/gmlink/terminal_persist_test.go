@@ -48,10 +48,7 @@ func (*terminalPersistFailureHost) ShowEmoji(string, int64, int64)          {}
 
 func TestTerminalIngressPersistsBeforeCloseReturns(t *testing.T) {
 	host := newSafetyHost()
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	link := openTestLink(t, nil, host)
 	setSafetyState(link, stateLinked, linkedSafetyAuth())
 
 	link.persistMu.Lock()
@@ -96,11 +93,7 @@ func TestTerminalIngressPersistsBeforeCloseReturns(t *testing.T) {
 		t.Fatal("terminal callback escaped after Close")
 	}
 
-	reopened, err := Open(states[0], newSafetyHost())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
+	reopened := openTestLink(t, states[0], newSafetyHost())
 	if reopened.state != stateSignedOut || reopened.auth.Browser != nil {
 		t.Fatal("reopened terminal envelope retained linked credentials")
 	}
@@ -120,10 +113,7 @@ func TestConfigSignOutPersistsBeforeCloseReturns(t *testing.T) {
 			fixture := newPhoneFixture(t, auth)
 			fixture.configure(test.configure)
 			host := newSafetyHost()
-			link, err := Open(nil, host)
-			if err != nil {
-				t.Fatal(err)
-			}
+			link := openTestLink(t, nil, host)
 			setSafetyState(link, stateLinked, auth)
 
 			link.persistMu.Lock()
@@ -165,11 +155,7 @@ func TestConfigSignOutPersistsBeforeCloseReturns(t *testing.T) {
 			if terminal.State != stateSignedOut || len(terminal.Auth) == 0 || string(terminal.Auth) == "null" {
 				t.Fatalf("terminal envelope = state %q auth %s", terminal.State, terminal.Auth)
 			}
-			reopened, err := Open(states[0], newSafetyHost())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer reopened.Close()
+			reopened := openTestLink(t, states[0], newSafetyHost())
 			if err := reopened.Run(); err == nil {
 				t.Fatal("reopened terminal envelope accepted Run")
 			}
@@ -179,10 +165,7 @@ func TestConfigSignOutPersistsBeforeCloseReturns(t *testing.T) {
 
 func TestUnlinkPersistsBeforeCloseReturns(t *testing.T) {
 	host := newSafetyHost()
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	link := openTestLink(t, nil, host)
 	setSafetyState(link, stateLinked, libgm.NewAuthData())
 
 	link.persistMu.Lock()
@@ -231,11 +214,7 @@ func TestTerminalPersistenceFailureReportsPersistFailed(t *testing.T) {
 	fixture := newPhoneFixture(t, auth)
 	fixture.configure(func(knobs *fixtureKnobs) { knobs.configEmail = fixtureSourceID })
 	host := newSafetyHost()
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer link.Close()
+	link := openTestLink(t, nil, host)
 	setSafetyState(link, stateLinked, auth)
 	runDone := startSafetyRun(t, link)
 	host.setFailPersist(true)
@@ -255,11 +234,7 @@ func TestTerminalPersistenceFailureReportsPersistFailed(t *testing.T) {
 
 func TestTerminalPersistenceFailureWithoutRunReportsPersistFailed(t *testing.T) {
 	host := newSafetyHost()
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer link.Close()
+	link := openTestLink(t, nil, host)
 	setSafetyState(link, stateLinked, linkedSafetyAuth())
 	host.setFailPersist(true)
 	link.mu.Lock()
@@ -284,11 +259,7 @@ func TestRunWaitsForTerminalPersistenceFailure(t *testing.T) {
 	fixture := newPhoneFixture(t, auth)
 	fixture.configure(func(knobs *fixtureKnobs) { knobs.configEmail = fixtureSourceID })
 	host := newTerminalPersistFailureHost()
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer link.Close()
+	link := openTestLink(t, nil, host)
 	releasePersist := sync.OnceFunc(func() { close(host.releasePersist) })
 	defer releasePersist()
 	setSafetyState(link, stateLinked, auth)
@@ -338,10 +309,7 @@ func TestClosedTerminalPersistenceFailureReachesOwningRun(t *testing.T) {
 	fixture := newPhoneFixture(t, auth)
 	fixture.configure(func(knobs *fixtureKnobs) { knobs.configEmail = fixtureSourceID })
 	host := newTerminalPersistFailureHost()
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	link := openTestLink(t, nil, host)
 	setSafetyState(link, stateLinked, auth)
 	runDone := startSafetyRun(t, link)
 

@@ -94,10 +94,7 @@ func TestReentrantCloseDoesNotDependOnQueuedTerminalConsumer(t *testing.T) {
 		allowClose: make(chan struct{}),
 		closed:     make(chan struct{}),
 	}
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	link := openTestLink(t, nil, host)
 	host.link = link
 	link.mu.Lock()
 	link.state = stateLinked
@@ -166,10 +163,7 @@ func (host *blockingEmojiHost) ShowEmoji(string, int64, int64) {
 
 func TestCloseKeepsReplacementFencedUntilAdmittedEmojiReturns(t *testing.T) {
 	host := &blockingEmojiHost{entered: make(chan struct{}), release: make(chan struct{}), delivered: make(chan struct{})}
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	link := openTestLink(t, nil, host)
 	link.mu.Lock()
 	link.generation = 3
 	link.pairOwner = 3

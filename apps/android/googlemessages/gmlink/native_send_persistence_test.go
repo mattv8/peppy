@@ -71,10 +71,7 @@ func pairedEvidenceLink(t *testing.T) (*Link, *evidencePersistHost) {
 		knobs.gaiaFinish = true
 	})
 	host := newEvidencePersistHost()
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	link := openTestLink(t, nil, host)
 	candidate := libgm.NewAuthData()
 	candidate.SetCookies(syntheticCookies())
 	if err := awaitPair(t, link, func() error { return link.pair(candidate, false, "") }); err != nil {
@@ -107,10 +104,7 @@ func TestNativeSendPairingEvidencePersistsAcrossLifecycle(t *testing.T) {
 		knobs.gaiaFinish = true
 	})
 	host := newEvidencePersistHost()
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	link := openTestLink(t, nil, host)
 	reached, release := host.holdNextPersist(stateLinked)
 	var releaseOnce sync.Once
 	releasePersist := func() { releaseOnce.Do(func() { close(release) }) }
@@ -147,10 +141,7 @@ func TestNativeSendPairingEvidencePersistsAcrossLifecycle(t *testing.T) {
 	closeEvidenceLink(t, link)
 
 	reopenedHost := newSafetyHost()
-	reopened, err := Open(bytes, reopenedHost)
-	if err != nil {
-		t.Fatalf("Open(persisted state) error = %v", err)
-	}
+	reopened := openTestLink(t, bytes, reopenedHost)
 	defer closeEvidenceLink(t, reopened)
 	reopened.mu.Lock()
 	gotEvidence, runtimeID := reopened.pairingEvidenceID, reopened.runIncarnationID
