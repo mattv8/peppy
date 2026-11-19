@@ -4,13 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dismissibleNotifications, NotificationsView } from "./Notifications";
 import type { MirroredNotification, NotificationTarget } from "../bridge/bridge";
 
+const POSTED_AT = Date.now();
+
 const notification = (sourceDeviceId: string, packageName = "chat", overrides: Partial<MirroredNotification> = {}): MirroredNotification => ({
   target: { sourceDeviceId, notificationKey: `key-${sourceDeviceId}`, lifetime: "one" },
   packageName,
   appName: "Chat",
   title: `Title ${sourceDeviceId}`,
   text: "A readable notification body",
-  postedAt: Date.now(),
+  postedAt: POSTED_AT,
   dismissible: true,
   seen: false,
   dismissalPending: false,
