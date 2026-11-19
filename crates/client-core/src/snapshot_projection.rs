@@ -718,9 +718,11 @@ pub(super) fn reduce(
             if !crate::rcs_receive::valid_metadata(&metadata, producer_id) {
                 return Ok(false);
             }
+            let conversation_id =
+                crate::conversation_merge::survivor(conn, metadata.conversation_id)?;
             conn.execute(
                 "INSERT INTO projection_rcs_conversation_metadata(generation,conversation_id,rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(generation,conversation_id) DO UPDATE SET rcs_encryption=excluded.rcs_encryption,rcs_history_gap=excluded.rcs_history_gap,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>projection_rcs_conversation_metadata.logical_revision OR (excluded.logical_revision=projection_rcs_conversation_metadata.logical_revision AND excluded.writer_device_id>projection_rcs_conversation_metadata.writer_device_id)",
-                params![generation, metadata.conversation_id.to_string(), metadata.rcs_encryption.map(i64::from), metadata.rcs_history_gap, to_i64(metadata.logical_revision)?, metadata.writer_device_id, producer, sequence],
+                params![generation, conversation_id.to_string(), metadata.rcs_encryption.map(i64::from), metadata.rcs_history_gap, to_i64(metadata.logical_revision)?, metadata.writer_device_id, producer, sequence],
             )?;
             Ok(true)
         }
@@ -797,7 +799,7 @@ pub(super) fn reduce(
             ) {
                 return Ok(false);
             }
-            conn.execute("INSERT INTO projection_conversation_pins(generation,conversation_id,pinned,source_sequence,producer_device_id,logical_revision,writer_device_id) VALUES(?,?,?,?,?,?,?) ON CONFLICT(generation,conversation_id) DO UPDATE SET pinned=excluded.pinned,source_sequence=excluded.source_sequence,producer_device_id=excluded.producer_device_id,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id WHERE excluded.logical_revision>projection_conversation_pins.logical_revision OR (excluded.logical_revision=projection_conversation_pins.logical_revision AND excluded.writer_device_id>projection_conversation_pins.writer_device_id)", params![generation, conversation_id.to_string(), pinned, sequence, producer, to_i64(logical_revision)?, writer_device_id])?;
+            conn.execute("INSERT INTO projection_conversation_pins(generation,conversation_id,pinned,source_sequence,producer_device_id,logical_revision,writer_device_id) VALUES(?,?,?,?,?,?,?) ON CONFLICT(generation,conversation_id) DO UPDATE SET pinned=excluded.pinned,source_sequence=excluded.source_sequence,producer_device_id=excluded.producer_device_id,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id WHERE excluded.logical_revision>projection_conversation_pins.logical_revision OR (excluded.logical_revision=projection_conversation_pins.logical_revision AND (excluded.writer_device_id>projection_conversation_pins.writer_device_id OR (excluded.writer_device_id=projection_conversation_pins.writer_device_id AND excluded.source_sequence>projection_conversation_pins.source_sequence)))", params![generation, conversation_id.to_string(), pinned, sequence, producer, to_i64(logical_revision)?, writer_device_id])?;
             Ok(true)
         }
         PrivatePayload::ConversationFolder {
@@ -817,7 +819,7 @@ pub(super) fn reduce(
             ) {
                 return Ok(false);
             }
-            conn.execute("INSERT INTO projection_conversation_folders(generation,conversation_id,folder,archived_through_ms,source_sequence,producer_device_id,logical_revision,writer_device_id) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(generation,conversation_id) DO UPDATE SET folder=excluded.folder,archived_through_ms=excluded.archived_through_ms,source_sequence=excluded.source_sequence,producer_device_id=excluded.producer_device_id,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id WHERE excluded.logical_revision>projection_conversation_folders.logical_revision OR (excluded.logical_revision=projection_conversation_folders.logical_revision AND excluded.writer_device_id>projection_conversation_folders.writer_device_id)", params![generation, conversation_id.to_string(), folder.as_str(), archived_through_ms, sequence, producer, to_i64(logical_revision)?, writer_device_id])?;
+            conn.execute("INSERT INTO projection_conversation_folders(generation,conversation_id,folder,archived_through_ms,source_sequence,producer_device_id,logical_revision,writer_device_id) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(generation,conversation_id) DO UPDATE SET folder=excluded.folder,archived_through_ms=excluded.archived_through_ms,source_sequence=excluded.source_sequence,producer_device_id=excluded.producer_device_id,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id WHERE excluded.logical_revision>projection_conversation_folders.logical_revision OR (excluded.logical_revision=projection_conversation_folders.logical_revision AND (excluded.writer_device_id>projection_conversation_folders.writer_device_id OR (excluded.writer_device_id=projection_conversation_folders.writer_device_id AND excluded.source_sequence>projection_conversation_folders.source_sequence)))", params![generation, conversation_id.to_string(), folder.as_str(), archived_through_ms, sequence, producer, to_i64(logical_revision)?, writer_device_id])?;
             Ok(true)
         }
         PrivatePayload::SenderBlocklist {
@@ -855,6 +857,7 @@ pub(super) fn reduce(
             ) {
                 return Ok(false);
             }
+            let conversation_id = crate::conversation_merge::survivor(conn, conversation_id)?;
             conn.execute("INSERT INTO projection_sender_unblock_requests(generation,request_id,conversation_id,target_device_id,numbers,status,created_at_ms) VALUES(?,?,?,?,?,'pending',?) ON CONFLICT(generation,request_id) DO NOTHING", params![generation,request_id.to_string(),conversation_id.to_string(),target_device_id,crate::json(&numbers)?,created_at_ms])?;
             Ok(true)
         }
@@ -1173,7 +1176,7 @@ fn promote(
         [generation],
     )?;
     conn.execute(
-        "INSERT INTO rcs_conversation_metadata(conversation_id,transport,rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence) SELECT conversation_id,'rcs',rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence FROM projection_rcs_conversation_metadata WHERE generation=? ON CONFLICT(conversation_id) DO UPDATE SET rcs_encryption=excluded.rcs_encryption,rcs_history_gap=excluded.rcs_history_gap,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>rcs_conversation_metadata.logical_revision OR (excluded.logical_revision=rcs_conversation_metadata.logical_revision AND excluded.writer_device_id>rcs_conversation_metadata.writer_device_id)",
+        "INSERT INTO rcs_conversation_metadata(conversation_id,transport,rcs_encryption,rcs_history_gap,logical_revision,writer_device_id,producer_device_id,source_sequence) SELECT COALESCE(m.target_id,s.conversation_id),'rcs',s.rcs_encryption,s.rcs_history_gap,s.logical_revision,s.writer_device_id,s.producer_device_id,s.source_sequence FROM projection_rcs_conversation_metadata s LEFT JOIN conversation_merges m ON m.source_id=s.conversation_id WHERE s.generation=? ON CONFLICT(conversation_id) DO UPDATE SET rcs_encryption=excluded.rcs_encryption,rcs_history_gap=excluded.rcs_history_gap,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,producer_device_id=excluded.producer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>rcs_conversation_metadata.logical_revision OR (excluded.logical_revision=rcs_conversation_metadata.logical_revision AND excluded.writer_device_id>rcs_conversation_metadata.writer_device_id)",
         [generation],
     )?;
     release_promoted_snapshot_origins(conn, ctx, generation, high_water)?;
@@ -1211,7 +1214,7 @@ fn promote(
     conn.execute("DELETE FROM sender_blocklists WHERE producer_device_id<>?2 AND NOT EXISTS(SELECT 1 FROM projection_sender_blocklists s WHERE s.generation=?1 AND s.producer_device_id=sender_blocklists.producer_device_id)", params![generation, me])?;
     conn.execute("INSERT INTO sender_blocklists(producer_device_id,numbers,can_unblock,logical_revision,writer_device_id,source_sequence) SELECT producer_device_id,numbers,can_unblock,logical_revision,writer_device_id,source_sequence FROM projection_sender_blocklists WHERE generation=? ON CONFLICT(producer_device_id) DO UPDATE SET numbers=excluded.numbers,can_unblock=excluded.can_unblock,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id,source_sequence=excluded.source_sequence WHERE excluded.logical_revision>sender_blocklists.logical_revision OR (excluded.logical_revision=sender_blocklists.logical_revision AND excluded.writer_device_id>sender_blocklists.writer_device_id)", [generation])?;
     conn.execute("DELETE FROM sender_unblock_requests WHERE historical=1 AND NOT EXISTS(SELECT 1 FROM projection_sender_unblock_requests s WHERE s.generation=? AND s.request_id=sender_unblock_requests.request_id)", [generation])?;
-    conn.execute("INSERT INTO sender_unblock_requests(request_id,conversation_id,target_device_id,numbers,status,historical,created_at_ms) SELECT request_id,conversation_id,target_device_id,numbers,status,1,created_at_ms FROM projection_sender_unblock_requests WHERE generation=? ON CONFLICT(request_id) DO UPDATE SET status=excluded.status WHERE sender_unblock_requests.status='pending' AND excluded.status<>'pending'", [generation])?;
+    conn.execute("INSERT INTO sender_unblock_requests(request_id,conversation_id,target_device_id,numbers,status,historical,created_at_ms) SELECT s.request_id,COALESCE(m.target_id,s.conversation_id),s.target_device_id,s.numbers,s.status,1,s.created_at_ms FROM projection_sender_unblock_requests s LEFT JOIN conversation_merges m ON m.source_id=s.conversation_id WHERE s.generation=? ON CONFLICT(request_id) DO UPDATE SET status=excluded.status WHERE sender_unblock_requests.status='pending' AND excluded.status<>'pending'", [generation])?;
     let mut after_folder = String::new();
     loop {
         type FolderRow = (String, String, Option<i64>, i64, String, i64, String);
@@ -1704,6 +1707,100 @@ mod tests {
     use super::*;
 
     #[test]
+    fn promotion_keeps_register_ids_when_merge_follows_staging() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let device = crate::DeviceId::new();
+        let client = Client::open(
+            crate::ClientConfig {
+                database_path: directory.path().join("stage-merge.db"),
+                vault_id: crate::VaultId::new(),
+                device_id: device,
+            },
+            crate::DatabaseKey::new(&[8; 32]).unwrap(),
+        )
+        .unwrap();
+        let source = crate::ConversationId::new();
+        let target = crate::ConversationId::new();
+        let producer = crate::DeviceId::new().to_string();
+        let mut store = client.lock().unwrap();
+        let (conn, ctx) = store.parts();
+        for payload in [
+            PrivatePayload::ConversationPin {
+                conversation_id: source,
+                pinned: true,
+                logical_revision: 1,
+                writer_device_id: producer.clone(),
+            },
+            PrivatePayload::ConversationFolder {
+                conversation_id: source,
+                folder: crate::ConversationFolder::Spam,
+                archived_through_ms: None,
+                logical_revision: 1,
+                writer_device_id: producer.clone(),
+            },
+        ] {
+            assert!(reduce(conn, 1, &device.to_string(), &producer, 1, payload).unwrap());
+        }
+        conn.execute(
+            "INSERT INTO conversation_merges(source_id,target_id) VALUES(?,?)",
+            params![source.to_string(), target.to_string()],
+        )
+        .unwrap();
+        promote(conn, &ctx, 1, 0, &device.to_string()).unwrap();
+        for table in ["conversation_pins", "conversation_folders"] {
+            let id: String = conn
+                .query_row(&format!("SELECT conversation_id FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(id, source.to_string());
+        }
+    }
+
+    #[test]
+    fn staged_pin_and_folder_keep_original_conversation() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        conn.execute_batch("CREATE TABLE conversation_merges(source_id TEXT PRIMARY KEY, target_id TEXT NOT NULL);").unwrap();
+        let source = crate::ConversationId::new();
+        let target = crate::ConversationId::new();
+        let writer = crate::DeviceId::new().to_string();
+        conn.execute(
+            "INSERT INTO conversation_merges VALUES(?,?)",
+            params![source.to_string(), target.to_string()],
+        )
+        .unwrap();
+        for payload in [
+            PrivatePayload::ConversationPin {
+                conversation_id: source,
+                pinned: true,
+                logical_revision: 1,
+                writer_device_id: writer.clone(),
+            },
+            PrivatePayload::ConversationFolder {
+                conversation_id: source,
+                folder: crate::ConversationFolder::Spam,
+                archived_through_ms: None,
+                logical_revision: 1,
+                writer_device_id: writer.clone(),
+            },
+        ] {
+            assert!(reduce(&conn, 1, "other", &writer, 1, payload).unwrap());
+        }
+        for table in [
+            "projection_conversation_pins",
+            "projection_conversation_folders",
+        ] {
+            let id: String = conn
+                .query_row(&format!("SELECT conversation_id FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(id, source.to_string());
+        }
+    }
+
+    #[test]
     fn staged_rcs_status_merges_rank_and_reported_evidence_independently() {
         let conn = Connection::open_in_memory().unwrap();
         initialize(&conn).unwrap();
@@ -1745,6 +1842,7 @@ mod tests {
     fn staged_rcs_metadata_keeps_the_monotonic_revision_writer_tuple() {
         let conn = Connection::open_in_memory().unwrap();
         initialize(&conn).unwrap();
+        conn.execute_batch("CREATE TABLE conversation_merges(source_id TEXT PRIMARY KEY, target_id TEXT NOT NULL);").unwrap();
         let conversation_id = crate::ConversationId::new();
         let producer = crate::DeviceId::new();
         for (revision, encrypted) in [(2, true), (1, false)] {

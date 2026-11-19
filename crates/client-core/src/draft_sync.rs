@@ -1292,6 +1292,46 @@ fn store_conflict(
     Ok(())
 }
 
+/// Preserve a locally authored draft as a conflict before converging its conversation.
+pub(crate) fn preserve_conversation_merge_draft(
+    conn: &Connection,
+    survivor: DraftId,
+    source: &ComposeDraft,
+) -> Result<(), Error> {
+    for (_, record) in conflicts(conn, source.draft_id)? {
+        store_conflict(conn, survivor, Uuid::new_v4(), &record)?;
+    }
+    let attachments = source
+        .attachment_ids
+        .iter()
+        .map(|id| {
+            let row = attachment_row(conn, *id)?.ok_or(Error::NotFound)?;
+            Ok(DraftRecordAttachmentV1 {
+                attachment_id: *id,
+                media_type: row.media_type,
+                display_name: row.display_name,
+                plaintext_bytes: row.plaintext_bytes,
+                ciphertext_bytes: row.ciphertext_bytes,
+                ciphertext_sha256: row.ciphertext_sha256,
+                stream_version: u32::from(crate::media::STREAM_VERSION),
+                file_key: row.file_key.to_vec(),
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let record = DraftRecordV1 {
+        version: 1,
+        draft_id: source.draft_id,
+        revision_id: Uuid::new_v4(),
+        text: source.text.clone(),
+        recipients: source.recipients.clone(),
+        route: source.route.clone(),
+        attachments,
+        authored_at_ms: now_ms(),
+        group_name: source.group_name.clone(),
+    };
+    store_conflict(conn, survivor, Uuid::new_v4(), &record)
+}
+
 fn insert_adopted(
     conn: &Connection,
     conversation: ConversationId,
