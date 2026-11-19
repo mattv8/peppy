@@ -14,7 +14,7 @@
 #settings-devices #devices-intro-row [data-devices-intro-copy] { display: grid; flex: 1 1 240px; min-width: 0; gap: 2px; }
 #settings-devices #devices-intro-row [data-devices-intro-copy] > p { margin: 0; }
 #settings-devices #devices-add-device { display: inline-flex; flex: none; align-items: center; gap: 6px; }
-#settings-devices [data-mcp-actions] { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+#settings-devices [data-mcp-actions], #settings-devices [data-device-actions] { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 #mcp-device-details [data-mcp-details] { display: grid; gap: 8px; margin: 0; }
 #mcp-device-details [data-mcp-details] > div { display: grid; gap: 2px; }
 #mcp-device-details [data-mcp-details] dd { margin: 0; overflow-wrap: anywhere; }

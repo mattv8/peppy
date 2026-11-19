@@ -588,6 +588,101 @@ async fn readonly_policy_denies_mutations_before_semantic_validation_but_permits
 }
 
 #[tokio::test]
+async fn rename_device_permissions_validation_and_roster() {
+    let policy = Arc::new(Policy::allowing([Operation::Read, Operation::Revoke]));
+    let server = TestServer::start(policy).await;
+    let owner = server.owner().await;
+    let device = server.add_device(&owner).await;
+    let gateway = server.add_device(&owner).await;
+    sqlx::query("UPDATE devices SET role='gateway' WHERE vault_id=$1 AND device_id=$2")
+        .bind(owner.vault_id)
+        .bind(gateway.device_id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let path = format!("/v1/devices/{}/name", device.device_id);
+    for caller in [&owner, &device, &gateway] {
+        let (status, _) = server
+            .request(
+                "PUT",
+                &path,
+                &caller.device_token,
+                json!({"name": "  Phone  "}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    let (status, roster) = server
+        .request("GET", "/v1/devices", &owner.device_token, json!(null))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        roster["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["device_id"] == device.device_id.to_string()
+                && entry["name"] == "Phone")
+    );
+    for name in ["", "   ", "a\nb", &"x".repeat(129)] {
+        let (status, body) = server
+            .request("PUT", &path, &owner.device_token, json!({"name": name}))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "invalid_device_name");
+    }
+    let foreign = server.owner().await;
+    for target in [foreign.device_id, Uuid::new_v4()] {
+        let (status, body) = server
+            .request(
+                "PUT",
+                &format!("/v1/devices/{target}/name"),
+                &owner.device_token,
+                json!({"name": "Phone"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "device_not_found");
+    }
+    sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
+        .bind(owner.vault_id)
+        .bind(device.device_id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let (status, body) = server
+        .request("PUT", &path, &owner.device_token, json!({"name": "Phone"}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "device_already_revoked");
+    let (status, body) = server
+        .request("PUT", &path, &device.device_token, json!({"name": "Phone"}))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "invalid_bearer");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn rename_device_policy_denial_uses_revoke_operation() {
+    let policy = Arc::new(Policy::allowing([Operation::Read]));
+    let server = TestServer::start(policy.clone()).await;
+    let owner = server.owner().await;
+    let (status, body) = server
+        .request(
+            "PUT",
+            &format!("/v1/devices/{}/name", owner.device_id),
+            &owner.device_token,
+            json!({"name": "Phone"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "operation_not_permitted");
+    assert_called_by(&policy.calls().await, &owner, Operation::Revoke);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn wake_routes_use_sync_and_revoke_policy_and_delete_matching_jobs() {
     let policy = Arc::new(Policy::allowing([Operation::Sync, Operation::Revoke]));
     let server = TestServer::start(policy.clone()).await;

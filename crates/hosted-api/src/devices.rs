@@ -6,6 +6,12 @@ use uuid::Uuid;
 
 use crate::DevicePresence;
 
+/// A new display name for a device in the authenticated vault.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeviceRenameRequest {
+    pub name: String,
+}
+
 /// The authenticated vault's devices, including revoked devices.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DeviceRosterResponse {

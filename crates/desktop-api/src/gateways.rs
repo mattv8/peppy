@@ -6,7 +6,7 @@ use std::collections::HashSet;
 const MAX_GATEWAYS: usize = 16;
 const MAX_SIMS: usize = 8;
 const MAX_SUBSCRIPTION_CHARS: usize = 128;
-const MAX_LABEL_CHARS: usize = 48;
+const MAX_DEVICE_NAME_CHARS: usize = 128;
 const FALLBACK_MMS_MAX_BYTES: u64 = 300 * 1024;
 const MAX_MMS_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_MMS_RECIPIENTS: usize = 20;
@@ -68,8 +68,8 @@ impl Status {
 #[derive(Deserialize)]
 struct SimReport {
     subscription_id: String,
-    #[serde(default)]
-    label: Option<String>,
+    #[serde(default, rename = "label")]
+    _label: Option<String>,
     sms: Status,
     mms: Status,
     #[serde(default)]
@@ -133,13 +133,17 @@ fn valid_optional_mms_fields(sim: &SimReport) -> bool {
             .as_ref()
             .is_none_or(|value| bounded_u64(Some(value), 1, MAX_MMS_RECIPIENTS as u64).is_some())
 }
-fn clean_label(value: &str) -> Option<String> {
+fn clean_device_name(value: &str) -> Option<String> {
     let value = value
         .chars()
         .filter(|c| !c.is_control())
-        .take(MAX_LABEL_CHARS)
         .collect::<String>();
-    (!value.trim().is_empty()).then(|| value.trim().into())
+    let value = value
+        .trim()
+        .chars()
+        .take(MAX_DEVICE_NAME_CHARS)
+        .collect::<String>();
+    (!value.is_empty()).then_some(value)
 }
 fn valid_subscription(value: &str) -> bool {
     !value.is_empty()
@@ -345,6 +349,8 @@ pub fn gateway_views(
             continue;
         };
         let short = id.simple().to_string()[..8].to_owned();
+        let device_label = clean_device_name(device.name.as_deref().unwrap_or(""))
+            .unwrap_or_else(|| format!("Phone {short}"));
         let report = capabilities
             .capabilities
             .iter()
@@ -360,15 +366,18 @@ pub fn gateway_views(
         let wake_route = device.wake_route;
         match &reports {
             SimReports::Valid(sims) => {
-                for sim in sims {
+                for (index, sim) in sims.iter().enumerate() {
                     let limits = mms_limits(sim);
                     let supports_sms = sim.sms == Status::Available;
                     let supports_mms = supports_sms
                         && sim.mms == Status::Available
                         && valid_optional_mms_fields(sim)
                         && limits.0.is_some_and(|version| version >= 2);
-                    let name = clean_label(sim.label.as_deref().unwrap_or(""))
-                        .unwrap_or_else(|| format!("Phone {short}"));
+                    let name = if sims.len() > 1 {
+                        format!("{device_label} · SIM {}", index + 1)
+                    } else {
+                        device_label.clone()
+                    };
                     let mut note = format!(
                         "SMS {}; MMS {}. Presence is not reported by the server; commands wait durably until the gateway syncs.",
                         sim.sms.describe(),
@@ -423,15 +432,9 @@ pub fn gateway_views(
                     None,
                     setting_up,
                 );
-                let name = if setting_up {
-                    clean_label(device.name.as_deref().unwrap_or(""))
-                        .unwrap_or_else(|| format!("Phone {short}"))
-                } else {
-                    format!("Phone {short}")
-                };
                 views.push(GatewayView {
                     id: id.to_string(),
-                    name,
+                    name: device_label,
                     sim_id: String::new(),
                     online: availability == GatewayAvailability::Connected,
                     simulated,
@@ -463,6 +466,53 @@ pub fn gateway_views(
 mod tests {
     use super::*;
     use crate::compose::find_route;
+
+    #[test]
+    fn gateway_names_follow_device_names_and_sim_count() {
+        let id = "12345678-1234-1234-1234-123456789abc";
+        let views = |name: serde_json::Value, sims: serde_json::Value, simulated: bool| {
+            let mut roster = serde_json::json!({
+                "devices": [{"device_id": id, "role": "gateway", "revoked": false, "name": name}]
+            });
+            if name.is_null() {
+                roster["devices"][0].as_object_mut().unwrap().remove("name");
+            }
+            let devices: DevicesResponse = serde_json::from_value(roster).unwrap();
+            let capabilities: CapabilitiesResponse = serde_json::from_value(serde_json::json!({
+                "capabilities": [{"device_id": id, "simulator": simulated, "capabilities": {"sims": sims}}]
+            })).unwrap();
+            gateway_views(&devices, &capabilities)
+                .into_iter()
+                .map(|view| view.name)
+                .collect::<Vec<_>>()
+        };
+        let sim = serde_json::json!({"subscription_id":"sim", "label":"Carrier", "sms":"available", "mms":"unavailable"});
+        assert_eq!(
+            views("  Pixel\u{0007}  ".into(), serde_json::json!([sim]), false),
+            ["Pixel"]
+        );
+        assert_eq!(
+            views("Pixel".into(), serde_json::json!([sim, sim]), false),
+            ["Pixel · SIM 1", "Pixel · SIM 2"]
+        );
+        for name in [serde_json::Value::Null, "".into(), " \u{0007} ".into()] {
+            assert_eq!(
+                views(name, serde_json::json!([sim]), false),
+                ["Phone 12345678"]
+            );
+        }
+        for sims in [serde_json::json!([]), serde_json::json!([{}])] {
+            assert_eq!(views("Pixel".into(), sims, false), ["Pixel"]);
+        }
+        assert_eq!(
+            views("Pixel".into(), serde_json::json!([sim]), true),
+            ["Pixel (simulated)"]
+        );
+        assert_eq!(
+            views("x".repeat(200).into(), serde_json::json!([sim]), false),
+            ["x".repeat(128)]
+        );
+    }
     #[test]
     fn valid_v2_capability_enables_a_route_but_unknown_presence_is_offline() {
         let id = uuid::Uuid::new_v4().to_string();

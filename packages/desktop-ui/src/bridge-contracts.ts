@@ -346,6 +346,7 @@ export interface DesktopBridge {
   list_contact_books(): Promise<ContactBookView[]>;
   list_devices(): Promise<DeviceRosterView>;
   revoke_device(deviceId: string): Promise<void>;
+  rename_device(deviceId: string, name: string): Promise<void>;
   mcp_status(): Promise<McpDeviceStatus>;
   mcp_enable(): Promise<McpDeviceStatus>;
   mcp_grants(): Promise<McpGrantView[]>;

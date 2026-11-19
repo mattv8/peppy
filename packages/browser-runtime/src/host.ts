@@ -126,6 +126,7 @@ export interface BrowserNetwork {
   /** Server capability reports; setup state is decoration, so a failed read only drops that badge. */
   listCapabilities?(): Promise<unknown>;
   revokeDevice(deviceId: string): Promise<void>;
+  renameDevice(deviceId: string, name: string): Promise<void>;
   mcpStatus(): Promise<McpDeviceStatus>;
   mcpEnable(): Promise<McpDeviceStatus>;
   mcpGrants(): Promise<McpGrantView[]>;
@@ -430,7 +431,7 @@ function deviceManagementError(error: unknown): RpcError {
     if (error.kind === "revoked") {
       return { code: "invalid_bearer", message: "The server rejected this device credential." };
     }
-    if (error.kind === "status" && error.code && ["owner_required", "last_active_owner", "device_already_revoked", "device_not_found", "invalid_bearer"].includes(error.code)) {
+    if (error.kind === "status" && error.code && ["owner_required", "last_active_owner", "device_already_revoked", "device_not_found", "invalid_bearer", "invalid_device_name", "operation_not_permitted"].includes(error.code)) {
       return { code: error.code, message: "The server rejected the device request." };
     }
   }
@@ -1166,10 +1167,10 @@ export class BrowserWorkerHost {
       if (this.owner.owner.phase === "closed") await this.stop("closed");
       return;
     }
-    if (request.command === "list_devices" || request.command === "revoke_device") {
+    if (request.command === "list_devices" || request.command === "revoke_device" || request.command === "rename_device") {
       const response = await this.deviceManagement(request);
       port.postMessage(response);
-      if (response.ok && request.command === "revoke_device") this.changed();
+      if (response.ok && request.command !== "list_devices") this.changed();
       return;
     }
     if (request.command.startsWith("mcp_") || request.command === "webhooks_list" || request.command.startsWith("webhook_")) {
@@ -1591,6 +1592,12 @@ export class BrowserWorkerHost {
         return { id: request.id, ok: true, value: deviceRoster(devices, currentDeviceId, capabilities) };
       }
       const deviceId = requiredDeviceId(request.args.deviceId);
+      if (request.command === "rename_device") {
+        if (typeof request.args.name !== "string") throw new TransportError("invalid");
+        await network.renameDevice(deviceId, request.args.name);
+        network.wake?.();
+        return { id: request.id, ok: true, value: undefined };
+      }
       const identity = object(await this.owner!.owner.query("_worker_identity_metadata", {}));
       currentDeviceId = requiredDeviceId(identity.deviceId);
       await network.revokeDevice(deviceId);
@@ -2055,6 +2062,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
         async listDevices() { if (!publicTransport) throw new TransportError("invalid"); return publicTransport.json("/v1/devices", { method: "GET" }); },
         async listCapabilities() { if (!publicTransport) throw new TransportError("invalid"); return publicTransport.json("/v1/capabilities", { method: "GET" }); },
        async revokeDevice(deviceId) { if (!publicTransport) throw new TransportError("invalid"); await publicTransport.discard(`/v1/devices/${deviceId}/revoke`, { method: "POST" }); },
+       async renameDevice(deviceId, name) { if (!publicTransport) throw new TransportError("invalid"); await publicTransport.discard(`/v1/devices/${deviceId}/name`, { method: "PUT", body: { name } }); },
        async mcpStatus() { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpStatus(); },
        async mcpEnable() { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpEnable(); },
         async mcpGrants() { if (!enrollment) throw new TransportError("invalid"); return enrollment.mcpGrants(); },

@@ -23,6 +23,90 @@ describe("DevicesSettings", () => {
       { id: "old", name: "Old phone", kind: "ios", role: "owner", revoked: true },
     ] });
     vi.mocked(bridge.revoke_device).mockReset().mockResolvedValue(undefined);
+    vi.mocked(bridge.rename_device).mockReset().mockResolvedValue(undefined);
+  });
+
+  it("renames active devices, including this device, and refreshes the roster", async () => {
+    render(<DevicesSettings />);
+    const opener = await screen.findByRole("button", { name: "Rename This Mac" });
+    expect(screen.getByRole("button", { name: "Rename Pixel 8" })).toBeEnabled();
+    expect(document.querySelector("#device-rename-old")).toBeNull();
+    fireEvent.click(opener);
+    const input = screen.getByLabelText("Device name");
+    expect(input).toHaveValue("This Mac");
+    expect(screen.getByRole("button", { name: "Save name" })).toBeDisabled();
+    fireEvent.change(input, { target: { value: "  New Mac  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+    await waitFor(() => expect(bridge.rename_device).toHaveBeenCalledWith("self", "New Mac"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(bridge.list_devices).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    [" ", "Enter a name."],
+    ["😀".repeat(33), "Use 128 bytes or fewer. Emoji and non-Latin characters count for more than one."],
+    ["name\u0001", "Names can't contain line breaks or control characters."],
+  ])("validates device names", async (value, message) => {
+    render(<DevicesSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Rename This Mac" }));
+    const input = screen.getByLabelText("Device name");
+    fireEvent.change(input, { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(message);
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(bridge.rename_device).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["invalid_device_name", "Enter a valid name."],
+    ["invalid_bearer", "This device's sign-in expired. Reconnect it, then try again."],
+    ["app-locked", "Unlock Peppy to rename a device."],
+    ["app_lock", "Unlock Peppy to rename a device."],
+    ["operation_not_permitted", "Renaming isn't available for this account right now."],
+    ["unknown", "Couldn't rename the device. Try again."],
+    ["offline", "Server offline. Renaming is unavailable."],
+  ])("shows rename error %s", async (code, message) => {
+    vi.mocked(bridge.rename_device).mockRejectedValue({ code });
+    render(<DevicesSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Rename This Mac" }));
+    fireEvent.change(screen.getByLabelText("Device name"), { target: { value: "New name" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    if (code === "offline") expect(screen.getByRole("button", { name: "Save name" })).toBeDisabled();
+  });
+
+  it.each([
+    ["device_already_revoked", "This device was removed, so it can't be renamed."],
+    ["device_not_found", "This device is no longer in the roster."],
+  ])("reloads after rename error %s", async (code, message) => {
+    vi.mocked(bridge.rename_device).mockRejectedValue({ code });
+    render(<DevicesSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Rename This Mac" }));
+    fireEvent.change(screen.getByLabelText("Device name"), { target: { value: "New name" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(bridge.list_devices).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the rename dialog open when the server goes offline", async () => {
+    const { rerender } = render(<DevicesSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Rename This Mac" }));
+    fireEvent.change(screen.getByLabelText("Device name"), { target: { value: "New name" } });
+    rerender(<DevicesSettings serverOffline />);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save name" })).toBeDisabled();
+  });
+
+  it("reports a roster reload failure after a successful rename", async () => {
+    vi.mocked(bridge.list_devices).mockReset().mockResolvedValueOnce({ currentDeviceId: "self", devices: [
+      { id: "self", name: "This Mac", kind: "desktop", role: "owner", revoked: false },
+    ] }).mockRejectedValueOnce(new Error("reload failed"));
+    render(<DevicesSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Rename This Mac" }));
+    fireEvent.change(screen.getByLabelText("Device name"), { target: { value: "New name" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+    expect(await screen.findByText("The device was renamed, but the latest roster could not be loaded.")).toBeInTheDocument();
   });
 
   it("loads devices under StrictMode", async () => {
@@ -378,7 +462,7 @@ describe("DevicesSettings", () => {
     render(<DevicesSettings serverOffline />);
     expect(await screen.findByText("This Mac")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Remove Pixel 8" })).not.toBeInTheDocument();
-    expect(document.querySelector("[data-remove-offline]")).toHaveTextContent("Unavailable while offline");
+    expect(document.querySelector('[data-rename-offline="phone"]')).toHaveTextContent("Unavailable while offline");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
@@ -397,7 +481,7 @@ describe("DevicesSettings", () => {
     render(<DevicesSettings serverOffline={false} />);
     fireEvent.click(await screen.findByRole("button", { name: "Remove Pixel 8" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove device" }));
-    await waitFor(() => expect(document.querySelector("[data-remove-offline]")).toBeInTheDocument());
+    await waitFor(() => expect(document.querySelector('[data-rename-offline="phone"]')).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: "Retry loading devices" }));
 

@@ -235,7 +235,7 @@ use base64::{
 };
 use ipnet::IpNet;
 use peppy_domain::{DeviceId, VaultId};
-use peppy_hosted_api::{DeviceRosterDevice, DeviceRosterResponse};
+use peppy_hosted_api::{DeviceRenameRequest, DeviceRosterDevice, DeviceRosterResponse};
 use peppy_hosted_api::{
     PushConfig, PushConfigAdvertisement,
     enrollment::{
@@ -888,6 +888,7 @@ fn build_router_with_live_backend(
     let router = Router::new()
         .route("/v1/vault", get(vault_header))
         .route("/v1/devices/{device_id}/revoke", post(revoke_device))
+        .route("/v1/devices/{device_id}/name", put(rename_device))
         .route("/v1/devices/self/push-config", get(push_config))
         .route(
             "/v1/devices/self/retention-capability",
@@ -2372,6 +2373,72 @@ pub async fn bootstrap_owner(
         .map_err(|e| e.to_string())?;
     Ok(())
 }
+fn normalize_device_name(name: &str) -> ApiResult<String> {
+    let name = name.trim();
+    crate::enrollment::validate_device_name(name)
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_device_name"))?;
+    Ok(name.to_owned())
+}
+
+async fn rename_device(
+    State(s): State<ApiState>,
+    h: HeaderMap,
+    Path(device_id): Path<Uuid>,
+    Json(request): Json<DeviceRenameRequest>,
+) -> ApiResult<StatusCode> {
+    let p = authenticated(&s, &h, Operation::Revoke).await?;
+    let name = normalize_device_name(&request.name)?;
+    let mut tx = scope::begin(&s.db, p.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "rename_begin"))?;
+    sqlx::query("SELECT 1 FROM vaults WHERE vault_id=$1 FOR UPDATE")
+        .bind(p.vault)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "rename_vault_lock"))?;
+    revalidate_principal(&mut tx, &p).await?;
+    withdraw_legacy_retention_mutation(&mut tx, &h, p.vault, p.device).await?;
+    let active: bool = sqlx::query_scalar(
+        "SELECT revoked_at IS NULL FROM devices WHERE vault_id=$1 AND device_id=$2 FOR UPDATE",
+    )
+    .bind(p.vault)
+    .bind(device_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| database_unavailable(&error, "rename_target_lookup"))?
+    .ok_or(ApiError(StatusCode::NOT_FOUND, "device_not_found"))?;
+    if !active {
+        return Err(ApiError(StatusCode::CONFLICT, "device_already_revoked"));
+    }
+    sqlx::query("UPDATE devices SET name=$3 WHERE vault_id=$1 AND device_id=$2")
+        .bind(p.vault)
+        .bind(device_id)
+        .bind(name)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "rename_device"))?;
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "rename_commit"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod device_name_tests {
+    use super::normalize_device_name;
+
+    #[test]
+    fn normalizes_and_validates_device_names() {
+        assert_eq!(normalize_device_name("  Phone  ").unwrap(), "Phone");
+        assert!(normalize_device_name(&"é".repeat(64)).is_ok());
+        for invalid in ["", "  ", "a\nb", &"a".repeat(129)] {
+            let error = normalize_device_name(invalid).unwrap_err();
+            assert_eq!(error.0, axum::http::StatusCode::BAD_REQUEST);
+            assert_eq!(error.1, "invalid_device_name");
+        }
+    }
+}
+
 async fn revoke_device(
     State(s): State<ApiState>,
     h: HeaderMap,
