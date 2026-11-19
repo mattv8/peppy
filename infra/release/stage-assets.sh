@@ -41,4 +41,12 @@ if [ "$group" = all ] || [ "$group" = desktop ]; then
   copy_asset "$(find_exact "$windows" '*.msi')" "peppy-$version-windows-x86_64.msi"
   copy_asset "$(find_exact "$windows" '*-setup.exe')" "peppy-$version-windows-x86_64-setup.exe"
 fi
-(cd "$out_dir"; sums=SHA256SUMS.tmp; if command -v sha256sum >/dev/null 2>&1; then find . -maxdepth 1 -type f ! -name SHA256SUMS ! -name SHA256SUMS.tmp -exec sha256sum {} \; | sed 's#  \./#  #' | LC_ALL=C sort > "$sums"; else find . -maxdepth 1 -type f ! -name SHA256SUMS ! -name SHA256SUMS.tmp -exec shasum -a 256 {} \; | sed 's#  \./#  #' | LC_ALL=C sort > "$sums"; fi; mv "$sums" SHA256SUMS)
+(
+  cd "$out_dir"
+  if ! declare -F _release_checksum_transform >/dev/null; then
+    # shellcheck disable=SC1091
+    source "$script_dir/lib.sh"
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then _release_checksum_transform no sha256sum; else _release_checksum_transform no shasum -a 256; fi
+  mv SHA256SUMS.tmp SHA256SUMS
+)
