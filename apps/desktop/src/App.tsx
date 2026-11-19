@@ -6263,6 +6263,22 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     );
   }
 
+  const dismissAllNotifications = () => {
+    if (dismissingNotificationsRef.current) return;
+    setNotificationAppFilter(null);
+    setNotificationQuery("");
+    dismissingNotificationsRef.current = true;
+    setDismissingNotifications(true);
+    setNotificationActionNotice("");
+    void bridge.dismiss_all_notifications()
+      .then(() => refresh())
+      .catch(error => setNotificationActionNotice(`Could not dismiss notifications. ${errorText(error)}`))
+      .finally(() => {
+        dismissingNotificationsRef.current = false;
+        setDismissingNotifications(false);
+      });
+  };
+
   return (
     <ToneOverridesProvider overrides={toneOverrides}>
     <>
@@ -6466,15 +6482,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           data-mobile-list={showingMobileConversationList || undefined}
           ref={paneRef}
         >
-          <header id="thread-pane-header">
-            {!settingsOpen && !notificationsOpen && !contactsOpen && activeDisplay && (
+          {!notificationsOpen && <header id="thread-pane-header">
+            {!settingsOpen && !contactsOpen && activeDisplay && (
               <TonePicker id="thread-tone-picker" seed={activeDisplay.avatar.seed} value={toneOverrides[activeDisplay.avatar.seed]} automaticIndex={paletteIndex(activeDisplay.avatar.seed)} disabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pending={Boolean(pendingToneSeeds[activeDisplay.avatar.seed])} error={toneErrors[activeDisplay.avatar.seed]} onSelect={(index) => { void saveTone(activeDisplay.avatar.seed, index); }} renderTrigger={(props) => <button {...props} id="thread-contact-avatar" aria-label="Change conversation color"><ContactAvatar {...activeDisplay.avatar} toneOverrides={toneOverrides} size={36} /></button>} />
             )}
             <div className="header-copy">
               {settingsOpen ? (
                 <h1 data-header-title>Settings</h1>
-              ) : notificationsOpen ? (
-                <h1 data-header-title>Notifications</h1>
               ) : contactsOpen ? (
                 <h1 data-header-title>Contacts</h1>
               ) : (
@@ -6487,7 +6501,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               )}
             </div>
             {contactsOpen && <div id="contacts-header-slot" className="header-actions" ref={setContactsHeaderHost} />}
-            <div className="header-actions" hidden={revoked || settingsOpen || notificationsOpen || contactsOpen}>
+            <div className="header-actions" hidden={revoked || settingsOpen || contactsOpen}>
               {isGroup && active?.group && !headPanel && <button
                 id="header-group-details"
                 ref={groupDetailsButtonRef}
@@ -6540,30 +6554,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                </button>}
               {listCollapsed && deleteConfirmationId === slotKey && <span id="conversation-delete-draft-warning" data-delete-draft-warning role="status">Deleting this draft permanently removes its text and attachments.</span>}
             </div>
-            {notificationsOpen && <button
-              id="notifications-dismiss-all"
-              className="btn"
-              disabled={notificationsLocked || !dismissibleNotificationsCount || dismissingNotifications}
-              onClick={() => {
-                if (dismissingNotificationsRef.current) return;
-                setNotificationAppFilter(null);
-                setNotificationQuery("");
-                dismissingNotificationsRef.current = true;
-                setDismissingNotifications(true);
-                setNotificationActionNotice("");
-                void bridge.dismiss_all_notifications()
-                  .then(() => refresh())
-                  .catch(error => setNotificationActionNotice(`Could not dismiss notifications. ${errorText(error)}`))
-                  .finally(() => {
-                    dismissingNotificationsRef.current = false;
-                    setDismissingNotifications(false);
-                  });
-              }}
-            >
-              <CheckCheck size={14} aria-hidden />
-              {dismissibleNotificationsCount > 100 ? "Dismiss up to 100" : "Dismiss all"}
-            </button>}
-          </header>
+          </header>}
           {!settingsOpen && !notificationsOpen && !contactsOpen && active && <ConversationSpamNotice folder={active.folder} folderReason={active.folderReason} unblock={active.unblock} />}
           {!settingsOpen && !notificationsOpen && !contactsOpen && active && <ConversationRcsNotice historyGap={active.rcsHistoryGap} group={groupBarState ? { state: groupBarState } : undefined} />}
           {groupDetailsOpen && active?.group && activeDisplay && <GroupDetailsDialog
@@ -6668,6 +6659,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               filters={snapshot?.appFilters ?? []}
               sources={snapshot?.gateways ?? []}
               locked={notificationsLocked}
+              dismissAll={{ label: dismissibleNotificationsCount > 100 ? "Dismiss up to 100" : "Dismiss all", disabled: !dismissibleNotificationsCount || dismissingNotifications, onDismissAll: dismissAllNotifications }}
               onDismiss={target => {
                 setNotificationActionNotice("");
                 void bridge.dismiss_notification(target).then(() => refresh()).catch(error => setNotificationActionNotice(`Could not dismiss notification. ${errorText(error)}`));
