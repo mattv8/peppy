@@ -261,7 +261,6 @@
 #notification-settings .notif-app-letter-avatar {
   display: grid;
   place-items: center;
-  border: 1px solid var(--peppy-border-strong);
   background: var(--peppy-surface-widget);
   color: var(--peppy-text-secondary);
   font-size: 12px;
