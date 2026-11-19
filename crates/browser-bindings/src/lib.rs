@@ -523,9 +523,25 @@ impl BrowserCore {
             .iter()
             .map(|conversation| conversation.conversation_id)
             .collect();
-        let requested = requested.filter(|id| {
-            conversations.iter().any(|item| item.conversation_id == *id)
-                || drafts.iter().any(|draft| draft.conversation_id == *id)
+        let redirect_target = match requested {
+            Some(id) if !conversation_ids.contains(&id) => {
+                client.conversation_redirect(id).map_err(core)?
+            }
+            _ => None,
+        };
+        let redirected = redirect_target.filter(|id| conversation_ids.contains(id));
+        let requested_redirect =
+            requested
+                .zip(redirected)
+                .map(|(from, to)| dto::RequestedRedirect {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                });
+        let requested = redirected.or_else(|| {
+            requested.filter(|id| {
+                conversation_ids.contains(id)
+                    || drafts.iter().any(|draft| draft.conversation_id == *id)
+            })
         });
         let history_from_message_id = if requested.is_some() {
             args.get("historyFromMessageId")
@@ -535,9 +551,13 @@ impl BrowserCore {
         } else {
             None
         };
-        let active = requested
-            .or_else(|| conversations.first().map(|c| c.conversation_id))
-            .or_else(|| drafts.first().map(|d| d.conversation_id));
+        let active = if redirect_target.is_some() && redirected.is_none() {
+            requested
+        } else {
+            requested
+                .or_else(|| conversations.first().map(|c| c.conversation_id))
+                .or_else(|| drafts.first().map(|d| d.conversation_id))
+        };
         let mut views = Vec::new();
         let reaction_gateways = self.context.gateways.as_deref().unwrap_or_default();
         for conversation in &conversations {
@@ -709,6 +729,7 @@ impl BrowserCore {
                 .map_err(core)?
                 .unwrap_or_default(),
             active_conversation_id: active.map(|id| id.to_string()),
+            requested_redirect,
             draft: active
                 .and_then(|id| drafts_by_conversation.get(&id).copied())
                 .map(|draft| Self::draft_view_with_browser_attachments(client, draft))
@@ -1574,6 +1595,64 @@ mod tests {
         )
         .unwrap();
         assert_eq!(malformed["error"]["code"], "invalid-request");
+    }
+
+    #[test]
+    fn snapshot_follows_conversation_redirects_and_draft_ghosts() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = VaultId::new();
+        let mut browser = BrowserCore::new(root.path().to_path_buf());
+        open(&mut browser, vault, DeviceId::new(), [7; 32]);
+        let profile = KeyProfile::new(vault.0, 1).unwrap();
+        let header = create_vault_check_header(
+            &derive_root_key("passphrase", &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
+        value(&browser.dispatch(&json!({"command":"unlock","args":{"profile":profile,"header":header,"passphrase":"passphrase"}}).to_string()));
+        let client = browser.client().unwrap();
+        let survivor = client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550101".into(),
+                body: "history".into(),
+                provider_message_id: Some("redirect-test".into()),
+                imported: false,
+            })
+            .unwrap()
+            .conversation_id;
+        let ghost = client.create_compose_draft(None).unwrap().conversation_id;
+        let source = ConversationId::new();
+        let missing = ConversationId::new();
+        let db = rusqlite::Connection::open(root.path().join("client.db")).unwrap();
+        db.execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+        for (from, to) in [
+            (ghost, survivor),
+            (source, survivor),
+            (missing, ConversationId::new()),
+        ] {
+            db.execute(
+                "INSERT INTO conversation_merges(source_id, target_id) VALUES(?, ?)",
+                rusqlite::params![from.to_string(), to.to_string()],
+            )
+            .unwrap();
+        }
+        for from in [ghost, source] {
+            let snapshot = value(&browser.dispatch(
+                &json!({"command":"snapshot","args":{"conversationId":from}}).to_string(),
+            ));
+            assert_eq!(snapshot["activeConversationId"], survivor.to_string());
+            assert_eq!(snapshot["requestedRedirect"]["from"], from.to_string());
+            assert_eq!(snapshot["requestedRedirect"]["to"], survivor.to_string());
+        }
+        let snapshot = value(&browser.dispatch(
+            &json!({"command":"snapshot","args":{"conversationId":missing}}).to_string(),
+        ));
+        assert!(snapshot["activeConversationId"].is_null());
+        assert!(snapshot.get("requestedRedirect").is_none());
     }
 
     #[test]

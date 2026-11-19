@@ -64,6 +64,8 @@ pub struct Snapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_conversation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_redirect: Option<RequestedRedirect>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub draft: Option<DraftView>,
     pub head: Head,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,6 +96,12 @@ pub struct Snapshot {
     /// Bounded, read-only RCS display state. Omitted while locked or unsupported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rcs_status: Option<RcsStatusSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RequestedRedirect {
+    pub from: String,
+    pub to: String,
 }
 
 /// Sanitized, exact replay status. Cursors and snapshot counts remain decimal strings so JS never

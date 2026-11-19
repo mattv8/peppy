@@ -35,6 +35,17 @@ use tokio_util::sync::CancellationToken;
 
 pub type Notifier = Arc<dyn Fn() + Send + Sync>;
 
+fn resolve_requested_conversation(
+    requested: Option<ConversationId>,
+    target: Option<ConversationId>,
+    conversations: &HashSet<ConversationId>,
+    known: &HashSet<ConversationId>,
+) -> (Option<ConversationId>, Option<ConversationId>, bool) {
+    let redirected = target.filter(|id| conversations.contains(id));
+    let active = redirected.or_else(|| requested.filter(|id| known.contains(id)));
+    (active, redirected, target.is_none() || redirected.is_some())
+}
+
 fn replay_is_behind(progress: &ReplayProgress, target: Option<Cursor>) -> bool {
     target.is_some_and(|target| progress.received_through < target)
 }
@@ -1716,11 +1727,16 @@ impl Session {
     pub fn media_preview_message_conversation(&self, message_id: &str) -> BridgeResult<String> {
         let message_id = MessageId::from_str(message_id)
             .map_err(|_| BridgeError::new("invalid-message", "The message ID is invalid."))?;
-        self.client
+        let message = self
+            .client
             .message_by_id(message_id)
             .map_err(core_error)?
-            .map(|message| message.payload.record.conversation_id.to_string())
-            .ok_or_else(|| BridgeError::new("not-found", "The message was not found."))
+            .ok_or_else(|| BridgeError::new("not-found", "The message was not found."))?;
+        let source = message.payload.record.conversation_id;
+        Ok(self
+            .redirected_conversation(source)?
+            .unwrap_or(source)
+            .to_string())
     }
 
     fn attachment_views(
@@ -2030,12 +2046,33 @@ impl Session {
             .chain(drafts.iter().map(|d| d.conversation_id))
             .collect();
         let explicitly_requested = requested.is_some();
-        let requested_conversation = requested
-            .and_then(|id| ConversationId::from_str(id).ok())
-            .filter(|id| known.contains(id));
-        let active = requested_conversation
-            .or_else(|| conversations.first().map(|c| c.conversation_id))
-            .or_else(|| drafts.first().map(|d| d.conversation_id));
+        let requested_id = requested.and_then(|id| ConversationId::from_str(id).ok());
+        let conversation_ids: HashSet<_> =
+            conversations.iter().map(|c| c.conversation_id).collect();
+        let redirect_target = match requested_id {
+            Some(id) if !conversation_ids.contains(&id) => self.redirected_conversation(id)?,
+            _ => None,
+        };
+        let (requested_conversation, redirected, allow_fallback) = resolve_requested_conversation(
+            requested_id,
+            redirect_target,
+            &conversation_ids,
+            &known,
+        );
+        let requested_redirect =
+            requested_id
+                .zip(redirected)
+                .map(|(from, to)| peppy_desktop_api::RequestedRedirect {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                });
+        let active = if !allow_fallback {
+            requested_conversation
+        } else {
+            requested_conversation
+                .or_else(|| conversations.first().map(|c| c.conversation_id))
+                .or_else(|| drafts.first().map(|d| d.conversation_id))
+        };
         let (mut budget, mut hydration) = (MAX_PREVIEWS_PER_SNAPSHOT, DeferredHydration::default());
         let mut views = Vec::new();
         for conversation in &conversations {
@@ -2309,6 +2346,7 @@ impl Session {
             app_filters: notification_snapshot.app_filters,
             notification_preferences,
             active_conversation_id: active.map(|id| id.to_string()),
+            requested_redirect,
             draft,
             head,
             desktop: None,
@@ -2436,6 +2474,42 @@ fn bounded_preview_ids(ids: impl IntoIterator<Item = AttachmentId>) -> HashSet<A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_redirect_draft_ghost_prefers_survivor_and_missing_target_never_falls_back() {
+        let source = ConversationId::new();
+        let target = ConversationId::new();
+        let other = ConversationId::new();
+        let known = [source, other].into_iter().collect();
+        let conversations = [target, other].into_iter().collect();
+        assert_eq!(
+            resolve_requested_conversation(Some(source), Some(target), &conversations, &known),
+            (Some(target), Some(target), true)
+        );
+        let conversations = [other].into_iter().collect();
+        assert_eq!(
+            resolve_requested_conversation(Some(source), Some(target), &conversations, &known),
+            (Some(source), None, false)
+        );
+        assert_eq!(
+            resolve_requested_conversation(
+                Some(ConversationId::new()),
+                Some(target),
+                &conversations,
+                &known
+            ),
+            (None, None, false)
+        );
+        assert_eq!(
+            resolve_requested_conversation(
+                Some(ConversationId::new()),
+                None,
+                &conversations,
+                &known
+            ),
+            (None, None, true)
+        );
+    }
     use crate::{
         credentials::{
             parse_credential, store_credential,

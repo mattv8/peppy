@@ -462,6 +462,41 @@ export class DraftStore {
     return failure ?? review ?? { ok: true };
   }
 
+  /**
+   * Follows a host merge that redirected `from` to the survivor `to`. `from` then resolves to `to`, so
+   * the composer identity and the window keep their place. Without a survivor slot the source slot
+   * moves. With one, the survivor keeps its own content: unsaved source text becomes a retained copy
+   * there for review, and a clean source is dropped. A held source is left alone because its send
+   * settles against that slot.
+   */
+  followMerge(from: string, to: string): void {
+    if (from === to || this.resolve(to) === from) return;
+    const source = this.get(from);
+    if (source?.held) return;
+    this.aliases.set(from, to);
+    if (!source || source.key === to) {
+      this.events.changed();
+      return;
+    }
+    const destination = this.slots.get(to);
+    if (!destination) {
+      this.moveSlot(source, to);
+      this.events.changed();
+      return;
+    }
+    const copy = source.content;
+    const copyDiffers = isDirty(source) && Boolean(copy.text || copy.attachmentIds.length) && !sameDraftContent(destination.content, copy);
+    this.migrateRetained(source.key, to);
+    this.slots.delete(source.key);
+    this.saveStates.delete(source.key);
+    if (copyDiffers) {
+      this.retainCopy(to, copy);
+      this.reviewRequired.add(to);
+      this.events.notice?.(to, "moved");
+    }
+    this.events.changed();
+  }
+
   hold(key: string) {
     const slot = this.get(key);
     if (slot) slot.held = true;
@@ -929,6 +964,14 @@ export class DraftStore {
 
   private rekey(slot: DraftSlot, conversationId: string): boolean {
     const from = slot.key;
+    if (!this.moveSlot(slot, conversationId)) return false;
+    if (from !== conversationId) this.events.rekeyed(from, conversationId);
+    return true;
+  }
+
+  /** Re-keys a slot without notifying the window; refuses a dirty destination. */
+  private moveSlot(slot: DraftSlot, conversationId: string): boolean {
+    const from = slot.key;
     if (from === conversationId) return true;
     const destination = this.slots.get(conversationId);
     if (destination && destination !== slot && isDirty(destination)) {
@@ -941,7 +984,6 @@ export class DraftStore {
     slot.conversationId = conversationId;
     this.slots.set(conversationId, slot);
     this.hydrated.add(conversationId);
-    this.events.rekeyed(from, conversationId);
     return true;
   }
 

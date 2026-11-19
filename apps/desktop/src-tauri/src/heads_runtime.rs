@@ -560,16 +560,52 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         update_recent_tray_menu(app, Some(&token)).await;
     }
 
-    let pins = match runtime(app).pins.pins(&binding) {
+    let mut pins = match runtime(app).pins.pins(&binding) {
         Ok(pins) => pins,
         Err(_) => return,
     };
-    let recent_ids = match app.state::<AppState>().recents.list(&token.binding) {
+    let mut recent_ids = match app.state::<AppState>().recents.list(&token.binding) {
         Ok(ids) => ids,
         Err(_) => {
             clear_recent_entries(app, &token).await;
             Vec::new()
         }
+    };
+    let ids = pins
+        .iter()
+        .map(|pin| pin.conversation_id.clone())
+        .chain(recent_ids.iter().cloned())
+        .collect::<HashSet<_>>();
+    let (redirects, mut protected) = match crate::sync::blocking({
+        let session = session.clone();
+        move || {
+            Ok(collect_redirects(ids, |source| {
+                session.redirected_conversation(source)
+            }))
+        }
+    })
+    .await
+    {
+        Ok(redirects) => redirects,
+        Err(_) => return,
+    };
+    if !revalidate_after_await(app, &token).await {
+        return;
+    }
+    for (from, to) in redirects {
+        let pin_failed = runtime(app).pins.remap(&binding, &from, &to).is_err();
+        let recent_failed = app_state.recents.remap(&binding, &from, &to).is_err();
+        if pin_failed || recent_failed {
+            protected.insert(from);
+        }
+    }
+    pins = match runtime(app).pins.pins(&binding) {
+        Ok(pins) => pins,
+        Err(_) => return,
+    };
+    recent_ids = match app_state.recents.list(&binding) {
+        Ok(ids) => ids,
+        Err(_) => return,
     };
     let wanted_ids = pins
         .iter()
@@ -622,14 +658,13 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         .into_iter()
         .map(|head| (head.id.clone(), head))
         .collect();
-    refresh_recent_conversations(app, &token, &recent_ids, &data).await;
+    refresh_recent_conversations(app, &token, &recent_ids, &data, &protected).await;
     // The core resolution above is authoritative for this binding. Only now may stale persisted
     // pins be pruned; doing it before a successful resolution makes transient failures consume
     // capacity permanently.
-    for stale_pin in pins
-        .iter()
-        .filter(|pin| !data.contains_key(&pin.conversation_id))
-    {
+    for stale_pin in pins.iter().filter(|pin| {
+        !data.contains_key(&pin.conversation_id) && !protected.contains(&pin.conversation_id)
+    }) {
         if runtime(app)
             .pins
             .remove(&binding, &stale_pin.conversation_id)
@@ -657,7 +692,7 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         let to_hide = state
             .heads
             .keys()
-            .filter(|id| !wanted.contains_key(*id))
+            .filter(|id| !wanted.contains_key(*id) && !protected.contains(*id))
             .cloned()
             .collect::<Vec<_>>();
         for id in &to_hide {
@@ -732,6 +767,27 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         }
     }
     update_tray_menu(app, Some(&token)).await;
+}
+
+fn collect_redirects(
+    ids: HashSet<String>,
+    mut lookup: impl FnMut(ConversationId) -> BridgeResult<Option<ConversationId>>,
+) -> (Vec<(String, String)>, HashSet<String>) {
+    let mut redirects = Vec::new();
+    let mut protected = HashSet::new();
+    for id in ids {
+        let Ok(source) = ConversationId::from_str(&id) else {
+            continue;
+        };
+        match lookup(source) {
+            Ok(Some(target)) if source != target => redirects.push((id, target.to_string())),
+            Err(_) => {
+                protected.insert(id);
+            }
+            _ => {}
+        }
+    }
+    (redirects, protected)
 }
 
 fn resolve_heads(
@@ -2342,9 +2398,13 @@ async fn refresh_recent_conversations(
     token: &RuntimeToken,
     ids: &[String],
     heads: &HashMap<String, HeadData>,
+    protected: &HashSet<String>,
 ) {
     let (entries, missing) = reconcile_recent_heads(ids, heads);
     for missing in missing {
+        if protected.contains(&missing) {
+            continue;
+        }
         if app
             .state::<AppState>()
             .recents
@@ -2478,6 +2538,27 @@ fn tray_entries(mut entries: Vec<(String, String)>) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_redirect_lookup_failure_protects_only_failed_id() {
+        let failed = ConversationId::new();
+        let source = ConversationId::new();
+        let target = ConversationId::new();
+        let (redirects, protected) = collect_redirects(
+            [failed.to_string(), source.to_string()]
+                .into_iter()
+                .collect(),
+            |id| {
+                if id == failed {
+                    Err(BridgeError::host_state())
+                } else {
+                    Ok(Some(target))
+                }
+            },
+        );
+        assert_eq!(redirects, vec![(source.to_string(), target.to_string())]);
+        assert_eq!(protected, [failed.to_string()].into_iter().collect());
+    }
     use crate::heads::{GenerationFence, PanelLayout};
     use crate::tests::{fixture_at, input, open};
     use peppy_client_core::IncomingSms;

@@ -250,7 +250,8 @@ pub fn react(
     gateways: &[GatewayView],
 ) -> Result<ReactionSubmitView, Error> {
     let message = client.message_by_id(message_id)?.ok_or(Error::NotFound)?;
-    let conversation_id = message.payload.record.conversation_id;
+    let source = message.payload.record.conversation_id;
+    let conversation_id = client.conversation_redirect(source)?.unwrap_or(source);
     let conversation = client
         .list_conversations()?
         .into_iter()

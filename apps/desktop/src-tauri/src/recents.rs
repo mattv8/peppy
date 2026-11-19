@@ -116,6 +116,30 @@ impl RecentStore {
         Ok(())
     }
 
+    pub fn remap(&self, binding: &Binding, from: &str, to: &str) -> Result<(), String> {
+        if !valid_id(from) || !valid_id(to) {
+            return Err(INVALID_ID_ERROR.into());
+        }
+        let _transaction = self
+            .transaction
+            .lock()
+            .map_err(|_| WRITE_ERROR.to_string())?;
+        let mut file = self.read()?;
+        if let Some(recents) = file.bindings.get_mut(&binding_key(binding)) {
+            if from != to && recents.iter().any(|recent| recent.conversation_id == from) {
+                for recent in recents
+                    .iter_mut()
+                    .filter(|recent| recent.conversation_id == from)
+                {
+                    recent.conversation_id = to.to_owned();
+                }
+                *recents = sanitize(std::mem::take(recents));
+                self.write(&file)?;
+            }
+        }
+        Ok(())
+    }
+
     fn read(&self) -> Result<RecentFile, String> {
         let metadata = match fs::metadata(&self.path) {
             Ok(metadata) => metadata,
@@ -196,6 +220,20 @@ mod tests {
 
     fn id() -> String {
         uuid::Uuid::new_v4().to_string()
+    }
+
+    #[test]
+    fn remap_preserves_order_and_deduplicates_survivor() {
+        let root = tempdir().unwrap();
+        let store = RecentStore::new(root.path());
+        let source = id();
+        let target = id();
+        let other = id();
+        store.touch(&binding("one"), &target, 1).unwrap();
+        store.touch(&binding("one"), &other, 2).unwrap();
+        store.touch(&binding("one"), &source, 3).unwrap();
+        store.remap(&binding("one"), &source, &target).unwrap();
+        assert_eq!(store.list(&binding("one")).unwrap(), vec![target, other]);
     }
 
     #[test]

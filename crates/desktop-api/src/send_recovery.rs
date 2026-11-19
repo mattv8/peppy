@@ -61,7 +61,11 @@ pub fn send_recovery_view(
         && kind != "unconfirmed-removed-cancel"
         && sent_again.is_none()
         && client
-            .group_view(message.payload.record.conversation_id)?
+            .group_view(
+                client
+                    .conversation_redirect(message.payload.record.conversation_id)?
+                    .unwrap_or(message.payload.record.conversation_id),
+            )?
             .is_none();
     Ok(Some(SendRecoveryView {
         kind,
