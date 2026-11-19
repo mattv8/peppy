@@ -4,7 +4,7 @@ import { notificationMuteKey, notificationTuple } from "./notificationIdentity";
 export const notificationKey = (target: NotificationTarget) =>
   notificationTuple(target.sourceDeviceId, target.notificationKey, target.lifetime);
 
-export type NotificationSectionId = "new" | "today" | "yesterday" | "older";
+export type NotificationSectionId = "today" | "yesterday" | "older";
 export type NotificationSection = { id: NotificationSectionId; label: string; items: MirroredNotification[] };
 
 export type NotificationStackData = {
@@ -36,10 +36,8 @@ function startOfLocalDay(timestamp: number) {
 
 function bucketFor(
   notification: MirroredNotification,
-  newKeys: ReadonlySet<string>,
   bounds: DayBounds,
 ): NotificationSectionId {
-  if (newKeys.has(notificationKey(notification.target))) return "new";
   const day = startOfLocalDay(notification.postedAt);
   // A phone clock running ahead can post into the future; keep those with today.
   if (day >= bounds.todayStart) return "today";
@@ -47,19 +45,16 @@ function bucketFor(
   return "older";
 }
 
-/** Splits notifications into New, Today/Earlier today, Yesterday, and Older by local calendar day. */
+/** Splits notifications into Today, Yesterday, and Older by local calendar day. */
 export function sectionNotifications(
   list: MirroredNotification[],
-  newKeys: ReadonlySet<string>,
   now: number,
 ): NotificationSection[] {
   const bounds = dayBounds(now);
-  const buckets: Record<NotificationSectionId, MirroredNotification[]> = { new: [], today: [], yesterday: [], older: [] };
-  for (const notification of list) buckets[bucketFor(notification, newKeys, bounds)].push(notification);
-  const todayLabel = buckets.new.length > 0 ? "Earlier today" : "Today";
+  const buckets: Record<NotificationSectionId, MirroredNotification[]> = { today: [], yesterday: [], older: [] };
+  for (const notification of list) buckets[bucketFor(notification, bounds)].push(notification);
   const sections: NotificationSection[] = [
-    { id: "new", label: "New", items: buckets.new },
-    { id: "today", label: todayLabel, items: buckets.today },
+    { id: "today", label: "Today", items: buckets.today },
     { id: "yesterday", label: "Yesterday", items: buckets.yesterday },
     { id: "older", label: "Older", items: buckets.older },
   ];

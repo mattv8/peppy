@@ -27,18 +27,18 @@ const filterFor = (notification: MirroredNotification, filtersByApp: Map<string,
   };
 
 export function NotificationSections({ notifications, ...props }: FeedProps & { notifications: MirroredNotification[] }) {
-  const sections = sectionNotifications(notifications, props.newKeys, Date.now());
+  const sections = sectionNotifications(notifications, Date.now());
   const showLabels = sections.length > 1;
   const showPhone = new Set(notifications.map(notification => notification.target.sourceDeviceId)).size > 1;
   return <>{sections.map(section => <section key={section.id} data-notification-section={section.id} aria-labelledby={`notification-section-${section.id}`} className="notif-section">
     <h2 id={`notification-section-${section.id}`} className={showLabels ? "notif-section-label" : "visually-hidden"}>
-      {section.label}{section.id === "new" && <span className="notification-count-badge">{section.items.length}</span>}
+      {section.label}
     </h2>
     <ul data-notification-section-list={section.id}>{section.items.map(notification => <li key={notificationKey(notification.target)}><NotificationRow
       notification={notification}
       labels={props.labels}
       filter={filterFor(notification, props.filtersByApp)}
-      isNew={props.newKeys.has(notificationKey(notification.target))}
+      unread={props.newKeys.has(notificationKey(notification.target))}
       showPhone={showPhone}
       query={props.query}
       onDismiss={props.onDismiss}
@@ -88,7 +88,7 @@ export function NotificationStacks({
         notification={notification}
         labels={props.labels}
         filter={filter}
-        isNew={props.newKeys.has(notificationKey(notification.target))}
+        unread={props.newKeys.has(notificationKey(notification.target))}
         showPhone={showPhone && stack.items.length === 1}
         query={props.query}
         onDismiss={props.onDismiss}

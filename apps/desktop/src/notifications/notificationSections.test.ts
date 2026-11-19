@@ -36,21 +36,13 @@ describe("notificationKey", () => {
 });
 
 describe("sectionNotifications", () => {
-  it("places new items first and labels remaining today items as earlier today", () => {
-    const fresh = notification("fresh", today(14));
-    const earlier = notification("earlier", today(9));
-    const list = [fresh, earlier];
-    const sections = sectionNotifications(list, new Set([notificationKey(fresh.target)]), now);
-    expect(sections.map(section => [section.id, section.label])).toEqual([
-      ["new", "New"],
-      ["today", "Earlier today"],
-    ]);
-    expect(titles(sections[0])).toEqual(["fresh"]);
-    expect(titles(sections[1])).toEqual(["earlier"]);
+  it("places unseen older notifications in Older", () => {
+    const sections = sectionNotifications([notification("unseen", older)], now);
+    expect(sections.map(section => [section.id, titles(section)])).toEqual([["older", ["unseen"]]]);
   });
 
-  it("labels today as Today when nothing is new", () => {
-    const sections = sectionNotifications([notification("a", today(9))], new Set(), now);
+  it("labels the current day as Today", () => {
+    const sections = sectionNotifications([notification("a", today(9))], now);
     expect(sections.map(section => [section.id, section.label])).toEqual([["today", "Today"]]);
   });
 
@@ -61,7 +53,7 @@ describe("sectionNotifications", () => {
       notification("yesterday-early", yesterday(0)),
       notification("older", older),
     ];
-    const sections = sectionNotifications(list, new Set(), now);
+    const sections = sectionNotifications(list, now);
     expect(sections.map(section => [section.id, section.label])).toEqual([
       ["today", "Today"],
       ["yesterday", "Yesterday"],
@@ -74,28 +66,28 @@ describe("sectionNotifications", () => {
   it("splits yesterday's last minute from today's first minute", () => {
     const midnight = new Date(2026, 10, 16, 0, 0, 0, 0).getTime();
     const lastMinute = new Date(2026, 10, 15, 23, 59, 0, 0).getTime();
-    const sections = sectionNotifications([notification("midnight", midnight), notification("late", lastMinute)], new Set(), now);
+    const sections = sectionNotifications([notification("midnight", midnight), notification("late", lastMinute)], now);
     expect(sections.map(section => [section.id, titles(section)])).toEqual([["today", ["midnight"]], ["yesterday", ["late"]]]);
   });
 
   it("finds yesterday across a month boundary", () => {
     const firstOfMonth = new Date(2026, 11, 1, 10).getTime();
     const lastOfPrevious = new Date(2026, 10, 30, 22).getTime();
-    const sections = sectionNotifications([notification("prev", lastOfPrevious)], new Set(), firstOfMonth);
+    const sections = sectionNotifications([notification("prev", lastOfPrevious)], firstOfMonth);
     expect(sections.map(section => section.id)).toEqual(["yesterday"]);
   });
 
   it("keeps notifications from a phone clock running ahead with today", () => {
     const tomorrow = new Date(2026, 10, 17, 9).getTime();
-    expect(sectionNotifications([notification("ahead", tomorrow)], new Set(), now).map(section => section.id)).toEqual(["today"]);
+    expect(sectionNotifications([notification("ahead", tomorrow)], now).map(section => section.id)).toEqual(["today"]);
   });
 
   it("omits empty sections and preserves item order", () => {
     const list = [notification("second", today(12)), notification("first", today(8))];
-    const sections = sectionNotifications(list, new Set(), now);
+    const sections = sectionNotifications(list, now);
     expect(sections).toHaveLength(1);
     expect(titles(sections[0])).toEqual(["second", "first"]);
-    expect(sectionNotifications([], new Set(), now)).toEqual([]);
+    expect(sectionNotifications([], now)).toEqual([]);
   });
 });
 
