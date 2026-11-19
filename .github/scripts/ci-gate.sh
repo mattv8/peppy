@@ -48,6 +48,11 @@ write_summary() {
   fi
 
   {
+    if [ "${REUSE_REUSED:-}" = true ]; then
+      printf 'Validation reused from %s: %s\n\n' "${REUSE_EVIDENCE:-}" "${REUSE_REASON:-}"
+    elif [ -n "${REUSE_REASON:-}" ]; then
+      printf 'Full validation (%s)\n\n' "$REUSE_REASON"
+    fi
     printf '| job | required | result |\n'
     printf '| --- | --- | --- |\n'
     for job in "${JOBS[@]}"; do

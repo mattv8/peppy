@@ -31,6 +31,8 @@ mutate = lambda do |name, workflow_change: nil, scope_change: nil, gate_change: 
   end
 end
 mutate.call('missing-root-shard', workflow_change: ->(text) { text.sub('shard: [1, 2, 3, 4]', 'shard: [1, 2, 3]') })
+mutate.call('unrestricted-reuse', workflow_change: ->(text) { text.sub("if: github.event_name == 'push' && github.ref == 'refs/heads/production'", 'if: true') })
+mutate.call('shared-nightly-concurrency', workflow_change: ->(text) { text.sub("ci-${{ github.workflow }}-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}", 'ci-${{ github.workflow }}-${{ github.ref }}') })
 mutate.call('root-excludes-shard', workflow_change: ->(text) { text.sub('shard: [1, 2, 3, 4]', "shard: [1, 2, 3, 4]\n        exclude:\n          - shard: 4") })
 mutate.call('wrong-root-count', workflow_change: ->(text) { text.sub('workspace ${{ matrix.shard }} 4', 'workspace ${{ matrix.shard }} 3') })
 mutate.call('literal-desktop-runner', workflow_change: ->(text) { text.sub('desktop ${{ matrix.index }} ${{ matrix.count }}', 'desktop 1 4') })
