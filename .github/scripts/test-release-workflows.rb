@@ -89,6 +89,9 @@ Dir.mktmpdir('desktop-apt-index-refresh') do |fixture|
   status, stderr, _, apt_calls = run_linux_setup.call('APT_INSTALL_FAILURE' => '1')
   assert.call(status.exitstatus == 42 && apt_calls == expected_apt_calls, "Linux desktop package installation failure must propagate: #{stderr}")
 end
+%w[desktop-windows-build desktop-windows-check desktop-windows].each do |job|
+  assert.call(ci_jobs[job]&.fetch('timeout-minutes') == 60, "#{job} must retain a 60-minute timeout")
+end
 android_ci = load_workflow.call('test-android.yml')
 android_ci_jobs = android_ci.fetch('jobs')
 android_call = ci_jobs.fetch('android')
