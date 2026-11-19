@@ -710,6 +710,28 @@ pub(crate) async fn delete_account_core(
             Ok("deleted".into())
         }
         reqwest::StatusCode::ACCEPTED => Ok("pending".into()),
+        reqwest::StatusCode::FORBIDDEN => {
+            let body = crate::net::read_bounded(response, crate::net::MAX_JSON_BYTES)
+                .await
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            if body
+                .as_ref()
+                .and_then(|value| value.get("error"))
+                .and_then(|value| value.as_str())
+                == Some("reauthentication_required")
+            {
+                Err(BridgeError::new(
+                    "hosted-session-required",
+                    "Sign in again to Peppy Hosted before deleting your account.",
+                ))
+            } else {
+                Err(BridgeError::new(
+                    "account-deletion-failed",
+                    "Peppy Hosted could not delete your account. Please try again.",
+                ))
+            }
+        }
         _ => Err(BridgeError::new(
             "account-deletion-failed",
             "Peppy Hosted could not delete your account. Please try again.",
