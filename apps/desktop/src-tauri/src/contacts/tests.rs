@@ -21,6 +21,61 @@ use std::{
 
 const BOOK: &str = "book-1";
 
+#[test]
+fn local_name_controls_validate_and_change_lookup() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut h = Harness::new(json!({"read": true, "write": true}), "auto");
+    let notices = Arc::new(AtomicUsize::new(0));
+    let counter = notices.clone();
+    Arc::get_mut(&mut h.session).unwrap().notifier = Arc::new(move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+    });
+    let address = "+12025550100";
+    let candidates = name_candidates(&h.session, address, None).unwrap();
+    assert_eq!(candidates["candidates"][0]["contactId"], "c1");
+    set_name_pin(&h.session, address, None, BOOK, "c1").unwrap();
+    assert!(name_candidates(&h.session, address, None).unwrap()["pinned"].is_null());
+    clear_name_pin(&h.session, address, None).unwrap();
+    set_book_lookup(&h.session, BOOK, false).unwrap();
+    assert!(
+        name_candidates(&h.session, address, None).unwrap()["candidates"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(set_book_lookup(&h.session, "", false).is_err());
+    assert!(name_candidates(&h.session, &"x".repeat(257), None).is_err());
+    assert_eq!(notices.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn snapshot_reports_conflict_then_pinned_name_without_identity() {
+    let mut h = Harness::new(json!({"read": true, "write": true}), "auto");
+    let mut book = owner_book(&h.owner_id, json!({"read": true}), "auto");
+    book["id"] = json!("book-2");
+    let mut contact = ada();
+    contact["id"] = json!("c2");
+    contact["book_id"] = json!("book-2");
+    contact["display_name"] = json!("Other name");
+    h.owner
+        .capture_contact_book(
+            &json!({"schema_version": 1, "book": book, "contacts": [contact]}).to_string(),
+        )
+        .unwrap();
+    h.sync_to_desktop();
+    let address = "+12025550100";
+    let addresses = [(address.to_owned(), None), (address.to_owned(), None)];
+    let snapshot = snapshot_contacts(&h.session, &addresses);
+    assert_eq!(snapshot.name_conflicts.unwrap(), vec![address]);
+    set_name_pin(&h.session, address, None, "book-2", "c2").unwrap();
+    let snapshot = snapshot_contacts(&h.session, &addresses);
+    let view = &snapshot.resolution.unwrap()[address];
+    assert_eq!(view["nameBasis"], "pinned");
+    assert!(view.get("contactId").is_none());
+    assert!(view.get("bookId").is_none());
+    assert!(snapshot.name_conflicts.is_none());
+}
+
 fn owner_book(owner: &str, caps: Value, mode: &str) -> Value {
     json!({
         "id": BOOK, "owner_device_id": owner, "generation": "1", "state": "active",
@@ -806,7 +861,7 @@ fn names_resolve_for_display_and_recipient_search_returns_phone_addresses() {
         "unknown numbers and non-numbers stay raw"
     );
     assert_eq!(resolved["+12025550100"].display_name, "Ada Lovelace");
-    assert_eq!(resolved["+12025550100"].contact_id, "c1");
+    assert_eq!(resolved["+12025550100"].contact_id.as_deref(), Some("c1"));
 
     let snapshot = snapshot_contacts(&h.session, &[("+12025550100".into(), None)]);
     let resolution = snapshot.resolution.unwrap();

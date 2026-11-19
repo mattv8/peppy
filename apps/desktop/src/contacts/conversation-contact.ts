@@ -1,11 +1,11 @@
 import { isValidPhoneNumber } from "@peppy/desktop-ui";
 import type { ContactBookView, ContactResolutionMap, ConversationView } from "../bridge/bridge";
-import { senderLabel } from "../sender/attribution";
 
 export type ConversationContactAddressInput = {
   conversation: ConversationView | undefined;
   resolution: ContactResolutionMap;
   books: ContactBookView[] | undefined;
+  conflicts?: readonly string[];
 };
 
 export function canCreateContactInBook(book: ContactBookView): boolean {
@@ -18,6 +18,7 @@ export function conversationContactAddress({
   conversation,
   resolution,
   books,
+  conflicts,
 }: ConversationContactAddressInput): string | undefined {
   const address = conversation?.participants?.length === 1
     ? conversation.participants[0]
@@ -27,7 +28,8 @@ export function conversationContactAddress({
     !address
     || conversation?.draftOnly
     || !isValidPhoneNumber(address)
-    || senderLabel(address, resolution).contact
+    || resolution[address]
+    || conflicts?.includes(address)
     || !books?.some(canCreateContactInBook)
   ) return undefined;
 

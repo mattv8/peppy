@@ -70,7 +70,13 @@ pub(crate) fn list_books(conn: &Connection) -> Result<String, Error> {
                     [book_id],
                     |r| r.get::<_, i64>(0),
                 )?;
+                let excluded: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM contact_book_lookup_exclusions WHERE book_id=?)",
+                    [book_id],
+                    |r| r.get(0),
+                )?;
                 obj.insert("contact_count".to_string(), json!(count));
+                obj.insert("lookup_excluded".to_string(), json!(excluded));
             }
             let effective = effective_remote_edits(&book);
             book["effective_remote_edits"] = json!(effective);

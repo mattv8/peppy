@@ -1,0 +1,55 @@
+.contact-source-anchor { position: relative; }
+.header-actions #conversation-contact-chooser {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: auto;
+  height: auto;
+  padding: 0 6px;
+  color: var(--peppy-accent);
+  background: transparent;
+}
+.header-actions #conversation-contact-chooser:hover { color: var(--peppy-accent-hover); background: transparent; }
+.contact-source-popover {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 35;
+  display: flex;
+  flex-direction: column;
+  width: 340px;
+  max-width: calc(100vw - 16px);
+  max-height: min(420px, calc(100vh - 120px));
+  padding: 12px;
+  color: var(--peppy-text-primary);
+  background: var(--peppy-surface-widget);
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: var(--peppy-control-radius);
+  box-shadow: var(--peppy-shadow-floating);
+}
+.header-actions .contact-source-popover button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: auto;
+  height: auto;
+  padding: 4px 8px;
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: var(--peppy-control-radius);
+  background: transparent;
+  color: var(--peppy-text-primary);
+}
+.header-actions .contact-source-popover button:hover { background: var(--peppy-surface-hover); }
+.header-actions #conversation-contact-chooser:focus-visible,
+.header-actions .contact-source-popover button:focus-visible,
+#contact-source-options input:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
+.contact-source-heading, .contact-source-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.contact-source-heading { justify-content: space-between; }
+.contact-source-heading h2 { margin: 0; font-size: 13px; color: var(--peppy-text-strong); }
+#contact-source-options { min-width: 0; min-height: 0; overflow-y: auto; border: 0; padding: 0; margin: 8px 0; }
+#contact-source-options label { display: grid; grid-template-columns: auto 1fr; column-gap: 6px; margin: 8px 0; }
+#contact-source-options input { grid-row: span 2; align-self: start; }
+.contact-source-book { grid-column: 2; color: var(--peppy-text-secondary); font-size: 12px; }
+.contact-source-book span { margin-left: 6px; }
+.contact-source-popover p { font-size: 12px; margin: 0 0 8px; }
+.contact-source-hint { color: var(--peppy-text-secondary); }
+.contact-source-popover p:empty { margin: 0; }
+@media (forced-colors: active) { .contact-source-popover { box-shadow: none; border-color: CanvasText; } }

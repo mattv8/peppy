@@ -11,6 +11,7 @@ const BATCH: i64 = 200;
 const MAX_DISPLAY_REFRESH_PAGES: usize = 64;
 const MAX_ADDRESSES: usize = 100;
 const MAX_ADDRESS_BYTES: usize = 256;
+const MAX_NAME_PINS: i64 = 5000;
 const ORIGINAL: i64 = 0;
 const E164: i64 = 1;
 
@@ -21,6 +22,7 @@ pub(crate) fn initialize(conn: &Connection) -> Result<(), Error> {
 
 const MIGRATION: &str = "
 CREATE TABLE IF NOT EXISTS contact_resolution_state(book_id TEXT PRIMARY KEY, book_digest TEXT NOT NULL, cursor TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS contact_name_pins(key TEXT PRIMARY KEY, book_id TEXT NOT NULL, contact_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS contact_resolution_projection(book_id TEXT NOT NULL, contact_id TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(book_id,contact_id));
 CREATE TABLE IF NOT EXISTS contact_address_index(key TEXT NOT NULL, key_kind INTEGER NOT NULL, book_id TEXT NOT NULL, contact_id TEXT NOT NULL, PRIMARY KEY(key,key_kind,book_id,contact_id));
 CREATE INDEX IF NOT EXISTS contact_address_index_contact ON contact_address_index(book_id,contact_id);
@@ -276,13 +278,7 @@ fn books(conn: &Connection, visible_book_ids: &BTreeSet<String>) -> Result<Vec<B
     Ok(books)
 }
 
-fn candidates(
-    conn: &Connection,
-    address: &str,
-    source: Option<&str>,
-    books: &[Book],
-    visible_book_ids: &BTreeSet<String>,
-) -> Result<Vec<Candidate>, Error> {
+fn lookup_keys(address: &str, source: Option<&str>, books: &[Book]) -> BTreeSet<(i64, String)> {
     let mut keys = BTreeSet::from([(ORIGINAL, address.to_owned())]);
     if address.starts_with('+') {
         if let Some(key) = normalized(address, None) {
@@ -313,8 +309,18 @@ fn candidates(
             keys.insert((E164, key));
         }
     }
+    keys
+}
+
+fn candidates(
+    conn: &Connection,
+    address: &str,
+    source: Option<&str>,
+    books: &[Book],
+    visible_book_ids: &BTreeSet<String>,
+) -> Result<Vec<Candidate>, Error> {
     let mut result = Vec::new();
-    for (kind, key) in keys {
+    for (kind, key) in lookup_keys(address, source, books) {
         let mut statement = conn.prepare(
             "SELECT DISTINCT c.id,c.book_id,c.body,b.owner_device_id FROM contact_address_index i \
              JOIN contacts c ON c.book_id=i.book_id AND c.id=i.contact_id AND c.deleted_at IS NULL \
@@ -350,6 +356,69 @@ fn candidates(
     result.sort_by(|a, b| (&a.book_id, &a.contact_id).cmp(&(&b.book_id, &b.contact_id)));
     result.dedup_by(|a, b| a.book_id == b.book_id && a.contact_id == b.contact_id);
     Ok(result)
+}
+
+fn valid_pin<'a>(
+    conn: &Connection,
+    keys: &BTreeSet<(i64, String)>,
+    candidates: &'a [Candidate],
+) -> Result<Option<&'a Candidate>, Error> {
+    for (_, key) in keys.iter().rev() {
+        let pin: Option<(String, String)> = conn
+            .query_row(
+                "SELECT book_id,contact_id FROM contact_name_pins WHERE key=?",
+                [key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((book, contact)) = pin
+            && let Ok(index) = candidates.binary_search_by(|candidate| {
+                (&candidate.book_id, &candidate.contact_id).cmp(&(&book, &contact))
+            })
+        {
+            return Ok(Some(&candidates[index]));
+        }
+    }
+    Ok(None)
+}
+
+type NameFallback<'a> = (&'a str, &'static str, Option<&'a str>);
+
+fn name_fallback<'a>(
+    conn: &Connection,
+    address: &str,
+    source: Option<&str>,
+    books: &[Book],
+    candidates: &'a [Candidate],
+) -> Result<Option<NameFallback<'a>>, Error> {
+    if let Some(pin) = valid_pin(conn, &lookup_keys(address, source, books), candidates)? {
+        return Ok((!pin.display_name.is_empty()).then_some((
+            &pin.display_name,
+            "pinned",
+            pin.photo_attachment_id.as_deref(),
+        )));
+    }
+    let names = candidates
+        .iter()
+        .map(|c| c.display_name.as_str())
+        .filter(|name| !name.is_empty())
+        .collect::<BTreeSet<_>>();
+    if names.len() != 1 {
+        return Ok(None);
+    }
+    let photo = candidates
+        .first()
+        .and_then(|c| c.photo_attachment_id.as_deref());
+    let photo = photo.filter(|photo| {
+        candidates
+            .iter()
+            .all(|c| c.photo_attachment_id.as_deref() == Some(*photo))
+    });
+    Ok(Some((
+        names.into_iter().next().unwrap(),
+        "consensus",
+        photo,
+    )))
 }
 
 fn choose(candidates: Vec<Candidate>, source: Option<&str>) -> Option<Candidate> {
@@ -421,9 +490,12 @@ impl DisplayResolver<'_> {
             .collect::<Vec<_>>();
         candidate_display_names.sort();
         candidate_display_names.dedup();
-        let chosen_display_name = choose(candidates, source)
-            .map(|candidate| candidate.display_name)
-            .filter(|name| !name.is_empty());
+        let chosen_display_name = if let Some(candidate) = choose(candidates.clone(), source) {
+            (!candidate.display_name.is_empty()).then_some(candidate.display_name)
+        } else {
+            name_fallback(self.conn, address, source, &self.books, &candidates)?
+                .map(|(name, _, _)| name.to_owned())
+        };
         Ok(AddressResolution {
             chosen_display_name,
             candidate_display_names,
@@ -433,7 +505,7 @@ impl DisplayResolver<'_> {
 
 /// Creates a read-only resolver that shares contact-book metadata across an entire search.
 pub(crate) fn display_resolver(conn: &Connection) -> Result<DisplayResolver<'_>, Error> {
-    let visible_book_ids = contacts::visible_book_ids(conn)?;
+    let visible_book_ids = contacts::lookup_book_ids(conn)?;
     Ok(DisplayResolver {
         conn,
         books: books(conn, &visible_book_ids)?,
@@ -480,38 +552,363 @@ pub(crate) fn resolve(conn: &mut Connection, input: &str) -> Result<String, Erro
         })
         .collect::<Result<Vec<_>, _>>()?;
     let more_indexing = refresh(conn)?;
-    let visible_book_ids = contacts::visible_book_ids(conn)?;
+    let visible_book_ids = contacts::lookup_book_ids(conn)?;
     let books = books(conn, &visible_book_ids)?;
     let mut matches = Vec::new();
     let mut ambiguous = Vec::new();
+    let mut name_matches = Vec::new();
+    let mut name_conflicts = Vec::new();
     for address in addresses {
         if more_indexing {
             ambiguous.push(json!(address));
             continue;
         }
-        if let Some(candidate) = choose(
-            candidates(conn, &address, source, &books, &visible_book_ids)?,
-            source,
-        ) {
+        let candidates = candidates(conn, &address, source, &books, &visible_book_ids)?;
+        if let Some(candidate) = choose(candidates.clone(), source) {
             let mut item = json!({"address": address, "contact_id": candidate.contact_id, "book_id": candidate.book_id, "display_name": candidate.display_name});
             if let Some(photo_attachment_id) = candidate.photo_attachment_id {
                 item["photo_attachment_id"] = json!(photo_attachment_id);
             }
             matches.push(item);
         } else {
+            if let Some((name, basis, photo)) =
+                name_fallback(conn, &address, source, &books, &candidates)?
+            {
+                let mut item = json!({"address": address, "display_name": name, "basis": basis});
+                if let Some(photo) = photo {
+                    item["photo_attachment_id"] = json!(photo);
+                }
+                name_matches.push(item);
+            } else if valid_pin(conn, &lookup_keys(&address, source, &books), &candidates)?
+                .is_none()
+                && candidates
+                    .iter()
+                    .map(|c| c.display_name.as_str())
+                    .filter(|name| !name.is_empty())
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    >= 2
+            {
+                name_conflicts.push(json!(address));
+            }
             ambiguous.push(json!(address));
         }
     }
     Ok(
-        json!({"matches": matches, "ambiguous": ambiguous, "more_indexing": more_indexing})
+        json!({"matches": matches, "ambiguous": ambiguous, "more_indexing": more_indexing, "name_matches": name_matches, "name_conflicts": name_conflicts})
             .to_string(),
     )
+}
+
+fn required<'a>(input: &'a Value, key: &str) -> Result<&'a str, Error> {
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= MAX_ADDRESS_BYTES)
+        .ok_or_else(invalid)
+}
+
+fn source(input: &Value) -> Result<Option<&str>, Error> {
+    match input.get("source_device_id") {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => required(input, "source_device_id").map(Some),
+    }
+}
+
+pub(crate) fn name_candidates(conn: &mut Connection, input: &str) -> Result<String, Error> {
+    let input: Value = serde_json::from_str(input).map_err(|_| invalid())?;
+    let address = required(&input, "address")?;
+    let source = source(&input)?;
+    let more_indexing = refresh(conn)?;
+    let ids = contacts::lookup_book_ids(conn)?;
+    let books = books(conn, &ids)?;
+    let candidates = if more_indexing {
+        Vec::new()
+    } else {
+        candidates(conn, address, source, &books, &ids)?
+    };
+    let pin = if choose(candidates.clone(), source).is_none() && !more_indexing {
+        valid_pin(conn, &lookup_keys(address, source, &books), &candidates)?.map(
+            |candidate| json!({"book_id": candidate.book_id, "contact_id": candidate.contact_id}),
+        )
+    } else {
+        None
+    };
+    let items = candidates.iter().take(32).map(|candidate| json!({
+        "book_id":candidate.book_id, "contact_id":candidate.contact_id, "display_name":candidate.display_name
+    })).collect::<Vec<_>>();
+    Ok(json!({"candidates":items, "pinned":pin, "more_indexing":more_indexing}).to_string())
+}
+
+pub(crate) fn set_pin(conn: &mut Connection, input: &str) -> Result<String, Error> {
+    let input: Value = serde_json::from_str(input).map_err(|_| invalid())?;
+    let address = required(&input, "address")?;
+    let source = source(&input)?;
+    let book = required(&input, "book_id")?;
+    let contact = required(&input, "contact_id")?;
+    if refresh(conn)? {
+        return Err(Error::NotFound);
+    }
+    let ids = contacts::lookup_book_ids(conn)?;
+    let books = books(conn, &ids)?;
+    let candidates = candidates(conn, address, source, &books, &ids)?;
+    if candidates
+        .binary_search_by(|candidate| {
+            (candidate.book_id.as_str(), candidate.contact_id.as_str()).cmp(&(book, contact))
+        })
+        .is_err()
+    {
+        return Err(Error::NotFound);
+    }
+    let keys = lookup_keys(address, source, &books);
+    let key = &keys.iter().next_back().ok_or_else(invalid)?.1;
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM contact_name_pins WHERE key=?)",
+        [key],
+        |row| row.get(0),
+    )?;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM contact_name_pins", [], |row| {
+        row.get(0)
+    })?;
+    if !exists && count >= MAX_NAME_PINS {
+        return Err(invalid());
+    }
+    conn.execute("INSERT INTO contact_name_pins(key,book_id,contact_id) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET book_id=excluded.book_id,contact_id=excluded.contact_id", params![key, book, contact])?;
+    Ok(json!({"status":"pinned"}).to_string())
+}
+
+pub(crate) fn clear_pin(conn: &Connection, input: &str) -> Result<String, Error> {
+    let input: Value = serde_json::from_str(input).map_err(|_| invalid())?;
+    let address = required(&input, "address")?;
+    let source = source(&input)?;
+    let ids = contacts::lookup_book_ids(conn)?;
+    let books = books(conn, &ids)?;
+    for (_, key) in lookup_keys(address, source, &books) {
+        conn.execute("DELETE FROM contact_name_pins WHERE key=?", [key])?;
+    }
+    Ok(json!({"status":"cleared"}).to_string())
+}
+
+pub(crate) fn set_book_lookup(conn: &Connection, input: &str) -> Result<String, Error> {
+    let input: Value = serde_json::from_str(input).map_err(|_| invalid())?;
+    let book = required(&input, "book_id")?;
+    let enabled = input
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(invalid)?;
+    if enabled {
+        conn.execute(
+            "DELETE FROM contact_book_lookup_exclusions WHERE book_id=?",
+            [book],
+        )?;
+    } else {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM contact_books WHERE id=? AND forgotten=0)",
+            [book],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(Error::NotFound);
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO contact_book_lookup_exclusions(book_id) VALUES(?)",
+            [book],
+        )?;
+    }
+    Ok(json!({"status":"ok","book_id":book,"enabled":enabled}).to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::StatementStatus;
+
+    #[test]
+    fn consensus_photo_requires_identical_present_ids() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let candidate = Candidate {
+            contact_id: "one".into(),
+            book_id: "book".into(),
+            display_name: "Alex".into(),
+            photo_attachment_id: Some("photo".into()),
+            owner: "owner".into(),
+        };
+        let mut candidates = vec![candidate.clone(), candidate];
+        assert_eq!(
+            name_fallback(&conn, "123", None, &[], &candidates).unwrap(),
+            Some(("Alex", "consensus", Some("photo")))
+        );
+        candidates[1].photo_attachment_id = Some("other".into());
+        assert_eq!(
+            name_fallback(&conn, "123", None, &[], &candidates).unwrap(),
+            Some(("Alex", "consensus", None))
+        );
+        candidates[1].photo_attachment_id = None;
+        assert_eq!(
+            name_fallback(&conn, "123", None, &[], &candidates).unwrap(),
+            Some(("Alex", "consensus", None))
+        );
+    }
+
+    #[test]
+    fn pin_cap_allows_replacement_but_not_new_keys() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        contacts::initialize(&conn).unwrap();
+        initialize(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO contact_books(id,owner_device_id,generation,state,body) VALUES('book','owner',1,'active',?)",
+            [r#"{"region":"US"}"#],
+        ).unwrap();
+        for (id, phone) in [("one", "+12025550100"), ("two", "+12025550101")] {
+            let body = json!({"display_name":"Alex","phones":[{"value":phone}]}).to_string();
+            conn.execute(
+                "INSERT INTO contacts(id,book_id,revision,body) VALUES(?,'book',1,?)",
+                params![id, body],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4999)
+             INSERT INTO contact_name_pins(key,book_id,contact_id) SELECT 'key-'||x,'book','one' FROM n;
+             INSERT INTO contact_name_pins(key,book_id,contact_id) VALUES('+12025550100','book','one');",
+        ).unwrap();
+        let first =
+            json!({"address":"+12025550100","book_id":"book","contact_id":"one"}).to_string();
+        let second =
+            json!({"address":"+12025550101","book_id":"book","contact_id":"two"}).to_string();
+        assert!(set_pin(&mut conn, &first).is_ok());
+        assert!(matches!(
+            set_pin(&mut conn, &second),
+            Err(Error::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn display_resolver_uses_consensus_without_selecting_identity() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        contacts::initialize(&conn).unwrap();
+        initialize(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO contact_books(id,owner_device_id,generation,state,body) VALUES('book','owner',1,'active',?)",
+            [r#"{"region":"US"}"#],
+        ).unwrap();
+        for id in ["one", "two"] {
+            conn.execute(
+                "INSERT INTO contacts(id,book_id,revision,body) VALUES(?,'book',1,?)",
+                params![
+                    id,
+                    r#"{"display_name":"Alex","phones":[{"value":"+12025550100"}]}"#
+                ],
+            )
+            .unwrap();
+        }
+        assert!(!refresh(&mut conn).unwrap());
+        let resolved = display_resolver(&conn)
+            .unwrap()
+            .resolve("+12025550100", None)
+            .unwrap();
+        assert_eq!(resolved.chosen_display_name.as_deref(), Some("Alex"));
+        assert_eq!(resolved.candidate_display_names, vec!["Alex"]);
+    }
+
+    #[test]
+    fn incomplete_refresh_withholds_pinned_names() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        contacts::initialize(&conn).unwrap();
+        initialize(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO contact_books(id,owner_device_id,generation,state,body) VALUES('book','owner',1,'active',?)",
+            [r#"{"region":"US"}"#],
+        ).unwrap();
+        for number in 0..201 {
+            conn.execute(
+                "INSERT INTO contacts(id,book_id,revision,body) VALUES(?,'book',1,?)",
+                params![
+                    format!("c{number:03}"),
+                    r#"{"display_name":"Alex","phones":[{"value":"+12025550100"}]}"#
+                ],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO contact_name_pins(key,book_id,contact_id) VALUES('+12025550100','book','c000')",
+            [],
+        ).unwrap();
+        let result: Value = serde_json::from_str(
+            &resolve(
+                &mut conn,
+                &json!({"addresses":["+12025550100"]}).to_string(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["more_indexing"], true);
+        assert_eq!(result["matches"], json!([]));
+        assert_eq!(result["name_matches"], json!([]));
+        assert_eq!(result["name_conflicts"], json!([]));
+        let candidates: Value = serde_json::from_str(
+            &name_candidates(&mut conn, &json!({"address":"+12025550100"}).to_string()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(candidates["more_indexing"], false);
+        assert_eq!(candidates["candidates"].as_array().unwrap().len(), 32);
+        assert_eq!(candidates["candidates"][0]["contact_id"], "c000");
+        assert_eq!(candidates["pinned"]["contact_id"], "c000");
+    }
+
+    #[test]
+    fn pin_validity_tracks_deleted_and_forgotten_candidates() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        contacts::initialize(&conn).unwrap();
+        initialize(&conn).unwrap();
+        for id in ["one", "two"] {
+            conn.execute(
+                "INSERT INTO contact_books(id,owner_device_id,generation,state,body) VALUES(?,?,1,'active',?)",
+                params![id, id, r#"{"region":"US"}"#],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO contacts(id,book_id,revision,body) VALUES('contact',?,1,?)",
+                params![
+                    id,
+                    r#"{"display_name":"Alex","phones":[{"value":"+12025550100"}]}"#
+                ],
+            )
+            .unwrap();
+        }
+        assert!(!refresh(&mut conn).unwrap());
+        conn.execute(
+            "INSERT INTO contact_name_pins(key,book_id,contact_id) VALUES('+12025550100','one','contact')",
+            [],
+        ).unwrap();
+        let pinned = |conn: &Connection| {
+            let ids = contacts::lookup_book_ids(conn).unwrap();
+            let books = books(conn, &ids).unwrap();
+            let candidates = candidates(conn, "+12025550100", None, &books, &ids).unwrap();
+            valid_pin(
+                conn,
+                &lookup_keys("+12025550100", None, &books),
+                &candidates,
+            )
+            .unwrap()
+            .is_some()
+        };
+        assert!(pinned(&conn));
+        conn.execute("UPDATE contacts SET deleted_at=1 WHERE book_id='one'", [])
+            .unwrap();
+        assert!(!pinned(&conn));
+        conn.execute(
+            "UPDATE contacts SET deleted_at=NULL WHERE book_id='one'",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE contact_books SET forgotten=1 WHERE id='one'", [])
+            .unwrap();
+        assert!(!pinned(&conn));
+        conn.execute("UPDATE contact_books SET forgotten=0 WHERE id='one'", [])
+            .unwrap();
+        assert!(pinned(&conn));
+    }
 
     fn page_steps(
         conn: &Connection,

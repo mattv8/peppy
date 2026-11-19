@@ -1063,6 +1063,7 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
         pending_count: 0,
         quarantine_count: 0,
         contact_resolution: None,
+        contact_name_conflicts: None,
         contact_books: None,
         contacts_pending_count: None,
         contact_sync: None,
@@ -3549,6 +3550,63 @@ async fn forget_contact_book(state: State<'_, AppState>, book_id: String) -> Bri
     let operation = admit_update_operation(&state)?;
     let session = state.require_session_admitted(&operation).await?;
     blocking(move || contacts::forget_book(&session, &book_id)).await
+}
+
+#[tauri::command]
+async fn set_contact_book_lookup(
+    state: State<'_, AppState>,
+    book_id: String,
+    enabled: bool,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    blocking(move || contacts::set_book_lookup(&session, &book_id, enabled)).await
+}
+
+#[tauri::command]
+async fn list_contact_name_candidates(
+    state: State<'_, AppState>,
+    address: String,
+    source_device_id: Option<String>,
+) -> BridgeResult<serde_json::Value> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    blocking(move || contacts::name_candidates(&session, &address, source_device_id.as_deref()))
+        .await
+}
+
+#[tauri::command]
+async fn set_contact_name_pin(
+    state: State<'_, AppState>,
+    address: String,
+    source_device_id: Option<String>,
+    book_id: String,
+    contact_id: String,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    blocking(move || {
+        contacts::set_name_pin(
+            &session,
+            &address,
+            source_device_id.as_deref(),
+            &book_id,
+            &contact_id,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn clear_contact_name_pin(
+    state: State<'_, AppState>,
+    address: String,
+    source_device_id: Option<String>,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    blocking(move || contacts::clear_name_pin(&session, &address, source_device_id.as_deref()))
+        .await
 }
 
 #[tauri::command]
@@ -7250,6 +7308,10 @@ pub fn run() {
         list_contact_books,
         list_contacts,
         forget_contact_book,
+        set_contact_book_lookup,
+        list_contact_name_candidates,
+        set_contact_name_pin,
+        clear_contact_name_pin,
         submit_contact_edit,
         list_contact_edits,
         pick_contact_photo,

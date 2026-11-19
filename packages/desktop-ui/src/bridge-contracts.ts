@@ -104,7 +104,7 @@ export type PastedImage = { bytes: ArrayBuffer; name: string; mediaType: string 
 export type PreparedPastedAttachments = { views: AttachmentView[]; failures: string[] };
 /** Exact durable cursors only; `targetHighWater` is a transient authenticated replay cut, not a percentage denominator. */
 export type SyncProgress = { phase: "receiving" | "applying" | "waitingForKeys" | "current"; receivedThrough: string; processedThrough: string; targetHighWater?: string; snapshotReceived?: string; snapshotExpected?: string; snapshotRemaining?: string };
-export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; sessionScopeId?: string; head: { enabled: boolean; capability: "available" | "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus; toneOverrides?: Record<string, number>; syncProgress?: SyncProgress; rcsStatus?: RcsStatusSnapshot };
+export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; sessionScopeId?: string; head: { enabled: boolean; capability: "available" | "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus; contactNameConflicts?: string[]; toneOverrides?: Record<string, number>; syncProgress?: SyncProgress; rcsStatus?: RcsStatusSnapshot };
 /** gatewayId/simId are optional on saves (omitted = keep the stored route) and required on sends. */
 export type DraftInput = Pick<Draft, "id" | "conversationId" | "text" | "recipientIds" | "attachmentIds" | "groupName"> & { expectedRevision: string; gatewayId?: string; simId?: string };
 export type DiscardDraftInput = Pick<Draft, "id" | "conversationId"> & { expectedRevision: string };
@@ -150,7 +150,10 @@ export const notificationPersistence = (value: unknown): NotificationPersistence
 export type ContactBookState = "active" | "limited" | "unavailable" | "retired";
 /** Native values: requests go to the owner phone, so `canRestore` follows `canWrite`; `supportsNotes`/`supportsBirthday` follow the phone's platform (iOS has no notes). */
 export type BookCapabilities = { canWrite: boolean; canDelete: boolean; supportsNotes: boolean; supportsPhoto: boolean; canRestore?: boolean; supportsBirthday?: boolean; canSync?: boolean };
-export type ContactBookView = { id: string; deviceName: string; state: ContactBookState; capabilities: BookCapabilities; contactCount: number; defaultAccountLabel?: string; lastSyncAt?: string; stalenessNote?: string; pendingEditCount: number; ownerDeviceId?: string; sourceRevoked?: boolean };
+export type ContactBookView = { id: string; deviceName: string; state: ContactBookState; capabilities: BookCapabilities; contactCount: number; defaultAccountLabel?: string; lastSyncAt?: string; stalenessNote?: string; pendingEditCount: number; ownerDeviceId?: string; sourceRevoked?: boolean; lookupExcluded?: boolean };
+/** A contact that could supply a name for an address; `bookId`/`contactId` identify it for pinning. */
+export type ContactNameCandidate = { bookId: string; contactId: string; displayName: string };
+export type ContactNameCandidates = { candidates: ContactNameCandidate[]; pinned: { bookId: string; contactId: string } | null; moreIndexing: boolean };
 export type ManagedDeviceView = { id: string; name: string; kind: string | null; role: string; revoked: boolean; settingUp?: boolean; presence?: GatewayPresence; wakeRoute?: boolean };
 export type DeviceRosterView = { currentDeviceId: string; devices: ManagedDeviceView[] };
 export type ContactScanStatus = { requestId: string; bookId: string; state: "queued" | "waiting" | "scanning" | "completed" | "blocked" | "failed" | "expired"; reason?: string; expiresAt?: number };
@@ -171,7 +174,8 @@ export type ContactSyncStatus = { repairRequired: boolean; projection?: { state:
 /** A phone number of a matching contact; `address` (never the contact ID) is the recipient. `normalized` is false for numbers kept as entered (e.g. short codes). */
 export type RecipientSuggestion = { address: string; bookId: string; displayName: string; number: string; label?: string; normalized: boolean; contactId: string; phoneId: string; avatarUrl?: string };
 export type RestorableContact = { id: string; bookId: string; displayName: string; deletedAt: string; photoDataUrl?: string };
-export type ResolvedContact = { contactId: string; bookId: string; displayName: string; photoDataUrl?: string };
+/** Identity ids are present only for identity matches; name-only entries carry `nameBasis` instead. */
+export type ResolvedContact = { contactId?: string; bookId?: string; displayName: string; photoDataUrl?: string; nameBasis?: "consensus" | "pinned" };
 export type ContactResolutionMap = Record<string, ResolvedContact>;
 /** `currentRevision` is set when the stored draft revision is known (stale saves/sends, refused sends). */
 export type BridgeErrorCode = "database-key-unavailable" | "cancelled" | (string & {});
@@ -357,6 +361,11 @@ export interface DesktopBridge {
   mcp_approve_authorization(id: string, scopes: McpScope[]): Promise<McpAuthorizationDecision>;
   mcp_deny_authorization(id: string): Promise<McpAuthorizationDecision>;
   forget_contact_book(bookId: string): Promise<void>;
+  /** Hides a book from names and recipient search on this computer only; `enabled: true` restores it. */
+  set_contact_book_lookup(bookId: string, enabled: boolean): Promise<void>;
+  list_contact_name_candidates(address: string, sourceDeviceId?: string): Promise<ContactNameCandidates>;
+  set_contact_name_pin(address: string, bookId: string, contactId: string, sourceDeviceId?: string): Promise<void>;
+  clear_contact_name_pin(address: string, sourceDeviceId?: string): Promise<void>;
   /** One page of at most 200 contacts; request the next page with `offset`. */
   list_contacts(bookId: string, query?: string, offset?: number, sort?: ContactSort): Promise<ContactView[]>;
   submit_contact_edit(input: ContactEditRequestInput): Promise<ContactEditOutcome>;

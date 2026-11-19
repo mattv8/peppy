@@ -41,12 +41,207 @@ fn contact(book_id: &str, id: &str, name: &str, phone: &str) -> Value {
 }
 
 fn resolve(client: &Client, addresses: &[&str]) -> Value {
+    let mut result = resolve_names(client, addresses);
+    result.as_object_mut().unwrap().remove("name_matches");
+    result.as_object_mut().unwrap().remove("name_conflicts");
+    result
+}
+
+fn resolve_names(client: &Client, addresses: &[&str]) -> Value {
     serde_json::from_str(
         &client
             .resolve_contact_addresses_json(&json!({"addresses": addresses}).to_string())
             .unwrap(),
     )
     .unwrap()
+}
+
+#[test]
+fn duplicate_names_provide_consensus_without_identity() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "owner", &vault);
+    let client = unlocked(&cfg, &vault);
+    capture(
+        &client,
+        &cfg,
+        "book",
+        "US",
+        "1",
+        json!([
+            contact("book", "one", "Alex", "+12025550100"),
+            contact("book", "two", "Alex", "+12025550100")
+        ]),
+    );
+    let result = resolve_names(&client, &["+12025550100"]);
+    assert_eq!(result["matches"], json!([]));
+    assert_eq!(result["ambiguous"], json!(["+12025550100"]));
+    assert_eq!(
+        result["name_matches"],
+        json!([
+            {"address":"+12025550100","display_name":"Alex","basis":"consensus"}
+        ])
+    );
+}
+
+#[test]
+fn different_duplicate_names_report_conflict_without_identity() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "owner", &vault);
+    let client = unlocked(&cfg, &vault);
+    capture(
+        &client,
+        &cfg,
+        "book",
+        "US",
+        "1",
+        json!([
+            contact("book", "one", "Alex", "+12025550100"),
+            contact("book", "two", "alex", "+12025550100")
+        ]),
+    );
+    let result = resolve_names(&client, &["+12025550100"]);
+    assert_eq!(result["matches"], json!([]));
+    assert_eq!(result["ambiguous"], json!(["+12025550100"]));
+    assert_eq!(result["name_conflicts"], json!(["+12025550100"]));
+}
+
+#[test]
+fn empty_duplicate_name_does_not_block_consensus() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "owner", &vault);
+    let client = unlocked(&cfg, &vault);
+    capture(
+        &client,
+        &cfg,
+        "book",
+        "US",
+        "1",
+        json!([
+            contact("book", "one", "", "+12025550100"),
+            contact("book", "two", "Alex", "+12025550100")
+        ]),
+    );
+    let result = resolve_names(&client, &["+12025550100"]);
+    assert_eq!(result["matches"], json!([]));
+    assert_eq!(
+        result["name_matches"],
+        json!([
+            {"address":"+12025550100","display_name":"Alex","basis":"consensus"}
+        ])
+    );
+}
+
+#[test]
+fn pin_and_book_exclusion_change_names_without_inventing_identity() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "owner", &vault);
+    let client = unlocked(&cfg, &vault);
+    capture(
+        &client,
+        &cfg,
+        "book",
+        "US",
+        "1",
+        json!([
+            contact("book", "one", "Alex", "+12025550100"),
+            contact("book", "two", "Blake", "+12025550100")
+        ]),
+    );
+    let request = json!({"address":"2025550100","book_id":"book","contact_id":"one"}).to_string();
+    assert!(matches!(
+        client.set_contact_name_pin_json(
+            &json!({"address":"2025550100","book_id":"book","contact_id":"missing"}).to_string()
+        ),
+        Err(peppy_client_core::Error::NotFound)
+    ));
+    assert_eq!(
+        client.set_contact_name_pin_json(&request).unwrap(),
+        r#"{"status":"pinned"}"#
+    );
+    let result = resolve_names(&client, &["+12025550100"]);
+    assert_eq!(result["matches"], json!([]));
+    assert_eq!(
+        result["name_matches"],
+        json!([{"address":"+12025550100","display_name":"Alex","basis":"pinned"}])
+    );
+    let input = json!({"address":"+12025550100"}).to_string();
+    let candidates: Value =
+        serde_json::from_str(&client.contact_name_candidates_json(&input).unwrap()).unwrap();
+    assert_eq!(
+        candidates["pinned"],
+        json!({"book_id":"book","contact_id":"one"})
+    );
+    client
+        .set_contact_book_lookup_json(&json!({"book_id":"book","enabled":false}).to_string())
+        .unwrap();
+    let hidden = resolve_names(&client, &["+12025550100"]);
+    assert_eq!(hidden["matches"], json!([]));
+    assert_eq!(hidden["name_matches"], json!([]));
+    let books: Value = serde_json::from_str(&client.list_contact_books_json().unwrap()).unwrap();
+    assert_eq!(books["books"][0]["lookup_excluded"], true);
+    client
+        .set_contact_book_lookup_json(&json!({"book_id":"book","enabled":true}).to_string())
+        .unwrap();
+    assert_eq!(
+        resolve_names(&client, &["+12025550100"])["name_matches"],
+        result["name_matches"]
+    );
+    client.clear_contact_name_pin_json(&input).unwrap();
+    assert_eq!(
+        resolve_names(&client, &["+12025550100"])["name_conflicts"],
+        json!(["+12025550100"])
+    );
+}
+
+#[test]
+fn excluding_one_book_resolves_identity_and_restoring_returns_ambiguity() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "owner", &vault);
+    let client = unlocked(&cfg, &vault);
+    for book in ["one", "two"] {
+        capture(
+            &client,
+            &cfg,
+            book,
+            "US",
+            "1",
+            json!([contact(book, "alex", "Alex", "+12025550100")]),
+        );
+    }
+    let before = resolve_names(&client, &["+12025550100"]);
+    assert_eq!(before["matches"], json!([]));
+    assert_eq!(before["name_matches"][0]["basis"], "consensus");
+    let search = || {
+        serde_json::from_str::<Value>(
+            &client
+                .search_contact_recipients_json(
+                    &json!({"schema_version":1,"query":"Alex"}).to_string(),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(search()["results"].as_array().unwrap().len(), 2);
+    client
+        .set_contact_book_lookup_json(&json!({"book_id":"two","enabled":false}).to_string())
+        .unwrap();
+    let hidden = resolve_names(&client, &["+12025550100"]);
+    assert_eq!(hidden["matches"][0]["book_id"], "one");
+    assert_eq!(hidden["ambiguous"], json!([]));
+    assert_eq!(search()["results"].as_array().unwrap().len(), 1);
+    client
+        .set_contact_book_lookup_json(&json!({"book_id":"two","enabled":true}).to_string())
+        .unwrap();
+    assert_eq!(
+        resolve_names(&client, &["+12025550100"])["matches"],
+        json!([])
+    );
+    assert_eq!(search()["results"].as_array().unwrap().len(), 2);
 }
 
 fn succession_tag(vault: &Vault) -> String {

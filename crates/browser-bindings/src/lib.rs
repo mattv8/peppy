@@ -731,6 +731,7 @@ impl BrowserCore {
             pending_count: client.pending_outbox_count().map_err(core)? as u64,
             quarantine_count: client.quarantine_count().map_err(core)? as u64,
             contact_resolution: None,
+            contact_name_conflicts: None,
             contact_books: None,
             contacts_pending_count: None,
             contact_sync: None,

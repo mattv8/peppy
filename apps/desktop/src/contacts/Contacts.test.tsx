@@ -116,6 +116,85 @@ describe("ContactsView", () => {
     }
   });
 
+  it("hides the book-use strip for one included book", async () => {
+    render(<ContactsView />);
+    await screen.findByRole("button", { name: /Pixel 8/ });
+    expect(document.getElementById("contacts-book-use")).not.toBeInTheDocument();
+  });
+
+  it("hides a book from lookup and offers undo", async () => {
+    let books = [mockContactBook, { ...mockContactBook, id: "book-other", deviceName: "Other" }];
+    vi.mocked(bridge.list_contact_books).mockImplementation(async () => books);
+    vi.mocked(bridge.set_contact_book_lookup).mockImplementation(async (id, enabled) => {
+      books = books.map(item => item.id === id ? { ...item, lookupExcluded: !enabled } : item);
+    });
+    render(<ContactsView />);
+    fireEvent.click(await screen.findByRole("switch", { name: "Use for names and recipient search" }));
+    await waitFor(() => expect(bridge.set_contact_book_lookup).toHaveBeenCalledWith("book-pixel8", false));
+    expect(await screen.findByText(/Names and recipient search no longer use/)).toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector('[data-book-id="book-pixel8"]')).toHaveAttribute("data-book-use", "excluded"));
+    expect(screen.getByText("Hidden from names")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(bridge.set_contact_book_lookup).toHaveBeenCalledWith("book-pixel8", true));
+  });
+
+  it("confirms before hiding the last included book and restores focus on cancel or Escape", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, { ...mockContactBook, id: "book-other", deviceName: "Other", lookupExcluded: true }]);
+    render(<ContactsView />);
+    const toggle = () => screen.getByRole("switch");
+    await screen.findByRole("switch");
+    await screen.findByText("Aurora Chen");
+    toggle().focus();
+    expect(toggle()).toHaveFocus();
+    fireEvent.click(toggle());
+    expect(bridge.set_contact_book_lookup).not.toHaveBeenCalled();
+    expect(screen.getByRole("group", { name: "Confirm turning off the last contact book" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus());
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(toggle()).toBeChecked();
+    await waitFor(() => expect(toggle()).toHaveFocus());
+    fireEvent.click(toggle());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus());
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await waitFor(() => expect(toggle()).toHaveFocus());
+    expect(document.getElementById("contacts-book-use-confirm")).not.toBeInTheDocument();
+    expect(bridge.set_contact_book_lookup).not.toHaveBeenCalled();
+    fireEvent.click(toggle());
+    vi.mocked(bridge.set_contact_book_lookup).mockResolvedValue(undefined);
+    fireEvent.click(screen.getByRole("button", { name: "Turn off" }));
+    await waitFor(() => expect(bridge.set_contact_book_lookup).toHaveBeenCalledWith("book-pixel8", false));
+    await waitFor(() => expect(toggle()).toHaveFocus());
+  });
+
+  it("reports a lookup save failure without changing the switch", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, { ...mockContactBook, id: "book-other", deviceName: "Other" }]);
+    vi.mocked(bridge.set_contact_book_lookup).mockRejectedValueOnce(new Error("failed"));
+    render(<ContactsView />);
+    const toggle = await screen.findByRole("switch");
+    fireEvent.click(toggle);
+    expect(await screen.findByText("Couldn't save this change. Try again.")).toBeInTheDocument();
+    expect(toggle).toBeChecked();
+  });
+
+  it("distinguishes books with duplicate device names", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, { ...mockContactBook, id: "book-1234" }]);
+    render(<ContactsView />);
+    await screen.findByRole("switch");
+    expect(document.querySelector('[data-book-id="book-pixel8"]')).toHaveTextContent("ID xel8");
+    expect(document.querySelector('[data-book-id="book-1234"]')).toHaveTextContent("ID 1234");
+    expect(document.getElementById("contacts-book-use-title")).toHaveTextContent("ID xel8");
+  });
+
+  it("labels hidden books in the compact selector", async () => {
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+      matches: query === "(max-width: 700px)", media: query,
+      addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    })));
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, { ...mockContactBook, id: "book-1234", lookupExcluded: true }]);
+    render(<ContactsView />);
+    expect(await screen.findByRole("option", { name: "Pixel 8, ID 1234, Active, hidden from names" })).toBeInTheDocument();
+  });
+
   it("requests a fresh scan for the selected capable book", async () => {
     vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
     vi.mocked(bridge.request_contact_sync).mockResolvedValue({ requestId: "scan-1", bookId: "book-pixel8", state: "waiting" });

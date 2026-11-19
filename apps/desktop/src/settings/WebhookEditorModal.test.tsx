@@ -207,6 +207,26 @@ describe("WebhookEditorModal", () => {
       })));
     });
 
+    it("stores a merged suggestion that spans two contacts as an address-only entry", async () => {
+      const sameNumberOtherBook = { ...jordan, bookId: "book-work", contactId: "contact-jordan-work", phoneId: "phone-jordan-work" };
+      vi.mocked(bridge.search_contact_recipients).mockResolvedValue([jordan, sameNumberOtherBook]);
+      renderEditor();
+      typeInto("Endpoint URL", "https://hooks.example.com/in");
+      fireEvent.click(screen.getByRole("radio", { name: "Only these contacts" }));
+      const chips = screen.getByLabelText("Contacts or numbers");
+
+      fireEvent.change(chips, { target: { value: "Jor" } });
+      const suggestions = await screen.findAllByRole("option", { name: /Jordan Lee/ });
+      expect(suggestions).toHaveLength(1);
+      fireEvent.mouseDown(suggestions[0]);
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+      await waitFor(() => expect(bridge.webhook_create).toHaveBeenCalledWith(expect.objectContaining({
+        filterMode: "only",
+        filter: [{ address: "+12025550199", label: null, contactId: null, bookId: null }],
+      })));
+    });
+
     it("keeps a typed matching number address-only", async () => {
       vi.mocked(bridge.search_contact_recipients).mockResolvedValue([jordan]);
       renderEditor();

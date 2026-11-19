@@ -39,6 +39,24 @@ pub fn valid_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_ID
 }
 
+pub fn name_lookup_input(address: &str, source: Option<&str>) -> ContactResult<Value> {
+    if address.is_empty()
+        || address.len() > 256
+        || source.is_some_and(|id| !valid_id(id) || id.len() > 256)
+    {
+        return Err(invalid("The contact address or source is invalid."));
+    }
+    let mut input = json!({"address": address});
+    if let Some(source) = source {
+        input["source_device_id"] = json!(source);
+    }
+    Ok(input)
+}
+
+pub fn name_lookup_id(id: &str) -> bool {
+    valid_id(id) && id.len() <= 256
+}
+
 /// Core's per-call address cap for contact resolution.
 pub const RESOLVE_ADDRESS_BATCH: usize = 100;
 /// Distinct eligible addresses resolved per snapshot; the rest show their raw number.
@@ -220,6 +238,7 @@ pub fn book_view(
         },
         "contactCount": book.get("contact_count").and_then(Value::as_u64).unwrap_or(0),
         "pendingEditCount": pending.get(id).copied().unwrap_or(0),
+        "lookupExcluded": book.get("lookup_excluded").and_then(Value::as_bool).unwrap_or(false),
     });
     // Synced books carry account names but not which is the owner's default; a single
     // account is unambiguous.
@@ -1355,35 +1374,88 @@ where
 
 /// Sanitizes core's resolve-addresses response. It deliberately accepts only display fields.
 pub fn resolved_addresses_view(raw: &Value) -> HashMap<String, Resolved> {
-    raw.get("matches")
+    let mut out = HashMap::new();
+    for (key, identity) in [("matches", true), ("name_matches", false)] {
+        for item in raw.get(key).and_then(Value::as_array).into_iter().flatten() {
+            let Some(address) = str_field(item, "address") else {
+                continue;
+            };
+            let Some(name) = str_field(item, "display_name").filter(|name| !name.trim().is_empty())
+            else {
+                continue;
+            };
+            let (contact_id, book_id, basis) = if identity {
+                let (Some(contact), Some(book)) =
+                    (str_field(item, "contact_id"), str_field(item, "book_id"))
+                else {
+                    continue;
+                };
+                (Some(contact.to_owned()), Some(book.to_owned()), None)
+            } else {
+                let basis = match str_field(item, "basis") {
+                    Some("pinned") => "pinned",
+                    Some("consensus") => "consensus",
+                    _ => continue,
+                };
+                (None, None, Some(basis))
+            };
+            let resolved = Resolved {
+                contact_id,
+                book_id,
+                basis,
+                display_name: name.chars().take(MAX_TEXT).collect(),
+                photo: str_field(item, "photo_attachment_id")
+                    .and_then(|id| AttachmentId::from_str(id).ok()),
+            };
+            if identity {
+                out.insert(address.to_owned(), resolved);
+            } else {
+                out.entry(address.to_owned()).or_insert(resolved);
+            }
+        }
+    }
+    out
+}
+
+pub fn name_conflicts_view(raw: &Value) -> Vec<String> {
+    raw.get("name_conflicts")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|item| {
-            let (address, contact_id, book_id, display_name) = (
-                str_field(item, "address")?,
-                str_field(item, "contact_id")?,
-                str_field(item, "book_id")?,
-                str_field(item, "display_name").filter(|name| !name.trim().is_empty())?,
-            );
-            Some((
-                address.to_owned(),
-                Resolved {
-                    contact_id: contact_id.to_owned(),
-                    book_id: book_id.to_owned(),
-                    display_name: display_name.chars().take(MAX_TEXT).collect(),
-                    photo: str_field(item, "photo_attachment_id")
-                        .and_then(|id| AttachmentId::from_str(id).ok()),
-                },
-            ))
-        })
+        .filter_map(Value::as_str)
+        .filter(|address| address.len() <= 256)
+        .take(MAX_RESOLVED_ADDRESSES)
+        .map(str::to_owned)
         .collect()
+}
+
+pub fn name_candidates_view(raw: &Value) -> Value {
+    let pair = |item: &Value| {
+        let book = str_field(item, "book_id").filter(|id| valid_id(id))?;
+        let contact = str_field(item, "contact_id").filter(|id| valid_id(id))?;
+        Some(json!({"bookId": book, "contactId": contact}))
+    };
+    let candidates = raw
+        .get("candidates")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(32)
+        .filter_map(|item| {
+            let mut view = pair(item)?;
+            let name = str_field(item, "display_name")?;
+            view["displayName"] = json!(name.chars().take(MAX_TEXT).collect::<String>());
+            Some(view)
+        })
+        .collect::<Vec<_>>();
+    json!({"candidates": candidates, "pinned": raw.get("pinned").and_then(pair), "moreIndexing": raw.get("more_indexing").and_then(Value::as_bool).unwrap_or(false)})
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved {
-    pub contact_id: String,
-    pub book_id: String,
+    pub contact_id: Option<String>,
+    pub book_id: Option<String>,
+    pub basis: Option<&'static str>,
     pub display_name: String,
     pub photo: Option<AttachmentId>,
 }
