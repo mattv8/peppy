@@ -335,7 +335,8 @@ if [ "$is_linux_prerelease_rpm" = true ]; then
 else
   if [ -n "$json" ]; then
     if [ "$macos_distribution" = app-store ]; then
-      pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" --target universal-apple-darwin --config "$json" -- --locked --no-default-features
+      # Native App Store packaging signs afterward, including legacy MAS identities.
+      pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" --target universal-apple-darwin --no-sign --config "$json" -- --locked --no-default-features
     elif [ -n "${PEPPY_TAURI_TARGET:-}" ]; then
       pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" --target "$PEPPY_TAURI_TARGET" --config "$json" -- --locked
     else

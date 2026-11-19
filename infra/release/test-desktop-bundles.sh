@@ -325,6 +325,10 @@ node -e 'const config = JSON.parse(process.argv[1]); if (config.productName || c
 
 run_macos_target
 grep -Fq '|build|--bundles|app,dmg|--target|x86_64-apple-darwin|--config|{"version":"1.2.3"}|--|--locked' "$log"
+if grep -Fq '|--no-sign|' "$log"; then
+  printf 'direct-download builds must not disable Tauri signing\n' >&2
+  exit 1
+fi
 run_macos_target_without_version
 grep -Fq '|build|--bundles|app,dmg|--target|x86_64-apple-darwin|--|--locked' "$log"
 
@@ -410,6 +414,10 @@ fi
 
 : > "$log"
 run_macos_developer_id 'CODESIGN_APP_FLAGS=0x10000(library-validation,runtime)'
+if grep -Fq '|--no-sign|' "$log"; then
+  printf 'Developer ID builds must not disable Tauri signing\n' >&2
+  exit 1
+fi
 test "$(grep -c '^codesign|' "$log")" = 4
 test "$(grep -c '^spctl|' "$log")" = 2
 test "$(grep -c '^xcrun|' "$log")" = 4
@@ -516,12 +524,16 @@ PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app VERSION=1.2.3
   TRUSTED_UPDATE_BUILD=false PEPPY_MACOS_DISTRIBUTION=app-store \
   APPLE_MAS_CERTIFICATE_P12=YXBwbGljYXRpb24tY2VydGlmaWNhdGU= APPLE_MAS_CERTIFICATE_PASSWORD=password \
   APPLE_MAS_INSTALLER_CERTIFICATE=aW5zdGFsbGVyLWNlcnRpZmljYXRl APPLE_MAS_PROVISIONING_PROFILE_BASE64=cHJvZmlsZQ== \
-  APPLE_MAS_SIGNING_IDENTITY='Apple Distribution: Peppy (team)' APPLE_MAS_INSTALLER_IDENTITY='3rd Party Mac Developer Installer: Peppy (team)' \
+  APPLE_MAS_SIGNING_IDENTITY='3rd Party Mac Developer Application: Peppy (team)' APPLE_MAS_INSTALLER_IDENTITY='3rd Party Mac Developer Installer: Peppy (team)' \
   PEPPY_BUNDLE_OUTPUT_DIR="$root/macos" PEPPY_PKG_OUTPUT_DIR="$root/pkg" \
   "$script_dir/build-desktop-bundles.sh"
 app_store_config=$(grep '^ARGV' "$log" | sed -n 's/.*|--config|\(.*\)|--|--locked|--no-default-features$/\1/p')
 node -e 'const config = JSON.parse(process.argv[1]); if (config.productName !== "Peppy" || config.identifier !== "org.peppy.desktop" || config.bundle?.createUpdaterArtifacts !== false || config.bundle?.macOS?.minimumSystemVersion !== "13.0" || config.bundle?.macOS?.entitlements !== "../../../packaging/macos/app-store/entitlements.plist" || config.bundle?.macOS?.infoPlist !== "../../../packaging/macos/app-store/Info.plist" || config.bundle?.macOS?.files?.["Resources/PrivacyInfo.xcprivacy"] !== "../../../packaging/macos/app-store/PrivacyInfo.xcprivacy" || JSON.stringify(config.plugins?.updater?.endpoints) !== "[]") process.exit(1)' "$app_store_config"
 grep -Fq '|build|--bundles|app|--target|universal-apple-darwin|' "$log"
+if ! grep -Eq '^ARGV\|.*\|build\|.*\|--no-sign\|.*\|--\|' "$log"; then
+  printf 'App Store Tauri assembly must use --no-sign\n' >&2
+  exit 1
+fi
 grep -Fq '|--|--locked|--no-default-features' "$log"
 grep -Fq 'productbuild|--component' "$log"
 grep -Fq 'security|cms -D' "$log"
@@ -529,7 +541,7 @@ grep -Fq 'security|create-keychain' "$log"
 grep -Fq 'security|import' "$log"
 grep -Fq 'security|list-keychains -d user -s' "$log"
 grep -Fq 'security|delete-keychain' "$log"
-grep -Fq 'codesign|--force --sign Apple Distribution: Peppy (team) --keychain' "$log"
+grep -Fq 'codesign|--force --sign 3rd Party Mac Developer Application: Peppy (team) --keychain' "$log"
 grep -Fqx 'entitlements|team.org.peppy.desktop|team' "$log"
 grep -Fq 'productbuild|--component' "$log"
 grep -Fq 'pkgutil|--check-signature' "$log"
