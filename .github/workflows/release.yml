@@ -365,6 +365,9 @@ jobs:
     with:
       release_tag: android-v${{ needs.prepare.outputs.android_version }}
       track: internal
+    # Environment secrets still have to be passed by name across workflow_call.
+    secrets:
+      PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
   publish-server-image:
     if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.desktop_existing != 'true' && needs.signing.result == 'success' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' }}
     needs: [prepare, signing, artifacts]

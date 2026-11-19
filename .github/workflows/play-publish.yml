@@ -10,6 +10,9 @@ on:
         required: false
         type: string
         default: internal
+    secrets:
+      PLAY_SERVICE_ACCOUNT_JSON:
+        required: false
   workflow_dispatch:
     inputs:
       release_tag:
@@ -162,6 +165,10 @@ jobs:
           set -euo pipefail
           [ -f "dist/play/peppy-${VERSION}-android.aab" ] || { echo 'missing Play AAB' >&2; exit 1; }
           [ -f dist/play/whatsnew/whatsnew-en-US ] || { echo 'missing Play release notes' >&2; exit 1; }
+      - name: Require the Play service account credential
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: '[ -n "$PLAY_SERVICE_ACCOUNT_JSON" ] || { echo "::error::PLAY_SERVICE_ACCOUNT_JSON is empty; callers must pass it by name"; exit 1; }'
       - name: Upload to Google Play
         uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
         with:
