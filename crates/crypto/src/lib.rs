@@ -187,8 +187,10 @@ impl KeyPurpose {
     }
 }
 
-/// Derives an opaque, epoch-scoped grouping key. Each component is length framed
-/// so logically distinct tuples cannot share an encoding.
+/// Derives an opaque grouping tag from the supplied raw key material. Profile
+/// epoch metadata is not included by this primitive; separation across epochs
+/// depends on independent key material. Each component is length framed so
+/// logically distinct tuples cannot share an encoding.
 pub fn compaction_hmac(key: &PurposeKey, domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("SHA-256 accepts a fixed-size key");

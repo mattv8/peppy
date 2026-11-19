@@ -12,7 +12,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use image::{ImageReader, Limits};
 use peppy_client_core::{
-    AttachmentId, Client, ConversationId, Direction, GatewayRoute, McpCommand, MessageId,
+    AttachmentId, Client, ConversationId, Direction, GatewayRoute, McpCommand, MessageId, SendState,
 };
 use peppy_desktop_api::{GatewayAvailability, GatewayView};
 use peppy_hosted_api::mcp::{
@@ -169,7 +169,7 @@ fn get_messages(client: &Client, args: &Value) -> Result<Value, (&'static str, &
     let mut envelope_bytes = serialized_success_len(&json!({"messages":[],"has_more":false}));
     let mut newest_first = Vec::new();
     for message in page.messages.into_iter().rev() {
-        let message = json!({"message_id":message.payload.record.message_id,"conversation_id":message.payload.record.conversation_id,"body":message.payload.body,"attachments":attachment_descriptors(client, message.payload.record.attachments.iter().map(|item| item.attachment_id)),"recipients":message.payload.recipients,"direction":match message.payload.direction { Direction::Incoming => "incoming", Direction::Outgoing => "outgoing" },"transport":format!("{:?}", message.payload.transport).to_lowercase(),"send_state":message.send_state.map(|state| format!("{:?}",state).to_lowercase())});
+        let message = json!({"message_id":message.payload.record.message_id,"conversation_id":message.payload.record.conversation_id,"body":message.payload.body,"attachments":attachment_descriptors(client, message.payload.record.attachments.iter().map(|item| item.attachment_id)),"recipients":message.payload.recipients,"direction":match message.payload.direction { Direction::Incoming => "incoming", Direction::Outgoing => "outgoing" },"transport":format!("{:?}", message.payload.transport).to_lowercase(),"send_state":message.send_state.map(send_state_label)});
         let contribution = escaped_json_string_content_len(&message);
         let separator = usize::from(!newest_first.is_empty());
         if envelope_bytes + separator + contribution > MAX_TOOL_RESULT_BYTES {
@@ -811,6 +811,20 @@ fn core_error(error: peppy_client_core::Error) -> (&'static str, &'static str) {
         _ => ("core_error", "Local data is unavailable."),
     }
 }
+fn send_state_label(state: SendState) -> &'static str {
+    match state {
+        SendState::QueuedLocal => "queuedlocal",
+        SendState::AcceptedServer => "acceptedserver",
+        SendState::PersistedGateway => "persistedgateway",
+        SendState::AttemptRecorded => "attemptrecorded",
+        SendState::SubmittedToOs => "submittedtoos",
+        SendState::Sent => "sent",
+        SendState::Delivered => "delivered",
+        SendState::FailedBeforeSubmission => "failedbeforesubmission",
+        SendState::FailedConfirmed => "failedconfirmed",
+        SendState::OutcomeUnknown => "outcomeunknown",
+    }
+}
 fn success(value: Value) -> Value {
     json!({"content":[{"type":"text","text":value.to_string()}],"isError":false})
 }
@@ -1213,6 +1227,37 @@ mod tests {
             core_error(peppy_client_core::Error::NotFound),
             ("not_found", "The requested local item is unavailable.")
         );
+    }
+
+    #[test]
+    fn send_state_and_transport_spellings_are_pinned_to_current_output() {
+        use peppy_client_core::Transport;
+
+        let send_state_expectations = [
+            (SendState::QueuedLocal, "queuedlocal"),
+            (SendState::AcceptedServer, "acceptedserver"),
+            (SendState::PersistedGateway, "persistedgateway"),
+            (SendState::AttemptRecorded, "attemptrecorded"),
+            (SendState::SubmittedToOs, "submittedtoos"),
+            (SendState::Sent, "sent"),
+            (SendState::Delivered, "delivered"),
+            (SendState::FailedBeforeSubmission, "failedbeforesubmission"),
+            (SendState::FailedConfirmed, "failedconfirmed"),
+            (SendState::OutcomeUnknown, "outcomeunknown"),
+        ];
+        for (state, expected) in send_state_expectations {
+            assert_eq!(send_state_label(state), expected);
+        }
+
+        // Transport output is pinned here only; its inline codec is out of scope for R09.
+        let transport_expectations = [
+            (Transport::Sms, "sms"),
+            (Transport::Mms, "mms"),
+            (Transport::Rcs, "rcs"),
+        ];
+        for (transport, expected) in transport_expectations {
+            assert_eq!(format!("{:?}", transport).to_lowercase(), expected);
+        }
     }
 
     #[test]

@@ -643,27 +643,32 @@ pub fn media_page_view_with_media_status(
     let items = page
         .items
         .into_iter()
-        .map(|item| {
-            Ok(MediaPageItemView {
-                message_id: item.message.record.message_id.to_string(),
-                sender_address: (item.message.direction == Direction::Incoming)
-                    .then_some(item.message.sender_address)
-                    .flatten(),
-                timestamp: positive_ms_to_decimal(item.message.sent_at_ms).unwrap_or_default(),
-                attachment: attachment_view_with_media_status(
-                    &item.attachment,
-                    None,
-                    None,
-                    client.deferred_media_status(item.attachment.attachment_id)?,
-                ),
-                media_meta: item.media_meta.map(media_metadata_view),
-                cursor: cursor_view(item.cursor),
-            })
-        })
+        .map(|item| media_page_item_view_with_media_status(client, item))
         .collect::<Result<Vec<_>, Error>>()?;
     Ok(MediaPageView {
         items,
         next_cursor: page.next_cursor.map(cursor_view),
+    })
+}
+
+fn media_page_item_view_with_media_status(
+    client: &Client,
+    item: peppy_client_core::MediaPageItem,
+) -> Result<MediaPageItemView, Error> {
+    Ok(MediaPageItemView {
+        message_id: item.message.record.message_id.to_string(),
+        sender_address: (item.message.direction == Direction::Incoming)
+            .then_some(item.message.sender_address)
+            .flatten(),
+        timestamp: positive_ms_to_decimal(item.message.sent_at_ms).unwrap_or_default(),
+        attachment: attachment_view_with_media_status(
+            &item.attachment,
+            None,
+            None,
+            client.deferred_media_status(item.attachment.attachment_id)?,
+        ),
+        media_meta: item.media_meta.map(media_metadata_view),
+        cursor: cursor_view(item.cursor),
     })
 }
 
@@ -672,38 +677,17 @@ pub fn media_page_around_view_with_media_status(
     client: &Client,
     page: MediaPageAround,
 ) -> Result<MediaPageAroundView, Error> {
-    fn view_item(
-        client: &Client,
-        item: peppy_client_core::MediaPageItem,
-    ) -> Result<MediaPageItemView, Error> {
-        Ok(MediaPageItemView {
-            message_id: item.message.record.message_id.to_string(),
-            sender_address: (item.message.direction == Direction::Incoming)
-                .then_some(item.message.sender_address)
-                .flatten(),
-            timestamp: positive_ms_to_decimal(item.message.sent_at_ms).unwrap_or_default(),
-            attachment: attachment_view_with_media_status(
-                &item.attachment,
-                None,
-                None,
-                client.deferred_media_status(item.attachment.attachment_id)?,
-            ),
-            media_meta: item.media_meta.map(media_metadata_view),
-            cursor: cursor_view(item.cursor),
-        })
-    }
-
     Ok(MediaPageAroundView {
-        target: view_item(client, page.target)?,
+        target: media_page_item_view_with_media_status(client, page.target)?,
         newer: page
             .newer
             .into_iter()
-            .map(|item| view_item(client, item))
+            .map(|item| media_page_item_view_with_media_status(client, item))
             .collect::<Result<Vec<_>, Error>>()?,
         older: page
             .older
             .into_iter()
-            .map(|item| view_item(client, item))
+            .map(|item| media_page_item_view_with_media_status(client, item))
             .collect::<Result<Vec<_>, Error>>()?,
         newer_cursor: page.newer_cursor.map(cursor_view),
         older_cursor: page.older_cursor.map(cursor_view),
@@ -712,20 +696,7 @@ pub fn media_page_around_view_with_media_status(
 
 pub fn media_page_view(page: MediaPage) -> MediaPageView {
     MediaPageView {
-        items: page
-            .items
-            .into_iter()
-            .map(|item| MediaPageItemView {
-                message_id: item.message.record.message_id.to_string(),
-                sender_address: (item.message.direction == Direction::Incoming)
-                    .then_some(item.message.sender_address)
-                    .flatten(),
-                timestamp: positive_ms_to_decimal(item.message.sent_at_ms).unwrap_or_default(),
-                attachment: attachment_view(&item.attachment, None, None),
-                media_meta: item.media_meta.map(media_metadata_view),
-                cursor: cursor_view(item.cursor),
-            })
-            .collect(),
+        items: page.items.into_iter().map(media_page_item_view).collect(),
         next_cursor: page.next_cursor.map(cursor_view),
     }
 }
@@ -1000,6 +971,118 @@ mod tests {
         for forbidden in ["google", "cursor", "detector", "provider", "tmp"] {
             assert!(!serialized.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn media_page_projections_preserve_sender_timestamp_and_order() {
+        use peppy_client_core::{ClientConfig, DatabaseKey, MediaCursor, MediaPageItem};
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: dir.path().join("media.db"),
+                vault_id: peppy_client_core::VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[9; 32]).unwrap(),
+        )
+        .unwrap();
+        let make_item = |direction, timestamp| {
+            let mut message = message_with_body(direction, "image").payload;
+            message.sent_at_ms = timestamp;
+            message.sender_address = Some("+15555550100".into());
+            MediaPageItem {
+                cursor: MediaCursor {
+                    sort_at_ms: 3,
+                    local_order: 4,
+                    message_id: message.record.message_id,
+                    attachment_position: 0,
+                },
+                message,
+                attachment: AttachmentInfo {
+                    attachment_id: AttachmentId::new(),
+                    media_type: "image/png".into(),
+                    display_name: "photo.png".into(),
+                    plaintext_bytes: 42,
+                    ciphertext_bytes: 99,
+                    ciphertext_sha256: "private".into(),
+                    state: AttachmentState::PendingDownload,
+                },
+                media_meta: None,
+            }
+        };
+        let incoming = make_item(Direction::Incoming, Some(12));
+        let outgoing = make_item(Direction::Outgoing, None);
+        let zero = make_item(Direction::Incoming, Some(0));
+        let negative = make_item(Direction::Outgoing, Some(-1));
+        let page = MediaPage {
+            items: vec![
+                incoming.clone(),
+                outgoing.clone(),
+                zero.clone(),
+                negative.clone(),
+            ],
+            next_cursor: Some(incoming.cursor.clone()),
+        };
+        let normal = serde_json::to_value(media_page_view(page.clone())).unwrap();
+        let status =
+            serde_json::to_value(media_page_view_with_media_status(&client, page).unwrap())
+                .unwrap();
+        assert_eq!(normal, status);
+        assert_eq!(normal["items"][0]["senderAddress"], "+15555550100");
+        assert_eq!(normal["items"][0]["timestamp"], "12");
+        for index in 1..4 {
+            assert_eq!(normal["items"][index]["timestamp"], "");
+        }
+        assert!(normal["items"][1].get("senderAddress").is_none());
+        assert!(normal["items"][0].get("mediaMeta").is_none());
+        let around = MediaPageAround {
+            target: incoming,
+            newer: vec![outgoing, zero],
+            older: vec![negative],
+            newer_cursor: None,
+            older_cursor: None,
+        };
+        let normal_around = serde_json::to_value(media_page_around_view(around.clone())).unwrap();
+        let status_around = serde_json::to_value(
+            media_page_around_view_with_media_status(&client, around).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(normal_around, status_around);
+        assert_eq!(normal_around["target"], normal["items"][0]);
+        assert_eq!(normal_around["newer"][0], normal["items"][1]);
+        assert_eq!(normal_around["newer"][1], normal["items"][2]);
+        assert_eq!(normal_around["older"][0], normal["items"][3]);
+
+        let db = rusqlite::Connection::open(dir.path().join("media.db")).unwrap();
+        db.execute_batch(
+            "PRAGMA key = \"x'0909090909090909090909090909090909090909090909090909090909090909'\";\
+             DROP TABLE mms_deferred_originals;",
+        )
+        .unwrap();
+        let item = make_item(Direction::Incoming, None);
+        assert!(matches!(
+            media_page_view_with_media_status(
+                &client,
+                MediaPage {
+                    items: vec![item.clone()],
+                    next_cursor: None,
+                }
+            ),
+            Err(Error::Database)
+        ));
+        assert!(matches!(
+            media_page_around_view_with_media_status(
+                &client,
+                MediaPageAround {
+                    target: item,
+                    newer: vec![],
+                    older: vec![],
+                    newer_cursor: None,
+                    older_cursor: None,
+                }
+            ),
+            Err(Error::Database)
+        ));
     }
 
     #[test]

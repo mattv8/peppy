@@ -154,7 +154,7 @@ fn local_wrap_key_round_trips_only_with_its_profile_purpose_and_aad() {
     );
 }
 #[test]
-fn compaction_hmac_is_epoch_scoped_and_length_framed() {
+fn compaction_hmac_changes_with_salt_and_is_length_framed() {
     let p = profile();
     let root = root();
     let key = derive_purpose_key(&root, &p, KeyPurpose::Compaction).unwrap();
@@ -168,6 +168,19 @@ fn compaction_hmac_is_epoch_scoped_and_length_framed() {
     let later_root = derive_root_key("correct horse battery staple", &later).unwrap();
     let later_key = derive_purpose_key(&later_root, &later, KeyPurpose::Compaction).unwrap();
     assert_ne!(
+        compaction_hmac(&key, b"notification", &[b"a"]),
+        compaction_hmac(&later_key, b"notification", &[b"a"]),
+    );
+}
+#[test]
+fn compaction_hmac_is_unchanged_by_epoch_metadata_alone() {
+    let p = profile();
+    let root = root();
+    let key = derive_purpose_key(&root, &p, KeyPurpose::Compaction).unwrap();
+    let mut later = p.clone();
+    later.key_epoch += 1;
+    let later_key = derive_purpose_key(&root, &later, KeyPurpose::Compaction).unwrap();
+    assert_eq!(
         compaction_hmac(&key, b"notification", &[b"a"]),
         compaction_hmac(&later_key, b"notification", &[b"a"]),
     );
