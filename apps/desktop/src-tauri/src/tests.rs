@@ -2557,17 +2557,33 @@ mod real_server {
         })
         .await;
         let draft = first
-            .save_draft(&input("draft-new", "", "history one", &[ADDRESS], "0"))
+            .save_draft(&routed(
+                input("draft-new", "", "history one", &[ADDRESS], "0"),
+                &gateway_id.to_string(),
+                "sim-1",
+            ))
             .unwrap();
+        let draft_id = peppy_client_core::DraftId::from_str(&draft.id).unwrap();
+        first.request_work();
+        until("history draft synced", 20, || {
+            first.client.draft_sync_status(draft_id).unwrap().state
+                == peppy_client_core::DraftSyncState::Synced
+        })
+        .await;
         assert!(
-            first
-                .send_draft(&routed(
+            crate::send_draft_for_window(
+                &first_state,
+                crate::tray::MAIN,
+                first.clone(),
+                routed(
                     input(&draft.id, "", "", &[], &draft.revision),
                     &gateway_id.to_string(),
                     "sim-1"
-                ))
-                .unwrap()
-                .accepted
+                ),
+            )
+            .await
+            .unwrap()
+            .accepted
         );
         until("history uploaded", 20, || {
             first.client.pending_outbox_batch(10).unwrap().is_empty()
