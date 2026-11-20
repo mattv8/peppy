@@ -33,6 +33,8 @@ packages/**
 !packages/generated/**
 !packages/mobile-design/
 !packages/mobile-design/**
+!packages/typescript-ast/
+!packages/typescript-ast/**
 apps/desktop/node_modules
 apps/desktop/src-tauri
 apps/web/node_modules
