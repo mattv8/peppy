@@ -4,6 +4,7 @@ import android.content.ActivityNotFoundException
 import android.content.ContextWrapper
 import android.content.Intent
 import android.os.Bundle
+import android.os.Looper
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
@@ -11,6 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,7 +41,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.junit4.StateRestorationTester
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import dev.peppy.mobile.googlemessages.ui.GoogleMessagesLinkPanel
 import dev.peppy.mobile.googlemessages.ui.GoogleMessagesLinkPanelDetails
@@ -59,10 +61,13 @@ import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.robolectric.RobolectricTestRunner
@@ -146,12 +151,14 @@ private fun ManagedLinkPanel(host: GoogleMessagesLinkPanelHost?) {
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class GoogleMessagesLinkPanelTest {
-    // Panel effects resume on the main looper, as in production; the default unconfined test
-    // dispatcher would resume them on the Dispatchers.IO worker that finished the host call.
-    private val compose = createComposeRule(Dispatchers.Main)
+    // Queue IO completions until the test clock drains them on the main looper.
+    // The legacy rule uses an unconfined dispatcher even when given Dispatchers.Main.
+    private val compose = createComposeRule()
     @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
 
     @After fun tearDown() {
+        // Finish queued operation cleanup before disposing its scheduler and resetting shared hooks.
+        compose.waitUntil(5_000) { !LinkOperationLock.inProgress.value && !LinkRuntime.pairingInProgress.get() }
         LinkRuntime.resetForTest()
         LinkRuntimeTestHooks.engine = null
         LinkRuntimeTestHooks.storeFactory = null
@@ -382,7 +389,7 @@ class GoogleMessagesLinkPanelTest {
             onReset = { mode.set(3); current.state = "unlinked" },
         )
         showPanel(host)
-        check(firstEntered.await(2, TimeUnit.SECONDS))
+        compose.waitUntil(2_000) { firstEntered.count == 0L }
 
         host.signalChange()
         compose.waitUntil(5_000) { compose.onAllNodesWithTag("google-messages-link-linked").fetchSemanticsNodes().isNotEmpty() }
@@ -397,6 +404,7 @@ class GoogleMessagesLinkPanelTest {
         host.signalChange()
         compose.waitUntil(5_000) { resetLoadEntered.count == 0L }
         compose.onNodeWithTag("google-messages-link-reset").performClick()
+        compose.waitUntil(5_000) { compose.onAllNodesWithTag("google-messages-link-reset-sheet-confirm").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("google-messages-link-reset-sheet-confirm").performSemanticsAction(SemanticsActions.OnClick)
         compose.waitUntil(5_000) { compose.onAllNodesWithTag("google-messages-link-start").fetchSemanticsNodes().isNotEmpty() }
 
@@ -419,6 +427,7 @@ class GoogleMessagesLinkPanelTest {
         }
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-start").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("google-messages-link-start").performClick()
+        compose.waitUntil(5_000) { compose.onAllNodesWithTag("google-messages-link-consent-sheet-confirm").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("google-messages-link-consent-sheet-confirm")
             .performSemanticsAction(SemanticsActions.OnClick)
         compose.waitUntil { host.permissionRequests == 1 }
@@ -477,6 +486,7 @@ class GoogleMessagesLinkPanelTest {
         }
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-start").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("google-messages-link-start").performClick()
+        compose.waitUntil(5_000) { compose.onAllNodesWithTag("google-messages-link-consent-sheet-confirm").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("google-messages-link-consent-sheet-confirm")
             .performSemanticsAction(SemanticsActions.OnClick)
         compose.waitUntil { host.permissionRequests == 1 }
@@ -502,6 +512,7 @@ class GoogleMessagesLinkPanelTest {
         showPanel(host)
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-relink").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("google-messages-link-relink").performClick()
+        compose.waitUntil(5_000) { compose.onAllNodesWithTag("google-messages-link-relink-sheet-confirm").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("google-messages-link-relink-sheet-confirm")
             .performSemanticsAction(SemanticsActions.OnClick)
         compose.waitUntil { host.permissionRequests == 1 }
@@ -548,6 +559,61 @@ class GoogleMessagesLinkPanelTest {
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
         compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_unlinked_done)).fetchSemanticsNode()
         check(host.ownerUnlinkEvents == listOf("unlinked", "completed"))
+    }
+
+    @Test fun `background completion keeps pending unlink confirmation on the main looper`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val resumed = CountDownLatch(1)
+        val resumedLooper = AtomicReference<Looper?>()
+        val completed = mutableStateOf(false)
+        val handle = FakeHandle("linked").apply {
+            unlinkAction = { state = "unlinked"; stopCode = "unlink_remote_failed" }
+        }
+        val host = FakePanelHost(handle)
+        GoogleMessagesLinkTestHooks.available = true
+        try {
+            compose.setContent {
+                LaunchedEffect(Unit) {
+                    withContext(Dispatchers.IO) {
+                        entered.countDown()
+                        check(release.await(5, TimeUnit.SECONDS))
+                    }
+                    resumedLooper.set(Looper.myLooper())
+                    completed.value = true
+                    resumed.countDown()
+                }
+                if (completed.value) assertSame("recomposition looper", Looper.getMainLooper(), Looper.myLooper())
+                PeppyTheme {
+                    Column(Modifier.verticalScroll(rememberScrollState())) { ManagedLinkPanel(host) }
+                }
+            }
+            openManage()
+            compose.waitUntil { entered.count == 0L }
+            // Hold the frame so the sheet is pending when the IO call returns.
+            compose.mainClock.autoAdvance = false
+            compose.onNodeWithTag("google-messages-link-unlink")
+                .performSemanticsAction(SemanticsActions.OnClick)
+            release.countDown()
+            compose.waitUntil(5_000) {
+                compose.mainClock.advanceTimeByFrame()
+                resumed.count == 0L
+            }
+            assertSame("effect continuation looper", Looper.getMainLooper(), resumedLooper.get())
+            compose.mainClock.autoAdvance = true
+            compose.onNodeWithTag("google-messages-link-unlink-sheet").assertIsDisplayed()
+            compose.onNodeWithTag("google-messages-link-unlink-sheet-confirm")
+                .performSemanticsAction(SemanticsActions.OnClick)
+            compose.waitUntil {
+                handle.unlinkCalls == 1 && compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isNotEmpty()
+            }
+            val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+            compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_notice_unlink_remote_failed)).fetchSemanticsNode()
+            assertEquals(1, handle.unlinkCalls)
+        } finally {
+            release.countDown()
+            compose.mainClock.autoAdvance = true
+        }
     }
 
     @Test fun `unlink remote failure notice requires the authoritative unlink outcome`() {
@@ -625,7 +691,7 @@ class GoogleMessagesLinkPanelTest {
             }
         }
         confirm("google-messages-link-reset")
-        check(resetEntered.await(5, TimeUnit.SECONDS))
+        compose.waitUntil(5_000) { resetEntered.count == 0L }
 
         compose.runOnIdle { visible.value = false }
         releaseReset.countDown()
@@ -665,7 +731,7 @@ class GoogleMessagesLinkPanelTest {
         showPanel(host, PanelSurface.Managed)
         openManage()
         confirm("google-messages-link-unlink")
-        assertTrue(recordEntered.await(5, TimeUnit.SECONDS))
+        compose.waitUntil(5_000) { recordEntered.count == 0L }
         // The reload already reports unlinked, but details must not close under the held operation.
         compose.waitUntil(5_000) { host.observedStates.contains("unlinked") }
         compose.onNodeWithTag("google-messages-details-screen").fetchSemanticsNode()
@@ -716,7 +782,7 @@ class GoogleMessagesLinkPanelTest {
         showPanel(host)
 
         confirm("google-messages-link-relink")
-        assertTrue(acquireEntered.await(5, TimeUnit.SECONDS))
+        compose.waitUntil(5_000) { acquireEntered.count == 0L }
         LinkRuntime.resetLocalState(context)
         releaseAcquire.countDown()
         compose.waitUntil(5_000) { host.endedTokens.isNotEmpty() }
@@ -756,14 +822,14 @@ class GoogleMessagesLinkPanelTest {
         showPanel(host)
 
         confirm("google-messages-link-relink")
-        assertTrue(preStartEntered.await(5, TimeUnit.SECONDS))
+        compose.waitUntil(5_000) { preStartEntered.count == 0L }
         Thread {
             LinkRuntime.resetLocalState(context)
             resetFinished.countDown()
         }.start()
-        assertTrue(handleClosed.await(5, TimeUnit.SECONDS))
+        compose.waitUntil(5_000) { handleClosed.count == 0L }
         releasePreStart.countDown()
-        assertTrue(resetFinished.await(5, TimeUnit.SECONDS))
+        compose.waitUntil(5_000) { resetFinished.count == 0L }
         compose.waitUntil(5_000) { host.endedTokens.isNotEmpty() }
 
         assertEquals(listOf("unknown", "unlinked"), synchronized(recorded) { recorded.toList() })
@@ -800,16 +866,17 @@ class GoogleMessagesLinkPanelTest {
         val releaseObservation = CountDownLatch(1)
         val observationCalls = AtomicInteger()
         val handle = FakeHandle("linked").apply { unlinkAction = { state = "unlinked" } }
-        val host = FakePanelHost(handle).apply {
-            onRecordStatusObservation = {
-                if (observationCalls.incrementAndGet() == 1) {
-                    observationEntered.countDown()
-                    awaitIgnoringInterrupts(releaseObservation)
-                }
+        val host = FakePanelHost(handle)
+        // Render first, then hold a refresh observation while the owner unlinks the displayed link.
+        showPanel(host, PanelSurface.Managed, readinessTag = "google-messages-link-chip")
+        host.onRecordStatusObservation = {
+            if (observationCalls.incrementAndGet() == 1) {
+                observationEntered.countDown()
+                awaitIgnoringInterrupts(releaseObservation)
             }
         }
-        showPanel(host, PanelSurface.Managed, readinessTag = null)
-        assertTrue(observationEntered.await(5, TimeUnit.SECONDS))
+        host.signalChange()
+        compose.waitUntil(5_000) { observationEntered.count == 0L }
 
         openManage()
         confirm("google-messages-link-unlink")
@@ -870,7 +937,7 @@ class GoogleMessagesLinkPanelTest {
         showPanel(host, PanelSurface.Managed)
         openManage()
         confirm("google-messages-link-unlink")
-        assertTrue(recordEntered.await(5, TimeUnit.SECONDS))
+        compose.waitUntil(5_000) { recordEntered.count == 0L }
         check(compose.onAllNodesWithTag("google-messages-link-notice").fetchSemanticsNodes().isEmpty())
 
         releaseRecord.countDown()
@@ -970,7 +1037,7 @@ class GoogleMessagesLinkPanelTest {
             }
         }
         confirm("google-messages-link-unlink")
-        check(unlinkEntered.await(5, TimeUnit.SECONDS))
+        compose.waitUntil(5_000) { unlinkEntered.count == 0L }
 
         compose.runOnIdle { activeHost.value = secondHost }
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-remove-local").fetchSemanticsNodes().isNotEmpty() }
@@ -1001,7 +1068,7 @@ class GoogleMessagesLinkPanelTest {
             }
         }
         confirm("google-messages-link-relink")
-        check(pairingAcquired.await(5, TimeUnit.SECONDS))
+        compose.waitUntil(5_000) { pairingAcquired.count == 0L }
 
         compose.runOnIdle { visible.value = false }
         releasePairing.countDown()
