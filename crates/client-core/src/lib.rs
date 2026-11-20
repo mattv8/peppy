@@ -304,6 +304,8 @@ pub(crate) mod snapshot_sql {
 }
 /// Upper bound applied to `apply_pending(limit)`.
 pub const MAX_APPLY_BATCH: usize = 1_000;
+/// Scan pages of omitted RCS conversation metadata per `apply_pending` call.
+const RCS_METADATA_SUPERSEDE_PAGES: usize = 4;
 /// Outbox rows sealed implicitly by enqueue/unlock/import/upload; use `seal_pending_batch` for more.
 pub const MAX_SEAL_BATCH: usize = 256;
 /// Maximum messages returned by one bounded history query.
@@ -5607,6 +5609,12 @@ impl Client {
             |r| r.get(0),
         )?;
         report.waiting_for_keys = usize::try_from(waiting).map_err(|_| Error::Database)?;
+        // A page can scan only rows that stay fenced, so several pages run per pass; the
+        // persisted scan position keeps later passes from rescanning them.
+        for _ in 0..RCS_METADATA_SUPERSEDE_PAGES {
+            let superseded = snapshot_projection::supersede_omitted_rcs_metadata(&tx, &ctx, limit)?;
+            report.superseded += usize::try_from(superseded).map_err(|_| Error::Database)?;
+        }
         advance_processed_frontier(&tx)?;
         attachment_retention::complete_processed_restores(&tx)?;
         tx.commit()?;
@@ -5658,7 +5666,8 @@ impl Client {
             pending_apply: pending_snapshot
                 || projection_work
                 || pending_journal
-                || conversation_merge::has_work(&store.conn)?,
+                || conversation_merge::has_work(&store.conn)?
+                || snapshot_projection::supersede_scan_pending(&store.conn)?,
             pending_snapshot,
         })
     }
@@ -12562,6 +12571,8 @@ fn complete_key_install(
     epoch: u32,
     on_progress: &mut dyn FnMut(DecoderRecoveryProgress),
 ) -> Result<(), Error> {
+    // Newly unlocked epochs can make skipped superseded-metadata rows eligible again.
+    snapshot_projection::reset_rcs_metadata_supersede_scan(&s.conn)?;
     refresh_decoder_recovery_totals(&s.conn, &s.keys)?;
     match s.decoder_recovery_mode {
         DecoderRecoveryMode::Inline => {

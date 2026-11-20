@@ -906,6 +906,33 @@ fn pending_epoch_totals_are_counted_once_while_an_earlier_epoch_pages() {
 }
 
 #[test]
+fn stranded_supersede_scan_is_visible_to_work_status_until_the_scan_finishes() {
+    let seed = seed();
+    let client = open(&copy_of(&seed, "stranded"));
+    client.import_native_key_cache(&seed.cache).unwrap();
+    {
+        let store = client.lock().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO projection_generations(generation,high_water,state) VALUES(1,2000,'promoted')",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO journal(cursor,key_epoch,wire,status,reason,historical) VALUES(1000,1,?,'pending','snapshot_rcs_isolated',0)",
+                [b"not a wire".to_vec()],
+            )
+            .unwrap();
+    }
+    assert!(client.sync_work_status().unwrap().pending_apply);
+    client.apply_pending(10).unwrap();
+    assert!(!client.sync_work_status().unwrap().pending_apply);
+}
+
+#[test]
 fn reinstall_after_the_eligible_set_changed_refreshes_total_and_keeps_the_resume_position() {
     let seed = seed();
     let add_rows = |conn: &Connection| {

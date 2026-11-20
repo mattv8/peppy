@@ -1449,6 +1449,144 @@ fn release_promoted_snapshot_origins(
     Ok(())
 }
 
+const RCS_METADATA_SCAN_PREFIX: &str = "rcs_metadata_supersede_scan:";
+
+/// Revisit rows skipped while epoch keys were unavailable.
+pub(crate) fn reset_rcs_metadata_supersede_scan(conn: &Connection) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM metadata WHERE k GLOB ?",
+        [format!("{RCS_METADATA_SCAN_PREFIX}*")],
+    )?;
+    Ok(())
+}
+
+/// Whether the supersede scan has unfinished work for the promoted generation: its done latch is
+/// absent and an eligible row lies above the persisted position. This is a bounded existence check
+/// on the same predicate the scan reads, so no wire is decrypted.
+pub(crate) fn supersede_scan_pending(conn: &Connection) -> Result<bool, Error> {
+    let Some(projection) = Suppression::load(conn)? else {
+        return Ok(false);
+    };
+    if projection.state != "promoted" {
+        return Ok(false);
+    }
+    let progress = crate::get_meta(
+        conn,
+        &format!("{RCS_METADATA_SCAN_PREFIX}{}", projection.generation),
+    )?;
+    if progress.as_deref() == Some("done") {
+        return Ok(false);
+    }
+    let after = progress
+        .map(|value| value.parse::<i64>().map_err(|_| Error::Database))
+        .transpose()?
+        .unwrap_or(0);
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM journal j WHERE j.cursor>?1 AND j.cursor<=?2 AND j.status='pending' AND j.reason=?3 AND NOT EXISTS(SELECT 1 FROM projection_retained r WHERE r.generation=?4 AND r.cursor=j.cursor))",
+        params![
+            after,
+            projection.high_water,
+            RCS_ISOLATED_REASON,
+            projection.generation
+        ],
+        |row| row.get(0),
+    )?)
+}
+
+/// Release only authenticated omitted metadata for which promoted live state exists.
+/// The savepoint makes a page atomic both standalone and inside apply_pending's transaction.
+pub(crate) fn supersede_omitted_rcs_metadata(
+    conn: &Connection,
+    ctx: &Ctx,
+    budget: usize,
+) -> Result<u64, Error> {
+    if budget == 0 {
+        return Ok(0);
+    }
+    conn.execute_batch("SAVEPOINT rcs_metadata_supersede")?;
+    let result = (|| {
+        let Some(projection) = Suppression::load(conn)? else {
+            return Ok(0);
+        };
+        if projection.state != "promoted" {
+            return Ok(0);
+        }
+        let key = format!("{RCS_METADATA_SCAN_PREFIX}{}", projection.generation);
+        let progress = crate::get_meta(conn, &key)?;
+        if progress.as_deref() == Some("done") {
+            return Ok(0);
+        }
+        let after = progress
+            .map(|value| value.parse::<i64>().map_err(|_| Error::Database))
+            .transpose()?
+            .unwrap_or(0);
+        let rows: Vec<(i64, Vec<u8>)> = {
+            let mut query = conn.prepare(
+                "SELECT LENGTH(j.wire),j.cursor,j.wire FROM journal j WHERE j.cursor>?1 AND j.cursor<=?2 AND j.status='pending' AND j.reason=?3 AND NOT EXISTS(SELECT 1 FROM projection_retained r WHERE r.generation=?4 AND r.cursor=j.cursor) ORDER BY j.cursor LIMIT ?5",
+            )?;
+            take_within_budget(
+                query.query(params![
+                    after,
+                    projection.high_water,
+                    RCS_ISOLATED_REASON,
+                    projection.generation,
+                    i64::try_from(budget).unwrap_or(i64::MAX)
+                ])?,
+                MAX_SNAPSHOT_PAGE_BYTES,
+                |row| Ok((row.get(1)?, row.get(2)?)),
+            )?
+        };
+        let mut superseded = 0;
+        for (cursor, wire) in &rows {
+            let Some(envelope) = parse_wire(wire) else {
+                continue;
+            };
+            if envelope.vault_id != ctx.vault_id
+                || envelope.purpose != EnvelopePurpose::Event
+                || envelope.compaction.is_none()
+            {
+                continue;
+            }
+            let Ok(Opened::Payload(PrivatePayload::RcsConversationMetadata(metadata))) =
+                open_payload(ctx, &envelope)
+            else {
+                continue;
+            };
+            let live: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM rcs_conversation_metadata WHERE conversation_id=COALESCE((SELECT target_id FROM conversation_merges WHERE source_id=?1),?1))",
+                [metadata.conversation_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if live {
+                conn.execute(
+                    "UPDATE journal SET status='duplicate',reason=? WHERE cursor=?",
+                    params![SUPERSEDED_REASON, cursor],
+                )?;
+                release_snapshot_origin_at_cursor(conn, *cursor)?;
+                superseded += 1;
+            }
+        }
+        let next = rows
+            .last()
+            .map(|(cursor, _)| cursor.to_string())
+            .unwrap_or_else(|| "done".to_owned());
+        crate::set_meta(conn, &key, &next)?;
+        Ok(superseded)
+    })();
+    match result {
+        Ok(count) => {
+            conn.execute_batch("RELEASE rcs_metadata_supersede")?;
+            Ok(count)
+        }
+        Err(error) => {
+            conn.execute_batch(
+                "ROLLBACK TO rcs_metadata_supersede; RELEASE rcs_metadata_supersede",
+            )?;
+            Err(error)
+        }
+    }
+}
+
 /// Decides, for one pending journal row, whether the newest authoritative snapshot proved it
 /// superseded. Loaded once per `apply_pending` batch (after `advance`).
 pub(crate) struct Suppression {
@@ -2183,6 +2321,410 @@ mod tests {
         let mut store = client.lock().unwrap();
         let (_, ctx) = store.parts();
         assert!(!authenticated_rcs_event(&ctx, &wire));
+    }
+
+    #[test]
+    fn omitted_metadata_is_superseded_and_advances_processed_frontier() {
+        use peppy_crypto::{
+            KeyPurpose, create_vault_check_header, derive_purpose_key, derive_root_key, encrypt,
+        };
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = crate::VaultId::new();
+        let producer = crate::DeviceId::new();
+        let conversation_id = crate::ConversationId::new();
+        let profile = peppy_crypto::KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let client = Client::open(
+            crate::ClientConfig {
+                database_path: directory.path().join("supersede.db"),
+                vault_id,
+                device_id: producer,
+            },
+            crate::DatabaseKey::new(&[8; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let compaction = crate::CompactionMetadata {
+            key: vec![1; 32],
+            terminal: false,
+            supersedes: vec![],
+            checkpoint: false,
+        };
+        let payload = PrivatePayload::RcsConversationMetadata(crate::RcsConversationMetadata {
+            conversation_id,
+            transport: crate::RcsConversationTransport::Rcs,
+            rcs_encryption: Some(true),
+            rcs_history_gap: false,
+            logical_revision: 1,
+            writer_device_id: producer.to_string(),
+        });
+        let mut envelope = crate::Envelope {
+            protocol_version: 1,
+            envelope_id: crate::EnvelopeId::new(),
+            command_id: None,
+            vault_id,
+            producer_device_id: producer,
+            producer_sequence: crate::SourceSequence(1),
+            key_epoch: 1,
+            crypto_suite: profile.crypto_suite,
+            profile_fingerprint: profile.fingerprint().unwrap(),
+            purpose: EnvelopePurpose::Event,
+            route: None,
+            compaction: Some(compaction.clone()),
+            origin_tag: None,
+            ciphertext: Vec::new(),
+        };
+        let plain = crate::serialize_authenticated_payload(&payload, Some(&compaction)).unwrap();
+        let key = derive_purpose_key(&root, &profile, KeyPurpose::Event).unwrap();
+        let encrypted = encrypt(&key, &envelope.aad_bytes().unwrap(), &plain).unwrap();
+        envelope.ciphertext = [encrypted.nonce.as_slice(), &encrypted.ciphertext].concat();
+        let mut store = client.lock().unwrap();
+        let (conn, ctx) = store.parts();
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 10).unwrap(), 0);
+        conn.execute(
+            "INSERT INTO projection_generations(generation,high_water,state) VALUES(1,2,'failed')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 10).unwrap(), 0);
+        conn.execute("DELETE FROM projection_generations WHERE generation=1", [])
+            .unwrap();
+        conn.execute("INSERT INTO journal(cursor,wire,status,reason) VALUES(1,?,'pending','snapshot_rcs_isolated')", [serde_json::to_vec(&envelope).unwrap()]).unwrap();
+        conn.execute(
+            "INSERT INTO metadata(k,v) VALUES('snapshot_import_origin:1','1')",
+            [],
+        )
+        .unwrap();
+        let mut newer = envelope.clone();
+        newer.envelope_id = crate::EnvelopeId::new();
+        newer.producer_sequence = crate::SourceSequence(2);
+        let newer_payload =
+            PrivatePayload::RcsConversationMetadata(crate::RcsConversationMetadata {
+                conversation_id,
+                transport: crate::RcsConversationTransport::Rcs,
+                rcs_encryption: Some(false),
+                rcs_history_gap: false,
+                logical_revision: 2,
+                writer_device_id: producer.to_string(),
+            });
+        let plain =
+            crate::serialize_authenticated_payload(&newer_payload, Some(&compaction)).unwrap();
+        let encrypted = encrypt(&key, &newer.aad_bytes().unwrap(), &plain).unwrap();
+        newer.ciphertext = [encrypted.nonce.as_slice(), &encrypted.ciphertext].concat();
+        conn.execute("INSERT INTO journal(cursor,wire,status,reason) VALUES(30,?,'pending','snapshot_rcs_isolated')", [serde_json::to_vec(&newer).unwrap()]).unwrap();
+        conn.execute("INSERT INTO projection_generations(generation,high_water,state) VALUES(1,30,'staging')", []).unwrap();
+        conn.execute(
+            "INSERT INTO projection_retained(generation,cursor) VALUES(1,30)",
+            [],
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        advance(&tx, &ctx, 10, &mut crate::ApplyReport::default()).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT state FROM projection_generations WHERE generation=1",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "promoted"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT logical_revision FROM rcs_conversation_metadata WHERE conversation_id=?",
+                [conversation_id.to_string()],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        crate::set_meta(conn, "receive_cursor", "1").unwrap();
+        crate::set_meta(conn, "processed_cursor", "0").unwrap();
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 10).unwrap(), 1);
+        assert_eq!(
+            conn.query_row(
+                "SELECT status,reason FROM journal WHERE cursor=1",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            )
+            .unwrap(),
+            ("duplicate".to_owned(), "snapshot_superseded".to_owned())
+        );
+        assert!(!has_snapshot_import_origin(conn, 1).unwrap());
+        assert_eq!(crate::advance_processed_frontier(conn).unwrap(), 1);
+
+        // A retained row is excluded even if it still has the isolation reason.
+        let make_wire = |payload: &PrivatePayload, mut envelope: crate::Envelope| {
+            let plain = crate::serialize_authenticated_payload(payload, Some(&compaction)).unwrap();
+            let sealed = encrypt(&key, &envelope.aad_bytes().unwrap(), &plain).unwrap();
+            envelope.ciphertext = [sealed.nonce.as_slice(), &sealed.ciphertext].concat();
+            serde_json::to_vec(&envelope).unwrap()
+        };
+        let missing = crate::ConversationId::new();
+        let source = crate::ConversationId::new();
+        let metadata_for = |id| {
+            PrivatePayload::RcsConversationMetadata(crate::RcsConversationMetadata {
+                conversation_id: id,
+                transport: crate::RcsConversationTransport::Rcs,
+                rcs_encryption: Some(true),
+                rcs_history_gap: false,
+                logical_revision: 1,
+                writer_device_id: producer.to_string(),
+            })
+        };
+        let mut bad_auth = envelope.clone();
+        *bad_auth.ciphertext.last_mut().unwrap() ^= 1;
+        let mut mismatch = envelope.clone();
+        mismatch.compaction.as_mut().unwrap().key[0] ^= 1;
+        let mut wrong_vault = envelope.clone();
+        wrong_vault.vault_id = crate::VaultId::new();
+        let wrong_vault = make_wire(&payload, wrong_vault);
+        let mut no_compaction = envelope.clone();
+        no_compaction.compaction = None;
+        let reported = PrivatePayload::RcsMessageReported {
+            message_id: crate::MessageId::new(),
+            rcs_reported: true,
+        };
+        let status = PrivatePayload::RcsMessageStatus {
+            message_id: crate::MessageId::new(),
+            status: crate::RcsMessageStatus::Delivered,
+            rcs_reported: true,
+        };
+        let rows = [
+            (2, make_wire(&metadata_for(missing), envelope.clone())),
+            (3, serde_json::to_vec(&bad_auth).unwrap()),
+            (4, serde_json::to_vec(&mismatch).unwrap()),
+            (5, wrong_vault),
+            (6, serde_json::to_vec(&no_compaction).unwrap()),
+            (7, serde_json::to_vec(&envelope).unwrap()),
+            (8, make_wire(&reported, envelope.clone())),
+            (9, make_wire(&status, envelope.clone())),
+            (10, make_wire(&metadata_for(source), envelope.clone())),
+            (11, serde_json::to_vec(&envelope).unwrap()),
+            (31, serde_json::to_vec(&envelope).unwrap()),
+        ];
+        conn.execute(
+            "UPDATE projection_generations SET high_water=20 WHERE generation=1",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO projection_retained(generation,cursor) VALUES(1,7)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_merges(source_id,target_id) VALUES(?,?)",
+            params![source.to_string(), conversation_id.to_string()],
+        )
+        .unwrap();
+        for (cursor, wire) in rows {
+            conn.execute("INSERT INTO journal(cursor,wire,status,reason) VALUES(?,?,'pending','snapshot_rcs_isolated')", params![cursor, wire]).unwrap();
+            conn.execute(
+                "INSERT INTO metadata(k,v) VALUES(?,'1')",
+                [origin_key(cursor)],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "UPDATE projection_generations SET state='failed' WHERE generation=1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 20).unwrap(), 0);
+        conn.execute(
+            "UPDATE projection_generations SET state='staging' WHERE generation=1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 20).unwrap(), 0);
+        for cursor in [8, 9, 11] {
+            assert_eq!(
+                conn.query_row("SELECT status FROM journal WHERE cursor=?", [cursor], |r| r
+                    .get::<_, String>(0))
+                    .unwrap(),
+                "pending"
+            );
+        }
+        conn.execute(
+            "UPDATE projection_generations SET state='promoted' WHERE generation=1",
+            [],
+        )
+        .unwrap();
+        reset_rcs_metadata_supersede_scan(conn).unwrap();
+        // A locked epoch is scanned but not released; reset after keys arrive revisits it.
+        let empty_keys = std::collections::BTreeMap::new();
+        let locked = Ctx {
+            vault_id,
+            device_id: producer,
+            keys: &empty_keys,
+            active_epoch: None,
+        };
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &locked, 1).unwrap(), 0);
+        assert_eq!(
+            crate::get_meta(conn, "rcs_metadata_supersede_scan:1")
+                .unwrap()
+                .as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            supersede_omitted_rcs_metadata(conn, &locked, 20).unwrap(),
+            0
+        );
+        assert_eq!(
+            supersede_omitted_rcs_metadata(conn, &locked, 20).unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT status FROM journal WHERE cursor=11", [], |r| r
+                .get::<_, String>(
+                0
+            ))
+            .unwrap(),
+            "pending"
+        );
+        reset_rcs_metadata_supersede_scan(conn).unwrap();
+        for _ in 0..7 {
+            assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 1).unwrap(), 0);
+        }
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 1).unwrap(), 1);
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 1).unwrap(), 1);
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 1).unwrap(), 0);
+        assert_eq!(
+            crate::get_meta(conn, "rcs_metadata_supersede_scan:1")
+                .unwrap()
+                .as_deref(),
+            Some("done")
+        );
+        for cursor in 2..=9 {
+            assert_eq!(
+                conn.query_row("SELECT status FROM journal WHERE cursor=?", [cursor], |r| r
+                    .get::<_, String>(0))
+                    .unwrap(),
+                "pending"
+            );
+            assert!(has_snapshot_import_origin(conn, cursor).unwrap());
+        }
+        assert_eq!(
+            conn.query_row("SELECT status FROM journal WHERE cursor=31", [], |r| r
+                .get::<_, String>(
+                0
+            ))
+            .unwrap(),
+            "pending"
+        );
+        assert!(has_snapshot_import_origin(conn, 31).unwrap());
+        for cursor in [10, 11] {
+            assert_eq!(
+                conn.query_row("SELECT status FROM journal WHERE cursor=?", [cursor], |r| r
+                    .get::<_, String>(0))
+                    .unwrap(),
+                "duplicate"
+            );
+            assert!(!has_snapshot_import_origin(conn, cursor).unwrap());
+        }
+        // Done is a latch; a new generation, or explicit reset, starts scanning from the start.
+        conn.execute(
+            "UPDATE journal SET status='pending',reason='snapshot_rcs_isolated' WHERE cursor=11",
+            [],
+        )
+        .unwrap();
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 20).unwrap(), 0);
+        conn.execute("INSERT INTO projection_generations(generation,high_water,state) VALUES(2,20,'staging')", []).unwrap();
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 20).unwrap(), 0);
+        conn.execute(
+            "UPDATE projection_generations SET state='promoted' WHERE generation=2",
+            [],
+        )
+        .unwrap();
+        // Generation 2 retains cursor 7, just like the original generation.
+        conn.execute(
+            "INSERT INTO projection_retained(generation,cursor) VALUES(2,7)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 20).unwrap(), 1);
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 20).unwrap(), 0);
+        conn.execute(
+            "UPDATE journal SET status='pending',reason='snapshot_rcs_isolated' WHERE cursor=11",
+            [],
+        )
+        .unwrap();
+        reset_rcs_metadata_supersede_scan(conn).unwrap();
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 20).unwrap(), 1);
+        let tx = conn.transaction().unwrap();
+        tx.execute(
+            "UPDATE journal SET status='pending',reason='snapshot_rcs_isolated' WHERE cursor=11",
+            [],
+        )
+        .unwrap();
+        reset_rcs_metadata_supersede_scan(&tx).unwrap();
+        assert_eq!(supersede_omitted_rcs_metadata(&tx, &ctx, 20).unwrap(), 1);
+        tx.rollback().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT status FROM journal WHERE cursor=11", [], |r| r
+                .get::<_, String>(
+                0
+            ))
+            .unwrap(),
+            "duplicate"
+        );
+        conn.execute(
+            "UPDATE journal SET status='pending',reason='snapshot_rcs_isolated' WHERE cursor=11",
+            [],
+        )
+        .unwrap();
+        reset_rcs_metadata_supersede_scan(conn).unwrap();
+        store.keys.clear();
+        let (conn, locked_ctx) = store.parts();
+        assert_eq!(
+            supersede_omitted_rcs_metadata(conn, &locked_ctx, 20).unwrap(),
+            0
+        );
+        assert_eq!(
+            supersede_omitted_rcs_metadata(conn, &locked_ctx, 20).unwrap(),
+            0
+        );
+        drop(store);
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let mut store = client.lock().unwrap();
+        let (conn, ctx) = store.parts();
+        reset_rcs_metadata_supersede_scan(conn).unwrap();
+        assert_eq!(supersede_omitted_rcs_metadata(conn, &ctx, 20).unwrap(), 1);
+        conn.execute(
+            "UPDATE journal SET status='pending',reason='snapshot_rcs_isolated' WHERE cursor=11",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO metadata(k,v) VALUES('snapshot_import_origin:11','1')",
+            [],
+        )
+        .unwrap();
+        reset_rcs_metadata_supersede_scan(conn).unwrap();
+        conn.execute_batch("CREATE TEMP TRIGGER fail_origin_delete BEFORE DELETE ON metadata WHEN OLD.k='snapshot_import_origin:11' BEGIN SELECT RAISE(ABORT,'test'); END;").unwrap();
+        assert!(supersede_omitted_rcs_metadata(conn, &ctx, 20).is_err());
+        assert_eq!(
+            conn.query_row("SELECT status FROM journal WHERE cursor=11", [], |r| r
+                .get::<_, String>(
+                0
+            ))
+            .unwrap(),
+            "pending"
+        );
+        assert!(has_snapshot_import_origin(conn, 11).unwrap());
+        assert_eq!(
+            crate::get_meta(conn, "rcs_metadata_supersede_scan:2").unwrap(),
+            None
+        );
+        conn.execute_batch("DROP TRIGGER fail_origin_delete")
+            .unwrap();
     }
 
     #[test]
