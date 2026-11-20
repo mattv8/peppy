@@ -3,7 +3,7 @@ use std::env;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
-const UP: [&str; 36] = [
+const UP: [&str; 37] = [
     include_str!("../migrations/0001_foundation.sql"),
     include_str!("../migrations/0002_messaging.sql"),
     include_str!("../migrations/0003_pairing_proofs.sql"),
@@ -40,9 +40,10 @@ const UP: [&str; 36] = [
     include_str!("../migrations/0034_vault_identity.sql"),
     include_str!("../migrations/0035_device_cursor_reports.sql"),
     include_str!("../migrations/0036_mcp_grant_fence.sql"),
+    include_str!("../migrations/0037_mcp_oauth_provisional.sql"),
 ];
 
-const DOWN: [&str; 36] = [
+const DOWN: [&str; 37] = [
     include_str!("../migrations/down/0001_foundation.down.sql"),
     include_str!("../migrations/down/0002_messaging.down.sql"),
     include_str!("../migrations/down/0003_pairing_proofs.down.sql"),
@@ -79,6 +80,7 @@ const DOWN: [&str; 36] = [
     include_str!("../migrations/down/0034_vault_identity.down.sql"),
     include_str!("../migrations/down/0035_device_cursor_reports.down.sql"),
     include_str!("../migrations/down/0036_mcp_grant_fence.down.sql"),
+    include_str!("../migrations/down/0037_mcp_oauth_provisional.down.sql"),
 ];
 
 #[tokio::test]
