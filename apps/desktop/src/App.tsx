@@ -6395,7 +6395,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         onClose={browserHost ? undefined : () => void closeAfterSave(() => bridge.window("close"))}
         platform={platform}
         nativeWindowControls={!browserHost && platform === "macos"}
-        search={<OmniSearch onSearch={searchLocal} onActivate={activateSearchHit} resolveContactNumbers={resolveOmniContactNumbers} onStartConversation={startOmniConversation} sessionKey={searchSessionKey} disabled={searchDisabled} refreshKey={mediaStateHint} historySearch={historyControls.historySearch} onSearchFurtherBack={historyControls.onSearchFurtherBack} onCancelHistorySearch={historyControls.onCancelHistorySearch} onOpenChange={setHistorySearchVisible} scope={notificationSearchScope} notificationResults={notificationSearchScope ? undefined : notificationResults} />}
+        search={<OmniSearch showContactBook={(snapshot?.contactBooks?.length ?? 0) > 1} onSearch={searchLocal} onActivate={activateSearchHit} resolveContactNumbers={resolveOmniContactNumbers} onStartConversation={startOmniConversation} sessionKey={searchSessionKey} disabled={searchDisabled} refreshKey={mediaStateHint} historySearch={historyControls.historySearch} onSearchFurtherBack={historyControls.onSearchFurtherBack} onCancelHistorySearch={historyControls.onCancelHistorySearch} onOpenChange={setHistorySearchVisible} scope={notificationSearchScope} notificationResults={notificationSearchScope ? undefined : notificationResults} />}
         onToggleSidebar={activeView === "contacts" && !compactContacts ? () => {
           const collapsed = !contactsBookCollapsed;
           setContactsBookCollapsed(collapsed);

@@ -3,9 +3,32 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { historyPresentation, OmniSearch } from "./OmniSearch";
-import type { OmniNotificationResults, OmniSearchScope } from "./OmniSearch";
+import type { OmniNotificationResults, OmniSearchProps, OmniSearchScope } from "./OmniSearch";
 import type { HistorySearchSnapshot, LocalSearchHit, LocalSearchPage } from "./bridge-contracts";
 import { formatDateTime } from "./datetime";
+
+type ContactHit = Extract<LocalSearchHit, { kind: "contact" }>;
+
+const contactHit = (overrides: Partial<Omit<ContactHit, "kind">> = {}): LocalSearchHit => ({
+  kind: "contact",
+  bookId: "book",
+  contactId: "contact",
+  title: "Ada Lovelace",
+  subtitle: "Legacy subtitle",
+  phones: [],
+  phoneCount: 0,
+  ...overrides,
+});
+
+async function openContactResults(hit: LocalSearchHit, props: Partial<OmniSearchProps> = {}, query = "ada"): Promise<HTMLElement> {
+  vi.useFakeTimers();
+  render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [hit])} {...props} />);
+  fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value: query } });
+  await act(async () => { vi.advanceTimersByTime(100); await Promise.resolve(); });
+  const row = document.querySelector<HTMLElement>("[data-omni-contact-hit]");
+  if (!row) throw new Error("contact row not rendered");
+  return row;
+}
 
 const page = (query: string, items: LocalSearchHit[] = [{ kind: "conversation", conversationId: "c1", title: "Aurora", subtitle: "Recent" }]) => ({
   query,
@@ -999,7 +1022,7 @@ describe("OmniSearch", () => {
     await act(async () => { await Promise.resolve(); });
     expect(screen.getByRole("option", { name: "Mobile" })).toBeInTheDocument();
     fireEvent.keyDown(input, { key: "Escape" });
-    expect(screen.getByRole("option", { name: "Ada Friend" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Ada" })).toBeInTheDocument();
   });
 
   it("keeps stored contact addresses unchanged and reports contacts without phone numbers", async () => {
@@ -1350,5 +1373,97 @@ describe("OmniSearch", () => {
     fireEvent.keyDown(input, { key: "Escape" });
     expect(onOpenChange).toHaveBeenLastCalledWith(false);
     expect(onOpenChange).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe("OmniSearch contact rows", () => {
+  it("renders a photo avatar when the hit carries one", async () => {
+    const row = await openContactResults(contactHit({ avatarUrl: "data:image/png;base64,photo" }));
+    const avatar = row.querySelector(".contact-avatar");
+    expect(avatar).toHaveAttribute("data-avatar-kind", "photo");
+    expect(avatar?.querySelector("img")).toHaveAttribute("src", "data:image/png;base64,photo");
+    expect(avatar).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("falls back to initials when the hit has no photo", async () => {
+    const row = await openContactResults(contactHit());
+    expect(row.querySelector(".contact-avatar")).toHaveAttribute("data-avatar-kind", "initials");
+    expect(row.querySelector(".contact-avatar")).toHaveTextContent(/^A$/);
+  });
+
+  it("formats the first phone and summarizes the rest for screen readers", async () => {
+    const row = await openContactResults(contactHit({ phones: ["+14155552671", "+14155552672", "+14155552673"], phoneCount: 3 }));
+    expect(row.querySelector("[data-omni-contact-phone]")).toHaveTextContent("(415) 555-2671");
+    expect(row.querySelector("[data-omni-contact-more]")).toHaveTextContent("+2 more");
+    expect(row.querySelector("[data-omni-contact-more] .sr-only")).toHaveTextContent("and 2 more numbers");
+    expect(row).toHaveAttribute("aria-label", "Ada Lovelace, (415) 555-2671, and 2 more numbers");
+  });
+
+  it("shows the organization on the copy line when it is not the title", async () => {
+    const row = await openContactResults(contactHit({ organization: "Analytical Engines" }));
+    expect(row.querySelector("[data-omni-contact-org]")).toHaveTextContent("Analytical Engines");
+    expect(row).toHaveAttribute("aria-label", "Ada Lovelace, Analytical Engines");
+  });
+
+  it("shows the device label only when the search asks for contact books", async () => {
+    const row = await openContactResults(contactHit({ bookLabel: "Pixel 8" }));
+    expect(row.querySelector("[data-omni-contact-book]")).toBeNull();
+    expect(row.getAttribute("aria-label")).not.toContain("Pixel 8");
+    cleanup();
+
+    const withBook = await openContactResults(contactHit({ bookLabel: "Pixel 8" }), { showContactBook: true });
+    expect(withBook.querySelector("[data-omni-contact-book]")).toHaveTextContent("Pixel 8");
+    expect(withBook).toHaveAttribute("aria-label", "Ada Lovelace, Pixel 8");
+  });
+
+  it("shows the matched field and highlights the query instead of organization and extra numbers", async () => {
+    const row = await openContactResults(contactHit({
+      phones: ["+14155552671", "+14155552672", "+14155552673"],
+      phoneCount: 3,
+      organization: "Analytical Engines",
+      matchField: "Email",
+      matchSnippet: "ada@example.com",
+    }), {}, "example");
+    expect(row.querySelector("[data-omni-match-field]")).toHaveTextContent("Email");
+    expect(row.querySelector("[data-omni-match-snippet] mark")).toHaveTextContent("example");
+    expect(row.querySelector("[data-omni-contact-org]")).toBeNull();
+    expect(row.querySelector("[data-omni-contact-more]")).toBeNull();
+    expect(row).toHaveAttribute("aria-label", "Ada Lovelace, (415) 555-2671, Email: ada@example.com");
+  });
+
+  it.each([
+    { title: "", organization: "Analytical Engines", phones: [], expected: "Analytical Engines" },
+    { title: "", organization: undefined, phones: ["+14155552671"], expected: "(415) 555-2671" },
+    { title: "", organization: undefined, phones: [], expected: "Unnamed contact" },
+  ])("uses the title fallback $expected", async ({ title, organization, phones, expected }) => {
+    const row = await openContactResults(contactHit({ title, organization, phones, phoneCount: phones.length }));
+    expect(row.querySelector("b")).toHaveTextContent(expected);
+    expect(row.querySelector("[data-omni-contact-phone]")).toBeNull();
+  });
+
+  it("labels the chooser and start action with the fallback title for an untitled contact", async () => {
+    vi.useFakeTimers();
+    const onStartConversation = vi.fn(async () => false);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "", subtitle: "Friend", phones: ["+14155552671"], phoneCount: 2 }])} resolveContactNumbers={async () => [{ address: "+14155552671", display: "Mobile" }, { address: "+14155552672", display: "Work" }]} onStartConversation={onStartConversation} />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value: "ada" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    const start = screen.getByRole("option", { name: "Start conversation with (415) 555-2671" });
+    expect(start).toHaveAttribute("title", "Start conversation with (415) 555-2671");
+    fireEvent.click(start);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByRole("group", { name: "Choose a number for (415) 555-2671" })).toBeInTheDocument();
+    const labels = [...document.querySelectorAll("[aria-label], [title]")].flatMap((element) => [element.getAttribute("aria-label"), element.getAttribute("title")]).filter(Boolean);
+    expect(labels.filter((label) => /\b(for|with)\s*$/.test(label ?? ""))).toEqual([]);
+  });
+
+  it("never renders the subtitle or raw book and contact ids", async () => {
+    const row = await openContactResults(contactHit({
+      bookId: "78d7ad7e-4f2a-4c1b-9d3e-5a6b7c8d9e0f",
+      contactId: "c0ffee00-1111-2222-3333-444455556666",
+      subtitle: "78d7ad7e-4f2a-4c1b-9d3e-5a6b7c8d9e0f",
+    }));
+    expect(row.textContent).not.toMatch(/78d7ad7e|c0ffee00|Legacy subtitle/);
+    expect(row.getAttribute("aria-label")).not.toMatch(/78d7ad7e|c0ffee00|Legacy subtitle/);
+    expect(screen.queryByText(/78d7ad7e/)).toBeNull();
   });
 });

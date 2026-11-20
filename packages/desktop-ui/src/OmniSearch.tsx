@@ -2,6 +2,8 @@ import type { ChangeEvent, CSSProperties, KeyboardEvent } from "react";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, MessageSquarePlus, X } from "lucide-react";
 import type { HistorySearchSnapshot, HistorySearchState, LocalSearchHit, LocalSearchPage, LocalSearchRequest, SearchKind } from "./bridge-contracts";
+import { contactSeed } from "./avatar";
+import { ContactAvatar } from "./ContactAvatar";
 import { formatDateTime } from "./datetime";
 import { formatPhoneNumber, normalizePhoneNumber } from "./phone";
 
@@ -47,6 +49,18 @@ export type OmniSearchProps = {
   onOpenChange?: (open: boolean) => void;
   scope?: OmniSearchScope;
   notificationResults?: OmniNotificationResults;
+  showContactBook?: boolean;
+};
+
+type ContactRow = {
+  title: string;
+  seed: string;
+  photoDataUrl?: string;
+  phone?: string;
+  moreCount: number;
+  organization?: string;
+  book?: string;
+  match?: { field: string; snippet: string; segments: OmniTextSegment[] };
 };
 
 type CategoryKind = Exclude<SearchKind, "all">;
@@ -124,6 +138,69 @@ function subtitle(hit: LocalSearchHit): string {
   return timestamp ? `${hit.snippet} · ${timestamp}` : hit.snippet;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function highlightSegments(text: string, query: string): OmniTextSegment[] {
+  if (!query) return [{ text, match: false }];
+  return text.split(new RegExp(`(${escapeRegExp(query)})`, "giu"))
+    .map((part, index) => ({ text: part, match: index % 2 === 1 }))
+    .filter((segment) => segment.text.length > 0);
+}
+
+function moreNumbersText(count: number): string {
+  return `and ${count} more ${count === 1 ? "number" : "numbers"}`;
+}
+
+function contactDisplayTitle(hit: ContactHit): string {
+  const organization = hit.organization?.trim() || undefined;
+  const firstPhone = hit.phones[0] ? formatPhoneNumber(hit.phones[0]) : undefined;
+  return hit.title.trim() || organization || firstPhone || "Unnamed contact";
+}
+
+function contactRow(hit: ContactHit, query: string, showContactBook: boolean): ContactRow {
+  const organization = hit.organization?.trim() || undefined;
+  const firstPhone = hit.phones[0] ? formatPhoneNumber(hit.phones[0]) : undefined;
+  const title = contactDisplayTitle(hit);
+  const match = hit.matchField ? { field: hit.matchField, snippet: hit.matchSnippet ?? "" } : undefined;
+  return {
+    title,
+    seed: contactSeed(hit.phones.map((number) => ({ number })), hit.contactId),
+    photoDataUrl: hit.avatarUrl,
+    phone: firstPhone && firstPhone !== title ? firstPhone : undefined,
+    moreCount: match ? 0 : Math.max(0, hit.phoneCount - 1),
+    organization: !match && organization !== title ? organization : undefined,
+    book: showContactBook ? hit.bookLabel : undefined,
+    match: match && { ...match, segments: highlightSegments(match.snippet, query) },
+  };
+}
+
+function contactAccessibleName(row: ContactRow): string {
+  const moreNumbers = row.moreCount > 0 ? moreNumbersText(row.moreCount) : undefined;
+  const match = row.match ? `${row.match.field}: ${row.match.snippet}` : undefined;
+  return [row.title, row.phone, moreNumbers, match, row.organization, row.book].filter(Boolean).join(", ");
+}
+
+function ContactHitCopy({ row }: { row: ContactRow }) {
+  return <>
+    <ContactAvatar seed={row.seed} name={row.title} photoDataUrl={row.photoDataUrl} size={24} />
+    <div className="omni-search-contact-text" data-omni-contact-text>
+      <b>{row.title}</b>
+      <div className="omni-search-contact-copy" data-omni-contact-copy>
+        {row.phone && <span data-omni-contact-phone>{row.phone}</span>}
+        {row.moreCount > 0 && <span data-omni-contact-more><span aria-hidden="true">+{row.moreCount} more</span><span className="sr-only">{moreNumbersText(row.moreCount)}</span></span>}
+        {row.organization && <span data-omni-contact-org>{row.organization}</span>}
+        {row.book && <span data-omni-contact-book>{row.book}</span>}
+        {row.match && <>
+          <span data-omni-match-field>{row.match.field}</span>
+          <span data-omni-match-snippet>{row.match.segments.map((segment, index) => segment.match ? <mark key={index}>{segment.text}</mark> : segment.text)}</span>
+        </>}
+      </div>
+    </div>
+  </>;
+}
+
 function appendUnique(items: LocalSearchHit[], additions: LocalSearchHit[]): LocalSearchHit[] {
   const seen = new Set(items.map(hitKey));
   return [...items, ...additions.filter((item) => !seen.has(hitKey(item)))];
@@ -174,7 +251,7 @@ function selectableItems(page: LocalSearchPage | null, category: CategoryKind | 
   return items;
 }
 
-export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false, keyboardShortcut = true, refreshKey, resolveContactNumbers, onStartConversation, historySearch, onSearchFurtherBack, onCancelHistorySearch, onOpenChange, scope, notificationResults }: OmniSearchProps) {
+export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false, keyboardShortcut = true, refreshKey, resolveContactNumbers, onStartConversation, historySearch, onSearchFurtherBack, onCancelHistorySearch, onOpenChange, scope, notificationResults, showContactBook = false }: OmniSearchProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
@@ -773,15 +850,15 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
       <div
         id={listId}
         role="listbox"
-        aria-label={chooserContact ? `Choose a number for ${chooserContact.title}` : "Search results"}
+        aria-label={chooserContact ? `Choose a number for ${contactDisplayTitle(chooserContact)}` : "Search results"}
         aria-busy={recipientPending}
       >
         {chooser ? <div
           role="group"
-          aria-label={`Choose a number for ${chooserContact?.title ?? "contact"}`}
+          aria-label={`Choose a number for ${chooserContact ? contactDisplayTitle(chooserContact) : "contact"}`}
           data-omni-number-chooser
         >
-          <div role="presentation" className="omni-search-group-label">Choose a number for {chooserContact?.title}</div>
+          <div role="presentation" className="omni-search-group-label">Choose a number for {chooserContact ? contactDisplayTitle(chooserContact) : "contact"}</div>
           {chooser.map((number) => <div
             key={number.address}
             id={`${componentId}-candidate-${addressId(number.address)}`}
@@ -819,25 +896,31 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
               data-search-group={kind}
             >
               <div role="presentation" className="omni-search-group-label">{categoryLabel(kind)}</div>
-              {group.map((hit) => <div key={hitKey(hit)} className="omni-search-hit-row">
+              {group.map((hit) => {
+                const row = hit.kind === "contact" ? contactRow(hit, trimmedQuery, showContactBook) : null;
+                const contactName = row ? contactAccessibleName(row) : undefined;
+                return <div key={hitKey(hit)} className="omni-search-hit-row">
                 <div
                   id={`${componentId}-${hitKey(hit)}`}
                   role="option"
                   aria-selected={selectedId === `${componentId}-${hitKey(hit)}`}
+                  aria-label={contactName}
                   data-search-hit={hitKey(hit)}
+                  data-omni-contact-hit={row ? "" : undefined}
                   onClick={() => activate({ kind: "hit", hit })}
-                  title={`${hit.title} — ${subtitle(hit)}`}
-                ><b>{hit.title}</b><span>{subtitle(hit)}</span></div>
+                  title={contactName ?? `${hit.title} — ${subtitle(hit)}`}
+                >{row ? <ContactHitCopy row={row} /> : <><b>{hit.title}</b><span>{subtitle(hit)}</span></>}</div>
                 {hit.kind === "contact" && resolveContactNumbers && onStartConversation && <div
                   id={`${componentId}-start-${hitKey(hit)}`}
                   role="option"
-                  aria-label={`Start conversation with ${hit.title}`}
+                  aria-label={`Start conversation with ${contactDisplayTitle(hit)}`}
                   aria-selected={selectedId === `${componentId}-start-${hitKey(hit)}`}
                   data-omni-contact-action
-                  title={`Start conversation with ${hit.title}`}
+                  title={`Start conversation with ${contactDisplayTitle(hit)}`}
                   onClick={() => startContactConversation(hit)}
                 ><MessageSquarePlus size={16} aria-hidden /></div>}
-              </div>)}
+              </div>;
+              })}
               {more && <div
                 id={`${componentId}-${actionId(more.action)}`}
                 role="option"
