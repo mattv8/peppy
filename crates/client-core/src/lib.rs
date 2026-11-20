@@ -1626,6 +1626,13 @@ impl Store {
 #[derive(Clone)]
 pub struct Client(Arc<Mutex<Store>>);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryBlock {
+    Repairing,
+    Failed,
+    Withheld,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContactBookSelection {
     Inherited {
@@ -5404,6 +5411,52 @@ impl Client {
         })
     }
 
+    /// Describes a stopped snapshot-isolated frontier, not ordinary replay lag.
+    pub fn history_block(&self) -> Result<Option<HistoryBlock>, Error> {
+        let store = self.lock()?;
+        let conn = &store.conn;
+        let received = receive_cursor(conn)?;
+        let processed = processed_cursor(conn, received)?;
+        if processed >= received {
+            return Ok(None);
+        }
+        let next: Option<(i64, String, Option<String>)> = conn.query_row(
+            "SELECT cursor,status,reason FROM journal WHERE cursor>? AND cursor<=? ORDER BY cursor LIMIT 1",
+            params![to_i64(processed)?, to_i64(received)?],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        let Some((cursor, status, reason)) = next else {
+            return Ok(None);
+        };
+        if status != "pending"
+            || reason.as_deref() != Some("snapshot_rcs_isolated")
+            || (u64::try_from(cursor).map_err(|_| Error::Database)? > processed + 1
+                && u64::try_from(cursor - 1).map_err(|_| Error::Database)?
+                    > processed_snapshot_high_water(conn)?)
+        {
+            return Ok(None);
+        }
+        if active_generation(conn)?.is_some() || has_waiting_for_keys(conn, &store.keys, received)?
+        {
+            return Ok(None);
+        }
+        let state: Option<String> = conn.query_row(
+            "SELECT state FROM projection_generations WHERE state!='superseded' ORDER BY generation DESC LIMIT 1",
+            [], |row| row.get(0),
+        ).optional()?;
+        if matches!(state.as_deref(), Some("draining" | "staging")) {
+            return Ok(None);
+        }
+        if get_meta(conn, "contact_repair_required")?.is_some() {
+            return Ok(Some(HistoryBlock::Repairing));
+        }
+        Ok(Some(if state.as_deref() == Some("failed") {
+            HistoryBlock::Failed
+        } else {
+            HistoryBlock::Withheld
+        }))
+    }
+
     /// Drains up to `limit` published snapshot records into the journal (in cursor order), then
     /// decrypts and applies up to `limit` contiguous journaled records whose epoch is unlocked.
     /// While a snapshot is draining, nothing after the last drained cursor is applied, so a live
@@ -9040,6 +9093,28 @@ fn mark_processed_snapshot_coverage(conn: &Connection, high_water: u64) -> Resul
     Ok(())
 }
 
+fn has_waiting_for_keys(
+    conn: &Connection,
+    keys: &BTreeMap<u32, EpochKeys>,
+    received: u64,
+) -> Result<bool, Error> {
+    let epochs = keys
+        .keys()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let missing_epoch = if epochs.is_empty() {
+        String::new()
+    } else {
+        format!(" AND (key_epoch IS NULL OR key_epoch NOT IN ({epochs}))")
+    };
+    Ok(conn.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM journal INDEXED BY journal_apply_eligible WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND cursor<=?{missing_epoch})"),
+        [to_i64(received)?],
+        |row| row.get(0),
+    )?)
+}
+
 fn waiting_for_keys(
     conn: &Connection,
     keys: &BTreeMap<u32, EpochKeys>,
@@ -11088,7 +11163,32 @@ fn repair_notification_reply_spike(conn: &mut Connection) -> Result<(), Error> {
 }
 /// Decoder revision seven replays applied LWW events after older clients consumed them as unknown.
 // Revision 8 reprojects retained control wires that older clients consumed as unknown.
-const DECODER_REVISION: &str = "14";
+const DECODER_REVISION: &str = "15";
+
+// Existing markers were written after a full scan, including applied-row hygiene.
+// Thus all applied-row arms through the stored marker have already run. Revision 14
+// adds only quarantined RCS recovery; revision 15 adds only quarantined folder recovery
+// (an archive with no cutoff could not previously be applied). Revision 13 needs applied
+// rows. Add each new revision here, raising the full-scan floor when it needs applied rows.
+fn decoder_revision_needs_applied(revision: u32) -> Option<bool> {
+    match revision {
+        13 => Some(true),
+        14 | 15 => Some(false),
+        _ => None,
+    }
+}
+
+fn decoder_recovery_needs_applied(marker: Option<&str>) -> bool {
+    let Some(stored) = marker.and_then(|value| value.parse::<u32>().ok()) else {
+        return true;
+    };
+    let Some(current) = DECODER_REVISION.parse::<u32>().ok() else {
+        return true;
+    };
+    stored > current
+        || ((stored + 1)..=current)
+            .any(|revision| decoder_revision_needs_applied(revision).unwrap_or(true))
+}
 
 fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error> {
     let mut hex = Zeroizing::new(String::with_capacity(64));
@@ -11536,14 +11636,21 @@ fn recover_decoder_revision(
     on_progress: &mut dyn FnMut(DecoderRecoveryProgress),
 ) -> Result<(), Error> {
     let marker = format!("decoder_revision:{epoch}");
-    if get_meta(conn, &marker)?.as_deref() == Some(DECODER_REVISION) {
+    let stored_revision = get_meta(conn, &marker)?;
+    if stored_revision.as_deref() == Some(DECODER_REVISION) {
         return Ok(());
     }
     let Some(keys) = ctx.keys.get(&epoch) else {
         return Ok(());
     };
+    let needs_applied = decoder_recovery_needs_applied(stored_revision.as_deref());
+    let eligible = if needs_applied {
+        "((status='quarantined' AND reason='invalid_payload') OR status='applied')"
+    } else {
+        "(status='quarantined' AND reason='invalid_payload')"
+    };
     let total: u64 = conn.query_row(
-        "SELECT COUNT(*) FROM journal WHERE key_epoch=? AND ((status='quarantined' AND reason='invalid_payload') OR status='applied')",
+        &format!("SELECT COUNT(*) FROM journal WHERE key_epoch=? AND {eligible}"),
         params![epoch],
         |row| row.get(0),
     )?;
@@ -11551,9 +11658,9 @@ fn recover_decoder_revision(
     let mut after = i64::MIN;
     loop {
         let rows: Vec<(i64, String, Vec<u8>, bool)> = {
-            let mut query = conn.prepare(
-                "SELECT cursor,status,wire,historical FROM journal WHERE key_epoch=? AND cursor>? AND ((status='quarantined' AND reason='invalid_payload') OR status='applied') ORDER BY cursor LIMIT 256",
-            )?;
+            let mut query = conn.prepare(&format!(
+                "SELECT cursor,status,wire,historical FROM journal WHERE key_epoch=? AND cursor>? AND {eligible} ORDER BY cursor LIMIT 256",
+            ))?;
             query
                 .query_map(params![epoch, after], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
@@ -11763,16 +11870,25 @@ fn recover_decoder_revision(
                         logical_revision,
                         writer_device_id,
                     },
-                ) if conversation_folders::valid_event(
-                    conversation_id,
-                    folder,
-                    archived_through_ms,
-                    logical_revision,
-                    &writer_device_id,
-                    &envelope.producer_device_id.to_string(),
-                ) =>
+                ) if envelope.vault_id == ctx.vault_id
+                    && envelope.validate().is_ok()
+                    && storage_sequence_fits(envelope.producer_sequence.0)
+                    && envelope.compaction.as_ref().is_none_or(|metadata| {
+                        metadata
+                            .supersedes
+                            .iter()
+                            .all(|reference| storage_sequence_fits(reference.producer_sequence.0))
+                    })
+                    && conversation_folders::valid_event(
+                        conversation_id,
+                        folder,
+                        archived_through_ms,
+                        logical_revision,
+                        &writer_device_id,
+                        &envelope.producer_device_id.to_string(),
+                    ) =>
                 {
-                    conn.execute("UPDATE journal SET status='pending',reason=NULL,historical=1 WHERE cursor=? AND status='quarantined' AND reason='invalid_payload'", params![cursor])?;
+                    snapshot_projection::recover_folder_event(conn, cursor)?;
                 }
                 (
                     "applied",
@@ -20803,6 +20919,79 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert!(!queued_index);
+    }
+
+    #[test]
+    fn history_block_bounds_vm_steps_for_isolated_backlog() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        unsafe extern "C" fn count_step(context: *mut std::ffi::c_void) -> i32 {
+            unsafe { &*(context as *const AtomicUsize) }.fetch_add(1, Ordering::Relaxed);
+            0
+        }
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("history-block-steps.db"),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[38; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let mut store = client.lock().unwrap();
+        let tx = store.conn.transaction().unwrap();
+        for cursor in 1..=10_000_i64 {
+            tx.execute("INSERT INTO journal(cursor,key_epoch,wire,status,reason,historical) VALUES(?,1,X'00','pending','snapshot_rcs_isolated',1)", [cursor]).unwrap();
+        }
+        set_meta(&tx, "receive_cursor", "10000").unwrap();
+        set_meta(&tx, "processed_cursor", "0").unwrap();
+        tx.commit().unwrap();
+        let db = unsafe { store.conn.handle() };
+        drop(store);
+        let steps = AtomicUsize::new(0);
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(
+                db,
+                1,
+                Some(count_step),
+                &steps as *const _ as *mut _,
+            );
+        }
+        let result = client.history_block();
+        unsafe { rusqlite::ffi::sqlite3_progress_handler(db, 0, None, std::ptr::null_mut()) };
+        assert_eq!(result.unwrap(), Some(HistoryBlock::Withheld));
+        let steps = steps.load(Ordering::Relaxed);
+        assert!(steps < 2_000, "isolated backlog used {steps} VM steps");
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute("UPDATE journal SET reason=NULL WHERE cursor=1", [])
+                .unwrap();
+        }
+        let steps = AtomicUsize::new(0);
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(
+                db,
+                1,
+                Some(count_step),
+                &steps as *const _ as *mut _,
+            );
+        }
+        let result = client.history_block();
+        unsafe { rusqlite::ffi::sqlite3_progress_handler(db, 0, None, std::ptr::null_mut()) };
+        assert_eq!(result.unwrap(), None);
+        let steps = steps.load(Ordering::Relaxed);
+        assert!(steps < 2_000, "ordinary frontier used {steps} VM steps");
     }
 
     #[test]

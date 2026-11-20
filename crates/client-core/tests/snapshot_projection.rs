@@ -3,7 +3,9 @@
 //! contact/notification, while owner state, unsent local writes and non-compactable history are
 //! untouched, and nothing visible is cleared before the whole snapshot is authenticated.
 use crate::common::*;
-use peppy_crypto::{EncryptedEnvelope, KeyPurpose, decrypt, derive_purpose_key, derive_root_key};
+use peppy_crypto::{
+    EncryptedEnvelope, KeyPurpose, decrypt, derive_purpose_key, derive_root_key, encrypt,
+};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use tempfile::TempDir;
@@ -297,6 +299,98 @@ fn offline_receiver_loses_purged_contact_only_after_complete_compaction_snapshot
     p.server.upload(&p.owner);
     p.server.sync(&offline);
     assert_eq!(visible(&offline, BOOK), ["c2", "c3"]);
+}
+
+#[test]
+fn retained_empty_archive_does_not_block_contact_projection() {
+    let mut p = pair();
+    let b = book(&p.owner_cfg, BOOK);
+    capture(&p.owner, &b, vec![contact(BOOK, "c1", "Ada")]);
+    p.server.upload(&p.owner);
+    let mut envelope = p
+        .server
+        .log
+        .iter()
+        .find(|e| e.compaction.is_some())
+        .unwrap()
+        .clone();
+    envelope.envelope_id = EnvelopeId::new();
+    envelope.producer_sequence = SourceSequence(
+        p.server
+            .log
+            .iter()
+            .map(|e| e.producer_sequence.0)
+            .max()
+            .unwrap()
+            + 1,
+    );
+    let metadata = envelope.compaction.as_mut().unwrap();
+    metadata.key = vec![123; 32];
+    metadata.supersedes.clear();
+    metadata.terminal = false;
+    let conversation = ConversationId::new();
+    let raw = json!({
+        "kind": "conversation_folder",
+        "conversation_id": conversation.to_string(),
+        "folder": "archived",
+        "logical_revision": 1,
+        "writer_device_id": envelope.producer_device_id.to_string(),
+        "compaction": envelope.compaction,
+    });
+    let root = derive_root_key(PASSPHRASE, &p.vault.profile).unwrap();
+    let key = derive_purpose_key(&root, &p.vault.profile, KeyPurpose::Event).unwrap();
+    let sealed = encrypt(
+        &key,
+        &envelope.aad_bytes().unwrap(),
+        &serde_json::to_vec(&raw).unwrap(),
+    )
+    .unwrap();
+    envelope.ciphertext = sealed.nonce.to_vec();
+    envelope.ciphertext.extend_from_slice(&sealed.ciphertext);
+    p.server.log.push(envelope);
+    p.peer
+        .capture_incoming(IncomingSms {
+            conversation_id: Some(conversation),
+            sender_address: ADDRESS.into(),
+            body: "message".into(),
+            provider_message_id: Some("snapshot-folder-message".into()),
+            imported: false,
+        })
+        .unwrap();
+    let retained = compact(&p.server.log, false);
+    import(&p.peer, &retained, p.server.log.len(), Some(1));
+    settle(&p.peer);
+    assert_eq!(
+        state(&p.peer),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert_eq!(visible(&p.peer, BOOK), ["c1"]);
+    let conn = rusqlite::Connection::open(&p.peer_cfg.database_path).unwrap();
+    let key = DB_KEY
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    conn.execute_batch(&format!(
+        "PRAGMA key = \"x'{key}'\"; PRAGMA cipher_compatibility = 4;"
+    ))
+    .unwrap();
+    let folder: (String, Option<i64>) = conn
+        .query_row(
+            "SELECT folder,archived_through_ms FROM conversation_folders WHERE conversation_id=?",
+            [conversation.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(folder, ("archived".into(), None));
+    let conversations = p.peer.list_conversations().unwrap();
+    assert_eq!(
+        conversations
+            .iter()
+            .find(|item| item.conversation_id == conversation)
+            .unwrap()
+            .folder,
+        ConversationFolder::Inbox
+    );
 }
 
 #[test]

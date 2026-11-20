@@ -582,7 +582,13 @@ impl Client {
         {
             if prior.contains(&thread) {
                 mapped.insert(thread, None);
-            } else if let Some(id) = thread_conversation(conn, &device, &generations, &thread)? {
+            } else if let Some(id) = thread_conversation(conn, &device, &generations, &thread)?
+                && conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE effective_conversation_id=?)",
+                    [id.to_string()],
+                    |row| row.get::<_, bool>(0),
+                )?
+            {
                 mapped.insert(thread, Some(id));
             }
         }
@@ -826,6 +832,76 @@ mod tests {
             .unlock(profile, header, "correct horse battery staple")
             .unwrap();
         client
+    }
+
+    #[test]
+    fn provider_archive_defers_unprojected_thread_without_invalid_event() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let device = DeviceId::new();
+        let client = unlocked_client(
+            dir.path().join("deferred.db"),
+            vault_id,
+            &profile,
+            &header,
+            device,
+        );
+        let conversation = ConversationId::new();
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute("INSERT INTO sms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,source_row_fingerprint,direction,conversation_id,input,state,message_id,source_sequence,local_order) VALUES('a','gen','sim','p','f','incoming',?,'{}','pending','m',1,1)", [conversation.to_string()]).unwrap();
+            store.conn.execute("INSERT INTO mms_thread_conversations(source_device_id,source_generation,subscription_id,provider_thread_id,conversation_id) VALUES(?,'gen','sim','thread',?)", params![device.to_string(),conversation.to_string()]).unwrap();
+        }
+        assert_eq!(
+            client
+                .reconcile_provider_archive(vec!["thread".into()])
+                .unwrap(),
+            0
+        );
+        {
+            let store = client.lock().unwrap();
+            let observed: i64 = store
+                .conn
+                .query_row("SELECT COUNT(*) FROM provider_archive_observed", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(observed, 0);
+        }
+        let changes = client.lock().unwrap().conn.total_changes();
+        assert_eq!(
+            client
+                .reconcile_provider_archive(vec!["thread".into()])
+                .unwrap(),
+            0
+        );
+        assert_eq!(client.lock().unwrap().conn.total_changes(), changes);
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute("INSERT INTO messages(id,conversation_id,effective_conversation_id,source_device_id,source_sequence,payload,seen,sort_at_ms) VALUES('m',?,?,?,1,'{}',0,42)", params![conversation.to_string(),conversation.to_string(),device.to_string()]).unwrap();
+        }
+        assert_eq!(
+            client
+                .reconcile_provider_archive(vec!["thread".into()])
+                .unwrap(),
+            1
+        );
+        {
+            let store = client.lock().unwrap();
+            let cutoff: i64 = store
+                .conn
+                .query_row(
+                    "SELECT archived_through_ms FROM conversation_folders WHERE conversation_id=?",
+                    [conversation.to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(cutoff, 42);
+        }
+        assert_eq!(client.reconcile_provider_archive(vec![]).unwrap(), 1);
     }
 
     #[test]
