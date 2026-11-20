@@ -537,11 +537,13 @@ pub(crate) fn open_session_with_progress(
             };
             base = base.saturating_add(epoch_completed);
             match result {
-                // A stale or unverifiable cache simply leaves this epoch locked.
+                // A stale or unverifiable cache simply leaves this epoch locked; the user unlocks
+                // at or above the anchor floor.
                 Ok(())
                 | Err(
                     peppy_client_core::Error::InvalidKeyCache
-                    | peppy_client_core::Error::InvalidProfile,
+                    | peppy_client_core::Error::InvalidProfile
+                    | peppy_client_core::Error::StaleKeyEpoch,
                 ) => {}
                 Err(error) => {
                     if updating {
@@ -2250,6 +2252,50 @@ mod tests {
     };
     use peppy_client_core::IncomingSms;
     use std::{collections::BTreeMap, sync::atomic::AtomicUsize};
+
+    #[test]
+    fn stale_cached_epoch_stays_locked_and_the_session_still_opens() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let (root, binding) = (fixture.dir.path(), &fixture.binding);
+        {
+            let session =
+                open_session(root, &fixture.store, binding, &[], crate::tests::noop()).unwrap();
+            crate::tests::unlock(&session, &fixture);
+            let cache = session.client.export_native_key_cache(1).unwrap();
+            fixture
+                .store
+                .set(&binding.key_cache_account(1), cache.native_storage_bytes())
+                .unwrap();
+        }
+        // The server's floor moves above the cached epoch 1.
+        let anchored = serde_json::json!({
+            "version": 2,
+            "origin": binding.origin,
+            "vaultId": binding.vault_id,
+            "deviceId": binding.device_id,
+            "deviceToken": TOKEN,
+            "epochFloor": 2,
+            "profileFingerprint": "a".repeat(64),
+        })
+        .to_string();
+        let (_, anchor) = crate::credentials::parse_anchored_import(anchored.as_bytes()).unwrap();
+        let key = fixture
+            .store
+            .get(&binding.db_key_account())
+            .unwrap()
+            .unwrap();
+        crate::credentials::apply_epoch_anchor(
+            binding,
+            &binding.database_path(root),
+            &key,
+            anchor.as_ref().unwrap(),
+        )
+        .unwrap();
+
+        let session = open_session(root, &fixture.store, binding, &[1], crate::tests::noop())
+            .expect("a stale cached epoch must leave that epoch locked, not fail the session");
+        assert!(session.client.key_status().unwrap().unlocked_epochs.is_empty());
+    }
 
     fn replay_page_error(session: &Session) -> BridgeResult<()> {
         let _page = session.replay_page_in_flight();

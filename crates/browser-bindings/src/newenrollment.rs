@@ -303,6 +303,7 @@ impl BrowserCore {
                     device_id,
                     device_token,
                     input.passphrase,
+                    credential.anchor(),
                 );
                 if result.is_ok() {
                     self.hosted_provisioning = None;

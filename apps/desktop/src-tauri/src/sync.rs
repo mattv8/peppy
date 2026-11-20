@@ -3373,6 +3373,78 @@ mod transport_status_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn anchored_import_refuses_a_stale_server_profile_before_unlock() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            root.path().to_path_buf(),
+            Arc::new(MemoryStore::default()),
+            noop(),
+        );
+        let vault = uuid::Uuid::new_v4();
+        let device = uuid::Uuid::new_v4();
+        let profile = peppy_client_core::KeyProfile::new(vault, 1).unwrap();
+        let key_root = peppy_crypto::derive_root_key(crate::tests::PHRASE, &profile).unwrap();
+        let header = peppy_crypto::create_vault_check_header(&key_root, profile.clone()).unwrap();
+        let origin = "http://127.0.0.1:9";
+        let anchored = serde_json::json!({
+            "version": 2,
+            "origin": origin,
+            "vaultId": vault.to_string(),
+            "deviceId": device.to_string(),
+            "deviceToken": TOKEN,
+            "epochFloor": 2,
+            "profileFingerprint": "a".repeat(64),
+        })
+        .to_string();
+        let (credential, anchor) =
+            crate::credentials::parse_anchored_import(anchored.as_bytes()).unwrap();
+        crate::activate_anchored_import(&state, Arc::new(credential), anchor)
+            .await
+            .unwrap();
+        let session = state.session().await.unwrap().unwrap();
+        let error = crate::unlock_with(
+            &state,
+            &session,
+            profile.clone(),
+            header.clone(),
+            zeroize::Zeroizing::new(crate::tests::PHRASE.to_owned()),
+            "a".repeat(64),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "profile-mismatch");
+
+        // Control: the same unlock succeeds when the import carries no anchor.
+        let control_root = tempfile::tempdir().unwrap();
+        let control = AppState::new(
+            control_root.path().to_path_buf(),
+            Arc::new(MemoryStore::default()),
+            noop(),
+        );
+        let plain = Arc::new(
+            parse_credential(&credential_json(
+                origin,
+                &vault.to_string(),
+                &device.to_string(),
+                TOKEN,
+            ))
+            .unwrap(),
+        );
+        crate::activate_import(&control, plain).await.unwrap();
+        let control_session = control.session().await.unwrap().unwrap();
+        crate::unlock_with(
+            &control,
+            &control_session,
+            profile,
+            header,
+            zeroize::Zeroizing::new(crate::tests::PHRASE.to_owned()),
+            "a".repeat(64),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn transport_revocation_does_not_reopen_the_same_binding() {
         let root = tempfile::tempdir().unwrap();
         let mut state = AppState::new(

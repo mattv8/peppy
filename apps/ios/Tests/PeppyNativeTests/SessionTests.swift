@@ -24,6 +24,140 @@ import Testing
         return object["cleanup_ready"] as? Bool
     }
 
+    @Test func v2ImportRefusesAStaleProfileBelowTheAnchorFloorAndPersistsNothing() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let store = InMemorySecureStore()
+        let deviceId = UUID().uuidString.lowercased()
+        let stale = session(server, store: store, deviceId: deviceId, directory: temporaryDirectory())
+
+        // The server's profile is epoch 1; a floor of 2 makes it stale.
+        await #expect(throws: ClientError.core(.InvalidProfile)) {
+            try await stale.importCredential(server.credential(deviceId: deviceId, anchor: (2, String(repeating: "aa", count: 32))))
+        }
+        #expect(store.accounts.isEmpty)
+    }
+
+    @Test func v2ImportAppliesTheAnchorBeforeAnyUnlock() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let store = InMemorySecureStore()
+        let deviceId = UUID().uuidString.lowercased()
+        let anchored = session(server, store: store, deviceId: deviceId, directory: temporaryDirectory())
+
+        // A fingerprint that is not the profile's, at its own epoch: the core must refuse the unlock.
+        _ = try await anchored.importCredential(server.credential(deviceId: deviceId, anchor: (1, String(repeating: "aa", count: 32))))
+        await #expect(throws: ClientError.core(.InvalidProfile)) { try await anchored.unlock(passphrase: passphrase) }
+        await anchored.close()
+    }
+
+    @Test(arguments: [1, 2])
+    func interruptedAnchoredImportRestoresTheFenceBeforeCachedKeys(floor: Int) async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let secure = RecoverySecureStore()
+        let device = UUID().uuidString.lowercased()
+        let directory = temporaryDirectory()
+        let first = session(server, store: secure, deviceId: device, directory: directory)
+        let identity = try #require(try await first.importCredential(server.credential(deviceId: device)).identity)
+        _ = try await first.unlock(passphrase: passphrase)
+        await first.close()
+
+        // Keep the epoch-1 cache, but let verification advertise the imported floor.
+        var vault = server.vault(deviceId: device)
+        vault["key_epoch"] = floor
+        let response = try JSONSerialization.data(withJSONObject: vault)
+        server.mutate { $0.override = { request in
+            request.url.path == "/v1/vault" ? HTTPResponse(status: 200, url: request.url, body: response) : nil
+        } }
+        let interrupted = session(server, store: secure, deviceId: device, directory: directory)
+        secure.failingRead = identity.account("database-key")
+        await #expect(throws: recoveryStoreFailure) {
+            try await interrupted.importCredential(server.credential(deviceId: device, anchor: (floor, String(repeating: "aa", count: 32))))
+        }
+        let durable = try EnrollmentStore(secure: secure).record(identity)
+        #expect(durable.epochFloor == UInt32(floor))
+        #expect(try EnrollmentStore(secure: secure).activeIdentity() == identity)
+        secure.failingRead = nil
+
+        let restarted = session(server, store: secure, deviceId: device, directory: directory)
+        let opened = try await restarted.open()
+        #expect(opened.databaseOpen && !opened.keysUnlocked)
+        #expect(opened.rejectedKeyCaches == 1)
+        await #expect(throws: ClientError.core(.InvalidProfile)) { try await restarted.unlock(passphrase: passphrase) }
+        // Neither an unanchored server refresh nor a v1 re-import may erase the floor.
+        _ = try await restarted.refreshEnrollment()
+        _ = try await restarted.importCredential(server.credential(deviceId: device))
+        #expect(try EnrollmentStore(secure: secure).record(identity).epochAnchor == durable.epochAnchor)
+        await restarted.close()
+    }
+
+    @Test func failedAnchorReplacementClearsAnAlreadyUnlockedClient() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let secure = InMemorySecureStore()
+        let device = UUID().uuidString.lowercased()
+        let native = session(server, store: secure, deviceId: device, directory: temporaryDirectory())
+        _ = try await native.importCredential(server.credential(deviceId: device))
+        _ = try await native.unlock(passphrase: passphrase)
+        // Install one anchor, then attempt a conflicting fingerprint at the same floor.
+        _ = try await native.importCredential(server.credential(deviceId: device, anchor: (1, String(repeating: "aa", count: 32))))
+        await #expect(throws: ClientError.core(.InvalidProfile)) {
+            try await native.importCredential(server.credential(deviceId: device, anchor: (1, String(repeating: "bb", count: 32))))
+        }
+        await #expect(throws: ClientError.notEnrolled) { try await native.conversations() }
+        #expect(try await native.open().keysUnlocked == false)
+        await #expect(throws: ClientError.core(.InvalidProfile)) { try await native.unlock(passphrase: passphrase) }
+        await native.close()
+    }
+
+    @Test(arguments: [1, 2])
+    func interruptedFirstImportCannotReplaceItsPendingPin(incomingFloor: Int) async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let secure = RecoverySecureStore()
+        let device = UUID().uuidString.lowercased()
+        let identity = try DeviceCredential.parse(server.credential(deviceId: device), allowLoopbackHTTP: false).identity
+        var vault = server.vault(deviceId: device)
+        vault["key_epoch"] = 2
+        let response = try JSONSerialization.data(withJSONObject: vault)
+        server.mutate { $0.override = { request in
+            request.url.path == "/v1/vault" ? HTTPResponse(status: 200, url: request.url, body: response) : nil
+        } }
+        let native = session(server, store: secure, deviceId: device, directory: temporaryDirectory())
+        secure.failingRead = identity.account("database-key")
+        await #expect(throws: recoveryStoreFailure) {
+            try await native.importCredential(server.credential(deviceId: device, anchor: (2, String(repeating: "aa", count: 32))))
+        }
+        let original = try #require(secure.value(identity.account("enrollment")))
+        // Core has never opened: the secure record alone must enforce monotonicity.
+        secure.failingRead = nil
+        await #expect(throws: ClientError.core(.InvalidProfile)) {
+            try await native.importCredential(server.credential(deviceId: device, anchor: (incomingFloor, String(repeating: "bb", count: 32))))
+        }
+        #expect(secure.value(identity.account("enrollment")) == original)
+        #expect(try EnrollmentStore(secure: secure).record(identity).epochFloor == 2)
+        #expect(secure.value(identity.account("database-created")) == nil)
+    }
+
+    @Test func durableEnrollmentAnchorRejectsPartialMalformedAndNullFields() throws {
+        let identity = EnrollmentIdentity(origin: FakeServer.origin, vaultId: UUID().uuidString.lowercased(), deviceId: UUID().uuidString.lowercased())
+        let record = EnrollmentRecord(identity: identity, role: "device", keyEpoch: 1, profileJson: "{}", headerJson: "{}")
+        let secure = InMemorySecureStore()
+        let store = EnrollmentStore(secure: secure)
+        try store.saveRecord(record)
+        #expect(try store.record(identity).epochAnchor == nil, "legacy records omit both optional fields")
+        let legacy = String(decoding: try JSONEncoder().encode(record), as: UTF8.self)
+        for fields in [
+            #""epochFloor":1"#,
+            #""profileFingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa""#,
+            #""epochFloor":null,"profileFingerprint":null"#,
+            #""epochFloor":0,"profileFingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa""#,
+            #""epochFloor":1.0,"profileFingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa""#,
+            #""epochFloor":true,"profileFingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa""#,
+            #""epochFloor":1,"profileFingerprint":"AA""#,
+        ] {
+            let malformed = String(legacy.dropLast()) + "," + fields + "}"
+            try secure.upsert(identity.account("enrollment"), Data(malformed.utf8))
+            #expect(throws: ClientError.missingSecret("enrollment record")) { try store.record(identity) }
+        }
+    }
+
     @Test func importVerifiesIdentityUnlocksWithSharedPassphraseAndRestoresKeysWithoutIt() async throws {
         let server = try FakeServer(passphrase: passphrase)
         let store = InMemorySecureStore()

@@ -4,6 +4,7 @@ import Testing
 
 @Suite struct CredentialTests {
     let token = String(repeating: "0f", count: 48)
+    let fingerprint = String(repeating: "ab", count: 32)
     let vault = "6F0D2C8E-6E4B-4D7B-9E1A-0B7C2D4E6F80"
     let device = "1b2c3d4e-5f60-4718-8a9b-0c1d2e3f4a5b"
 
@@ -62,7 +63,54 @@ import Testing
             try DeviceCredential.parse(json(["version": true]), allowLoopbackHTTP: false)
         }
         #expect(throws: ClientError.invalidCredential("unsupported version")) {
-            try DeviceCredential.parse(json(["version": 2]), allowLoopbackHTTP: false)
+            try DeviceCredential.parse(json(["version": 3]), allowLoopbackHTTP: false)
+        }
+    }
+
+    @Test func parsesStrictV2AnchorAndKeepsV1Unanchored() throws {
+        let anchored = try DeviceCredential.parse(
+            json(["version": 2, "epochFloor": 2, "profileFingerprint": fingerprint]), allowLoopbackHTTP: false
+        )
+        #expect(anchored.anchor == EpochAnchor(epochFloor: 2, profileFingerprint: fingerprint))
+        #expect(anchored.token == token)
+        #expect(try DeviceCredential.parse(json(), allowLoopbackHTTP: false).anchor == nil)
+    }
+
+    @Test func rejectsMalformedV2Anchors() {
+        let cases: [[String: Any]] = [
+            ["version": 2],
+            ["version": 2, "epochFloor": 2],
+            ["version": 2, "profileFingerprint": fingerprint],
+            ["version": 2, "epochFloor": 0, "profileFingerprint": fingerprint],
+            ["version": 2, "epochFloor": "2", "profileFingerprint": fingerprint],
+            ["version": 2, "epochFloor": 2.5, "profileFingerprint": fingerprint],
+            ["version": 2, "epochFloor": -1, "profileFingerprint": fingerprint],
+            ["version": 2, "epochFloor": 4_294_967_296, "profileFingerprint": fingerprint],
+            ["version": 2, "epochFloor": true, "profileFingerprint": fingerprint],
+            ["version": 2, "epochFloor": 2, "profileFingerprint": fingerprint.uppercased()],
+            ["version": 2, "epochFloor": 2, "profileFingerprint": String(fingerprint.dropLast())],
+            ["version": 1, "epochFloor": 2, "profileFingerprint": fingerprint],
+            ["version": 2, "epochFloor": 2, "profileFingerprint": fingerprint, "extra": "x"],
+        ]
+        for object in cases {
+            #expect(throws: ClientError.self, "\(object)") {
+                try DeviceCredential.parse(json(object), allowLoopbackHTTP: false)
+            }
+        }
+    }
+
+    @Test func rejectsDuplicateV2Members() {
+        let prefix = """
+        {"version":2,"origin":"https://push.example.test","vaultId":"\(vault)","deviceId":"\(device)","deviceToken":"\(token)"
+        """
+        for members in [
+            #","epochFloor":2,"epochFloor":1,"profileFingerprint":"\#(fingerprint)"}"#,
+            #","epochFloor":2,"profileFingerprint":"\#(fingerprint)","profileFingerprint":"\#(String(repeating: "c", count: 64))"}"#,
+            #","epochFloor":2,"epoch\u0046loor":1,"profileFingerprint":"\#(fingerprint)"}"#,
+        ] {
+            #expect(throws: ClientError.self) {
+                try DeviceCredential.parse(Data((prefix + members).utf8), allowLoopbackHTTP: false)
+            }
         }
     }
 

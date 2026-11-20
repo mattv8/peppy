@@ -142,6 +142,8 @@ object NativeGateway {
     private const val P_TOKEN = "token.v1"
     private const val P_PROFILE = "profile.v1"
     private const val P_HEADER = "header.v1"
+    private const val P_ANCHOR_FLOOR = "epoch-anchor-floor.v1"
+    private const val P_ANCHOR_FINGERPRINT = "epoch-anchor-fingerprint.v1"
     private const val P_KEY_CACHE = "key-cache.v1"
     /** Set after the first successful open; a missing database file afterwards is never recreated. */
     private const val P_DB_INITIALIZED = "db-initialized.v1"
@@ -274,11 +276,16 @@ object NativeGateway {
         return SyncDiagnostics.measureNativeOpen(cold, succeeded = { it != null }) { openUnchecked(context) }
     }
 
-    private fun openUnchecked(context: Context): NativeClient? = synchronized(lock) {
-        if (retirement != null) return null
+    private fun openUnchecked(context: Context, retirementToken: Retirement? = null): NativeClient? = synchronized(lock) {
+        if (retirement !== retirementToken) return null
         client?.let { return it }
         val prefs = prefs(context)
         val identity = identity(prefs) ?: return null
+        val anchor = try {
+            persistedAnchor(prefs)
+        } catch (_: IllegalStateException) {
+            return null
+        }
         // SQLCipher would silently create an empty database at a missing path. That is only
         // legitimate for the very first open of a fresh enrollment (no initialized marker, still in
         // BOOTSTRAP). Otherwise the file was lost: record recovery and never create a new one.
@@ -306,7 +313,14 @@ object NativeGateway {
             opened.dispose()
             return null
         }
-        sharedKeysReady = importCachedKeys(prefs, opened)
+        try {
+            anchor?.let { opened.setEpochAnchor(it.first, it.second) }
+            sharedKeysReady = importCachedKeys(prefs, opened)
+        } catch (_: Exception) {
+            opened.dispose()
+            sharedKeysReady = false
+            return null
+        }
         client = opened
         opened
     }
@@ -673,6 +687,22 @@ object NativeGateway {
      * database key. A first import refuses if any database file or key record already exists.
      */
     internal fun persistVerified(context: Context, credential: DeviceCredential, material: VaultMaterial, beforeCommit: () -> Boolean = { true }): ImportResult {
+        // A profile below the anchor floor is stale: refuse it before anything is persisted.
+        if (isBelowAnchorFloor(credential, material)) return ImportResult.SERVER_REJECTED
+        return persistVerifiedFenced(context, credential, material, beforeCommit)
+    }
+
+    private fun isBelowAnchorFloor(credential: DeviceCredential, material: VaultMaterial): Boolean {
+        val anchor = credential.anchor ?: return false
+        val epoch = try {
+            JSONObject(material.profileJson).strictUInt("key_epoch")
+        } catch (_: JSONException) {
+            return true
+        }
+        return epoch == null || epoch < anchor.epochFloor
+    }
+
+    private fun persistVerifiedFenced(context: Context, credential: DeviceCredential, material: VaultMaterial, beforeCommit: () -> Boolean): ImportResult {
         while (true) {
             val decision = synchronized(lock) {
                 when {
@@ -734,6 +764,18 @@ object NativeGateway {
         val prefs = prefs(context)
         val requested = Identity(credential.origin, credential.vaultId, credential.deviceId)
         val existing = identity(prefs)
+        val storedAnchor = try {
+            persistedAnchor(prefs)
+        } catch (_: IllegalStateException) {
+            return ImportResult.STORAGE_ERROR
+        }
+        val importedAnchor = credential.anchor?.let { it.epochFloor to it.profileFingerprint }
+        if (storedAnchor != null && importedAnchor != null &&
+            (importedAnchor.first < storedAnchor.first ||
+                (importedAnchor.first == storedAnchor.first && importedAnchor.second != storedAnchor.second))
+        ) return ImportResult.SERVER_REJECTED
+        val anchor = importedAnchor ?: storedAnchor
+        val anchorChanged = anchor != storedAnchor
         val editor = prefs.edit()
         var invalidateClient = false
         var bindingChanged = existing == null
@@ -747,12 +789,13 @@ object NativeGateway {
                 val profileChanged = openString(prefs, P_PROFILE) != material.profileJson ||
                     openString(prefs, P_HEADER) != material.headerJson
                 val tokenChanged = openString(prefs, P_TOKEN) != credential.deviceToken
-                bindingChanged = profileChanged || tokenChanged
+                bindingChanged = profileChanged || tokenChanged || anchorChanged
                 if (profileChanged) {
                     // New vault material may mean a new epoch: require a fresh passphrase unlock.
                     editor.remove(P_KEY_CACHE)
                     invalidateClient = true
                 }
+                if (anchorChanged) invalidateClient = true
                 ImportResult.UPDATED
             } else {
                 if (prefs.contains(P_DB_KEY) || prefs.contains(P_KEY_CACHE) || hasDatabaseFiles(context)) {
@@ -774,6 +817,10 @@ object NativeGateway {
             return ImportResult.STORAGE_ERROR
         }
         try {
+            anchor?.let {
+                editor.putString(P_ANCHOR_FLOOR, it.first.toString())
+                    .putString(P_ANCHOR_FINGERPRINT, it.second)
+            }
             editor.putString(P_TOKEN, secretBox.seal(P_TOKEN, credential.deviceToken.toByteArray(Charsets.UTF_8)))
                 .putString(P_PROFILE, secretBox.seal(P_PROFILE, material.profileJson.toByteArray(Charsets.UTF_8)))
                 .putString(P_HEADER, secretBox.seal(P_HEADER, material.headerJson.toByteArray(Charsets.UTF_8)))
@@ -792,6 +839,16 @@ object NativeGateway {
         }
         // A new database always bootstraps from a snapshot before any live replay or effect.
         if (result == ImportResult.IMPORTED) GatewayStateStore(context).startBootstrap()
+        if (anchor != null) {
+            // The durable pin is already committed and the old owner retired. Never call public
+            // open here: this transaction still owns the retirement fence.
+            try {
+                persistenceDecisionHook?.invoke()
+                if (openUnchecked(context, retirementToken) == null) return ImportResult.STORAGE_ERROR
+            } catch (_: Exception) {
+                return ImportResult.STORAGE_ERROR
+            }
+        }
         return result
     }
 
@@ -824,12 +881,27 @@ object NativeGateway {
         val existing = identity(prefs) ?: return true
         if (existing != Identity(credential.origin, credential.vaultId, credential.deviceId)) return false
         return try {
-            openString(prefs, P_PROFILE) != material.profileJson ||
+            (credential.anchor?.let { it.epochFloor to it.profileFingerprint }?.let { it != persistedAnchor(prefs) } == true) ||
+                openString(prefs, P_PROFILE) != material.profileJson ||
                 openString(prefs, P_HEADER) != material.headerJson ||
                 openString(prefs, P_TOKEN) != credential.deviceToken
         } catch (_: GeneralSecurityException) {
             false
+        } catch (_: IllegalStateException) {
+            false
         }
+    }
+
+    /** Absent pairs are legacy v1; partial, mistyped or malformed metadata must never unpin. */
+    private fun persistedAnchor(prefs: SharedPreferences): Pair<UInt, String>? {
+        val values = prefs.all
+        if (!values.containsKey(P_ANCHOR_FLOOR) && !values.containsKey(P_ANCHOR_FINGERPRINT)) return null
+        val rawFloor = values[P_ANCHOR_FLOOR] as? String
+        val floor = rawFloor?.takeIf { it.isNotEmpty() && it.all { c -> c in '0'..'9' } }?.toUIntOrNull()
+        val fingerprint = values[P_ANCHOR_FINGERPRINT] as? String
+        check(floor != null && floor > 0u && fingerprint != null &&
+            fingerprint.length == 64 && fingerprint.all { it in '0'..'9' || it in 'a'..'f' })
+        return floor to fingerprint
     }
 
     /**

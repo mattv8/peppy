@@ -42,6 +42,24 @@ struct CredentialWire {
     vault_id: String,
     device_id: String,
     device_token: String,
+    #[serde(default, deserialize_with = "present_field")]
+    epoch_floor: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "present_field")]
+    profile_fingerprint: Option<Option<String>>,
+}
+
+fn present_field<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EpochAnchor {
+    pub epoch_floor: u32,
+    pub profile_fingerprint: String,
 }
 
 impl Drop for CredentialWire {
@@ -58,6 +76,7 @@ pub struct PortableDeviceCredential {
     vault_id: String,
     device_id: String,
     device_token: String,
+    anchor: Option<EpochAnchor>,
 }
 
 impl Drop for PortableDeviceCredential {
@@ -87,6 +106,7 @@ impl PortableDeviceCredential {
             vault_id,
             device_id,
             device_token: std::mem::take(&mut *device_token),
+            anchor: None,
         })
     }
 
@@ -104,6 +124,10 @@ impl PortableDeviceCredential {
 
     pub fn device_token(&self) -> &str {
         &self.device_token
+    }
+
+    pub fn anchor(&self) -> Option<&EpochAnchor> {
+        self.anchor.as_ref()
     }
 }
 
@@ -140,15 +164,41 @@ pub fn parse_portable_credential(
     }
     let mut wire: CredentialWire =
         serde_json::from_slice(bytes).map_err(|_| PortableCredentialError::InvalidJson)?;
-    if wire.version != 1 {
-        return Err(PortableCredentialError::UnsupportedVersion);
-    }
-    PortableDeviceCredential::new(
+    let anchor = match wire.version {
+        1 if wire.epoch_floor.is_none() && wire.profile_fingerprint.is_none() => None,
+        1 => return Err(PortableCredentialError::InvalidJson),
+        2 => {
+            let floor = wire
+                .epoch_floor
+                .flatten()
+                .filter(|floor| *floor > 0)
+                .ok_or(PortableCredentialError::InvalidJson)?;
+            let fingerprint = wire
+                .profile_fingerprint
+                .take()
+                .flatten()
+                .filter(|value| {
+                    value.len() == 64
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                })
+                .ok_or(PortableCredentialError::InvalidJson)?;
+            Some(EpochAnchor {
+                epoch_floor: floor,
+                profile_fingerprint: fingerprint,
+            })
+        }
+        _ => return Err(PortableCredentialError::UnsupportedVersion),
+    };
+    let mut credential = PortableDeviceCredential::new(
         std::mem::take(&mut wire.origin),
         std::mem::take(&mut wire.vault_id),
         std::mem::take(&mut wire.device_id),
         std::mem::take(&mut wire.device_token),
-    )
+    )?;
+    credential.anchor = anchor;
+    Ok(credential)
 }
 
 pub fn serialize_portable_credential(
@@ -170,6 +220,38 @@ pub fn serialize_portable_credential(
         vault_id: &credential.vault_id,
         device_id: &credential.device_id,
         device_token: &credential.device_token,
+    })
+    .map(Zeroizing::new)
+    .map_err(|_| PortableCredentialError::Serialization)
+}
+
+/// Serializes an already anchored credential without changing the default v1 minting format.
+pub fn serialize_portable_credential_v2(
+    credential: &PortableDeviceCredential,
+) -> Result<Zeroizing<Vec<u8>>, PortableCredentialError> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Wire<'a> {
+        version: u8,
+        origin: &'a str,
+        vault_id: &'a str,
+        device_id: &'a str,
+        device_token: &'a str,
+        epoch_floor: u32,
+        profile_fingerprint: &'a str,
+    }
+    let anchor = credential
+        .anchor
+        .as_ref()
+        .ok_or(PortableCredentialError::InvalidJson)?;
+    serde_json::to_vec(&Wire {
+        version: 2,
+        origin: &credential.origin,
+        vault_id: &credential.vault_id,
+        device_id: &credential.device_id,
+        device_token: &credential.device_token,
+        epoch_floor: anchor.epoch_floor,
+        profile_fingerprint: &anchor.profile_fingerprint,
     })
     .map(Zeroizing::new)
     .map_err(|_| PortableCredentialError::Serialization)
@@ -224,6 +306,33 @@ mod tests {
     }
 
     #[test]
+    fn portable_v2_credential_accepts_an_epoch_anchor() {
+        let payload = format!(
+            r#"{{"version":2,"origin":"https://example.test","vaultId":"{}","deviceId":"{}","deviceToken":"{}","epochFloor":2,"profileFingerprint":"{}"}}"#,
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "a".repeat(96),
+            "b".repeat(64),
+        );
+        let credential = parse_portable_credential(payload.as_bytes()).unwrap();
+        assert_eq!(credential.anchor().unwrap().epoch_floor, 2);
+        let serialized = serialize_portable_credential_v2(&credential).unwrap();
+        assert_eq!(
+            parse_portable_credential(&serialized).unwrap().anchor(),
+            credential.anchor()
+        );
+        for malformed in [
+            payload.replace("\"epochFloor\":2", "\"epochFloor\":0"),
+            payload.replace("\"epochFloor\":2", "\"epochFloor\":null"),
+            payload.replace(&"b".repeat(64), &"B".repeat(64)),
+            payload.replace(&"b".repeat(64), "invalid"),
+            payload.replace("\"version\":2", "\"version\":1"),
+        ] {
+            assert!(parse_portable_credential(malformed.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
     fn portable_credentials_reject_invalid_contract_fields() {
         let valid = format!(
             r#"{{"version":1,"origin":"https://example.test","vaultId":"{}","deviceId":"{}","deviceToken":"{}"}}"#,
@@ -233,7 +342,7 @@ mod tests {
         );
         for (payload, expected) in [
             (
-                valid.replace("\"version\":1", "\"version\":2"),
+                valid.replace("\"version\":1", "\"version\":3"),
                 PortableCredentialError::UnsupportedVersion,
             ),
             (

@@ -980,7 +980,9 @@ impl From<CoreError> for MobileBindingsError {
             CoreError::UnsupportedSchema => Self::UnsupportedSchema,
             CoreError::IdentityMismatch => Self::IdentityMismatch,
             CoreError::WrongPassphrase => Self::WrongPassphrase,
-            CoreError::InvalidPassphrase | CoreError::InvalidProfile => Self::InvalidProfile,
+            CoreError::InvalidPassphrase | CoreError::InvalidProfile | CoreError::StaleKeyEpoch => {
+                Self::InvalidProfile
+            }
             CoreError::Crypto => Self::Crypto,
             CoreError::InvalidRequest(_)
             | CoreError::InvalidCursor
@@ -2456,10 +2458,23 @@ impl NativeClient {
     pub fn activate_verified_epoch(&self, epoch: u32) -> Result<(), MobileBindingsError> {
         with_client(&self.client, |client| {
             if client.key_status()?.active_epoch == Some(epoch) {
-                Ok(())
+                client.confirm_active_epoch(epoch)
             } else {
                 client.activate_epoch(epoch)
             }
+        })
+    }
+
+    /// Records the shared profile's epoch floor and fingerprint from a v2 credential. Native hosts
+    /// call this on credential import before the first unlock. The floor only moves up, and at the
+    /// same floor the fingerprint must not change.
+    pub fn set_epoch_anchor(
+        &self,
+        floor: u32,
+        fingerprint: String,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.set_epoch_anchor(floor, &fingerprint)
         })
     }
 
@@ -5779,6 +5794,37 @@ mod tests {
         assert_eq!(first, before);
         assert_eq!(reopened.pending_outbox_json_batch(500).unwrap(), before);
         assert_eq!(reopened.pending_outbox_json().unwrap(), before);
+    }
+
+    #[test]
+    fn set_epoch_anchor_is_monotonic_and_pins_the_fingerprint() {
+        let root = TempRoot::new(format!("peppy-epoch-anchor-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let client = open_native_client(NativeOpenConfig {
+            database_path: root.join("anchor.db").to_string_lossy().into_owned(),
+            vault_id: uuid::Uuid::new_v4().to_string(),
+            device_id: uuid::Uuid::new_v4().to_string(),
+            database_key: vec![7; 32],
+        })
+        .unwrap();
+        let first = "a".repeat(64);
+        let other = "b".repeat(64);
+
+        assert!(matches!(
+            client.set_epoch_anchor(0, first.clone()),
+            Err(MobileBindingsError::InvalidProfile)
+        ));
+        client.set_epoch_anchor(2, first.clone()).unwrap();
+        assert!(matches!(
+            client.set_epoch_anchor(1, first.clone()),
+            Err(MobileBindingsError::InvalidProfile)
+        ));
+        assert!(matches!(
+            client.set_epoch_anchor(2, other),
+            Err(MobileBindingsError::InvalidProfile)
+        ));
+        client.set_epoch_anchor(2, first).unwrap();
+        client.set_epoch_anchor(3, "c".repeat(64)).unwrap();
     }
 
     #[test]

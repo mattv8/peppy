@@ -350,13 +350,25 @@ public actor NativeSession {
         let credential = try DeviceCredential.parse(data, allowLoopbackHTTP: allowLoopbackHTTP)
         return try await changeEnrollment {
             try self.requireAdoptable(credential.identity)
-            let verified = try await EnrollmentVerifier(transport: self.transport)
+            var verified = try await EnrollmentVerifier(transport: self.transport)
                 .verify(origin: credential.origin, token: credential.token, identity: credential.identity)
             // Re-checked after the await: another change may have completed meanwhile.
             try Task.checkCancellation()
             try self.requireAdoptable(credential.identity)
-            try self.store.activate(verified, token: credential.token)
-            return try self.adopt(verified)
+            // A profile below the anchor floor is stale: refuse it before anything is persisted.
+            if let anchor = credential.anchor, verified.keyEpoch < anchor.epochFloor {
+                throw ClientError.core(.InvalidProfile)
+            }
+            verified.epochFloor = credential.anchor?.epochFloor
+            verified.profileFingerprint = credential.anchor?.profileFingerprint
+            do {
+                try self.store.activate(verified, token: credential.token)
+                return try self.adopt(verified)
+            } catch {
+                // Activation may fail after replacing the durable record of an open identity.
+                self.close()
+                throw error
+            }
         }
     }
 
@@ -1315,11 +1327,12 @@ public actor NativeSession {
             try enrollment.activateInto(nativeClient: nativeClient)
             let record = EnrollmentRecord(identity: identity, role: metadata.role, keyEpoch: epoch, profileJson: metadata.profileJson, headerJson: metadata.headerJson)
             try store.activate(record, token: credential)
+            let persisted = try store.record(identity)
             try store.saveKeyCache(nativeClient.exportNativeKeyCacheForNativeStorage(epoch: epoch), epoch: epoch, for: identity)
             client = nativeClient
-            self.record = record
+            self.record = persisted
             reachability.bind(identity)
-            status = SessionStatus(identity: identity, role: record.role, keyEpoch: epoch, databaseOpen: true, keysUnlocked: true)
+            status = SessionStatus(identity: identity, role: persisted.role, keyEpoch: persisted.keyEpoch, databaseOpen: true, keysUnlocked: true)
             refreshCount()
             return status
         } catch {
@@ -1347,12 +1360,13 @@ public actor NativeSession {
             try nativeClient.activateVerifiedEpoch(epoch: epoch)
             let record = EnrollmentRecord(identity: identity, role: metadata.role, keyEpoch: epoch, profileJson: metadata.profileJson, headerJson: metadata.headerJson)
             try store.activate(record, token: credential)
+            let persisted = try store.record(identity)
             try store.saveKeyCache(nativeClient.exportNativeKeyCacheForNativeStorage(epoch: epoch), epoch: epoch, for: identity)
             _ = VaultSecretStore(secure: store.secure).storeBinding(phrase, for: identity, origin: identity.origin)
             client = nativeClient
-            self.record = record
+            self.record = persisted
             reachability.bind(identity)
-            status = SessionStatus(identity: identity, role: record.role, keyEpoch: epoch, databaseOpen: true, keysUnlocked: true)
+            status = SessionStatus(identity: identity, role: persisted.role, keyEpoch: persisted.keyEpoch, databaseOpen: true, keysUnlocked: true)
             refreshCount()
             return status
         } catch {
@@ -1361,10 +1375,19 @@ public actor NativeSession {
         }
     }
 
-    /// Applies a verified record to the open client, or opens it.
+    /// Applies a verified record to the open client, or opens it. A credential's epoch anchor is set
+    /// on the client before any key cache is restored.
     private func adopt(_ verified: EnrollmentRecord) throws -> SessionStatus {
+        let verified = try store.record(verified.identity)
         if record?.identity != verified.identity { snapshotTooLargeStore.clear(vaultID: verified.identity.vaultId) }
-        guard client != nil, record?.identity == verified.identity else { return try open() }
+        guard let client, record?.identity == verified.identity else { return try openActive() }
+        do {
+            try applyEpochAnchor(verified.epochAnchor, to: client)
+        } catch {
+            close()
+            throw error
+        }
+        if record?.epochAnchor != verified.epochAnchor { status.keysUnlocked = false }
         let epochChanged = record?.keyEpoch != verified.keyEpoch
         record = verified
         status.role = verified.role
@@ -1373,7 +1396,7 @@ public actor NativeSession {
             // Keys for a new epoch come only from its cache or from unlocking with the passphrase.
             status.keysUnlocked = false
             if let cache = try store.keyCache(verified.identity, epoch: verified.keyEpoch) {
-                status.keysUnlocked = (try? client?.importNativeKeyCacheFromNativeStorage(bytes: cache)) != nil
+                status.keysUnlocked = (try? client.importNativeKeyCacheFromNativeStorage(bytes: cache)) != nil
             }
         }
         refreshCount()
@@ -1385,6 +1408,10 @@ public actor NativeSession {
     /// Opens the active enrollment's database with its Keychain key and restores stored key caches.
     @discardableResult
     public func open() throws -> SessionStatus {
+        try openActive()
+    }
+
+    private func openActive() throws -> SessionStatus {
         do {
             retryPendingVaultBindingCleanup()
             guard let identity = try store.activeIdentity() else {
@@ -1393,10 +1420,15 @@ public actor NativeSession {
             }
             if let open = record?.identity, open != identity { throw ClientError.identityMismatch }
             let record = try store.record(identity)
+            if let client {
+                try applyEpochAnchor(record.epochAnchor, to: client)
+                if self.record?.epochAnchor != record.epochAnchor { status.keysUnlocked = false }
+            }
             if client == nil {
                 let opened = try openClient(identity)
                 var openedStatus = SessionStatus(identity: identity, databaseOpen: true)
                 do {
+                    try applyEpochAnchor(record.epochAnchor, to: opened)
                     for (epoch, cache) in try store.keyCaches(identity, through: record.keyEpoch) {
                     do {
                         try opened.importNativeKeyCacheFromNativeStorage(bytes: cache)
@@ -1419,6 +1451,7 @@ public actor NativeSession {
             refreshCount()
             return status
         } catch {
+            close()
             throw ClientError.wrap(error)
         }
     }
@@ -1866,6 +1899,16 @@ public actor NativeSession {
 
     /// Fails closed when this identity's database was created before but is gone, or when a
     /// database file exists without its key; neither is ever replaced by a fresh database.
+    /// Sets a credential's epoch anchor. The core refuses a lower floor or a different fingerprint at the same floor.
+    private func applyEpochAnchor(_ anchor: EpochAnchor?, to client: NativeClient) throws {
+        guard let anchor else { return }
+        do {
+            try client.setEpochAnchor(floor: anchor.epochFloor, fingerprint: anchor.profileFingerprint)
+        } catch {
+            throw ClientError.wrap(error)
+        }
+    }
+
     private func openClient(_ identity: EnrollmentIdentity) throws -> NativeClient {
         let exists = databaseExists(identity)
         if try store.databaseWasCreated(identity), !exists { throw ClientError.localDatabaseMissing }
@@ -1882,10 +1925,17 @@ public actor NativeSession {
             let opened = try openNativeClient(config: NativeOpenConfig(
                 databasePath: databaseURL(identity).path, vaultId: identity.vaultId, deviceId: identity.deviceId, databaseKey: key
             ))
-            // SQLCipher creates its -wal/-shm sidecars and media directories on open.
-            try Self.protectUntilFirstUnlock(databaseDirectory)
-            try store.markDatabaseCreated(identity)
-            return opened
+            do {
+                // Pending portable imports must also fence verified phrase/handoff installs.
+                try applyEpochAnchor(try store.recordIfPresent(identity)?.epochAnchor, to: opened)
+                // SQLCipher creates its -wal/-shm sidecars and media directories on open.
+                try Self.protectUntilFirstUnlock(databaseDirectory)
+                try store.markDatabaseCreated(identity)
+                return opened
+            } catch {
+                try? opened.dispose()
+                throw error
+            }
         } catch {
             throw ClientError.wrap(error)
         }

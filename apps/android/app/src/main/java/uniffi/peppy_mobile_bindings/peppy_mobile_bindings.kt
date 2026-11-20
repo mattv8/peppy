@@ -1189,6 +1189,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_conversation_pinned(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_epoch_anchor(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_gateway_settings(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_mms_acquisition_part(
@@ -1814,6 +1816,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_contact_scan_request_capability(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_conversation_pinned(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`pinned`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_epoch_anchor(`ptr`: Long,`floor`: Int,`fingerprint`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_gateway_settings(`ptr`: Long,`settings`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -3119,6 +3123,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_conversation_pinned() and 0xFFFF) != 5079) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_epoch_anchor() and 0xFFFF) != 5054) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_gateway_settings() and 0xFFFF) != 40564) {
@@ -4484,6 +4491,13 @@ public interface NativeClientInterface {
     fun `setContactScanRequestCapability`(`inputJson`: kotlin.String): kotlin.String
     
     fun `setConversationPinned`(`conversationId`: kotlin.String, `pinned`: kotlin.Boolean)
+    
+    /**
+     * Records the shared profile's epoch floor and fingerprint from a v2 credential. Native hosts
+     * call this on credential import before the first unlock. The floor only moves up, and at the
+     * same floor the fingerprint must not change.
+     */
+    fun `setEpochAnchor`(`floor`: kotlin.UInt, `fingerprint`: kotlin.String)
     
     fun `setGatewaySettings`(`settings`: NativeGatewaySettings)
     
@@ -7693,6 +7707,26 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         
         FfiConverterString.lower(`conversationId`),
         FfiConverterBoolean.lower(`pinned`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Records the shared profile's epoch floor and fingerprint from a v2 credential. Native hosts
+     * call this on credential import before the first unlock. The floor only moves up, and at the
+     * same floor the fingerprint must not change.
+     */
+    @Throws(MobileBindingsException::class)override fun `setEpochAnchor`(`floor`: kotlin.UInt, `fingerprint`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_epoch_anchor(
+        it,
+        
+        FfiConverterUInt.lower(`floor`),
+        FfiConverterString.lower(`fingerprint`),_status)
 }
     }
     

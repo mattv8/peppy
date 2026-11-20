@@ -260,7 +260,9 @@ fn decode_secrets(plaintext: &[u8]) -> Result<IdentitySecrets, IdentityError> {
 
 fn map_core_error(error: CoreError) -> IdentityError {
     match error {
-        CoreError::InvalidProfile | CoreError::IdentityMismatch => IdentityError::Invalid,
+        CoreError::InvalidProfile | CoreError::StaleKeyEpoch | CoreError::IdentityMismatch => {
+            IdentityError::Invalid
+        }
         CoreError::KeysUnavailable => IdentityError::Unavailable,
         _ => IdentityError::Unavailable,
     }

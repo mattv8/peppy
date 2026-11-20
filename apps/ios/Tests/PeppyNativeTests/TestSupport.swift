@@ -52,10 +52,15 @@ final class FakeServer: HTTPTransport, @unchecked Sendable {
         material = try createVaultMaterial(vaultId: vaultId, passphrase: passphrase)
     }
 
-    func credential(deviceId: String, origin: String = FakeServer.origin, token: String? = nil) -> Data {
-        let object: [String: Any] = [
+    func credential(deviceId: String, origin: String = FakeServer.origin, token: String? = nil, anchor: (floor: Int, fingerprint: String)? = nil) -> Data {
+        var object: [String: Any] = [
             "version": 1, "origin": origin, "vaultId": vaultId, "deviceId": deviceId, "deviceToken": token ?? self.token,
         ]
+        if let anchor {
+            object["version"] = 2
+            object["epochFloor"] = anchor.floor
+            object["profileFingerprint"] = anchor.fingerprint
+        }
         return try! JSONSerialization.data(withJSONObject: object)
     }
 

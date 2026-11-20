@@ -1,6 +1,6 @@
 //! Native-only enrollment orchestration. Secrets are collected by native dialogs and never cross IPC.
 use crate::{
-    credentials::{parse_credential, stored_credential, ImportedCredential},
+    credentials::{parse_anchored_import, stored_credential, ImportedCredential},
     dialogs::{self, PassphrasePurpose},
     error::{BridgeError, BridgeResult},
     net::{read_bounded, NetError, MAX_JSON_BYTES},
@@ -8,6 +8,9 @@ use crate::{
     secure_store::SecretStore,
     AppState,
 };
+// Sibling test modules (enrollment/computer.rs) reach this through `use super::*`.
+#[cfg(test)]
+use crate::credentials::parse_credential;
 use peppy_client_core::{KeyProfile, VaultCheckHeader};
 use peppy_hosted_api::enrollment::{
     self, AdmissionChallenge, ClientKind, DeploymentMode, EnrollmentMethod, EnrollmentRole,
@@ -1114,7 +1117,8 @@ async fn install_identity_locked(
     let origin = identity.origin().to_owned();
     let vault_secret = passphrase.clone();
     let portable = native_identity_credential(identity)?;
-    let credential = std::sync::Arc::new(parse_credential(&portable)?);
+    let (credential, anchor) = parse_anchored_import(&portable)?;
+    let credential = std::sync::Arc::new(credential);
     drop(portable);
     let previous = state.config()?;
     let target_binding = credential.binding();
@@ -1144,7 +1148,14 @@ async fn install_identity_locked(
     let result = async {
         state.update_config(|config| config.select_origin(&credential.origin))?;
         crate::verify_import(state, &credential, computer_attempt).await?;
-        crate::activate_import_locked(state, credential, Some(&operation), computer_attempt).await
+        crate::activate_anchored_locked(
+            state,
+            credential,
+            anchor,
+            Some(&operation),
+            computer_attempt,
+        )
+        .await
     }
     .await;
     if let Err(error) = result {
@@ -3172,7 +3183,7 @@ fn recover_phone_handoff_after_fetch(
         Err(
             peppy_client_core::Error::WrongPassphrase | peppy_client_core::Error::InvalidPassphrase,
         ) => Err(vault_secret_mismatch()),
-        Err(error) => Err(crate::core_error(error)),
+        Err(error) => Err(crate::credentials::stale_profile_error(error)),
     }
 }
 
