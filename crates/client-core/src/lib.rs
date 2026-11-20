@@ -122,6 +122,8 @@ pub use rcs_media::{RcsMediaReceiveView, ReceiveDownloadAdmission};
 mod rcs_native;
 mod rcs_receive;
 mod rcs_send;
+#[cfg(test)]
+mod rcs_status_decoder_recovery_tests;
 mod rcs_target;
 mod sms_acquisition;
 mod sms_reconciliation;
@@ -571,6 +573,7 @@ pub enum PrivatePayload {
     RcsMessageStatus {
         message_id: MessageId,
         status: RcsMessageStatus,
+        #[serde(default = "default_true")]
         rcs_reported: bool,
     },
     RcsLinkStatus(RcsLinkStatusPayload),
@@ -10874,7 +10877,7 @@ fn repair_notification_reply_spike(conn: &mut Connection) -> Result<(), Error> {
 }
 /// Decoder revision seven replays applied LWW events after older clients consumed them as unknown.
 // Revision 8 reprojects retained control wires that older clients consumed as unknown.
-const DECODER_REVISION: &str = "13";
+const DECODER_REVISION: &str = "14";
 
 fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error> {
     let mut hex = Zeroizing::new(String::with_capacity(64));
@@ -11328,6 +11331,29 @@ fn recover_decoder_revision(
                     "UPDATE journal SET status='quarantined',reason='authentication_failed' WHERE cursor=?",
                     params![cursor],
                 )?;
+                continue;
+            }
+            if status == "quarantined"
+                && matches!(&payload, PrivatePayload::RcsMessageStatus { .. })
+                && envelope.vault_id == ctx.vault_id
+                && envelope.validate().is_ok()
+                && storage_sequence_fits(envelope.producer_sequence.0)
+                && envelope.compaction.as_ref().is_none_or(|metadata| {
+                    metadata
+                        .supersedes
+                        .iter()
+                        .all(|reference| storage_sequence_fits(reference.producer_sequence.0))
+                })
+                && serde_json::from_slice::<serde_json::Value>(&plain)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .as_object()
+                            .map(|object| !object.contains_key("rcs_reported"))
+                    })
+                    == Some(true)
+            {
+                snapshot_projection::recover_legacy_rcs_status(conn, cursor)?;
                 continue;
             }
             if matches!(

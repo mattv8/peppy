@@ -354,6 +354,50 @@ pub(crate) fn record_snapshot_import_origin(
     Ok(())
 }
 
+/// A recovered legacy record is not proof of a snapshot's retained membership.
+pub(crate) fn recover_legacy_rcs_status(conn: &Connection, cursor: i64) -> Result<(), Error> {
+    let latest: Option<(i64, i64, i64, String, Option<String>)> = conn
+        .query_row(
+            "SELECT generation,high_water,progress,state,reason FROM projection_generations WHERE state!='superseded' ORDER BY generation DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .optional()?;
+    if let Some((generation, high_water, progress, state, reason)) = latest
+        && cursor <= high_water
+    {
+        if state != "failed" || reason.as_deref() != Some("invalid_payload") || cursor <= progress {
+            return Ok(());
+        }
+        conn.execute_batch("SAVEPOINT recover_legacy_rcs")?;
+        let result = (|| -> Result<(), Error> {
+            record_snapshot_import_origin(conn, generation, cursor)?;
+            conn.execute(
+                "UPDATE journal SET status='pending',reason=?,historical=1 WHERE cursor=? AND status='quarantined' AND reason='invalid_payload'",
+                params![RCS_ISOLATED_REASON, cursor],
+            )?;
+            conn.execute(
+                "INSERT OR IGNORE INTO metadata(k,v) VALUES(?,'upgrade')",
+                [REPAIR_LATCH],
+            )?;
+            Ok(())
+        })();
+        if result.is_err() {
+            conn.execute_batch("ROLLBACK TO recover_legacy_rcs; RELEASE recover_legacy_rcs")?;
+        } else {
+            conn.execute_batch("RELEASE recover_legacy_rcs")?;
+        }
+        return result;
+    }
+    if !has_snapshot_import_origin(conn, cursor)? {
+        conn.execute(
+            "UPDATE journal SET status='pending',reason=NULL,historical=1 WHERE cursor=? AND status='quarantined' AND reason='invalid_payload'",
+            [cursor],
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn observe_ordinary_snapshot_replay(
     conn: &Connection,
     generation: i64,
