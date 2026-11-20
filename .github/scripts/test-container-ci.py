@@ -3,12 +3,18 @@
 
 import copy
 import json
+import posixpath
+import re
 from pathlib import Path
 import subprocess
 import unittest
 
 
+ROOT = Path(__file__).parents[2]
 WORKFLOW = Path(__file__).parents[1] / "workflows" / "build-container.yml"
+SERVER_DOCKERFILE = ROOT / "infra" / "docker" / "server.Dockerfile"
+DOCKERIGNORE = ROOT / ".dockerignore"
+LOCKFILE = ROOT / "pnpm-lock.yaml"
 IMAGES = {
     "server": ("peppy-server", "infra/docker/server.Dockerfile"),
     "relay": ("peppy-push-relay", "infra/docker/push-relay.Dockerfile"),
@@ -39,6 +45,67 @@ def aggregate_script(jobs):
 def aggregate_result(script, results):
     environment = {f"{job.upper()}_RESULT": result for job, result in results.items()}
     return subprocess.run(["bash", "-ec", script], env=environment, capture_output=True, text=True)
+
+
+def lockfile_importers():
+    """Workspace directories pnpm checks with --frozen-lockfile: the importers keys except the root."""
+    importers = []
+    in_importers = False
+    for line in LOCKFILE.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        if not line.startswith(" "):
+            in_importers = line == "importers:"
+            continue
+        match = re.fullmatch(r"  ([^ ].*?):(?: \{\})?", line)
+        if in_importers and match and match.group(1) != ".":
+            importers.append(match.group(1))
+    if not importers:
+        raise AssertionError("no workspace importers found in pnpm-lock.yaml")
+    return importers
+
+
+def web_build_copies():
+    """(source, destination) pairs of the COPY lines in the server Dockerfile's web-build stage."""
+    copies = []
+    in_web_build = False
+    for line in SERVER_DOCKERFILE.read_text(encoding="utf-8").splitlines():
+        if line.startswith("FROM "):
+            in_web_build = line.endswith(" AS web-build")
+        elif in_web_build and line.startswith("COPY "):
+            tokens = line.split()
+            copies.extend((source, tokens[-1]) for source in tokens[1:-1])
+    return copies
+
+
+def is_copied(importer, copies):
+    for source, destination in copies:
+        if importer == source or importer.startswith(source + "/"):
+            relative = importer[len(source) :].lstrip("/")
+            if posixpath.normpath(f"{destination}/{relative}") == importer:
+                return True
+    return False
+
+
+class WebBuildContextTests(unittest.TestCase):
+    """Every pnpm workspace importer must reach the web-build context.
+
+    .dockerignore excludes packages/** and apps/* and re-includes each needed directory with an
+    explicit `!<dir>/` line (no pattern engine is applied here), so a new workspace package needs
+    both a web-build COPY line and such a re-include.
+    """
+
+    def test_every_lockfile_importer_is_copied_and_not_excluded(self):
+        copies = web_build_copies()
+        ignore_lines = set(DOCKERIGNORE.read_text(encoding="utf-8").splitlines())
+        for importer in lockfile_importers():
+            with self.subTest(importer=importer):
+                self.assertTrue(
+                    is_copied(importer, copies),
+                    f"{importer} is not copied into the web-build stage of server.Dockerfile",
+                )
+                if importer.startswith(("packages/", "apps/")):
+                    self.assertIn(f"!{importer}/", ignore_lines, f"{importer} is excluded by .dockerignore")
 
 
 class ContainerWorkflowTests(unittest.TestCase):
