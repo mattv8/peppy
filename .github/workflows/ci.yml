@@ -155,9 +155,11 @@ jobs:
       - run: infra/release/test-android-signing.sh
       - run: infra/release/test-android-distribution.sh
       - run: infra/release/linux-repository/test-linux-repository.sh
+      - name: Install Linux package tooling
+        timeout-minutes: 20
+        run: bash .github/scripts/install-apt-packages.sh rpm gnupg cpio file
       - name: Test real Linux package normalization
         run: |
-          sudo apt-get update && sudo apt-get install --yes rpm gnupg cpio file
           infra/release/test-linux-package-metadata.sh
 
   release-macos-tooling:
@@ -230,7 +232,8 @@ jobs:
           components: rustfmt, clippy
       - run: bash .github/scripts/remove-unpinned-rust-toolchains.sh 1.98.1
         shell: bash
-      - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libpq-dev libsqlite3-dev libssl-dev libsodium-dev
+      - run: bash .github/scripts/install-apt-packages.sh build-essential pkg-config libpq-dev libsqlite3-dev libssl-dev libsodium-dev
+        timeout-minutes: 20
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ubuntu-24.04
@@ -264,7 +267,8 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libpq-dev libsqlite3-dev libssl-dev libsodium-dev
+      - run: bash .github/scripts/install-apt-packages.sh build-essential pkg-config libpq-dev libsqlite3-dev libssl-dev libsodium-dev
+        timeout-minutes: 20
       - name: Install cargo-nextest
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
@@ -339,7 +343,8 @@ jobs:
           toolchain: 1.98.1
       - run: bash .github/scripts/remove-unpinned-rust-toolchains.sh 1.98.1
         shell: bash
-      - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libpq-dev libsqlite3-dev libssl-dev libsodium-dev
+      - run: bash .github/scripts/install-apt-packages.sh build-essential pkg-config libpq-dev libsqlite3-dev libssl-dev libsodium-dev
+        timeout-minutes: 20
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ubuntu-24.04
@@ -560,7 +565,8 @@ jobs:
       - run: bash .github/scripts/remove-unpinned-rust-toolchains.sh 1.98.1
         shell: bash
       - if: runner.os == 'Linux'
-        run: sudo apt-get update --error-on=any && sudo apt-get install --yes build-essential pkg-config libsqlite3-dev libssl-dev libsodium-dev libsecret-1-dev libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+        run: bash .github/scripts/install-apt-packages.sh --strict-index build-essential pkg-config libsqlite3-dev libssl-dev libsodium-dev libsecret-1-dev libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+        timeout-minutes: 20
       - name: Install cargo-nextest
         shell: bash
         run: |
@@ -620,7 +626,8 @@ jobs:
       - run: bash .github/scripts/remove-unpinned-rust-toolchains.sh 1.98.1
         shell: bash
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libsqlite3-dev libssl-dev libsodium-dev libsecret-1-dev libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+        run: bash .github/scripts/install-apt-packages.sh build-essential pkg-config libsqlite3-dev libssl-dev libsodium-dev libsecret-1-dev libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+        timeout-minutes: 20
       - if: runner.os == 'Windows'
         name: Select native Windows Perl
         shell: pwsh
@@ -684,7 +691,8 @@ jobs:
           if ! pnpm audit; then
             echo '::warning::Development dependency advisories detected; production dependency advisories remain blocking.'
           fi
-      - run: sudo apt-get update && sudo apt-get install --yes shellcheck
+      - run: bash .github/scripts/install-apt-packages.sh shellcheck
+        timeout-minutes: 20
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
         with:
           just-version: '1.58.0'
