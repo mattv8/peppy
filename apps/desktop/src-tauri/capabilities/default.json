@@ -137,6 +137,8 @@
     "allow-hosted-open-billing",
     "allow-hosted-provision",
     "allow-hosted-delete-account",
+    "allow-hosted-deletion-status",
+    "allow-hosted-cancel-account-deletion",
     "allow-purchase-options",
     "allow-store-products",
     "allow-store-purchase",

@@ -12,8 +12,8 @@ use crate::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use peppy_hosted_api::{
-    auth_web::routes as web_routes, routes, NativeAuthConfigResponse, NativeSessionExchangeRequest,
-    SESSION_LIFETIME_SECONDS,
+    auth_web::routes as web_routes, routes, AccountDeletionStatus, NativeAuthConfigResponse,
+    NativeSessionExchangeRequest, SESSION_LIFETIME_SECONDS,
 };
 use peppy_hosted_client::{
     parse_hosted_account, parse_hosted_session, parse_hosted_session_renewal, prepare, restore,
@@ -681,6 +681,128 @@ pub(crate) async fn hosted_delete_account(
     let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     delete_account_core(&*state.store, &hosted, &hosted_origin()?).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DeletionStatusView {
+    execute_after: Option<String>,
+    cancellable: bool,
+}
+
+#[tauri::command]
+pub(crate) async fn hosted_deletion_status(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    hosted: tauri::State<'_, HostedState>,
+) -> BridgeResult<DeletionStatusView> {
+    let _operation = crate::admit_update_operation(&state)?;
+    crate::require_main(window.label())?;
+    deletion_status_core(&*state.store, &hosted, &hosted_origin()?).await
+}
+
+#[tauri::command]
+pub(crate) async fn hosted_cancel_account_deletion(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    hosted: tauri::State<'_, HostedState>,
+) -> BridgeResult<()> {
+    let _operation = crate::admit_update_operation(&state)?;
+    crate::require_main(window.label())?;
+    cancel_deletion_core(&*state.store, &hosted, &hosted_origin()?).await
+}
+
+pub(crate) async fn deletion_status_core(
+    store: &dyn SecretStore,
+    hosted: &HostedState,
+    origin: &str,
+) -> BridgeResult<DeletionStatusView> {
+    let session = load_session_from_store(store, hosted, origin)
+        .await?
+        .ok_or_else(|| {
+            BridgeError::new(
+                "hosted-session-required",
+                "Sign in again to Peppy Hosted before deleting your account.",
+            )
+        })?;
+    let base = hosted.api_base(origin);
+    let response = http(&base)?
+        .get(format!("{base}{}", routes::ACCOUNT_DELETION))
+        .bearer_auth(&*session.bearer)
+        .send()
+        .await
+        .map_err(|_| BridgeError::new("offline", "Could not reach Peppy Hosted."))?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(BridgeError::new(
+            "hosted-session-required",
+            "Sign in again to Peppy Hosted before deleting your account.",
+        ));
+    }
+    if response.status() != reqwest::StatusCode::OK {
+        return Err(BridgeError::new(
+            "account-deletion-failed",
+            "Could not check account deletion.",
+        ));
+    }
+    let bytes = read_bounded(response, crate::net::MAX_JSON_BYTES)
+        .await
+        .map_err(|_| {
+            BridgeError::new(
+                "account-deletion-failed",
+                "Could not check account deletion.",
+            )
+        })?;
+    let status: AccountDeletionStatus = serde_json::from_slice(&bytes).map_err(|_| {
+        BridgeError::new(
+            "account-deletion-failed",
+            "Could not check account deletion.",
+        )
+    })?;
+    Ok(DeletionStatusView {
+        execute_after: status.execute_after,
+        cancellable: status.cancellable,
+    })
+}
+
+pub(crate) async fn cancel_deletion_core(
+    store: &dyn SecretStore,
+    hosted: &HostedState,
+    origin: &str,
+) -> BridgeResult<()> {
+    let session = load_session_from_store(store, hosted, origin)
+        .await?
+        .ok_or_else(|| {
+            BridgeError::new(
+                "hosted-session-required",
+                "Sign in again to Peppy Hosted before deleting your account.",
+            )
+        })?;
+    let base = hosted.api_base(origin);
+    let response = http(&base)?
+        .post(format!("{base}{}", routes::ACCOUNT_DELETION_CANCEL))
+        .bearer_auth(&*session.bearer)
+        .send()
+        .await
+        .map_err(|_| BridgeError::new("offline", "Could not reach Peppy Hosted."))?;
+    match response.status() {
+        reqwest::StatusCode::NO_CONTENT => Ok(()),
+        reqwest::StatusCode::CONFLICT => Err(BridgeError::new(
+            "deletion-already-started",
+            "Account deletion has already started.",
+        )),
+        reqwest::StatusCode::NOT_FOUND => Err(BridgeError::new(
+            "deletion-not-scheduled",
+            "Account deletion is not scheduled.",
+        )),
+        reqwest::StatusCode::UNAUTHORIZED => Err(BridgeError::new(
+            "hosted-session-required",
+            "Sign in again to Peppy Hosted before deleting your account.",
+        )),
+        _ => Err(BridgeError::new(
+            "account-deletion-failed",
+            "Could not cancel account deletion.",
+        )),
+    }
 }
 
 /// Deletes the current Hosted account and discards only the observed account session on success.

@@ -294,6 +294,15 @@ pub struct AccountResponse {
     pub operation_id: Option<Uuid>,
 }
 
+/// Scheduled account deletion. `execute_after` is RFC 3339 UTC; `cancellable` is true
+/// only while processing has not started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountDeletionStatus {
+    pub execute_after: Option<String>,
+    pub cancellable: bool,
+}
+
 // ============================================================================
 // Billing DTOs
 // ============================================================================
@@ -378,6 +387,8 @@ pub mod routes {
     pub const AUTH_NATIVE_SESSION: &str = "/hosted/v1/auth/native-session";
     pub const AUTH_SESSION_RENEW: &str = "/hosted/v1/auth/session/renew";
     pub const ACCOUNT: &str = "/hosted/v1/account";
+    pub const ACCOUNT_DELETION: &str = "/hosted/v1/account/deletion";
+    pub const ACCOUNT_DELETION_CANCEL: &str = "/hosted/v1/account/deletion/cancel";
     pub const BILLING_CHECKOUT: &str = "/hosted/v1/billing/checkout";
     pub const BILLING_PORTAL: &str = "/hosted/v1/billing/portal";
     pub const BILLING_WEBHOOK: &str = "/hosted/v1/billing/webhook";
@@ -960,6 +971,40 @@ mod tests {
         assert_eq!(
             routes::PROVISIONING_COMPLETE,
             "/hosted/v1/provisioning/complete"
+        );
+        assert_eq!(routes::ACCOUNT_DELETION, "/hosted/v1/account/deletion");
+        assert_eq!(
+            routes::ACCOUNT_DELETION_CANCEL,
+            "/hosted/v1/account/deletion/cancel"
+        );
+    }
+
+    #[test]
+    fn account_deletion_status_round_trips_shared_fixtures() {
+        let scheduled = r#"{"execute_after":"2026-11-26T18:00:00Z","cancellable":true}"#;
+        let idle = r#"{"execute_after":null,"cancellable":false}"#;
+
+        let status: AccountDeletionStatus = serde_json::from_str(scheduled).unwrap();
+        assert_eq!(
+            status.execute_after.as_deref(),
+            Some("2026-11-26T18:00:00Z")
+        );
+        assert!(status.cancellable);
+        assert_eq!(serde_json::to_string(&status).unwrap(), scheduled);
+
+        let status: AccountDeletionStatus = serde_json::from_str(idle).unwrap();
+        assert_eq!(status.execute_after, None);
+        assert!(!status.cancellable);
+        assert_eq!(serde_json::to_string(&status).unwrap(), idle);
+    }
+
+    #[test]
+    fn account_deletion_status_rejects_unknown_fields() {
+        assert!(
+            serde_json::from_str::<AccountDeletionStatus>(
+                r#"{"execute_after":null,"cancellable":false,"unexpected":true}"#
+            )
+            .is_err()
         );
     }
 

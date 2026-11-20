@@ -46,6 +46,14 @@ pub struct WebAccountResponse {
     pub deletion_state: DeletionState,
 }
 
+/// Browser view of a scheduled account deletion. Same shape as the native `AccountDeletionStatus`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebAccountDeletionResponse {
+    pub execute_after: Option<String>,
+    pub cancellable: bool,
+}
+
 pub mod routes {
     pub const CAPABILITIES: &str = "/hosted/v1/web/capabilities";
     pub const SESSION: &str = "/hosted/v1/web/session";
@@ -57,6 +65,8 @@ pub mod routes {
     pub const APPLE_CALLBACK: &str = "/hosted/v1/web/auth/apple/callback";
     pub const LOGOUT: &str = "/hosted/v1/web/logout";
     pub const ACCOUNT: &str = "/hosted/v1/web/account";
+    pub const ACCOUNT_DELETION: &str = "/hosted/v1/web/account/deletion";
+    pub const ACCOUNT_DELETION_CANCEL: &str = "/hosted/v1/web/account/deletion/cancel";
     pub const CONFIG: &str = "/hosted/v1/web/config";
 }
 
@@ -125,6 +135,44 @@ mod tests {
         assert_eq!(
             routes::APP_SESSION_RENEW,
             "/hosted/v1/web/app-session/renew"
+        );
+    }
+
+    #[test]
+    fn web_account_deletion_routes_use_the_web_audience() {
+        assert_eq!(routes::ACCOUNT_DELETION, "/hosted/v1/web/account/deletion");
+        assert_eq!(
+            routes::ACCOUNT_DELETION_CANCEL,
+            "/hosted/v1/web/account/deletion/cancel"
+        );
+    }
+
+    #[test]
+    fn web_account_deletion_response_round_trips_shared_fixtures() {
+        let scheduled = r#"{"execute_after":"2026-11-26T18:00:00Z","cancellable":true}"#;
+        let idle = r#"{"execute_after":null,"cancellable":false}"#;
+
+        let status: WebAccountDeletionResponse = serde_json::from_str(scheduled).unwrap();
+        assert_eq!(
+            status.execute_after.as_deref(),
+            Some("2026-11-26T18:00:00Z")
+        );
+        assert!(status.cancellable);
+        assert_eq!(serde_json::to_string(&status).unwrap(), scheduled);
+
+        let status: WebAccountDeletionResponse = serde_json::from_str(idle).unwrap();
+        assert_eq!(status.execute_after, None);
+        assert!(!status.cancellable);
+        assert_eq!(serde_json::to_string(&status).unwrap(), idle);
+    }
+
+    #[test]
+    fn web_account_deletion_response_rejects_unknown_fields() {
+        assert!(
+            serde_json::from_str::<WebAccountDeletionResponse>(
+                r#"{"execute_after":null,"cancellable":false,"unexpected":true}"#
+            )
+            .is_err()
         );
     }
 }

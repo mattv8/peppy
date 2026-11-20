@@ -65,6 +65,10 @@ export function formatAccountDeadline(deadlineUnixSeconds: number, now: number):
   return new Intl.DateTimeFormat(undefined, options).format(deadline);
 }
 
+export function formatDeletionDeadline(deadlineUnixSeconds: number): string {
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(deadlineUnixSeconds * 1000));
+}
+
 /**
  * The one action rule. Apple-billed recovery notices go to Apple. Otherwise the website manage URL is used
  * only when website purchasing is resolved as allowed; recovery notices also need a resolved provider, so
@@ -89,7 +93,9 @@ export function accountRibbonModel(notice: AccountNoticeDto, now: number, contex
     ? formatAccountDeadline(notice.deadline, now)
     : null;
   const formatArguments = deadlineText === null ? [] : [deadlineText];
-  const bodyKey = notice.kind === "payment_failed_grace" && deadlineText === null ? `${stem}_body_nodate` : `${stem}_body`;
+  const bodyKey = notice.kind === "read_only_account_deleting" && !context.browserHost
+    ? "account_read_only_account_deleting_desktop_body"
+    : notice.kind === "payment_failed_grace" && deadlineText === null ? `${stem}_body_nodate` : `${stem}_body`;
   const actionTarget = resolveRibbonActionTarget(notice.kind, notice.manageUrl !== null, context);
   return {
     kind: notice.kind,

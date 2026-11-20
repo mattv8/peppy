@@ -4026,7 +4026,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Account is being deleted"
+            "value": "Account deletion scheduled"
           }
         }
       }
@@ -4036,7 +4036,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sending is off while deletion finishes. Export anything you want to keep before it completes."
+            "value": "Your account is scheduled for deletion and is read-only until then. You can cancel on the Peppy website before the deletion date."
           }
         }
       }
@@ -4046,7 +4046,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This phone isn't sending texts from your computer while the account is deleted. Export anything you want to keep before it completes."
+            "value": "This phone isn't sending texts from your computer while your account is scheduled for deletion. You can cancel on the Peppy website before the deletion date."
           }
         }
       }

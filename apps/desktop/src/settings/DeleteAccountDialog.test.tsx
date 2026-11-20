@@ -14,13 +14,61 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+it("finishes scheduling without waiting indefinitely for status", async () => {
+  vi.useFakeTimers();
+  try {
+    vi.mocked(bridge.hosted_delete_account).mockResolvedValue("pending");
+    vi.mocked(bridge.hosted_deletion_status).mockReturnValue(new Promise(() => {}));
+    const onDeleted = vi.fn();
+    render(<DeleteAccountDialog billing={{ provider: "apple", manageableIn: "app_store", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false }} opener={createRef()} onDismiss={vi.fn()} onDeleted={onDeleted} />);
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(document.getElementById("account-delete-submit")!);
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(onDeleted).toHaveBeenCalledWith({ outcome: "pending", provider: "apple", executeAfter: null });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("reports the scheduled deadline after a pending deletion", async () => {
+  vi.mocked(bridge.hosted_delete_account).mockResolvedValue("pending");
+  vi.mocked(bridge.hosted_deletion_status).mockResolvedValue({ executeAfter: "2026-11-26T18:00:00Z", cancellable: true });
+  const onDeleted = vi.fn();
+  render(<DeleteAccountDialog billing={{ provider: "apple", manageableIn: "app_store", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false }} opener={createRef()} onDismiss={vi.fn()} onDeleted={onDeleted} />);
+  fireEvent.click(screen.getByRole("checkbox"));
+  fireEvent.click(document.getElementById("account-delete-submit")!);
+  await waitFor(() => expect(onDeleted).toHaveBeenCalledWith({ outcome: "pending", provider: "apple", executeAfter: "2026-11-26T18:00:00Z", cancellable: true }));
+});
+
+it("reports pending even when the deadline cannot be fetched", async () => {
+  vi.mocked(bridge.hosted_delete_account).mockResolvedValue("pending");
+  vi.mocked(bridge.hosted_deletion_status).mockRejectedValueOnce(new Error("offline"));
+  const onDeleted = vi.fn();
+  render(<DeleteAccountDialog billing={{ provider: "apple", manageableIn: "app_store", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false }} opener={createRef()} onDismiss={vi.fn()} onDeleted={onDeleted} />);
+  fireEvent.click(screen.getByRole("checkbox"));
+  fireEvent.click(document.getElementById("account-delete-submit")!);
+  await waitFor(() => expect(onDeleted).toHaveBeenCalledWith({ outcome: "pending", provider: "apple", executeAfter: null }));
+  expect(document.getElementById("account-delete-error")).toHaveTextContent("");
+});
+
+it("does not request a deadline after immediate deletion", async () => {
+  vi.mocked(bridge.hosted_delete_account).mockResolvedValue("deleted");
+  const onDeleted = vi.fn();
+  render(<DeleteAccountDialog billing={{ provider: "apple", manageableIn: "app_store", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false }} opener={createRef()} onDismiss={vi.fn()} onDeleted={onDeleted} />);
+  fireEvent.click(screen.getByRole("checkbox"));
+  fireEvent.click(document.getElementById("account-delete-submit")!);
+  await waitFor(() => expect(onDeleted).toHaveBeenCalledWith({ outcome: "deleted", provider: "apple" }));
+  expect(bridge.hosted_deletion_status).not.toHaveBeenCalled();
+});
+
 it.each([
   [{ code: "hosted-session-required", message: "Sign in again to Peppy Hosted before deleting your account." }, "Sign in again to Peppy Hosted before deleting your account."],
   [{ code: "other", message: "unexpected detail" }, peppyCopy.account_delete_error],
 ])("shows the appropriate deletion failure", async (error, expected) => {
   vi.mocked(bridge.hosted_delete_account).mockRejectedValue(error);
   render(<DeleteAccountDialog billing={{ provider: "apple", manageableIn: "app_store", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false }} opener={createRef()} onDismiss={vi.fn()} onDeleted={vi.fn()} />);
-  fireEvent.click(screen.getByRole("checkbox", { name: "I understand this is permanent" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "I understand my account will be deleted in 7 days" }));
   fireEvent.click(document.getElementById("account-delete-submit")!);
   await waitFor(() => expect(document.getElementById("account-delete-error")?.textContent).not.toBe(""));
   const text = document.getElementById("account-delete-error")!.textContent;
@@ -34,7 +82,7 @@ it("keeps deletion confirmation intact when subscription management fails and cl
   const onDeleted = vi.fn();
   const onDismiss = vi.fn();
   render(<DeleteAccountDialog billing={{ provider: "apple", manageableIn: "app_store", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false }} opener={createRef()} onDismiss={onDismiss} onDeleted={onDeleted} />);
-  const confirmation = screen.getByRole("checkbox", { name: "I understand this is permanent" });
+  const confirmation = screen.getByRole("checkbox", { name: "I understand my account will be deleted in 7 days" });
   const dialog = screen.getByRole("dialog");
   const manage = screen.getByRole("button", { name: "Manage App Store subscriptions" });
   fireEvent.click(confirmation);

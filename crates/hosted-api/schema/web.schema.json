@@ -1746,6 +1746,25 @@
       ],
       "type": "object"
     },
+    "WebAccountDeletionResponse": {
+      "additionalProperties": false,
+      "description": "Browser view of a scheduled account deletion. Same shape as the native `AccountDeletionStatus`.",
+      "properties": {
+        "cancellable": {
+          "type": "boolean"
+        },
+        "execute_after": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cancellable"
+      ],
+      "type": "object"
+    },
     "WebAccountResponse": {
       "additionalProperties": false,
       "properties": {
@@ -1860,6 +1879,9 @@
   "properties": {
     "account": {
       "$ref": "#/$defs/WebAccountResponse"
+    },
+    "account_deletion": {
+      "$ref": "#/$defs/WebAccountDeletionResponse"
     },
     "attachment_storage_status": {
       "$ref": "#/$defs/AttachmentStorageStatusResponse"
@@ -2019,6 +2041,7 @@
     "session_renewal",
     "config",
     "account",
+    "account_deletion",
     "billing",
     "plan_catalog",
     "operation",
@@ -2033,6 +2056,8 @@
   "type": "object",
   "x-peppy-routes": {
     "account": "/hosted/v1/web/account",
+    "accountDeletion": "/hosted/v1/web/account/deletion",
+    "accountDeletionCancel": "/hosted/v1/web/account/deletion/cancel",
     "appSessionRenew": "/hosted/v1/web/app-session/renew",
     "attachmentStorageStatus": "/hosted/v1/attachment-storage/status",
     "authStart": "/hosted/v1/web/auth/{provider}/start",

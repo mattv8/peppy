@@ -135,7 +135,7 @@ import { DEFAULT_MMS_LIMIT_BYTES, availabilityProblem, gatewayAvailability, impo
 import { fileSize } from "./fileSize";
 import { formatCopy } from "./generated/peppyCopy";
 import { SystemRibbon, SystemRibbonAnnouncement, SystemRibbonStrip } from "./notices/SystemRibbon";
-import { openAccountManageUrl, resolveSystemRibbon, type RibbonActionContext, type RibbonBillingFacts } from "./notices/systemRibbonModel";
+import { formatDeletionDeadline, openAccountManageUrl, resolveSystemRibbon, type RibbonActionContext, type RibbonBillingFacts } from "./notices/systemRibbonModel";
 import { useAccountNotice } from "./notices/useAccountNotice";
 import { AppNoticeBanner, type AppNotice } from "./notices/AppNoticeBanner";
 import { MarkAllReadAction } from "./conversation/MarkAllReadAction";
@@ -1718,6 +1718,7 @@ function SettingsView({
   onRequestedSectionConsumed,
   onAddDevice,
   onAccountDeleted,
+  onDeletionCanceled,
 }: {
   /** Changes each time "Free up space" asks for the storage card; 0 when nothing was requested. */
   storageRequest?: number;
@@ -1772,7 +1773,8 @@ function SettingsView({
   requestedSection?: "notifications" | "notification-apps" | "devices" | "updates";
   onRequestedSectionConsumed?(): void;
   onAddDevice?(): void;
-  onAccountDeleted(result: { outcome: "deleted" | "pending"; provider: BillingProvider }): void;
+  onAccountDeleted(result: { outcome: "deleted" | "pending"; provider: BillingProvider; executeAfter?: string | null; cancellable?: boolean }): void;
+  onDeletionCanceled(): void;
 }) {
   const platform = detectPlatform();
   const [startupStatus, setStartupStatus] = useState<{ state: "on" | "off" | "approval_needed" | "unavailable"; background: boolean }>();
@@ -2157,7 +2159,7 @@ function SettingsView({
         {!browserHost && purchaseOptions?.appStore && billingSummary && (billingSummary.provider === "none" || billingSummary.provider === "apple") && <p>{peppyCopy.account_billing_intro_app_store}</p>}
         {billingSummary?.provider === "google_play" && billingSummary.manageableIn === "google_play" && <p id="account-billing-intro-google-play">{peppyCopy.account_billing_intro_google_play}</p>}
         {browserHost && accountUrl && <a id="settings-account-portal-link" className="secondary-button" href={accountUrl} target="_blank" rel="noopener noreferrer">{peppyCopy.account_portal_cta}<span className="visually-hidden"> (opens in a new tab)</span></a>}
-        {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} onAccountDeleted={onAccountDeleted} />}
+        {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} onAccountDeleted={onAccountDeleted} onDeletionCanceled={onDeletionCanceled} />}
       </section>}
       {typingShare !== undefined && <RcsFeaturesSettings typingShare={{ enabled: typingShare, onChange: onTypingShare, error: typingShareError }} />}
       <AdvancedSettings sessionKey={sessionScopeId ?? "unavailable"} unlocked={encryption === "unlocked"} serverOffline={serverOffline} browserHost={browserHost} onOpenDevices={() => { selectSection("devices"); window.setTimeout(() => document.getElementById("mcp-custody-review")?.focus(), 0); }} />
@@ -2253,8 +2255,10 @@ function ReenrolScreen({ onRetry, onStart, enrollment }: { onRetry(): Promise<vo
   </section>;
 }
 
-function AccountDeletionResultDialog({ result, onDone }: { result: { outcome: "deleted" | "pending"; provider: BillingProvider }; onDone(): void }) {
+function AccountDeletionResultDialog({ result, onDone }: { result: { outcome: "deleted" | "pending"; provider: BillingProvider; executeAfter?: string | null; cancellable?: boolean }; onDone(): void }) {
   const deleted = result.outcome === "deleted";
+  const processing = !deleted && result.cancellable === false;
+  const deadline = result.executeAfter ? Date.parse(result.executeAfter) : NaN;
   const [managementFailed, setManagementFailed] = useState(false);
   const openSubscriptionManagement = async () => {
     setManagementFailed(false);
@@ -2274,13 +2278,13 @@ function AccountDeletionResultDialog({ result, onDone }: { result: { outcome: "d
   };
   return <Modal
     id="account-deletion-result-dialog"
-    title={deleted ? peppyCopy.account_deleted_title : peppyCopy.account_delete_pending_title}
+    title={deleted ? peppyCopy.account_deleted_title : processing ? peppyCopy.account_delete_processing_title : peppyCopy.account_delete_pending_title}
     onDismiss={onDone}
     actions={<button id="account-deletion-result-done" className="primary-button" type="button" onClick={onDone}>{peppyCopy.account_deleted_done}</button>}
   >
-    <p id="account-deletion-result-body">{deleted ? peppyCopy.account_deleted_body : peppyCopy.account_delete_pending_body}</p>
-    {deleted && result.provider === "apple" && <><p id="account-deletion-result-apple-notice">{peppyCopy.account_deleted_apple_body}</p><button id="account-deletion-result-manage" className="secondary-button" type="button" onClick={() => void openSubscriptionManagement()}>{peppyCopy.store_manage_cta}</button>{managementFailed && <p id="account-deletion-result-management-error" role="alert">{peppyCopy.store_manage_failed}</p>}</>}
-    {deleted && result.provider === "google_play" && <><p id="account-deletion-result-google-play-notice">{peppyCopy.account_deleted_google_play_body}</p><button id="account-deletion-result-google-play-manage" className="secondary-button" type="button" onClick={() => void openGooglePlayManagement()}>{peppyCopy.google_play_manage_cta}</button>{managementFailed && <p id="account-deletion-result-management-error" role="alert">{peppyCopy.google_play_manage_failed}</p>}</>}
+    <p id="account-deletion-result-body">{deleted ? peppyCopy.account_deleted_body : processing ? peppyCopy.account_delete_pending_status : Number.isFinite(deadline) ? formatCopy(peppyCopy.account_delete_pending_body, formatDeletionDeadline(deadline / 1000)) : peppyCopy.account_delete_pending_body_nodate}</p>
+    {result.provider === "apple" && <><p id="account-deletion-result-apple-notice">{peppyCopy.account_deleted_apple_body}</p><button id="account-deletion-result-manage" className="secondary-button" type="button" onClick={() => void openSubscriptionManagement()}>{peppyCopy.store_manage_cta}</button>{managementFailed && <p id="account-deletion-result-management-error" role="alert">{peppyCopy.store_manage_failed}</p>}</>}
+    {result.provider === "google_play" && <><p id="account-deletion-result-google-play-notice">{peppyCopy.account_deleted_google_play_body}</p><button id="account-deletion-result-google-play-manage" className="secondary-button" type="button" onClick={() => void openGooglePlayManagement()}>{peppyCopy.google_play_manage_cta}</button>{managementFailed && <p id="account-deletion-result-management-error" role="alert">{peppyCopy.google_play_manage_failed}</p>}</>}
   </Modal>;
 }
 
@@ -2667,7 +2671,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [reenrolEnrollment, setReenrolEnrollment] = useState(false);
   const reenrolEnrollmentRef = useRef(false);
   reenrolEnrollmentRef.current = reenrolEnrollment;
-  const [deletionResult, setDeletionResult] = useState<{ outcome: "deleted" | "pending"; provider: BillingProvider }>();
+  const [deletionResult, setDeletionResult] = useState<{ outcome: "deleted" | "pending"; provider: BillingProvider; executeAfter?: string | null; cancellable?: boolean }>();
   const [refreshing, setRefreshing] = useState(false);
   const [sending, setSending] = useState(false);
   const [closingHead, setClosingHead] = useState(false);
@@ -6734,6 +6738,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   setDeletionResult(result);
                   void refresh().catch(() => undefined);
                 }}
+                onDeletionCanceled={() => { void refresh().catch(() => undefined); }}
              />
           ) : notificationsOpen ? (
             <NotificationsView
