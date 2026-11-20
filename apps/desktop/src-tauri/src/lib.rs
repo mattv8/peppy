@@ -1488,11 +1488,11 @@ async fn search_local(
     let session = state.require_session_admitted(&operation).await?;
     let search_session = session.clone();
     let page = blocking(move || {
-        search_session
+        let page = search_session
             .client
             .search_local(input.into())
-            .map(peppy_desktop_api::local_search_page_view)
-            .map_err(core_error)
+            .map_err(core_error)?;
+        contacts::search_page_view(&search_session, page)
     })
     .await?;
     if state.app_locked.load(Ordering::Acquire) || !session_is_current(&state, &session).await {

@@ -3,7 +3,7 @@
 export type SearchKind = "all" | "conversation" | "message" | "contact";
 export type LocalSearchRequest = { query: string, kind?: SearchKind, cursor?: string, limit?: number, };
 export type AdvanceSearchIndexInput = { budgetRows?: number, };
-export type LocalSearchHit = { "kind": "conversation", conversationId: string, title: string, subtitle: string, } | { "kind": "message", conversationId: string, messageId: string, title: string, snippet: string, timestamp: string, } | { "kind": "contact", bookId: string, contactId: string, title: string, subtitle: string, };
+export type LocalSearchHit = { "kind": "conversation", conversationId: string, title: string, subtitle: string, } | { "kind": "message", conversationId: string, messageId: string, title: string, snippet: string, timestamp: string, } | { "kind": "contact", bookId: string, contactId: string, title: string, subtitle: string, phones: Array<string>, phoneCount: number, organization?: string, bookLabel?: string, avatarUrl?: string, matchField?: string, matchSnippet?: string, };
 export type SearchHasMore = { conversation: boolean, message: boolean, contact: boolean, };
 export type LocalSearchPage = { query: string, items: Array<LocalSearchHit>, nextCursor?: string, indexState: SearchIndexState, hasMore: SearchHasMore, };
 export type SearchIndexState = "ready" | "indexing";

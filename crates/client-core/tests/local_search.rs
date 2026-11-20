@@ -125,9 +125,11 @@ fn ambiguous_duplicate_contacts_use_consensus_conversation_title() {
         })
         .unwrap();
     assert_eq!(contacts.items.len(), 2);
-    assert!(contacts.items.iter().all(
-        |hit| matches!(hit, LocalSearchHit::Contact { subtitle, .. } if subtitle.ends_with(ADDRESS))
-    ));
+    assert!(
+        contacts.items.iter().all(
+            |hit| matches!(hit, LocalSearchHit::Contact { subtitle, .. } if subtitle == ADDRESS)
+        )
+    );
 }
 
 #[test]
@@ -259,8 +261,95 @@ fn computed_display_name_fallbacks_retain_primary_subtitle() {
             contact_id: "org".into(),
             title: "Acme Labs".into(),
             subtitle: "Coworkers".into(),
+            phones: vec![],
+            phone_count: 0,
+            organization: Some("Acme Labs".into()),
+            book_label: Some("Coworkers".into()),
+            photo_attachment_id: None,
+            match_field: None,
+            match_snippet: None,
         }]
     );
+}
+
+#[test]
+fn contact_hits_expose_structured_details_without_using_book_id_as_label() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "structured-contact-hit", &vault);
+    let client = unlocked(&config, &vault);
+    let photo_path = directory.path().join("contact.png");
+    image::RgbImage::from_pixel(40, 30, image::Rgb([9, 99, 199]))
+        .save_with_format(&photo_path, image::ImageFormat::Png)
+        .unwrap();
+    let photo_id = client
+        .prepare_contact_photo(&photo_path)
+        .unwrap()
+        .attachment_id
+        .to_string();
+    client.capture_contact_book(&json!({
+        "schema_version": 1,
+        "book": {"id":"opaque-book","owner_device_id":config.device_id.to_string(),"generation":"1","state":"active","region":"US"},
+        "contacts": [{
+            "id":"ada","book_id":"opaque-book","revision":"1","display_name":"Ada",
+            "organization":"  Engines  ",
+            "phones":[{"id":"p1","value":"+15550001"},{"id":"p2","value":"+15550002"},{"id":"p3","value":"+15550003"},{"id":"p4","value":"+15550004"}],
+            "emails":[{"id":"e","value":"ada@example.test"}],"addresses":[],
+            "photo":{"attachment_id":photo_id},
+            "provenance":{"source_id":"private-source","read_only":false}
+        }]
+    }).to_string()).unwrap();
+    let search = |query: &str| {
+        client
+            .search_local(LocalSearchRequest {
+                query: query.into(),
+                kind: Some(SearchKind::Contact),
+                cursor: None,
+                limit: Some(6),
+            })
+            .unwrap()
+            .items
+            .into_iter()
+            .next()
+            .unwrap()
+    };
+    assert!(matches!(search("Ada"), LocalSearchHit::Contact {
+        subtitle, phones, phone_count: 4, organization: Some(org), book_label: None,
+        photo_attachment_id: Some(photo), match_field: None, match_snippet: None, ..
+    } if subtitle == "+15550001" && phones == ["+15550001", "+15550002", "+15550003"] && org == "Engines" && photo == photo_id));
+    assert!(
+        matches!(search("0004"), LocalSearchHit::Contact { phones, .. }
+        if phones == ["+15550004", "+15550001", "+15550002"])
+    );
+    assert!(matches!(search("example.test"), LocalSearchHit::Contact {
+        subtitle, match_field: Some(field), match_snippet: Some(snippet), ..
+    } if field == "Email" && snippet == "ada@example.test" && subtitle == "Email · ada@example.test"));
+}
+
+#[test]
+fn email_only_contact_is_titled_by_its_email_without_photo() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "email-only-contact", &vault);
+    let client = unlocked(&config, &vault);
+    client.capture_contact_book(&json!({
+        "schema_version":1,
+        "book":{"id":"people","owner_device_id":config.device_id.to_string(),"generation":"1","state":"active","region":"US"},
+        "contacts":[{"id":"email","book_id":"people","revision":"1","display_name":"",
+            "phones":[],"emails":[{"id":"e","value":"only@example.test"}],"addresses":[],
+            "provenance":{"source_id":"s","read_only":false}}]
+    }).to_string()).unwrap();
+    let page = client
+        .search_local(LocalSearchRequest {
+            query: "example.test".into(),
+            kind: Some(SearchKind::Contact),
+            cursor: None,
+            limit: Some(1),
+        })
+        .unwrap();
+    assert!(matches!(page.items.as_slice(), [LocalSearchHit::Contact {
+        title, subtitle, photo_attachment_id: None, ..
+    }] if title == "only@example.test" && subtitle.is_empty()));
 }
 
 #[test]

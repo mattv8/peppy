@@ -502,6 +502,28 @@ fn photo_set_is_prepared_by_core_and_held_until_its_upload_is_registered() {
     assert_no_private_data(&contact.to_string(), &h.f);
     assert!(!contact.to_string().contains(&local.to_string()));
 
+    h.session.set_status(|status| {
+        status.gateways = vec![crate::tests::gateway(&h.owner_id, true, false)];
+    });
+    let search = h
+        .session
+        .client
+        .search_local(peppy_client_core::LocalSearchRequest {
+            query: "Ada".into(),
+            kind: Some(peppy_client_core::SearchKind::Contact),
+            cursor: None,
+            limit: None,
+        })
+        .unwrap();
+    let search = serde_json::to_value(search_page_view(&h.session, search).unwrap()).unwrap();
+    let hit = &search["items"][0];
+    assert_eq!(hit["bookLabel"], "Test SIM");
+    assert!(hit["avatarUrl"]
+        .as_str()
+        .unwrap()
+        .starts_with("data:image/jpeg;base64,"));
+    assert!(!hit.to_string().contains(&local.to_string()));
+
     // Remove is a distinct operation and keep sends none.
     let mut remove = json!({
         "targetBookId": BOOK, "kind": "update", "contactId": "c1", "baseRevision": "1",

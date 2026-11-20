@@ -86,6 +86,23 @@ pub enum LocalSearchHitView {
         contact_id: String,
         title: String,
         subtitle: String,
+        phones: Vec<String>,
+        phone_count: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        organization: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        book_label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        avatar_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        match_field: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        match_snippet: Option<String>,
     },
 }
 
@@ -171,11 +188,25 @@ pub fn local_search_page_view(page: LocalSearchPage) -> LocalSearchPageView {
                     contact_id,
                     title,
                     subtitle,
+                    phones,
+                    phone_count,
+                    organization,
+                    book_label,
+                    photo_attachment_id: _,
+                    match_field,
+                    match_snippet,
                 } => LocalSearchHitView::Contact {
                     book_id,
                     contact_id,
                     title,
                     subtitle,
+                    phones,
+                    phone_count,
+                    organization,
+                    book_label,
+                    avatar_url: None,
+                    match_field,
+                    match_snippet,
                 },
             })
             .collect(),
@@ -307,6 +338,79 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn contact_search_projection_omits_private_attachment_and_missing_fields() {
+        let page = LocalSearchPage {
+            query: "ada".into(),
+            items: vec![LocalSearchHit::Contact {
+                book_id: "book".into(),
+                contact_id: "contact".into(),
+                title: "Ada".into(),
+                subtitle: String::new(),
+                phones: vec!["123".into()],
+                phone_count: 1,
+                organization: None,
+                book_label: None,
+                photo_attachment_id: Some("private-attachment".into()),
+                match_field: None,
+                match_snippet: None,
+            }],
+            next_cursor: None,
+            index_state: SearchIndexState::Ready,
+            has_more: peppy_client_core::SearchHasMore {
+                conversation: false,
+                message: false,
+                contact: false,
+            },
+        };
+        let value = serde_json::to_value(local_search_page_view(page)).unwrap();
+        assert_eq!(
+            value["items"][0],
+            json!({
+                "kind": "contact", "bookId": "book", "contactId": "contact",
+                "title": "Ada", "subtitle": "", "phones": ["123"], "phoneCount": 1
+            })
+        );
+        assert!(!value.to_string().contains("private-attachment"));
+    }
+
+    #[test]
+    fn contact_search_projection_preserves_display_metadata() {
+        let page = LocalSearchPage {
+            query: "ada".into(),
+            items: vec![LocalSearchHit::Contact {
+                book_id: "book".into(),
+                contact_id: "contact".into(),
+                title: "Ada".into(),
+                subtitle: String::new(),
+                phones: vec!["123".into(), "456".into()],
+                phone_count: 4,
+                organization: Some("Org".into()),
+                book_label: Some("Phone".into()),
+                photo_attachment_id: None,
+                match_field: Some("Email".into()),
+                match_snippet: Some("ada@example.com".into()),
+            }],
+            next_cursor: None,
+            index_state: SearchIndexState::Ready,
+            has_more: peppy_client_core::SearchHasMore {
+                conversation: false,
+                message: false,
+                contact: false,
+            },
+        };
+        let value = serde_json::to_value(local_search_page_view(page)).unwrap();
+        assert_eq!(
+            value["items"][0],
+            json!({
+                "kind": "contact", "bookId": "book", "contactId": "contact",
+                "title": "Ada", "subtitle": "", "phones": ["123", "456"], "phoneCount": 4,
+                "organization": "Org", "bookLabel": "Phone", "matchField": "Email",
+                "matchSnippet": "ada@example.com"
+            })
+        );
+    }
+
+    #[test]
     fn local_search_hit_variants_serialize_camel_case_identifiers() {
         let cases = [
             (
@@ -333,8 +437,15 @@ mod tests {
                     contact_id: "contact".into(),
                     title: "Contact".into(),
                     subtitle: "Subtitle".into(),
+                    phones: vec![],
+                    phone_count: 0,
+                    organization: None,
+                    book_label: None,
+                    avatar_url: None,
+                    match_field: None,
+                    match_snippet: None,
                 },
-                json!({"kind":"contact","bookId":"book","contactId":"contact","title":"Contact","subtitle":"Subtitle"}),
+                json!({"kind":"contact","bookId":"book","contactId":"contact","title":"Contact","subtitle":"Subtitle","phones":[],"phoneCount":0}),
             ),
         ];
 

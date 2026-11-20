@@ -239,6 +239,59 @@ pub(crate) fn session_avatar(
     value
 }
 
+pub(crate) fn search_page_view(
+    session: &Session,
+    page: peppy_client_core::LocalSearchPage,
+) -> BridgeResult<peppy_desktop_api::LocalSearchPageView> {
+    let books = if page.items.iter().any(|hit| {
+        matches!(
+            hit,
+            peppy_client_core::LocalSearchHit::Contact {
+                book_label: None,
+                ..
+            }
+        )
+    }) {
+        list_books(session).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let photos: Vec<_> = page
+        .items
+        .iter()
+        .map(|hit| match hit {
+            peppy_client_core::LocalSearchHit::Contact {
+                photo_attachment_id,
+                ..
+            } => photo_attachment_id.clone(),
+            _ => None,
+        })
+        .collect();
+    let mut view = peppy_desktop_api::local_search_page_view(page);
+    let mut budget = AVATAR_BUDGET;
+    for (hit, photo) in view.items.iter_mut().zip(photos) {
+        if let peppy_desktop_api::LocalSearchHitView::Contact {
+            book_id,
+            book_label,
+            avatar_url,
+            ..
+        } = hit
+        {
+            if book_label.is_none() {
+                *book_label = books
+                    .iter()
+                    .find(|book| str_field(book, "id") == Some(book_id.as_str()))
+                    .and_then(|book| str_field(book, "deviceName"))
+                    .map(str::to_owned);
+            }
+            *avatar_url = photo
+                .and_then(|id| id.parse().ok())
+                .and_then(|id| session_avatar(session, &mut budget, id));
+        }
+    }
+    Ok(view)
+}
+
 /// Reads a verified local contact photo, rejecting data above the avatar budget.
 pub(crate) fn local_photo_bytes(session: &Session, id: AttachmentId) -> Option<Vec<u8>> {
     let file = session.client.open_native_plaintext(id).ok()?;
