@@ -319,8 +319,8 @@ export class LiveSupervisor {
 
   private newSessionId(): string {
     const bytes = new Uint8Array(SESSION_BYTES);
-    const random = this.options.randomBytes ?? (value => crypto.getRandomValues(value));
-    return base64url(random(bytes));
+    const randomBytes = this.options.randomBytes;
+    return base64url(randomBytes == null ? crypto.getRandomValues(bytes) : randomBytes(bytes));
   }
 }
 

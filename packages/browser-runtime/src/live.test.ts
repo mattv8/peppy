@@ -7,7 +7,7 @@ const handle = "A".repeat(11);
 
 class FakeSocket implements LiveSocket {
   public protocol = "";
-  public readyState: number = WebSocket.CONNECTING;
+  public readyState: LiveSocket["readyState"] = WebSocket.CONNECTING;
   public onopen: ((event: Event) => void) | null = null;
   public onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
   public onclose: ((event: CloseEvent) => void) | null = null;
@@ -67,6 +67,33 @@ describe("LiveSupervisor", () => {
     const first = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body)) as { session_id: string };
     const second = JSON.parse(String(fetch.mock.calls[1]?.[1]?.body)) as { session_id: string };
     expect(second.session_id).not.toBe(first.session_id);
+  });
+
+  it("draws the private session id from the platform generator when no entropy is injected", async () => {
+    const getRandomValues = vi.spyOn(crypto, "getRandomValues");
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(json({ ticket, expires_at_ms: 1, lifetime_handle: handle }, 201));
+    const supervisor = new LiveSupervisor({ transport: transport(fetch), origin: "https://app.peppy.test", socket: () => new FakeSocket(), schedule: vi.fn() });
+    supervisor.start();
+    await settled();
+    const body = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body)) as { session_id: string };
+    expect(getRandomValues).toHaveBeenCalledWith(expect.any(Uint8Array));
+    expect(body.session_id).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    getRandomValues.mockRestore();
+  });
+
+  it("calls injected entropy without a receiver and encodes exactly the bytes it returns", async () => {
+    const seen: { receiver?: unknown } = {};
+    const randomBytes = function (this: unknown, bytes: Uint8Array): Uint8Array {
+      seen.receiver = this;
+      return bytes.fill(7);
+    };
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(json({ ticket, expires_at_ms: 1, lifetime_handle: handle }, 201));
+    const supervisor = new LiveSupervisor({ transport: transport(fetch), origin: "https://app.peppy.test", socket: () => new FakeSocket(), randomBytes, schedule: vi.fn() });
+    supervisor.start();
+    await settled();
+    const body = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body)) as { session_id: string };
+    expect(seen.receiver).toBeUndefined();
+    expect(body.session_id).toBe("BwcHBwcHBwcHBwcHBwcHBw");
   });
 
   it("closes and deletes before the owner can clear its transport token", async () => {
