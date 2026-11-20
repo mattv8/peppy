@@ -6,7 +6,7 @@ use crate::{
 };
 use peppy_hosted_api::DeviceRosterResponse;
 use serde::Serialize;
-use std::str::FromStr;
+use std::{str::FromStr, sync::Arc};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +84,21 @@ pub async fn revoke(session: &Session, device_id: &str) -> BridgeResult<()> {
         .map_err(roster_error)
 }
 
+pub async fn rename(session: &Arc<Session>, device_id: &str, name: &str) -> BridgeResult<()> {
+    let device_id = uuid::Uuid::from_str(device_id)
+        .map_err(|_| BridgeError::new("invalid-request", "The device ID is invalid."))?;
+    session
+        .api
+        .put_discard(
+            &format!("/v1/devices/{device_id}/name"),
+            &serde_json::json!({ "name": name }),
+        )
+        .await
+        .map_err(roster_error)?;
+    let _ = crate::sync::refresh_gateways(session).await;
+    Ok(())
+}
+
 fn roster_error(error: NetError) -> BridgeError {
     match error {
         NetError::Revoked => BridgeError::new(
@@ -94,6 +109,13 @@ fn roster_error(error: NetError) -> BridgeError {
             status,
             code: Some(code),
         } => match code.as_str() {
+            "invalid_device_name" => {
+                BridgeError::new("invalid_device_name", "Enter a valid device name.")
+            }
+            "operation_not_permitted" => BridgeError::new(
+                "operation_not_permitted",
+                "Renaming is not available for this account.",
+            ),
             "owner_required" => {
                 BridgeError::new("owner_required", "Only an owner can remove devices.")
             }
@@ -124,6 +146,23 @@ fn roster_error(error: NetError) -> BridgeError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn rename_errors_preserve_server_codes() {
+        for code in [
+            "invalid_device_name",
+            "operation_not_permitted",
+            "device_already_revoked",
+            "device_not_found",
+            "invalid_bearer",
+        ] {
+            let error = roster_error(NetError::Status {
+                status: 400,
+                code: Some(code.to_owned()),
+            });
+            assert_eq!(error.code, code);
+        }
+    }
 
     #[test]
     fn unreadable_capabilities_drop_only_the_setup_badge() {

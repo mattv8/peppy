@@ -356,6 +356,20 @@ describe("bridge subscriptions", () => {
     expect(eventMock.windowStop).toHaveBeenCalledOnce();
   });
 
+  it("passes rename arguments to the native command", async () => {
+    await tauriBridge.rename_device("device-id", "Phone");
+    expect(invokeMock).toHaveBeenCalledWith("rename_device", { deviceId: "device-id", name: "Phone" });
+  });
+
+  it("renames a fixture device and rejects missing devices", async () => {
+    const roster = await fixtureBridge.list_devices();
+    const device = roster.devices.find(item => !item.revoked)!;
+    await fixtureBridge.rename_device(device.id, "  Renamed  ");
+    expect((await fixtureBridge.list_devices()).devices.find(item => item.id === device.id)?.name).toBe("Renamed");
+    await fixtureBridge.rename_device(device.id, device.name);
+    await expect(fixtureBridge.rename_device("missing", "Phone")).rejects.toMatchObject({ code: "device_not_found" });
+  });
+
   it("passes declared arguments to native commands", async () => {
     await tauriBridge.list_devices();
     await tauriBridge.revoke_device("device-id");

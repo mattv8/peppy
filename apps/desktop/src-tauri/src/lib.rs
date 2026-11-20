@@ -3509,6 +3509,17 @@ async fn revoke_device(state: State<'_, AppState>, device_id: String) -> BridgeR
 }
 
 #[tauri::command]
+async fn rename_device(
+    state: State<'_, AppState>,
+    device_id: String,
+    name: String,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    devices::rename(&session, &device_id, &name).await
+}
+
+#[tauri::command]
 async fn list_contacts(
     state: State<'_, AppState>,
     book_id: String,
@@ -7353,6 +7364,7 @@ pub fn run() {
         set_notification_persistence,
         list_devices,
         revoke_device,
+        rename_device,
         list_contact_books,
         list_contacts,
         forget_contact_book,

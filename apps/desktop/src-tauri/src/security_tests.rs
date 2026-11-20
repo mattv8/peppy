@@ -630,6 +630,7 @@ fn device_management_commands_are_registered_for_the_main_window_only() {
     for command in [
         "list_devices",
         "revoke_device",
+        "rename_device",
         "request_contact_sync",
         "get_contact_sync_request",
     ] {

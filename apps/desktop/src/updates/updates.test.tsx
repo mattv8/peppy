@@ -1,7 +1,7 @@
-import { act, cleanup, render, renderHook } from "@testing-library/react";
+import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useUpdateActivity, useUpdateStatus, updateApi } from "./updates";
-import { UPDATE_STATUS_SERDE_FIXTURE, type UpdateStatus } from "./update-contract";
+import { UPDATE_STATUS_SERDE_FIXTURE, type Distribution, type UpdateStatus } from "./update-contract";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const listenMock = vi.hoisted(() => vi.fn(async () => vi.fn()));
@@ -137,6 +137,112 @@ describe("update bridge and activity reporter", () => {
     await act(async () => { pendingAction.reject({ code: "app-locked", message: "Unlock Peppy before restarting." }); });
 
     expect(result.current.error).toBe("Unlock Peppy before restarting. (app-locked)");
+  });
+});
+
+describe("update distribution", () => {
+  const freshUpdates = async () => {
+    vi.resetModules();
+    return import("./updates");
+  };
+
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("returns the distribution from the update status", async () => {
+    invokeMock.mockResolvedValue({ ...UPDATE_STATUS_SERDE_FIXTURE, distribution: "app_store" });
+    const { useUpdateDistribution } = await freshUpdates();
+    const { result } = renderHook(() => useUpdateDistribution(true));
+
+    await waitFor(() => expect(result.current).toBe("app_store"));
+  });
+
+  it("does not read the status while disabled", async () => {
+    const { useUpdateDistribution } = await freshUpdates();
+    const { result } = renderHook(() => useUpdateDistribution(false));
+    await act(async () => {});
+
+    expect(result.current).toBeUndefined();
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("does not cache a failed read", async () => {
+    invokeMock
+      .mockRejectedValueOnce({ code: "update-feed", message: "Update feed unavailable." })
+      .mockResolvedValueOnce({ ...UPDATE_STATUS_SERDE_FIXTURE, distribution: "direct" });
+    const { useUpdateDistribution } = await freshUpdates();
+    const failed = renderHook(() => useUpdateDistribution(true));
+    await act(async () => {});
+    expect(failed.result.current).toBeUndefined();
+    failed.unmount();
+
+    const retried = renderHook(() => useUpdateDistribution(true));
+
+    await waitFor(() => expect(retried.result.current).toBe("direct"));
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reuses a successful read across mounts", async () => {
+    invokeMock.mockResolvedValue({ ...UPDATE_STATUS_SERDE_FIXTURE, distribution: "direct" });
+    const { useUpdateDistribution } = await freshUpdates();
+    const first = renderHook(() => useUpdateDistribution(true));
+    await waitFor(() => expect(first.result.current).toBe("direct"));
+    first.unmount();
+
+    const second = renderHook(() => useUpdateDistribution(true));
+
+    await waitFor(() => expect(second.result.current).toBe("direct"));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("follows a successful status read when the distribution read failed", async () => {
+    invokeMock
+      .mockRejectedValueOnce({ code: "update-feed", message: "Update feed unavailable." })
+      .mockResolvedValue({ ...UPDATE_STATUS_SERDE_FIXTURE, distribution: "app_store" });
+    const { useUpdateDistribution, useUpdateStatus } = await freshUpdates();
+    const distribution = renderHook(() => useUpdateDistribution(true));
+    await act(async () => {});
+    expect(distribution.result.current).toBeUndefined();
+
+    const status = renderHook(() => useUpdateStatus(true));
+
+    await waitFor(() => expect(distribution.result.current).toBe("app_store"));
+    expect(status.result.current.status?.distribution).toBe("app_store");
+  });
+
+  it("returns a resolved distribution on the first render of a later mount", async () => {
+    invokeMock.mockResolvedValue({ ...UPDATE_STATUS_SERDE_FIXTURE, distribution: "app_store" });
+    const { useUpdateDistribution } = await freshUpdates();
+    const first = renderHook(() => useUpdateDistribution(true));
+    await waitFor(() => expect(first.result.current).toBe("app_store"));
+    first.unmount();
+
+    const firstRenders: (Distribution | undefined)[] = [];
+    renderHook(() => {
+      const distribution = useUpdateDistribution(true);
+      firstRenders.push(distribution);
+      return distribution;
+    });
+
+    expect(firstRenders[0]).toBe("app_store");
+  });
+
+  it("does not set state after unmounting before the read resolves", async () => {
+    const pending = deferred<UpdateStatus>();
+    invokeMock.mockReturnValue(pending.promise);
+    const { useUpdateDistribution } = await freshUpdates();
+    const consoleError = vi.spyOn(console, "error");
+    const { unmount } = renderHook(() => useUpdateDistribution(true));
+    unmount();
+
+    await act(async () => { pending.resolve({ ...UPDATE_STATUS_SERDE_FIXTURE, distribution: "app_store" }); });
+
+    expect(consoleError).not.toHaveBeenCalled();
   });
 });
 

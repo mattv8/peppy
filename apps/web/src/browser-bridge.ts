@@ -605,6 +605,7 @@ export class BrowserBridge implements DesktopBridge {
   public request_contact_repair(): Promise<ContactSyncStatus> { return this.call("request_contact_repair"); }
   public list_devices(): Promise<DeviceRosterView> { return this.call("list_devices"); }
   public revoke_device(deviceId: string): Promise<void> { return this.call("revoke_device", { deviceId }); }
+  public rename_device(deviceId: string, name: string): Promise<void> { return this.call("rename_device", { deviceId, name }); }
   public mcp_status(): Promise<import("@peppy/desktop-ui/bridge-contracts").McpDeviceStatus> { return this.call("mcp_status"); }
   public mcp_enable(): Promise<import("@peppy/desktop-ui/bridge-contracts").McpDeviceStatus> { return this.call("mcp_enable"); }
   public mcp_grants(): Promise<import("@peppy/desktop-ui/bridge-contracts").McpGrantView[]> { return this.call("mcp_grants"); }

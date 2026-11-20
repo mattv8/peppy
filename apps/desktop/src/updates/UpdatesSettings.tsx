@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { bridge } from "../bridge/bridge";
-import { peppyCopy } from "../generated/peppyCopy";
 import { updateApi, useUpdateStatus } from "./updates";
 
 const busyPhase = (phase: string) => ["checking", "downloading", "installing"].includes(phase);
@@ -28,19 +27,10 @@ function statusText(status: NonNullable<ReturnType<typeof useUpdateStatus>["stat
   return "";
 }
 
-function AppStoreUpdatesSettings({ currentVersion, error }: { currentVersion: string; error: string }) {
-  return <section id="settings-updates" className="settings-card" data-settings-section="updates" data-distribution="app_store" aria-labelledby="settings-updates-title">
-    <h2 id="settings-updates-title">Updates</h2>
-    <p id="update-status" role="status" aria-live="polite">{peppyCopy.updates_app_store_delivered}</p>
-    <p id="update-version"><strong>Peppy {currentVersion}</strong></p>
-    {error && <p className="settings-error" role="alert">{error}</p>}
-  </section>;
-}
-
 export function UpdatesSettings() {
   const { status, error, busy, refresh, run } = useUpdateStatus(true);
   const [notesError, setNotesError] = useState("");
-  if (status?.distribution === "app_store") return <AppStoreUpdatesSettings currentVersion={status.currentVersion} error={error} />;
+  if (status?.distribution === "app_store") return null;
   const phaseBusy = busy || Boolean(status && busyPhase(status.phase));
   const actionDisabled = phaseBusy || !status;
   const disabledBuild = status?.phase === "disabled";

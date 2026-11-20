@@ -425,6 +425,11 @@ async fn route_authority_inventory_is_complete_and_device_routes_reject_bad_bear
     let mutation_cases = vec![
         (
             Method::PUT,
+            format!("/v1/devices/{device}/name"),
+            json!({"name": "Phone"}),
+        ),
+        (
+            Method::PUT,
             "/v1/devices/self/wake-route".to_owned(),
             json!({"route_id": attachment, "wake_credential": ""}),
         ),

@@ -343,6 +343,24 @@ impl Api {
         .map(|_| ())
     }
 
+    /// Puts a body and discards a bounded response body.
+    pub async fn put_discard<B: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<(), NetError> {
+        read_bounded(
+            self.execute(
+                self.retention_mutation(self.http.put(self.url(path)))
+                    .json(body),
+            )
+            .await?,
+            MAX_JSON_BYTES,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// `DELETE` with a JSON body; any 2xx is success and the bounded body is discarded.
     pub async fn delete_json<B: Serialize + ?Sized>(
         &self,

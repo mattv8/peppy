@@ -627,14 +627,18 @@ describe("BrowserBridge", () => {
     const bridge = new BrowserBridge(port as unknown as MessagePort);
     const roster = bridge.list_devices();
     const revoked = bridge.revoke_device("device-id");
+    const renamed = bridge.rename_device("device-id", "Phone");
     expect(port.sent).toEqual([
       { id: 1, command: "list_devices", args: {} },
       { id: 2, command: "revoke_device", args: { deviceId: "device-id" } },
+      { id: 3, command: "rename_device", args: { deviceId: "device-id", name: "Phone" } },
     ]);
     port.reply({ id: 1, ok: true, value: { currentDeviceId: "device-id", devices: [] } });
     port.reply({ id: 2, ok: false, error: { code: "owner_required", message: "Denied" } });
+    port.reply({ id: 3, ok: true, value: undefined });
     await expect(roster).resolves.toEqual({ currentDeviceId: "device-id", devices: [] });
     await expect(revoked).rejects.toMatchObject({ code: "owner_required" });
+    await expect(renamed).resolves.toBeUndefined();
     bridge.dispose();
   });
 
