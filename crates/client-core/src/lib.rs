@@ -21,6 +21,7 @@
 //!   clear. Rolling a database back behind the application is not detectable.
 mod attachment_retention;
 mod compose_create;
+mod contact_book_deletion;
 mod contact_media;
 mod contact_photos;
 mod contact_queries;
@@ -794,6 +795,22 @@ pub enum PrivatePayload {
         book_id: String,
         contact_id: String,
         tombstone: serde_json::Value,
+    },
+    /// Vault-wide fence for one contact book (see `contact_book_deletion`). Non-terminal: it stays
+    /// the retained frontier of the book. `generation` is the canonical decimal string used by books.
+    ContactBookDeleted {
+        book_id: String,
+        owner_device_id: String,
+        generation: String,
+        deleted_at_ms: i64,
+    },
+    /// Terminal per-contact record of a vault-wide book deletion. Shares the identity of the
+    /// contact's own records, so it prunes their history.
+    ContactBookDeletedMember {
+        book_id: String,
+        contact_id: String,
+        owner_device_id: String,
+        generation: String,
     },
     ContactEditRequest {
         request: serde_json::Value,
@@ -5523,12 +5540,15 @@ impl Client {
                 }
             }
             let savepoint = tx.savepoint()?;
-            match apply_record(&savepoint, &ctx, &wire, historical)? {
+            let mut unknown_kind = false;
+            match apply_record(&savepoint, &ctx, &wire, historical, &mut unknown_kind)? {
                 None => {
                     savepoint.commit()?;
+                    // Consumed without effect; the tag tells a skipped kind apart from an applied one.
+                    let reason = unknown_kind.then_some(UNKNOWN_KIND_REASON);
                     tx.execute(
-                        "UPDATE journal SET status='applied' WHERE cursor=?",
-                        params![cursor],
+                        "UPDATE journal SET status='applied',reason=? WHERE cursor=?",
+                        params![reason, cursor],
                     )?;
                     report.applied += 1;
                 }
@@ -12495,6 +12515,8 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "contact_book_state"
             | "contact_upserted"
             | "contact_removed"
+            | "contact_book_deleted"
+            | "contact_book_deleted_member"
             | "contact_edit_request"
             | "contact_edit_result"
             | "contact_scan_request"
@@ -12506,12 +12528,17 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
     )
 }
 
+/// Journal `reason` on an applied row whose authenticated Event kind this build does not know.
+const UNKNOWN_KIND_REASON: &str = "unknown_kind";
+
 /// Applies one decrypted record. `Ok(Some(reason))` means quarantine; the caller rolls back.
+/// `consumed_unknown` is set when the record was an authenticated unknown Event kind.
 fn apply_record(
     conn: &Connection,
     ctx: &Ctx,
     wire: &[u8],
     historical: bool,
+    consumed_unknown: &mut bool,
 ) -> Result<Option<QuarantineReason>, Error> {
     use QuarantineReason as Q;
     let Ok(envelope) = serde_json::from_slice::<Envelope>(wire) else {
@@ -12519,7 +12546,10 @@ fn apply_record(
     };
     let payload = match open_payload(ctx, &envelope) {
         Ok(Opened::Payload(payload)) => payload,
-        Ok(Opened::UnknownEvent) => return Ok(None),
+        Ok(Opened::UnknownEvent) => {
+            *consumed_unknown = true;
+            return Ok(None);
+        }
         Err(reason) => return Ok(Some(reason)),
     };
     // Producer and compaction sequences are persisted as SQLite INTEGER values.
@@ -13405,6 +13435,8 @@ fn apply_record(
             payload @ (PrivatePayload::ContactBookState { .. }
             | PrivatePayload::ContactUpserted { .. }
             | PrivatePayload::ContactRemoved { .. }
+            | PrivatePayload::ContactBookDeleted { .. }
+            | PrivatePayload::ContactBookDeletedMember { .. }
             | PrivatePayload::ContactEditRequest { .. }
             | PrivatePayload::ContactEditResult { .. }
             | PrivatePayload::ContactScanRequest { .. }
@@ -13413,6 +13445,9 @@ fn apply_record(
             let Some(payload) = contact_media::ingest(conn, payload)? else {
                 return Ok(Some(Q::InvalidPayload));
             };
+            if contact_book_deletion::targets_own_book(&payload, &ctx.device_id.to_string()) {
+                return Ok(Some(Q::InvalidPayload));
+            }
             if !contacts::apply_event(
                 conn,
                 &producer.to_string(),
@@ -14611,6 +14646,8 @@ fn is_contact_payload(payload: &PrivatePayload) -> bool {
         PrivatePayload::ContactBookState { .. }
             | PrivatePayload::ContactUpserted { .. }
             | PrivatePayload::ContactRemoved { .. }
+            | PrivatePayload::ContactBookDeleted { .. }
+            | PrivatePayload::ContactBookDeletedMember { .. }
             | PrivatePayload::ContactEditRequest { .. }
             | PrivatePayload::ContactEditResult { .. }
             | PrivatePayload::ContactScanRequest { .. }
@@ -14843,6 +14880,19 @@ fn compaction_group(
             vec![book_id.as_bytes().to_vec(), contact_id.as_bytes().to_vec()],
             true,
         ),
+        // The book fence is the retained frontier of its book, so it is never terminal.
+        PrivatePayload::ContactBookDeleted { book_id, .. } => {
+            (b"contact-book", vec![book_id.as_bytes().to_vec()], false)
+        }
+        PrivatePayload::ContactBookDeletedMember {
+            book_id,
+            contact_id,
+            ..
+        } => (
+            b"contact",
+            vec![book_id.as_bytes().to_vec(), contact_id.as_bytes().to_vec()],
+            true,
+        ),
         // Requests are actionable for at most 7 days, far inside the 90-day terminal window, so
         // a request is a terminal root: an unanswered one expires instead of living forever.
         PrivatePayload::ContactEditRequest { request } => (
@@ -14987,6 +15037,14 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
             .zip(contact.get("id").and_then(serde_json::Value::as_str))
             .map(|(book, contact)| format!("contact:{book}:{contact}")),
         PrivatePayload::ContactRemoved {
+            book_id,
+            contact_id,
+            ..
+        } => Some(format!("contact:{book_id}:{contact_id}")),
+        PrivatePayload::ContactBookDeleted { book_id, .. } => {
+            Some(format!("contact-book:{book_id}"))
+        }
+        PrivatePayload::ContactBookDeletedMember {
             book_id,
             contact_id,
             ..
@@ -15337,6 +15395,8 @@ pub(crate) fn outbox_priority(purpose: EnvelopePurpose, payload: &PrivatePayload
         PrivatePayload::ContactBookState { .. }
         | PrivatePayload::ContactUpserted { .. }
         | PrivatePayload::ContactRemoved { .. }
+        | PrivatePayload::ContactBookDeleted { .. }
+        | PrivatePayload::ContactBookDeletedMember { .. }
         | PrivatePayload::ContactEditRequest { .. }
         | PrivatePayload::ContactEditResult { .. }
         | PrivatePayload::ContactScanRequest { .. }
@@ -21350,6 +21410,8 @@ mod tests {
             "reaction_result",
             "reaction_capability",
             "message_reactions",
+            "contact_book_deleted",
+            "contact_book_deleted_member",
             "future_unknown_event",
         ] {
             let mut envelope = Envelope {

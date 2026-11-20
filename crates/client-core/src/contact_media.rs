@@ -516,6 +516,20 @@ fn set_holder(
     Ok(())
 }
 
+/// Releases the edit-request photo holders and name-first markers of a deleted book. Contact
+/// holders are released per contact by `sync_contact` once the contact rows are gone.
+pub(crate) fn release_book_edit_holders(conn: &Connection, book_id: &str) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM contact_photo_references WHERE holder_kind='edit' AND book_id=?",
+        [book_id],
+    )?;
+    conn.execute(
+        "DELETE FROM contact_photo_names_first WHERE book_id=?",
+        [book_id],
+    )?;
+    Ok(())
+}
+
 /// Fourth reference class for `discard_unreferenced_attachment`: an active holder, a held or
 /// unregistered outbox row, or an unfinished server reclaim of a tracked uploaded photo.
 pub(crate) fn blocks_discard(conn: &Connection, id: AttachmentId) -> Result<bool, Error> {

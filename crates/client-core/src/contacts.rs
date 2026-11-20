@@ -119,7 +119,7 @@ struct ContactFields {
     birthday: Value,
 }
 
-fn invalid() -> Error {
+pub(crate) fn invalid() -> Error {
     Error::InvalidRequest("invalid contact request")
 }
 fn now() -> i64 {
@@ -136,7 +136,10 @@ pub(crate) fn req<'a>(v: &'a Value, key: &str) -> Result<&'a str, Error> {
 }
 /// Canonical non-negative decimal string (no sign, no leading zeros).
 pub(crate) fn revision(v: &Value, key: &str) -> Result<i64, Error> {
-    let text = req(v, key)?;
+    canonical_decimal(req(v, key)?)
+}
+/// Parses a canonical decimal string (the encoding of revisions and book generations).
+pub(crate) fn canonical_decimal(text: &str) -> Result<i64, Error> {
     if (text != "0" && text.starts_with('0')) || !text.bytes().all(|b| b.is_ascii_digit()) {
         return Err(invalid());
     }
@@ -370,6 +373,7 @@ CREATE TABLE IF NOT EXISTS contact_scan_holds(scan_id TEXT PRIMARY KEY, book_id 
 CREATE TABLE IF NOT EXISTS contact_scan_baselines(scan_id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS contact_scan_baseline(scan_id TEXT NOT NULL, contact_id TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(scan_id,contact_id));
 CREATE TABLE IF NOT EXISTS contact_restore_claims(book_id TEXT NOT NULL, tombstone_id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL, contact_id TEXT NOT NULL, PRIMARY KEY(book_id,tombstone_id));
+CREATE TABLE IF NOT EXISTS deleted_contact_books(book_id TEXT PRIMARY KEY, owner_device_id TEXT NOT NULL, generation INTEGER NOT NULL, deleted_at_ms INTEGER NOT NULL);
 ",
     )?;
     let has_key_epoch = conn
@@ -2402,6 +2406,9 @@ fn apply_peer(
             if !apply_book(conn, producer, book)? {
                 return Ok(false);
             }
+            if book_fenced(conn, book)? {
+                return Ok(true);
+            }
             let (id, rev, body) = peer_contact(contact, req(book, "id")?)?;
             conn.execute(
                 "INSERT INTO contacts(id,book_id,revision,body,deleted_at) VALUES(?,?,?,?,NULL) ON CONFLICT(book_id,id) DO UPDATE SET revision=excluded.revision,body=excluded.body,deleted_at=NULL WHERE excluded.revision > contacts.revision",
@@ -2421,6 +2428,14 @@ fn apply_peer(
                 && (req(book, "id")? != book_id || !apply_book(conn, producer, book)?)
             {
                 return Ok(false);
+            }
+            // Checked before the owner test: a deleted book has no stored owner left to match.
+            let book_generation = tombstone
+                .get("book")
+                .map(|book| revision(book, "generation"))
+                .transpose()?;
+            if crate::contact_book_deletion::covers(conn, book_id, book_generation)? {
+                return Ok(true);
             }
             let owner = stored_owner(conn, book_id)?;
             if !owner
@@ -2490,6 +2505,10 @@ fn apply_peer(
             let Some((body, current, book_id)) = row else {
                 return Ok(true);
             };
+            // A result for a book deleted vault-wide is a no-op, never a quarantine.
+            if crate::contact_book_deletion::covers(conn, &book_id, None)? {
+                return Ok(true);
+            }
             let request: Value = serde_json::from_str(&body).map_err(|_| Error::Database)?;
             if req(&request, "target_owner")? != producer
                 || stored_owner(conn, &book_id)?.is_some_and(|owner| owner != producer)
@@ -2516,8 +2535,18 @@ fn apply_peer(
                 conn, producer, historical, key_epoch, payload,
             )
         }
+        PrivatePayload::ContactBookDeleted { .. }
+        | PrivatePayload::ContactBookDeletedMember { .. } => {
+            crate::contact_book_deletion::apply(conn, payload)
+        }
         _ => Ok(false),
     }
+}
+
+/// Whether a book record is at or below its book's vault-wide deletion fence.
+fn book_fenced(conn: &Connection, book: &Value) -> Result<bool, Error> {
+    let generation = revision(book, "generation")?;
+    crate::contact_book_deletion::covers(conn, req(book, "id")?, Some(generation))
 }
 
 /// Book state from its owner. A foreign owner quarantines; an older generation is
@@ -2529,6 +2558,9 @@ fn apply_book(conn: &Connection, producer: &str, book: &Value) -> Result<bool, E
     }
     let generation = revision(book, "generation")?;
     book_state_revision(book)?;
+    if book_fenced(conn, book)? {
+        return Ok(true);
+    }
     let stored: Option<(String, i64, String)> = conn
         .query_row(
             "SELECT owner_device_id,generation,body FROM contact_books WHERE id=?",

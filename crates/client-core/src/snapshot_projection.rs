@@ -748,6 +748,9 @@ pub(super) fn reduce(
             )?;
             Ok(true)
         }
+        // Book deletion fences and member records are not staged yet (lane D1b adds staging).
+        PrivatePayload::ContactBookDeleted { .. }
+        | PrivatePayload::ContactBookDeletedMember { .. } => Ok(true),
         // Own contact books are local truth, rebuilt by rescanning the OS provider.
         PrivatePayload::ContactBookState { .. }
         | PrivatePayload::ContactUpserted { .. }
