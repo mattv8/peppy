@@ -296,6 +296,34 @@ assert_trusted_identity() {
   }
 }
 
+build_macos_with_dmg_recovery() (
+  local logfile build_status tee_status
+  local -a statuses bundle_args=(--bundles 'app,dmg')
+  logfile=$(mktemp)
+  trap 'rm -f "$logfile"' EXIT
+  if "$@" 2>&1 | tee "$logfile"; then
+    statuses=("${PIPESTATUS[@]}")
+  else
+    statuses=("${PIPESTATUS[@]}")
+  fi
+  build_status=${statuses[0]}
+  tee_status=${statuses[1]}
+  if [ "$tee_status" -ne 0 ]; then
+    echo 'could not capture Tauri build output' >&2
+    return "$tee_status"
+  fi
+  [ "$build_status" -ne 0 ] || return 0
+  if ! grep -Fq 'error running bundle_dmg.sh' "$logfile" ||
+     ! grep -Fq 'hdiutil: create failed - Resource busy' "$logfile"; then
+    return "$build_status"
+  fi
+  echo 'Retrying macOS DMG packaging after hdiutil resource busy' >&2
+  sleep 2
+  if [ -n "${PEPPY_TAURI_TARGET:-}" ]; then bundle_args+=(--target "$PEPPY_TAURI_TARGET"); fi
+  if [ -n "$json" ]; then bundle_args+=(--config "$json"); fi
+  pnpm --dir apps/desktop exec tauri bundle "${bundle_args[@]}"
+)
+
 if [[ -n "$VERSION" ]]; then
   if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
     echo 'version must match X.Y.Z or X.Y.Z-prerelease' >&2
@@ -341,7 +369,12 @@ if [ "$is_linux_prerelease_rpm" = true ]; then
   if [ "$TRUSTED_UPDATE_BUILD" = true ]; then assert_trusted_identity "$rpm_config"; fi
   pnpm --dir apps/desktop exec tauri bundle --bundles rpm --config "$rpm_config"
 else
-  if [ -n "$json" ]; then
+  if [ "$RUNNER_OS" = macOS ] && [ "$macos_distribution" = direct ] && [ "$BUNDLES" = app,dmg ]; then
+    build_args=(--bundles "$BUNDLES")
+    if [ -n "${PEPPY_TAURI_TARGET:-}" ]; then build_args+=(--target "$PEPPY_TAURI_TARGET"); fi
+    if [ -n "$json" ]; then build_args+=(--config "$json"); fi
+    build_macos_with_dmg_recovery pnpm --dir apps/desktop exec tauri build "${build_args[@]}" -- --locked
+  elif [ -n "$json" ]; then
     if [ "$macos_distribution" = app-store ]; then
       # Native App Store packaging signs afterward, including legacy MAS identities.
       pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" --target universal-apple-darwin --no-sign --config "$json" -- --locked --no-default-features
