@@ -1245,6 +1245,63 @@ async fn sweeping_unused_registrations_restores_registration_capacity() {
     fixture.cleanup().await;
 }
 
+async fn client_exists(pool: &PgPool, client_id: &str) -> bool {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mcp_oauth_clients WHERE client_id=$1)")
+        .bind(client_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn sweep_reclaims_idle_registrations_older_than_one_hour_and_keeps_younger_ones() {
+    let fixture = Fixture::new().await;
+    sqlx::query("INSERT INTO mcp_oauth_clients(client_id,client_name,redirect_uris,allowed_scopes,created_at) VALUES ('idle-older-client-01','older',ARRAY['https://client.example/callback'],ARRAY['conversations:read'],clock_timestamp()-interval '2 hours'), ('idle-younger-client-01','younger',ARRAY['https://client.example/callback'],ARRAY['conversations:read'],clock_timestamp()-interval '30 minutes')")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("SELECT mcp_sweep_oauth()")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert!(!client_exists(&fixture.pool, "idle-older-client-01").await);
+    assert!(client_exists(&fixture.pool, "idle-younger-client-01").await);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn sweep_keeps_a_registration_with_dependent_rows_at_any_age() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+    let client_id = register(app.clone()).await;
+    let code = approve(
+        app.clone(),
+        &authorize(app.clone(), &client_id, verifier).await,
+        &fixture.owner_token,
+    )
+    .await;
+    exchange(app, &client_id, &code, verifier).await;
+    let dependent_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM mcp_oauth_tokens WHERE client_id=$1")
+            .bind(&client_id)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert!(dependent_rows > 0);
+    sqlx::query("UPDATE mcp_oauth_clients SET created_at=clock_timestamp()-interval '400 days' WHERE client_id=$1")
+        .bind(&client_id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("SELECT mcp_sweep_oauth()")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert!(client_exists(&fixture.pool, &client_id).await);
+    fixture.cleanup().await;
+}
+
 #[tokio::test]
 async fn discovery_and_registration_advertise_accepted_oauth_metadata() {
     let fixture = Fixture::new().await;
