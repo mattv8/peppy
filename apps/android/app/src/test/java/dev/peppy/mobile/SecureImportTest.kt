@@ -30,7 +30,7 @@ import uniffi.peppy_mobile_bindings.NativeIncomingSms
 
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [34], application = android.app.Application::class)
 class SecureImportTest : GatewayTestBase() {
     private fun secure() = context.getSharedPreferences("peppy-secure", Context.MODE_PRIVATE)
 
