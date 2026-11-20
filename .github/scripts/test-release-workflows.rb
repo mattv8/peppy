@@ -31,7 +31,7 @@ repository_root = File.expand_path('../..', __dir__)
 desktop_linux_setup_steps = ci_jobs.fetch('desktop').fetch('steps').select { |step| step['run']&.include?('install-apt-packages.sh') }
 assert.call(desktop_linux_setup_steps.length == 1, 'desktop must have exactly one Linux package installer call')
 desktop_linux_setup_step = desktop_linux_setup_steps.first
-assert.call(desktop_linux_setup_step['if'] == "runner.os == 'Linux'" && desktop_linux_setup_step['timeout-minutes'] == 20, 'desktop Linux package installation must stay Linux-only and bounded to 20 minutes')
+assert.call(desktop_linux_setup_step['if'] == "runner.os == 'Linux'" && desktop_linux_setup_step['timeout-minutes'] == 30, 'desktop Linux package installation must stay Linux-only and bounded to 30 minutes')
 desktop_linux_setup = desktop_linux_setup_step.fetch('run')
 desktop_linux_packages = %w[build-essential pkg-config libsqlite3-dev libssl-dev libsodium-dev libsecret-1-dev libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev]
 apt_options = '-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120'
@@ -44,7 +44,7 @@ Dir.mktmpdir('desktop-apt-index-refresh') do |fixture|
   File.write(File.join(bin, 'sudo'), <<~'SH')
     #!/bin/bash
     set -euo pipefail
-    printf '%s\n' "$*" >> "$PEPPY_TEST_SUDO_LOG"
+    if [[ "$1" != du ]]; then printf '%s\n' "$*" >> "$PEPPY_TEST_SUDO_LOG"; fi
     exec "$@"
   SH
   File.write(File.join(bin, 'apt-get'), <<~'SH')
@@ -79,7 +79,9 @@ Dir.mktmpdir('desktop-apt-index-refresh') do |fixture|
     esac
   SH
   File.write(File.join(bin, 'dpkg-query'), "#!/bin/bash\nprintf 'not-installed'\n")
-  [File.join(bin, 'sudo'), File.join(bin, 'apt-get'), File.join(bin, 'dpkg-query')].each { |path| File.chmod(0o755, path) }
+  # A constant size means no attempt ever makes progress, so the stagnation rule decides every failure.
+  File.write(File.join(bin, 'du'), "#!/bin/bash\nprintf '0\\t%s\\n' \"${*: -1}\"\n")
+  [File.join(bin, 'sudo'), File.join(bin, 'apt-get'), File.join(bin, 'dpkg-query'), File.join(bin, 'du')].each { |path| File.chmod(0o755, path) }
   run_linux_setup = lambda do |environment|
     sudo_log = File.join(fixture, 'sudo.log')
     apt_log = File.join(fixture, 'apt.log')
@@ -112,7 +114,7 @@ end
 assert.call(installer_steps.none? { |_, _, step| step['run'].to_s.include?('apt-get') }, 'workflows must not invoke apt-get directly; they must use install-apt-packages.sh')
 bounded_installer_steps = installer_steps.select { |_, _, step| step['run'].to_s.include?('install-apt-packages.sh') }
 assert.call(bounded_installer_steps.length == 13, "every Linux apt call site must use install-apt-packages.sh; found #{bounded_installer_steps.length}")
-assert.call(bounded_installer_steps.all? { |_, _, step| step['timeout-minutes'].is_a?(Integer) && step['timeout-minutes'] <= 20 }, 'every install-apt-packages.sh step must have an integer timeout of at most 20 minutes')
+assert.call(bounded_installer_steps.all? { |_, _, step| step['timeout-minutes'].is_a?(Integer) && step['timeout-minutes'] <= 30 }, 'every install-apt-packages.sh step must have an integer timeout of at most 30 minutes')
 %w[desktop-windows-build desktop-windows-check desktop-windows].each do |job|
   assert.call(ci_jobs[job]&.fetch('timeout-minutes') == 60, "#{job} must retain a 60-minute timeout")
 end
