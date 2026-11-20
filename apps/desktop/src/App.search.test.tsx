@@ -339,7 +339,7 @@ describe("App search navigation", () => {
   it.each([
     { kind: "conversation", conversationId: "conv-river", title: "River", subtitle: "Recent" } as LocalSearchHit,
     { kind: "message", conversationId: "conv-river", messageId: "guard-target", title: "River", snippet: "Guarded", timestamp: "1788435180000" } as LocalSearchHit,
-    { kind: "contact", bookId: "book-pixel8", contactId: "contact-river", title: "River Park", subtitle: "+12025550124" } as LocalSearchHit,
+    { kind: "contact", bookId: "book-pixel8", contactId: "contact-river", title: "River Park", subtitle: "+12025550124", phones: ["+12025550124"], phoneCount: 1 } as LocalSearchHit,
   ])("cancels $kind search activation before any App navigation side effect", async (hit) => {
     const saveDraft = vi.spyOn(bridge, "save_draft");
     render(<App hostKind="browser" />);
@@ -431,7 +431,7 @@ describe("App search navigation", () => {
   it("consumes a contact target once so returning to Contacts does not reapply it", async () => {
     render(<App hostKind="browser" />);
     await screen.findAllByText("Can you send over the estimate?");
-    await activate({ kind: "contact", bookId: "book-pixel8", contactId: "contact-river", title: "River Park", subtitle: "+12025550124" });
+    await activate({ kind: "contact", bookId: "book-pixel8", contactId: "contact-river", title: "River Park", subtitle: "+12025550124", phones: ["+12025550124"], phoneCount: 1 });
     await waitFor(() => expect(screen.getByLabelText("Contact detail")).toHaveTextContent("River Park"));
 
     fireEvent.click(screen.getByRole("button", { name: "Conversations" }));

@@ -164,6 +164,9 @@ export type ContactEmail = { id?: string; label: string; displayLabel?: string; 
 export type ContactAddress = { id?: string; label: string; displayLabel?: string; formatted?: string; street?: string; poBox?: string; neighborhood?: string; subLocality?: string; city?: string; subAdministrativeArea?: string; state?: string; postalCode?: string; country?: string; isoCountryCode?: string; readOnly?: boolean };
 export type ContactBirthday = { year?: number; month?: number; day?: number };
 export type ContactSort = { key: "given" | "family"; direction: "asc" | "desc" };
+/** `cursor` is opaque: pass the previous `nextCursor` back unchanged. `through` asks for rows up to and including that contact. */
+export type ContactPageRequest = { cursor?: string; through?: string; sort?: ContactSort };
+export type ContactPage = { contacts: ContactView[]; total: number; nextCursor?: string; throughFound?: boolean };
 export type ContactView = { id: string; bookId: string; revision?: string; displayName: string; givenName?: string; familyName?: string; nickname?: string; phones: ContactPhone[]; emails: ContactEmail[]; addresses: ContactAddress[]; organization?: string; title?: string; birthday?: ContactBirthday; notes?: string; photoDataUrl?: string; photoPending?: boolean; pendingEditId?: string; pendingEditState?: "pending" | "awaiting-approval" | "outcome-unknown" | "conflict" | "rejected" | "failed" | "expired"; pendingEditSummary?: string; deletedAt?: string };
 export type ContactEditRequestInput = { targetBookId: string; kind: "create" | "update" | "delete"; contactId?: string; baseRevision?: string; patches: unknown[]; photo: { kind: "keep" } | { kind: "remove" } | { kind: "set"; croppedDataUrl: string } };
 export type ContactEditOutcome = { state: "pending"; requestId: string } | { state: "applied"; newRevision: string } | { state: "awaiting-approval" } | { state: "conflict"; conflictSummary: string } | { state: "rejected"; reason: string } | { state: "expired" };
@@ -369,6 +372,8 @@ export interface DesktopBridge {
   clear_contact_name_pin(address: string, sourceDeviceId?: string): Promise<void>;
   /** One page of at most 200 contacts; request the next page with `offset`. */
   list_contacts(bookId: string, query?: string, offset?: number, sort?: ContactSort): Promise<ContactView[]>;
+  /** Cursor page of at most 200 contacts; pass `nextCursor` back unchanged to continue. */
+  list_contacts_page(bookId: string, request: ContactPageRequest): Promise<ContactPage>;
   submit_contact_edit(input: ContactEditRequestInput): Promise<ContactEditOutcome>;
   list_contact_edits(bookId?: string): Promise<ContactEditStatus[]>;
   search_contact_recipients(query: string, sourceDeviceId?: string): Promise<RecipientSuggestion[]>;

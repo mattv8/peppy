@@ -72,6 +72,7 @@ import type {
   MediaPageItem,
   MediaPage,
   MediaOpen,
+  LocalSearchHit,
   LocalSearchRequest,
   LocalSearchPage,
   SearchIndexProgress,
@@ -360,11 +361,58 @@ let fixtureWebhookSequence = 4;
 const fixtureWebhookSecrets = new Map(fixtureWebhooks.map((webhook) => [webhook.id, `whsec_fixture_${webhook.id.replaceAll("-", "")}`]));
 const fixtureWebhook = (input: WebhookInput, id: string): WebhookView => ({ id, name: input.name?.trim() || new URL(input.url).hostname.replace(/^www\./, ""), nameIsDerived: !input.name?.trim(), url: input.url, events: [...input.events], filterMode: input.filterMode, filter: input.filter.map(entry => ({ ...entry })), paused: input.paused, createdAt: "2026-11-07T12:00:00Z", lastDeliveryState: "never", lastDeliveryAt: null, lastStatusCode: null, lastError: null, pendingDeliveries: 0 });
 const fixtureError = (code: string, message: string): BridgeError => ({ code, message });
+const FIXTURE_CONTACT_PAGE_SIZE = 200;
+const fixtureContactRows = (bookId: string): ContactView[] => [{ id: "contact-aurora", bookId, revision: "1", displayName: "Aurora Chen", givenName: "Aurora", familyName: "Chen", phones: [{ label: "mobile", number: "+12025550123" }], emails: [{ label: "work", address: "aurora@example.com" }], addresses: [], organization: "Northstar", title: "Director", notes: "Prefers SMS", pendingEditId: "edit-aurora", pendingEditState: "pending", pendingEditSummary: "Phone number update" }, { id: "contact-river", bookId, revision: "1", displayName: "River Park", givenName: "River", familyName: "Park", phones: [{ label: "mobile", number: "+12025550124" }], emails: [], addresses: [] }, { id: "contact-mina", bookId, revision: "1", displayName: "Mina Torres", givenName: "Mina", familyName: "Torres", phones: [{ label: "work", number: "+12025550125" }], emails: [], addresses: [] }];
+/** The fixture book's contacts in the requested order; `list_contacts` and `list_contacts_page` share it. */
+const sortedFixtureContacts = (bookId: string, query: string, sort: ContactSort): ContactView[] => {
+  const contacts = fixtureContactRows(bookId);
+  const sortKey: "givenName" | "familyName" = sort.key === "given" ? "givenName" : "familyName";
+  const otherSortKey: "givenName" | "familyName" = sort.key === "given" ? "familyName" : "givenName";
+  const direction = sort.direction === "desc" ? -1 : 1;
+  const compareText = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0;
+  const sortParts = (contact: ContactView) => {
+    const selected = (contact[sortKey] ?? "").trim().toLowerCase();
+    const other = (contact[otherSortKey] ?? "").trim().toLowerCase();
+    const display = contact.displayName.trim().toLowerCase();
+    return { selected, other, display, primary: selected || other || display };
+  };
+  return contacts.filter(contact => !query || `${contact.displayName} ${contact.phones.map(phone => phone.number).join(" ")}`.toLowerCase().includes(query.toLowerCase())).sort((left, right) => {
+    const leftParts = sortParts(left);
+    const rightParts = sortParts(right);
+    if (!leftParts.primary || !rightParts.primary) return !leftParts.primary && !rightParts.primary ? compareText(left.id, right.id) : !leftParts.primary ? 1 : -1;
+    return direction * (compareText(leftParts.primary, rightParts.primary) || compareText(leftParts.other, rightParts.other) || compareText(leftParts.display, rightParts.display)) || compareText(left.id, right.id);
+  });
+};
+/** Opaque to callers; the fixture encodes the row offset of the next page. */
+const encodeFixtureContactCursor = (offset: number) => btoa(`fixture-offset:${offset}`);
+const decodeFixtureContactCursor = (cursor: string | undefined): number => {
+  if (cursor === undefined) return 0;
+  const match = /^fixture-offset:(\d+)$/.exec(atob(cursor));
+  if (!match) throw fixtureError("invalid-cursor", "The contact page cursor is invalid.");
+  return Number(match[1]);
+};
 const fixtureSearchContacts = [
-  { id: "contact-aurora", bookId: "book-pixel8", title: "Aurora Chen", subtitle: "+12025550123" },
-  { id: "contact-river", bookId: "book-pixel8", title: "River Park", subtitle: "+12025550124" },
-  { id: "contact-mina", bookId: "book-pixel8", title: "Mina Torres", subtitle: "+12025550125" },
+  { id: "contact-aurora", bookId: "book-pixel8", title: "Aurora Chen", phones: ["+12025550123"], organization: "Northstar" },
+  { id: "contact-river", bookId: "book-pixel8", title: "River Park", phones: ["+12025550124"] },
+  { id: "contact-mina", bookId: "book-pixel8", title: "Mina Torres", phones: ["+12025550125"] },
 ];
+const fixtureSearchContactHit = (contact: (typeof fixtureSearchContacts)[number], query: string): LocalSearchHit & { kind: "contact" } => {
+  const bookLabel = fixtureContactBooks.find(book => book.id === contact.bookId)?.deviceName;
+  const matchSnippet = contact.phones.find(phone => phone.toLowerCase().includes(query));
+  const phoneMatch = !contact.title.toLowerCase().includes(query) && matchSnippet !== undefined ? { matchField: "Phone", matchSnippet } : {};
+  return {
+    kind: "contact",
+    bookId: contact.bookId,
+    contactId: contact.id,
+    title: contact.title,
+    subtitle: contact.phones[0] ?? "",
+    phones: contact.phones.slice(0, 3),
+    phoneCount: contact.phones.length,
+    ...(contact.organization ? { organization: contact.organization } : {}),
+    ...(bookLabel ? { bookLabel } : {}),
+    ...phoneMatch,
+  };
+};
 const fixtureSearch = (input: LocalSearchRequest): LocalSearchPage => {
   const query = input.query.trim().toLocaleLowerCase();
   if (!query) return { query: input.query, items: [], indexState: "ready", hasMore: { conversation: false, message: false, contact: false } };
@@ -372,7 +420,7 @@ const fixtureSearch = (input: LocalSearchRequest): LocalSearchPage => {
   const accepts = (kind: "conversation" | "message" | "contact") => !input.kind || input.kind === "all" || input.kind === kind;
   const conversations = fixtureSnapshot.conversations.filter(item => `${item.name} ${item.participants?.join(" ") ?? ""}`.toLocaleLowerCase().includes(query)).map(item => ({ kind: "conversation" as const, conversationId: item.id, title: item.name, subtitle: item.preview })).slice(0, limit);
   const messages = fixtureSnapshot.conversations.flatMap(conversation => conversation.messages.filter(message => `${message.body} ${message.subject ?? ""}`.toLocaleLowerCase().includes(query)).map(message => ({ kind: "message" as const, conversationId: conversation.id, messageId: message.id, title: conversation.name, snippet: message.body, timestamp: message.timestamp }))).slice(0, limit);
-  const contacts = fixtureSearchContacts.filter(contact => `${contact.title} ${contact.subtitle}`.toLocaleLowerCase().includes(query)).map(contact => ({ kind: "contact" as const, bookId: contact.bookId, contactId: contact.id, title: contact.title, subtitle: contact.subtitle })).slice(0, limit);
+  const contacts = fixtureSearchContacts.filter(contact => `${contact.title} ${contact.phones.join(" ")}`.toLocaleLowerCase().includes(query)).map(contact => fixtureSearchContactHit(contact, query)).slice(0, limit);
   const items = [...(accepts("conversation") ? conversations : []), ...(accepts("message") ? messages : []), ...(accepts("contact") ? contacts : [])];
   return { query: input.query, items, indexState: "ready", hasMore: { conversation: false, message: false, contact: false } };
 };
@@ -763,24 +811,19 @@ export const fixtureBridge: DesktopBridge = {
     fixtureNamePins.set(address, { bookId, contactId });
   },
   clear_contact_name_pin: async address => { fixtureNamePins.delete(address); },
-  list_contacts: async (bookId, query = "", offset = 0, sort = { key: "family" as const, direction: "asc" as const }) => {
-    const contacts = [{ id: "contact-aurora", bookId, revision: "1", displayName: "Aurora Chen", givenName: "Aurora", familyName: "Chen", phones: [{ label: "mobile", number: "+12025550123" }], emails: [{ label: "work", address: "aurora@example.com" }], addresses: [], organization: "Northstar", title: "Director", notes: "Prefers SMS", pendingEditId: "edit-aurora", pendingEditState: "pending" as const, pendingEditSummary: "Phone number update" }, { id: "contact-river", bookId, revision: "1", displayName: "River Park", givenName: "River", familyName: "Park", phones: [{ label: "mobile", number: "+12025550124" }], emails: [], addresses: [] }, { id: "contact-mina", bookId, revision: "1", displayName: "Mina Torres", givenName: "Mina", familyName: "Torres", phones: [{ label: "work", number: "+12025550125" }], emails: [], addresses: [] }];
-    const sortKey: "givenName" | "familyName" = sort.key === "given" ? "givenName" : "familyName";
-    const otherSortKey: "givenName" | "familyName" = sort.key === "given" ? "familyName" : "givenName";
-    const direction = sort.direction === "desc" ? -1 : 1;
-    const compareText = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0;
-    const sortParts = (contact: ContactView) => {
-      const selected = (contact[sortKey] ?? "").trim().toLowerCase();
-      const other = (contact[otherSortKey] ?? "").trim().toLowerCase();
-      const display = contact.displayName.trim().toLowerCase();
-      return { selected, other, display, primary: selected || other || display };
+  list_contacts: async (bookId, query = "", offset = 0, sort = { key: "family" as const, direction: "asc" as const }) => sortedFixtureContacts(bookId, query, sort).slice(offset, offset + FIXTURE_CONTACT_PAGE_SIZE),
+  list_contacts_page: async (bookId, request) => {
+    const sorted = sortedFixtureContacts(bookId, "", request.sort ?? { key: "family", direction: "asc" });
+    const start = decodeFixtureContactCursor(request.cursor);
+    const throughIndex = request.through === undefined ? -1 : sorted.findIndex(contact => contact.id === request.through);
+    const end = throughIndex >= 0 ? throughIndex + 1 : sorted.length;
+    const pageEnd = Math.min(end, start + FIXTURE_CONTACT_PAGE_SIZE);
+    return {
+      contacts: sorted.slice(start, pageEnd),
+      total: sorted.length,
+      ...(pageEnd < end ? { nextCursor: encodeFixtureContactCursor(pageEnd) } : {}),
+      ...(request.through === undefined ? {} : { throughFound: throughIndex >= 0 }),
     };
-    return contacts.filter(contact => !query || `${contact.displayName} ${contact.phones.map(phone => phone.number).join(" ")}`.toLowerCase().includes(query.toLowerCase())).sort((left, right) => {
-      const leftParts = sortParts(left);
-      const rightParts = sortParts(right);
-      if (!leftParts.primary || !rightParts.primary) return !leftParts.primary && !rightParts.primary ? compareText(left.id, right.id) : !leftParts.primary ? 1 : -1;
-      return direction * (compareText(leftParts.primary, rightParts.primary) || compareText(leftParts.other, rightParts.other) || compareText(leftParts.display, rightParts.display)) || compareText(left.id, right.id);
-    }).slice(offset, offset + 200);
   },
   submit_contact_edit: async () => ({ state: "pending", requestId: `fixture-${Date.now()}` }),
   list_contact_edits: async bookId => [{ requestId: "edit-aurora", bookId: bookId ?? "book-pixel8", state: "pending" }],
@@ -956,7 +999,7 @@ export const tauriBridge: DesktopBridge = {
   attachment_retention_state: attachmentId => invoke("attachment_retention_state", { attachmentId }),
   retryRcsMediaDownload: (messageId, attachmentIndex) => invoke("retry_rcs_media_download", { messageId, attachmentIndex }),
   load_state: (conversationId, historyFromMessageId, options) => invoke("load_state", { conversationId, historyFromMessageId, metadataOnly: options?.metadataOnly }), search_local: input => invoke("search_local", { input }), advance_search_index: input => invoke("advance_search_index", { input }), get_history_search: () => invoke("get_history_search"), start_history_search: ({ operationId }) => invoke("start_history_search", { input: { operationId } }), cancel_history_search: ({ attemptId }) => invoke("cancel_history_search", { input: { attemptId } }), load_message_window: input => invoke("load_message_window", { input }), open_external_url: url => invoke("open_external_url", { url }), load_history: (conversationId, beforeMessageId) => invoke("load_history", { conversationId, beforeMessageId }), configure_server: origin => invoke("configure_server", { origin }), unlock_sync: () => invoke("unlock_sync"), get_app_lock_status: () => invoke("get_app_lock_status"), retry_app_lock_check: () => invoke("retry_app_lock_check"), set_app_lock: enabled => invoke("set_app_lock", { enabled }), unlock_app: () => invoke("unlock_app"), save_draft: input => invoke("save_draft", { input }), discard_draft: input => invoke("discard_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), copy_one_time_code: target => invoke("copy_one_time_code", { target }), mark_all_read: () => invoke("mark_all_read"), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), open_notification_settings: () => invoke("open_notification_settings"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), retry_snapshot_import: async () => undefined, save_attachment: id => invoke("save_attachment", { id }), request_attachment_download: id => invoke("request_attachment_download", { id }), media_page: (conversationId, cursor, limit) => invoke("media_page", { conversationId, cursor, limit }), open_media: id => invoke("open_media", { id }), close_media: (id, url) => invoke("close_media", { id, url }), load_media: id => invoke("load_media", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), set_maximize_button_region: region => invoke("set_maximize_button_region", { region }), subscribe: listener => subscribeEvent("peppy://state", () => listener(), listener), subscribe_maximize_button_hover: listener => subscribeWindowEvent("peppy://maximize-button-hover", payload => { if (typeof payload === "boolean") listener(payload); }), subscribe_drafts: listener => subscribeWindowEvent("peppy://draft", payload => { if (isDraft(payload)) listener(payload); }), subscribe_typing: listener => subscribeWindowEvent("peppy://typing", payload => { if (isTypingSignal(payload)) listener(payload); }), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
-   list_devices: () => invoke("list_devices"), revoke_device: deviceId => invoke("revoke_device", { deviceId }), list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), set_contact_book_lookup: (bookId, enabled) => invoke("set_contact_book_lookup", { bookId, enabled }), list_contact_name_candidates: (address, sourceDeviceId) => invoke("list_contact_name_candidates", { address, sourceDeviceId }), set_contact_name_pin: (address, bookId, contactId, sourceDeviceId) => invoke("set_contact_name_pin", { address, sourceDeviceId, bookId, contactId }), clear_contact_name_pin: (address, sourceDeviceId) => invoke("clear_contact_name_pin", { address, sourceDeviceId }), list_contacts: (bookId, query, offset, sort) => invoke("list_contacts", { bookId, query, offset, sort }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), request_contact_sync: bookId => invoke("request_contact_sync", { bookId }), get_contact_sync_request: bookId => invoke("get_contact_sync_request", { bookId }), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_origin_url: () => invoke("hosted_origin_url"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), billing_summary: () => invoke("billing_summary"), enrollment_discover: discoverEnrollment, enrollment_start_over: () => invoke("enrollment_start_over"), enrollment_create_owner: input => invoke("enrollment_create_owner", { input }), enrollment_sign_in: input => invoke("enrollment_sign_in", { input }), enrollment_connect_shared_secret: input => invoke("enrollment_connect_shared_secret", { input }), enrollment_begin_vault_request: input => invoke("enrollment_begin_vault_request", { input }), enrollment_vault_request_status: () => invoke("enrollment_vault_request_status"), enrollment_create_vault: input => invoke("enrollment_create_vault", { input }), enrollment_add_phone: method => invoke("enrollment_add_phone", { method }), enrollment_rotate_phone: method => invoke("enrollment_rotate_phone", { method }), enrollment_cancel_phone: () => invoke("enrollment_cancel_phone"), reveal_vault_secret: () => invoke("reveal_vault_secret"), enrollment_status: () => invoke("enrollment_status"), enrollment_approve: () => invoke("enrollment_approve"), enrollment_cancel: () => invoke("enrollment_cancel"), enrollment_sign_out: () => invoke("enrollment_sign_out"),
+   list_devices: () => invoke("list_devices"), revoke_device: deviceId => invoke("revoke_device", { deviceId }), list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), set_contact_book_lookup: (bookId, enabled) => invoke("set_contact_book_lookup", { bookId, enabled }), list_contact_name_candidates: (address, sourceDeviceId) => invoke("list_contact_name_candidates", { address, sourceDeviceId }), set_contact_name_pin: (address, bookId, contactId, sourceDeviceId) => invoke("set_contact_name_pin", { address, sourceDeviceId, bookId, contactId }), clear_contact_name_pin: (address, sourceDeviceId) => invoke("clear_contact_name_pin", { address, sourceDeviceId }), list_contacts: (bookId, query, offset, sort) => invoke("list_contacts", { bookId, query, offset, sort }), list_contacts_page: (bookId, request) => invoke("list_contacts_page", { bookId, request }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), request_contact_sync: bookId => invoke("request_contact_sync", { bookId }), get_contact_sync_request: bookId => invoke("get_contact_sync_request", { bookId }), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_origin_url: () => invoke("hosted_origin_url"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), billing_summary: () => invoke("billing_summary"), enrollment_discover: discoverEnrollment, enrollment_start_over: () => invoke("enrollment_start_over"), enrollment_create_owner: input => invoke("enrollment_create_owner", { input }), enrollment_sign_in: input => invoke("enrollment_sign_in", { input }), enrollment_connect_shared_secret: input => invoke("enrollment_connect_shared_secret", { input }), enrollment_begin_vault_request: input => invoke("enrollment_begin_vault_request", { input }), enrollment_vault_request_status: () => invoke("enrollment_vault_request_status"), enrollment_create_vault: input => invoke("enrollment_create_vault", { input }), enrollment_add_phone: method => invoke("enrollment_add_phone", { method }), enrollment_rotate_phone: method => invoke("enrollment_rotate_phone", { method }), enrollment_cancel_phone: () => invoke("enrollment_cancel_phone"), reveal_vault_secret: () => invoke("reveal_vault_secret"), enrollment_status: () => invoke("enrollment_status"), enrollment_approve: () => invoke("enrollment_approve"), enrollment_cancel: () => invoke("enrollment_cancel"), enrollment_sign_out: () => invoke("enrollment_sign_out"),
   open_mcp_oauth_redirect: url => invoke("open_mcp_oauth_redirect", { url }),
   mcp_status: () => invoke("mcp_status"),
   mcp_enable: () => invoke("mcp_enable"),

@@ -3027,7 +3027,7 @@ describe("new-recipient drafts", () => {
       id: `other-${index}`, bookId: "book", revision: "1", displayName: "Other", phones: [], emails: [], addresses: [],
     }));
     vi.spyOn(bridge, "search_local").mockResolvedValue({
-      query: "Ada", items: [{ kind: "contact", bookId: "book", contactId: "ada", title: "Ada", subtitle: "Contact" }], indexState: "ready",
+      query: "Ada", items: [{ kind: "contact", bookId: "book", contactId: "ada", title: "Ada", subtitle: "Contact", phones: [], phoneCount: 0 }], indexState: "ready",
       hasMore: { conversation: false, message: false, contact: false },
     });
     const listContacts = vi.spyOn(bridge, "list_contacts").mockImplementation(async (_book, _query, offset) => offset === 0
@@ -3044,7 +3044,7 @@ describe("new-recipient drafts", () => {
 
   it("keeps a missing contact lookup inline and does not create a draft", async () => {
     vi.spyOn(bridge, "search_local").mockResolvedValue({
-      query: "Missing", items: [{ kind: "contact", bookId: "book", contactId: "missing", title: "Missing", subtitle: "Contact" }], indexState: "ready",
+      query: "Missing", items: [{ kind: "contact", bookId: "book", contactId: "missing", title: "Missing", subtitle: "Contact", phones: [], phoneCount: 0 }], indexState: "ready",
       hasMore: { conversation: false, message: false, contact: false },
     });
     vi.spyOn(bridge, "list_contacts").mockResolvedValue([]);

@@ -552,6 +552,39 @@ describe("fixture draft saves", () => {
     expect((await fixtureBridge.load_state()).toneOverrides).toEqual({});
   });
 
+  it("sends cursor page requests with the book and request arguments", async () => {
+    const request = { cursor: "cursor-token", through: "contact-id", sort: { key: "given" as const, direction: "desc" as const } };
+    await tauriBridge.list_contacts_page("book-id", request);
+
+    expect(invokeMock).toHaveBeenCalledWith("list_contacts_page", { bookId: "book-id", request });
+  });
+
+  it("pages fixture contacts in list order and resumes from an opaque cursor", async () => {
+    const listed = await fixtureBridge.list_contacts("book-pixel8", "", 0);
+    const first = await fixtureBridge.list_contacts_page("book-pixel8", {});
+    expect(first).toEqual({ contacts: listed, total: listed.length });
+    expect(first).not.toHaveProperty("nextCursor");
+
+    const resumed = await fixtureBridge.list_contacts_page("book-pixel8", { cursor: btoa("fixture-offset:1") });
+    expect(resumed.contacts).toEqual(listed.slice(1));
+    expect(resumed.total).toBe(listed.length);
+    expect(resumed).not.toHaveProperty("nextCursor");
+
+    const givenDesc = { key: "given" as const, direction: "desc" as const };
+    expect((await fixtureBridge.list_contacts_page("book-pixel8", { sort: givenDesc })).contacts).toEqual(await fixtureBridge.list_contacts("book-pixel8", "", 0, givenDesc));
+  });
+
+  it("returns fixture contacts through a requested contact, and reports whether it was found", async () => {
+    const listed = await fixtureBridge.list_contacts("book-pixel8", "", 0);
+    expect(await fixtureBridge.list_contacts_page("book-pixel8", { through: "contact-river" })).toEqual({ contacts: listed.slice(0, 2), total: listed.length, throughFound: true });
+    expect(await fixtureBridge.list_contacts_page("book-pixel8", { through: "contact-missing" })).toEqual({ contacts: listed, total: listed.length, throughFound: false });
+  });
+
+  it("fills fixture contact search hits with phones and match context when the name did not match", async () => {
+    const page = await fixtureBridge.search_local({ query: "2025550124", kind: "contact" } as never);
+    expect(page.items).toEqual([{ kind: "contact", bookId: "book-pixel8", contactId: "contact-river", title: "River Park", subtitle: "+12025550124", phones: ["+12025550124"], phoneCount: 1, bookLabel: "Pixel 8", matchField: "Phone", matchSnippet: "+12025550124" }]);
+  });
+
   it("hides a fixture book from names until restored, and honors a pin only for a current candidate", async () => {
     await fixtureBridge.set_contact_book_lookup("book-pixel8", false);
     expect((await fixtureBridge.list_contact_books()).find(book => book.id === "book-pixel8")?.lookupExcluded).toBe(true);

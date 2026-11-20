@@ -599,6 +599,7 @@ export class BrowserBridge implements DesktopBridge {
   public set_contact_name_pin(address: string, bookId: string, contactId: string, sourceDeviceId?: string): Promise<void> { return this.call("set_contact_name_pin", { address, sourceDeviceId, bookId, contactId }); }
   public clear_contact_name_pin(address: string, sourceDeviceId?: string): Promise<void> { return this.call("clear_contact_name_pin", { address, sourceDeviceId }); }
   public list_contacts(bookId: string, query?: string, offset?: number, sort?: import("@peppy/desktop-ui/bridge-contracts").ContactSort): Promise<ContactView[]> { return this.call("list_contacts", { bookId, query, offset, sort }); }
+  public list_contacts_page(bookId: string, request: import("@peppy/desktop-ui/bridge-contracts").ContactPageRequest): Promise<import("@peppy/desktop-ui/bridge-contracts").ContactPage> { return this.call("list_contacts_page", { bookId, request }); }
   public submit_contact_edit(input: ContactEditRequestInput): Promise<ContactEditOutcome> { return this.call("submit_contact_edit", { input }); }
   public list_contact_edits(bookId?: string): Promise<ContactEditStatus[]> { return this.call("list_contact_edits", { bookId }); }
   public search_contact_recipients(query: string, sourceDeviceId?: string): Promise<RecipientSuggestion[]> { return this.call("search_contact_recipients", { query, sourceDeviceId }); }
