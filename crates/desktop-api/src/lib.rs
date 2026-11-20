@@ -51,6 +51,7 @@ mod send_again_tests;
 pub struct Snapshot {
     pub version: &'static str,
     pub mode: &'static str,
+    pub writes_paused: bool,
     /// Opaque native device-session invalidation hint, never a credential or acknowledgement scope.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_scope_id: Option<String>,
@@ -110,6 +111,10 @@ pub struct RequestedRedirect {
 #[serde(rename_all = "camelCase")]
 pub struct SyncProgress {
     pub phase: SyncProgressPhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_completed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_total: Option<String>,
     pub received_through: String,
     pub processed_through: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,6 +132,7 @@ pub struct SyncProgress {
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SyncProgressPhase {
+    Updating,
     Receiving,
     Applying,
     WaitingForKeys,
@@ -143,6 +149,8 @@ mod sync_progress_shape_tests {
     fn sync_progress_serializes_snapshot_total_as_decimal_string() {
         let progress = SyncProgress {
             phase: SyncProgressPhase::Applying,
+            update_completed: None,
+            update_total: None,
             received_through: "9".into(),
             processed_through: "8".into(),
             target_high_water: None,
@@ -156,6 +164,8 @@ mod sync_progress_shape_tests {
         assert_eq!(value["snapshotTotal"], "10");
         let progress = SyncProgress {
             phase: SyncProgressPhase::Current,
+            update_completed: None,
+            update_total: None,
             received_through: "0".into(),
             processed_through: "0".into(),
             target_high_water: None,

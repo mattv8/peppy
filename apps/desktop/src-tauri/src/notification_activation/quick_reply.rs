@@ -459,7 +459,7 @@ fn queue_reply(capability: Arc<ReplyCapability>, body: String) {
             return;
         };
         let Some(input) = quick_reply_input(&capability, &body) else {
-            finish_rejected_reply(&state, &capability, &session, body, false).await;
+            finish_rejected_reply(&state, &capability, &session, body, QueueResult::Rejected).await;
             return;
         };
         // Reconcile the stable command ID before account or gateway preflight. This is read-only
@@ -482,11 +482,13 @@ fn queue_reply(capability: Arc<ReplyCapability>, body: String) {
                 return;
             }
             Ok(Err(error)) if reconciliation_is_uncertain(&error) => {
-                finish_rejected_reply(&state, &capability, &session, body, true).await;
+                finish_rejected_reply(&state, &capability, &session, body, QueueResult::Uncertain)
+                    .await;
                 return;
             }
             Err(_) | Ok(Err(_)) => {
-                finish_rejected_reply(&state, &capability, &session, body, true).await;
+                finish_rejected_reply(&state, &capability, &session, body, QueueResult::Uncertain)
+                    .await;
                 return;
             }
             Ok(Ok(None)) => {}
@@ -496,7 +498,7 @@ fn queue_reply(capability: Arc<ReplyCapability>, body: String) {
         // The final blocking admission below rechecks every authority after this await.
         let account = crate::account_access::status(session.clone()).await;
         if !account_allows_reply(account.as_ref().ok()) {
-            finish_rejected_reply(&state, &capability, &session, body, false).await;
+            finish_rejected_reply(&state, &capability, &session, body, QueueResult::Rejected).await;
             return;
         }
 
@@ -520,15 +522,11 @@ fn queue_reply(capability: Arc<ReplyCapability>, body: String) {
                     return Ok(QueueResult::Unavailable);
                 }
                 let (gateways, known) = current.gateways();
-                match peppy_desktop_api::quick_reply::queue_quick_reply(
+                Ok(queue_admitted_reply(
                     &current.client,
                     input,
                     known.then_some(gateways.as_slice()),
-                ) {
-                    Ok(_) => Ok(QueueResult::Queued),
-                    Err(error) if reconciliation_is_uncertain(&error) => Ok(QueueResult::Uncertain),
-                    Err(_) => Ok(QueueResult::Rejected),
-                }
+                ))
             }
         })
         .await
@@ -560,23 +558,46 @@ fn queue_reply(capability: Arc<ReplyCapability>, body: String) {
         } else {
             queued
         };
-        finish_rejected_reply(
-            &state,
-            &capability,
-            &session,
-            body,
-            queued != QueueResult::Rejected,
-        )
-        .await;
+        finish_rejected_reply(&state, &capability, &session, body, queued).await;
     }));
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QueueResult {
     Queued,
     Rejected,
     Uncertain,
     Unavailable,
+    Updating,
+}
+
+fn queue_admitted_reply(
+    client: &peppy_client_core::Client,
+    input: peppy_desktop_api::quick_reply::QuickReplyInput,
+    gateways: Option<&[GatewayView]>,
+) -> QueueResult {
+    match client.decoder_recovery_pending() {
+        Ok(Some(_)) => return QueueResult::Updating,
+        Err(_) => return QueueResult::Uncertain,
+        Ok(None) => {}
+    }
+    match peppy_desktop_api::quick_reply::queue_quick_reply(client, input, gateways) {
+        Ok(_) => QueueResult::Queued,
+        Err(error) => classify_reply_failure(&error),
+    }
+}
+
+fn classify_reply_failure(error: &peppy_desktop_api::compose::ComposeError) -> QueueResult {
+    if matches!(
+        error,
+        peppy_desktop_api::compose::ComposeError::Core(peppy_client_core::Error::RecoveryPending)
+    ) {
+        QueueResult::Updating
+    } else if reconciliation_is_uncertain(error) {
+        QueueResult::Uncertain
+    } else {
+        QueueResult::Rejected
+    }
 }
 
 fn quick_reply_input(
@@ -650,12 +671,44 @@ fn reconciliation_is_uncertain(error: &peppy_desktop_api::compose::ComposeError)
     )
 }
 
+fn rejected_reply_message(outcome: QueueResult) -> &'static str {
+    match outcome {
+        QueueResult::Updating => {
+            "Reply not sent. Peppy is updating your messages. Open Peppy to find your reply."
+        }
+        QueueResult::Rejected => "Reply not queued. Open Peppy to review it.",
+        _ => "Checking reply status. Do not resend yet.",
+    }
+}
+
+fn rejection_details(outcome: QueueResult, has_route: bool) -> (&'static str, RecoveryState) {
+    match outcome {
+        QueueResult::Updating => ("update-in-progress", RecoveryState::Ready),
+        QueueResult::Rejected if !has_route => ("needs-route-choice", RecoveryState::Ready),
+        QueueResult::Rejected => ("reply-not-queued", RecoveryState::Ready),
+        _ => ("checking-reply-status", RecoveryState::Uncertain),
+    }
+}
+
+fn record_rejected_reply(
+    store: &super::recovery_store::RecoveryStore,
+    reservation: Arc<RecoveryReservation>,
+    mut item: RecoveryItem,
+    outcome: QueueResult,
+    has_route: bool,
+) -> bool {
+    let (reason, state) = rejection_details(outcome, has_route);
+    item.reason = reason.into();
+    item.state = state;
+    store.record(reservation, item)
+}
+
 async fn finish_rejected_reply(
     state: &AppState,
     capability: &ReplyCapability,
     session: &Arc<crate::session::Session>,
     body: String,
-    uncertain: bool,
+    outcome: QueueResult,
 ) {
     let stored = {
         let guard = state.session.lock().await;
@@ -670,31 +723,22 @@ async fn finish_rejected_reply(
         {
             return;
         }
-        state.notification_activation.recovery.record(
+        record_rejected_reply(
+            &state.notification_activation.recovery,
             capability.reservation.clone(),
             RecoveryItem {
                 id: capability.command_id.clone(),
                 session_generation: capability.session_generation.clone(),
                 conversation_id: capability.conversation_id.clone(),
                 body,
-                reason: if uncertain {
-                    "checking-reply-status"
-                } else if capability
-                    .selection
-                    .as_ref()
-                    .is_none_or(|selection| selection.route.is_none())
-                {
-                    "needs-route-choice"
-                } else {
-                    "reply-not-queued"
-                }
-                .into(),
-                state: if uncertain {
-                    RecoveryState::Uncertain
-                } else {
-                    RecoveryState::Ready
-                },
+                reason: String::new(),
+                state: RecoveryState::Ready,
             },
+            outcome,
+            capability
+                .selection
+                .as_ref()
+                .is_some_and(|selection| selection.route.is_some()),
         )
     };
     if !stored {
@@ -709,12 +753,7 @@ async fn finish_rejected_reply(
             &session,
             Destination::Conversation { conversation_id },
             "Peppy".into(),
-            if uncertain {
-                "Checking reply status. Do not resend yet."
-            } else {
-                "Reply not queued. Open Peppy to review it."
-            }
-            .into(),
+            rejected_reply_message(outcome).into(),
             None,
             None,
         )
@@ -726,6 +765,83 @@ async fn finish_rejected_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_recovery_refuses_quick_reply_admission() {
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = crate::tests::open_deferred(&fixture, &fixture.binding, &[]);
+        crate::tests::unlock(&session, &fixture);
+        while session.client.recover_decoder_page(1).unwrap().is_some() {}
+        let message = session
+            .client
+            .capture_incoming(peppy_client_core::IncomingSms {
+                conversation_id: None,
+                sender_address: "+14155552671".into(),
+                body: "hello".into(),
+                provider_message_id: Some(uuid::Uuid::new_v4().to_string()),
+                imported: false,
+            })
+            .unwrap();
+        let second = peppy_client_core::KeyProfile::new(fixture.profile.vault_id, 2).unwrap();
+        let root = peppy_crypto::derive_root_key(crate::tests::PHRASE, &second).unwrap();
+        let header = peppy_crypto::create_vault_check_header(&root, second.clone()).unwrap();
+        session
+            .client
+            .unlock(&second, &header, crate::tests::PHRASE)
+            .unwrap();
+        assert!(session.client.decoder_recovery_pending().unwrap().is_some());
+        let gateway_id = uuid::Uuid::new_v4().to_string();
+        let input = peppy_desktop_api::quick_reply::QuickReplyInput {
+            command_id: uuid::Uuid::new_v4().to_string(),
+            conversation_id: message.conversation_id.to_string(),
+            body: "reply".into(),
+            gateway_id: gateway_id.clone(),
+            sim_id: Some("sim-1".into()),
+            expected_transport: peppy_client_core::Transport::Sms,
+            expected_member_revision: None,
+        };
+        let before = session.client.pending_outbox_count().unwrap();
+        let gateway = crate::tests::gateway(&gateway_id, true, false);
+        let outcome = queue_admitted_reply(&session.client, input.clone(), Some(&[gateway]));
+        assert_eq!(outcome, QueueResult::Updating);
+        assert_eq!(session.client.pending_outbox_count().unwrap(), before);
+        assert!(
+            peppy_desktop_api::quick_reply::reconcile_quick_reply(&session.client, input)
+                .is_ok_and(|reconciled| reconciled.is_none())
+        );
+        let store = super::super::recovery_store::RecoveryStore::new(1);
+        assert!(record_rejected_reply(
+            &store,
+            store.reserve().unwrap(),
+            RecoveryItem {
+                id: "reply".into(),
+                session_generation: "session".into(),
+                conversation_id: message.conversation_id.to_string(),
+                body: "reply".into(),
+                reason: String::new(),
+                state: RecoveryState::Ready,
+            },
+            outcome,
+            true,
+        ));
+        let items = store.list("session", &message.conversation_id.to_string());
+        assert_eq!(items[0].reason, "update-in-progress");
+        assert_eq!(items[0].state, RecoveryState::Ready);
+    }
+
+    #[test]
+    fn recovery_pending_is_an_unsent_reply() {
+        assert_eq!(
+            classify_reply_failure(&peppy_desktop_api::compose::ComposeError::Core(
+                peppy_client_core::Error::RecoveryPending
+            )),
+            QueueResult::Updating
+        );
+        assert_eq!(
+            rejected_reply_message(QueueResult::Updating),
+            "Reply not sent. Peppy is updating your messages. Open Peppy to find your reply."
+        );
+    }
 
     #[tokio::test]
     async fn cancellation_watcher_wakes_when_generation_was_cancelled_before_it_started() {

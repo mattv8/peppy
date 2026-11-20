@@ -1040,6 +1040,7 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
     Snapshot {
         version: "1",
         mode: "native",
+        writes_paused: false,
         session_scope_id: None,
         connection: dto::Connection {
             state: "offline",
@@ -2344,6 +2345,7 @@ async fn unlock_with(
             }
             other => other.map_err(core_error)?,
         }
+        s.request_replay();
         s.set_mismatch(false);
         // The server reports this epoch as current; local work must be sealed under it.
         if s.client
@@ -2370,6 +2372,7 @@ async fn unlock_with(
     // The renderer refreshes only on state events; the claim path notifies before this unlock.
     session.notify();
     session.request_work();
+    session.request_replay();
     session.reconnect_wake.notify_one();
     Ok(())
 }

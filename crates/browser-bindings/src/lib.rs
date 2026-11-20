@@ -776,8 +776,11 @@ impl BrowserCore {
                 snapshot_expected: None,
                 snapshot_remaining: None,
                 snapshot_total: None,
+                update_completed: None,
+                update_total: None,
             }),
             rcs_status,
+            writes_paused: false,
         })
         .map_err(|_| core(CoreError::Database))
     }

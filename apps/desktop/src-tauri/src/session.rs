@@ -50,6 +50,15 @@ fn replay_is_behind(progress: &ReplayProgress, target: Option<Cursor>) -> bool {
     target.is_some_and(|target| progress.received_through < target)
 }
 
+fn apply_decoder_progress(
+    view: &mut dto::SyncProgress,
+    recovery: peppy_client_core::DecoderRecoveryProgress,
+) {
+    view.phase = dto::SyncProgressPhase::Updating;
+    view.update_completed = Some(recovery.completed.min(recovery.total).to_string());
+    view.update_total = Some(recovery.total.to_string());
+}
+
 fn history_block_fallback(
     progress: &ReplayProgress,
     target: Option<Cursor>,
@@ -205,6 +214,93 @@ impl ProgressMirror {
 mod sync_progress_mirror_tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn recovery_progress_clamps_completed() {
+        let mut view = Session::sync_progress_view(
+            ReplayProgress {
+                received_through: Cursor(0),
+                processed_through: Cursor(0),
+                waiting_for_keys: 0,
+            },
+            None,
+            Some((1, 2)),
+            3,
+            Some(3),
+            true,
+            (None, false),
+        );
+        apply_decoder_progress(
+            &mut view,
+            peppy_client_core::DecoderRecoveryProgress {
+                epoch: 1,
+                completed: 9,
+                total: 4,
+            },
+        );
+        let value = serde_json::to_value(view).unwrap();
+        assert_eq!(value["phase"], "updating");
+        assert_eq!(value["updateCompleted"], "4");
+        assert_eq!(value["updateTotal"], "4");
+    }
+
+    #[test]
+    fn session_unlock_defers_decoder_recovery() {
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = crate::tests::open_deferred(&fixture, &fixture.binding, &[]);
+        crate::tests::unlock(&session, &fixture);
+        assert!(session.client.decoder_recovery_pending().unwrap().is_some());
+        session.set_staging_progress(Some((1, 10)), false);
+        let progress = serde_json::to_value(session.sync_progress().unwrap()).unwrap();
+        assert_eq!(progress["phase"], "updating");
+        let snapshot = || {
+            session
+                .snapshot(
+                    None,
+                    None,
+                    crate::head(),
+                    None,
+                    NotificationPreferences::default(),
+                )
+                .unwrap()
+                .0
+        };
+        assert!(snapshot().writes_paused);
+        while session.client.recover_decoder_page(1).unwrap().is_some() {}
+        assert!(!snapshot().writes_paused);
+    }
+
+    #[test]
+    fn cached_open_returns_with_recovery_pending() {
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        {
+            let session = crate::tests::open_deferred(&fixture, &fixture.binding, &[]);
+            crate::tests::unlock(&session, &fixture);
+            let cache = session.client.export_native_key_cache(1).unwrap();
+            fixture
+                .store
+                .set(
+                    &fixture.binding.key_cache_account(1),
+                    cache.native_storage_bytes(),
+                )
+                .unwrap();
+        }
+        let tracker = crate::launch_progress::LaunchTracker::default();
+        let session = open_session_with_progress(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[1],
+            crate::tests::noop(),
+            Some(&tracker),
+        )
+        .unwrap();
+        assert!(session.client.decoder_recovery_pending().unwrap().is_some());
+        assert_ne!(
+            tracker.snapshot().phase,
+            peppy_desktop_api::LaunchPhase::Updating
+        );
+    }
 
     #[test]
     fn drain_reports_peak_total() {
@@ -846,26 +942,13 @@ pub(crate) fn open_session_with_progress(
     }
     let client =
         Client::open(config, DatabaseKey::new(&key).map_err(core_error)?).map_err(core_error)?;
-    let mut updating = false;
-    let mut base = 0u64;
+    client
+        .set_decoder_recovery_mode(peppy_client_core::DecoderRecoveryMode::Deferred)
+        .map_err(core_error)?;
     for epoch in cached_epochs {
         if let Some(bytes) = store.get(&binding.key_cache_account(*epoch))? {
             let cache = NativeKeyCache::from_native_storage(bytes.to_vec());
-            let mut epoch_completed = 0;
-            let result = if let Some(progress) = progress {
-                client.import_native_key_cache_with_progress(&cache, &mut |update| {
-                    if !updating {
-                        updating = true;
-                        progress.enter(peppy_desktop_api::LaunchPhase::Updating);
-                    }
-                    epoch_completed = update.completed;
-                    progress.set_update(base.saturating_add(update.completed), base.saturating_add(update.total));
-                })
-            } else {
-                client.import_native_key_cache(&cache)
-            };
-            base = base.saturating_add(epoch_completed);
-            match result {
+            match client.import_native_key_cache(&cache) {
                 // A stale or unverifiable cache simply leaves this epoch locked; the user unlocks
                 // at or above the anchor floor.
                 Ok(())
@@ -874,20 +957,8 @@ pub(crate) fn open_session_with_progress(
                     | peppy_client_core::Error::InvalidProfile
                     | peppy_client_core::Error::StaleKeyEpoch,
                 ) => {}
-                Err(error) => {
-                    if updating {
-                        if let Some(progress) = progress {
-                            progress.clear_update();
-                        }
-                    }
-                    return Err(core_error(error));
-                }
+                Err(error) => return Err(core_error(error)),
             }
-        }
-    }
-    if updating {
-        if let Some(progress) = progress {
-            progress.clear_update();
         }
     }
     let api = Api::new(&credential.origin, &credential.device_token)?;
@@ -1339,7 +1410,7 @@ impl Session {
         } else {
             None
         };
-        Ok(Self::sync_progress_view(
+        let mut view = Self::sync_progress_view(
             progress,
             target_high_water,
             staging,
@@ -1347,7 +1418,11 @@ impl Session {
             apply_total,
             bootstrap,
             (history_block, self.repair_exhausted()),
-        ))
+        );
+        if let Some(recovery) = self.client.decoder_recovery_pending().map_err(core_error)? {
+            apply_decoder_progress(&mut view, recovery);
+        }
+        Ok(view)
     }
 
     fn sync_progress_view(
@@ -1388,6 +1463,8 @@ impl Session {
         };
         dto::SyncProgress {
             phase,
+            update_completed: None,
+            update_total: None,
             received_through: progress.received_through.0.to_string(),
             processed_through: progress.processed_through.0.to_string(),
             target_high_water: target_high_water.map(|target| target.0.to_string()),
@@ -2596,6 +2673,7 @@ impl Session {
         let snapshot = Snapshot {
             version: "1",
             mode: "native",
+            writes_paused: matches!(sync_progress.phase, dto::SyncProgressPhase::Updating),
             session_scope_id: Some(self.attachment_retention_session_scope_id()),
             connection,
             encryption,
@@ -3087,6 +3165,16 @@ mod tests {
         .unwrap();
         let settings = NotificationSettings::load(fixture.dir.path());
 
+        assert_eq!(
+            session.notification_preferences(&settings).unwrap(),
+            NotificationPreferences::default()
+        );
+        assert!(fixture
+            .dir
+            .path()
+            .join("notification-preferences.json")
+            .exists());
+        crate::tests::finish_decoder_recovery(&session);
         assert_eq!(session.notification_preferences(&settings).unwrap(), legacy);
         assert!(!fixture
             .dir
@@ -3192,6 +3280,7 @@ mod tests {
             .client
             .unlock(&fixture.profile, &fixture.header, PHRASE)
             .unwrap();
+        crate::tests::finish_decoder_recovery(&session);
         let established = NotificationPreferences {
             preview: peppy_desktop_api::Preview::Hidden,
             ..NotificationPreferences::default()
@@ -3297,6 +3386,7 @@ mod tests {
             .client
             .unlock(&fixture.profile, &fixture.header, PHRASE)
             .unwrap();
+        crate::tests::finish_decoder_recovery(&session);
         session
             .client
             .set_conversation_tone("contact:+15555550100", Some(60))
