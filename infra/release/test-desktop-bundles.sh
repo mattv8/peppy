@@ -31,8 +31,26 @@ printf 'ENV|%s|%s|%s|%s|%s|%s|%s\n' "${APPLE_CERTIFICATE+x}" "${APPLE_SIGNING_ID
 printf 'ARGV' >> "$PNPM_LOG"
 printf '|%s' "$@" >> "$PNPM_LOG"
 printf '\n' >> "$PNPM_LOG"
+if [[ " $* " == *' tauri build '* ]] && [ -n "${BUILD_ERROR:-}" ]; then
+  printf '%s\n' "$BUILD_ERROR" >&2
+  exit 42
+fi
+if [[ " $* " == *' tauri bundle '* ]]; then exit "${BUNDLE_EXIT:-0}"; fi
 PNPM
 chmod +x "$fake_bin/pnpm"
+
+cat > "$fake_bin/sleep" <<'SLEEP'
+#!/usr/bin/env bash
+printf 'sleep|%s\n' "$*" >> "$PNPM_LOG"
+SLEEP
+chmod +x "$fake_bin/sleep"
+
+cat > "$fake_bin/tee" <<'TEE'
+#!/usr/bin/env bash
+if [ "${TEE_FAIL:-false}" = true ]; then cat >/dev/null; exit 91; fi
+exec /usr/bin/tee "$@"
+TEE
+chmod +x "$fake_bin/tee"
 
 cat > "$fake_bin/codesign" <<'CODESIGN'
 #!/usr/bin/env bash
@@ -318,6 +336,86 @@ run_macos_target_without_version() {
   PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app,dmg VERSION='' TRUSTED_UPDATE_BUILD=false \
     PEPPY_TAURI_TARGET=x86_64-apple-darwin PEPPY_DMG_OUTPUT_DIR="$root/dmg" "$script_dir/build-desktop-bundles.sh"
 }
+
+busy_error=$'error running bundle_dmg.sh\nhdiutil: create failed - Resource busy'
+mkdir -p "$root/capture"
+: > "$log"
+run_macos_developer_id "BUILD_ERROR=$busy_error" PEPPY_TAURI_TARGET=x86_64-apple-darwin TMPDIR="$root/capture"
+test "$(grep -c '^ARGV' "$log")" = 2
+test "$(grep -c '^sleep|2$' "$log")" = 1
+awk '/^sleep\|2$/ { delay = NR } /^ARGV.*\|bundle\|/ { if (!delay || delay >= NR) exit 1; found = 1 } END { if (!found) exit 1 }' "$log"
+build_args=$(grep '^ARGV.*|build|' "$log" | sed 's/|build|/|bundle|/; s/|--|--locked$//')
+bundle_args=$(grep '^ARGV.*|bundle|' "$log")
+test "$build_args" = "$bundle_args"
+test "$(grep '^ENV|' "$log" | sort -u | wc -l | tr -d ' ')" = 1
+grep -Fq 'repair|' "$log"
+grep -Fq "codesign|--verify --strict --verbose=2 $root/dmg/Peppy.dmg" "$log"
+grep -Fq 'xcrun|notarytool submit' "$log"
+grep -Fq 'xcrun|stapler validate' "$log"
+grep -Fq 'spctl|--assess --type open' "$log"
+test -z "$(find "$root/capture" -type f -print -quit)"
+
+: > "$log"
+BUILD_ERROR="$busy_error" run_macos_target_without_version
+test "$(grep -c '^ARGV' "$log")" = 2
+grep -Fq '|bundle|--bundles|app,dmg|--target|x86_64-apple-darwin' "$log"
+if grep '^ARGV.*|bundle|' "$log" | grep -Eq -- '\|--config\||\|--locked|\|--no-sign|\|--no-default-features'; then
+  echo 'unexpected recovery arguments' >&2; exit 1
+fi
+
+: > "$log"
+if run_macos_developer_id "BUILD_ERROR=$busy_error" CODESIGN_APP_TEAM_ID=wrong-team >/dev/null 2>&1; then
+  echo 'recovery must retain strict signature validation' >&2; exit 1
+fi
+test "$(grep -c '^ARGV' "$log")" = 2
+grep -Fq 'repair|' "$log"
+
+: > "$log"
+if run_macos_developer_id "BUILD_ERROR=$busy_error" BUNDLE_EXIT=53 TMPDIR="$root/capture" >/dev/null 2>&1; then
+  echo 'expected bundle recovery failure' >&2; exit 1
+else
+  test "$?" = 53
+fi
+test "$(grep -c '^ARGV' "$log")" = 2
+if grep -Eq '^(repair|codesign|xcrun|spctl)\|' "$log"; then echo 'unexpected downstream verification after failed recovery' >&2; exit 1; fi
+test -z "$(find "$root/capture" -type f -print -quit)"
+
+for error in 'compilation failed' 'signing failed' 'Resource busy' $'error running bundle_dmg.sh\nhdiutil: create failed - Permission denied' 'hdiutil: create failed - Resource busy'; do
+  : > "$log"
+  if run_macos_developer_id "BUILD_ERROR=$error" TMPDIR="$root/capture" >/dev/null 2>&1; then
+    echo 'unexpected recovery of unmatched failure' >&2; exit 1
+  else
+    test "$?" = 42
+  fi
+  test "$(grep -c '^ARGV' "$log")" = 1
+  test -z "$(find "$root/capture" -type f -print -quit)"
+done
+for bundles in app dmg dmg,app app,dmg,deb; do
+  : > "$log"
+  if BUNDLE_TARGETS="$bundles" run_macos_developer_id "BUILD_ERROR=$busy_error" >/dev/null 2>&1; then
+    echo 'unexpected recovery for bundle mode' >&2; exit 1
+  fi
+  test "$(grep -c '^ARGV' "$log")" = 1
+done
+for os in Linux Windows; do
+  if BUILD_ERROR="$busy_error" run_bundles "$os" app,dmg 1.2.3 false >/dev/null 2>&1; then
+    echo 'unexpected recovery on non-macOS runner' >&2; exit 1
+  fi
+  test "$(grep -c '^ARGV' "$log")" = 1
+done
+for error in '' "$busy_error"; do
+  : > "$log"
+  if run_macos_developer_id TEE_FAIL=true "BUILD_ERROR=$error" TMPDIR="$root/capture" >/dev/null 2>&1; then
+    echo 'capture failure must fail closed' >&2; exit 1
+  else
+    test "$?" = 91
+  fi
+  test "$(grep -c '^ARGV' "$log")" = 1
+  if grep -Eq '^(sleep|repair|codesign|xcrun|spctl)\|' "$log"; then
+    echo 'capture failure must not retry or run downstream checks' >&2; exit 1
+  fi
+  test -z "$(find "$root/capture" -type f -print -quit)"
+done
 
 assert_developer_id_failure() {
   local expected_diagnostic="$1"
