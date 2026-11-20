@@ -181,6 +181,36 @@
   outline: none;
 }
 
+#contacts-book-menu .contacts-book-menu-item-destructive {
+  color: var(--peppy-error-text);
+}
+
+#contacts-book-menu .contacts-book-menu-item[aria-disabled="true"] {
+  color: var(--peppy-text-secondary);
+  cursor: default;
+}
+
+#contacts-book-menu .contacts-book-menu-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--peppy-border);
+}
+
+/* Locked: the destructive button stays readable and says why through its title, instead of going inert. */
+.destructive-button[aria-disabled="true"] {
+  cursor: default;
+  opacity: 1;
+  border-style: dashed;
+}
+
+.contacts-book-delete-ack {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 13px;
+}
+
 /* Compact lookup strip (rail hidden). With the list header's book select it is one row plus its hint; the title line shows only when no select does. */
 #contacts-book-use { padding: 6px 10px; border-bottom: 1px solid var(--peppy-border); }
 #contacts-book-use-title, .contacts-book-use-row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
@@ -244,6 +274,12 @@
 
 #contacts-book-removed .contacts-strip-actions button {
   white-space: nowrap;
+}
+
+#contacts-book-removed .contacts-strip-actions .destructive-button {
+  height: 26px;
+  min-height: 26px;
+  line-height: 24px;
 }
 
 #contacts-book-removed .contacts-strip-actions .secondary-button {

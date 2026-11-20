@@ -3,14 +3,14 @@ import { Ellipsis, PhoneOff, Search, Smartphone } from "@peppy/desktop-ui";
 import type { ContactBookView } from "../bridge/bridge";
 import type { PostContactActionNotice } from "./contact-action-notice";
 import { bookContactCountText, bookLabels, bookStateText, bookSummaryText } from "./contact-labels";
-import { BookRowMenu, pointerMenuPoint, underButtonPoint, type BookMenuItem, type BookMenuPoint } from "./BookRowMenu";
+import { BookRowMenu, pointerMenuPoint, underButtonPoint, type BookMenuEntry, type BookMenuPoint } from "./BookRowMenu";
 import { bookUseSwitchId, useBookLookup, type BookLookup } from "./useBookLookup";
 import "./book-rail.css";
 
 const BOOK_USE_HINT = "This computer only. Contacts stay here to browse.";
 
 /** The contact-book column shown above ≈700px. Each row carries its own lookup switch when the switch applies. */
-export function BookRail({ books, bookId, width, panelRef, onSelect, onBooksChanged, onRemoveRequest, onNotice }: {
+export function BookRail({ books, bookId, width, panelRef, onSelect, onBooksChanged, onRemoveRequest, onDeleteRequest, deleteDisabledReason, onNotice }: {
   books: ContactBookView[];
   bookId: string;
   width: number;
@@ -18,6 +18,8 @@ export function BookRail({ books, bookId, width, panelRef, onSelect, onBooksChan
   onSelect(bookId: string): void;
   onBooksChanged(): void;
   onRemoveRequest(book: ContactBookView, opener: RefObject<HTMLElement | null>): void;
+  onDeleteRequest(book: ContactBookView, opener: RefObject<HTMLElement | null>): void;
+  deleteDisabledReason?: string;
   onNotice: PostContactActionNotice;
 }) {
   const lookup = useBookLookup({ books, bookId, onBooksChanged, onNotice });
@@ -36,6 +38,8 @@ export function BookRail({ books, bookId, width, panelRef, onSelect, onBooksChan
             lookup={lookup}
             onSelect={onSelect}
             onRemoveRequest={onRemoveRequest}
+            onDeleteRequest={onDeleteRequest}
+            deleteDisabledReason={deleteDisabledReason}
             railRef={panelRef}
             onNotice={onNotice}
           />
@@ -45,7 +49,7 @@ export function BookRail({ books, bookId, width, panelRef, onSelect, onBooksChan
   );
 }
 
-function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, onRemoveRequest, railRef, onNotice }: {
+function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, onRemoveRequest, onDeleteRequest, deleteDisabledReason, railRef, onNotice }: {
   item: ContactBookView;
   selected: boolean;
   suffix: string;
@@ -53,6 +57,8 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
   lookup: BookLookup;
   onSelect(bookId: string): void;
   onRemoveRequest(book: ContactBookView, opener: RefObject<HTMLElement | null>): void;
+  onDeleteRequest(book: ContactBookView, opener: RefObject<HTMLElement | null>): void;
+  deleteDisabledReason?: string;
   railRef: RefObject<HTMLElement | null>;
   onNotice: PostContactActionNotice;
 }) {
@@ -62,8 +68,10 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
   const [menuPoint, setMenuPoint] = useState<BookMenuPoint | null>(null);
   const closeMenu = useCallback(() => setMenuPoint(null), []);
   const railLeft = () => railRef.current?.getBoundingClientRect().left ?? 0;
-  const menuItems: BookMenuItem[] = [
+  const menuItems: BookMenuEntry[] = [
     { action: "remove-book-local", label: "Remove from this computer", onSelect: () => onRemoveRequest(item, moreButton) },
+    "separator",
+    { action: "delete-book-everywhere", label: "Delete for all devices…", destructive: true, disabledReason: deleteDisabledReason, onSelect: () => onDeleteRequest(item, moreButton) },
   ];
   return (
     <li

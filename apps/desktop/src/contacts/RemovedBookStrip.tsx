@@ -5,12 +5,15 @@ import { IsolatedText } from "../notices/IsolatedText";
 import type { PostContactActionNotice } from "./contact-action-notice";
 import "./book-rail.css";
 
-/** The removed-book strip. The removal dialog itself is owned by ContactsView, so it survives the strip leaving the status slot. */
-export function RemovedBookStrip({ book, onRemoveRequest }: {
+/** The removed-book strip. Its dialogs are owned by ContactsView, so they survive the strip leaving the status slot. */
+export function RemovedBookStrip({ book, onRemoveRequest, onDeleteRequest, deleteDisabledReason }: {
   book: ContactBookView;
   onRemoveRequest(book: ContactBookView, opener: RefObject<HTMLElement | null>): void;
+  onDeleteRequest(book: ContactBookView, opener: RefObject<HTMLElement | null>): void;
+  deleteDisabledReason?: string;
 }) {
-  const opener = useRef<HTMLButtonElement>(null);
+  const removeOpener = useRef<HTMLButtonElement>(null);
+  const deleteOpener = useRef<HTMLButtonElement>(null);
   return (
     <section id="contacts-book-removed" role="status">
       <div className="contacts-strip-text">
@@ -18,7 +21,18 @@ export function RemovedBookStrip({ book, onRemoveRequest }: {
         <p>Peppy keeps a read-only copy of its contacts. You can browse them, but you can't change them or ask the phone to sync.</p>
       </div>
       <div className="contacts-strip-actions">
-        <button ref={opener} type="button" className="secondary-button" data-action="remove-book-local" onClick={() => onRemoveRequest(book, opener)}>Remove from this computer</button>
+        <button ref={removeOpener} type="button" className="secondary-button" data-action="remove-book-local" onClick={() => onRemoveRequest(book, removeOpener)}>Remove from this computer</button>
+        <button
+          ref={deleteOpener}
+          type="button"
+          className="destructive-button"
+          data-action="delete-book-everywhere"
+          aria-disabled={deleteDisabledReason ? true : undefined}
+          title={deleteDisabledReason}
+          onClick={() => { if (!deleteDisabledReason) onDeleteRequest(book, deleteOpener); }}
+        >
+          Delete for all devices…
+        </button>
       </div>
     </section>
   );
