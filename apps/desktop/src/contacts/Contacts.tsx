@@ -783,7 +783,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
 
   const syncDisabledReason = !book
     ? "Select a contact book to request a scan."
-    : book.sourceRevoked ? "This source device was removed."
+    : book.sourceRevoked ? "Can't sync a removed phone"
       : book.state === "retired" ? "This book is retired."
         : book.state === "limited" ? "This phone has limited contact access and cannot complete an authoritative scan."
           : book.state === "unavailable" ? "This phone is unavailable for contact scans."

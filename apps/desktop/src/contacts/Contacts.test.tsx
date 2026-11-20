@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { StrictMode, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -340,8 +341,9 @@ describe("ContactsView", () => {
       fireEvent.click(auroraButton);
 
       await waitFor(() => {
-        expect(screen.getByText("(202) 555-0123")).toBeInTheDocument();
+        expect(within(document.querySelector<HTMLElement>('[data-contact-section="phones"]')!).getByText("(202) 555-0123")).toBeInTheDocument();
       });
+      expect(document.querySelector('[data-contact-section="phones"]')).toHaveTextContent("mobile (202) 555-0123");
     });
 
     it("displays all contact fields in detail view", async () => {
@@ -351,10 +353,13 @@ describe("ContactsView", () => {
       const auroraButton = await screen.findByRole("button", { name: /Aurora Chen/ }, { timeout: 3000 });
       fireEvent.click(auroraButton);
 
-      // Email renders as "work · aurora@example.com" — use regex for substring
+      // Email renders as a "work" label beside the address, with no separator
       await screen.findByText(/aurora@example\.com/, {}, { timeout: 3000 });
+      expect(document.querySelector('[data-contact-section="emails"]')).toHaveTextContent("work aurora@example.com");
+      expect(document.querySelector('[data-contact-section="emails"] .contacts-detail-label')).toHaveTextContent("work");
+      expect(document.querySelector('[data-contact-section="phones"]')).not.toHaveTextContent("·");
       // "Northstar · Director" is the full small-element text in the detail header
-      await screen.findByText("Northstar · Director", {}, { timeout: 3000 });
+      await screen.findByText("Northstar, Director", {}, { timeout: 3000 });
     });
   });
 

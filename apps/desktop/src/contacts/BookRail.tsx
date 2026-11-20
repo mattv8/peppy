@@ -3,7 +3,7 @@ import { Ellipsis, PhoneOff, Search, Smartphone } from "@peppy/desktop-ui";
 import type { ContactBookView } from "../bridge/bridge";
 import type { PostContactActionNotice } from "./contact-action-notice";
 import { bookContactCountText, bookLabels, bookStateText, bookSummaryText } from "./contact-labels";
-import { BookRowMenu, underButtonPoint, type BookMenuItem, type BookMenuPoint } from "./BookRowMenu";
+import { BookRowMenu, pointerMenuPoint, underButtonPoint, type BookMenuItem, type BookMenuPoint } from "./BookRowMenu";
 import { bookUseSwitchId, useBookLookup, type BookLookup } from "./useBookLookup";
 import "./book-rail.css";
 
@@ -36,6 +36,7 @@ export function BookRail({ books, bookId, width, panelRef, onSelect, onBooksChan
             lookup={lookup}
             onSelect={onSelect}
             onRemoveRequest={onRemoveRequest}
+            railRef={panelRef}
             onNotice={onNotice}
           />
         ))}
@@ -44,7 +45,7 @@ export function BookRail({ books, bookId, width, panelRef, onSelect, onBooksChan
   );
 }
 
-function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, onRemoveRequest, onNotice }: {
+function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, onRemoveRequest, railRef, onNotice }: {
   item: ContactBookView;
   selected: boolean;
   suffix: string;
@@ -52,6 +53,7 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
   lookup: BookLookup;
   onSelect(bookId: string): void;
   onRemoveRequest(book: ContactBookView, opener: RefObject<HTMLElement | null>): void;
+  railRef: RefObject<HTMLElement | null>;
   onNotice: PostContactActionNotice;
 }) {
   const hintId = `contacts-book-use-hint-${item.id}`;
@@ -59,6 +61,7 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
   const moreButton = useRef<HTMLButtonElement>(null);
   const [menuPoint, setMenuPoint] = useState<BookMenuPoint | null>(null);
   const closeMenu = useCallback(() => setMenuPoint(null), []);
+  const railLeft = () => railRef.current?.getBoundingClientRect().left ?? 0;
   const menuItems: BookMenuItem[] = [
     { action: "remove-book-local", label: "Remove from this computer", onSelect: () => onRemoveRequest(item, moreButton) },
   ];
@@ -73,7 +76,7 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
       }}
       onContextMenu={item.sourceRevoked ? event => {
         event.preventDefault();
-        setMenuPoint({ x: event.clientX, y: event.clientY });
+        setMenuPoint(pointerMenuPoint(event.clientX, event.clientY, railLeft()));
       } : undefined}
     >
       <button
@@ -84,7 +87,7 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
         onClick={() => onSelect(item.id)}
       >
         {item.sourceRevoked
-          ? <PhoneOff aria-hidden="true" size={16} strokeWidth={1.75} />
+          ? <PhoneOff className="contacts-book-removed-icon" aria-hidden="true" size={16} strokeWidth={1.75} />
           : <Smartphone aria-hidden="true" size={16} strokeWidth={1.75} />}
         <span className="contacts-book-text">
           <b>{item.deviceName}</b>
@@ -129,7 +132,7 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
               aria-expanded={menuPoint !== null}
               title="More actions"
               onClick={event => {
-                const point = underButtonPoint(event.currentTarget.getBoundingClientRect());
+                const point = underButtonPoint(event.currentTarget.getBoundingClientRect(), railLeft());
                 setMenuPoint(current => current ? null : point);
               }}
             >
@@ -173,7 +176,7 @@ export function BookLookupStrip({ book, books, onBooksChanged, onNotice }: {
         if (lookup.confirmBookId && event.key === "Escape") { event.preventDefault(); lookup.cancelConfirm(); }
       }}
     >
-      <div id="contacts-book-use-title"><span>{book.deviceName}</span>{suffix(book) && <span className="contacts-book-id">{suffix(book)}</span>}</div>
+      {books.length < 2 && <div id="contacts-book-use-title"><span>{book.deviceName}</span>{suffix(book) && <span className="contacts-book-id">{suffix(book)}</span>}</div>}
       <label className="contacts-book-use-row" htmlFor={switchId}>
         <span>Use for names and recipient search</span>
         <span className="settings-switch">

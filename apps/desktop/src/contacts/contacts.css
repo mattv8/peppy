@@ -90,7 +90,7 @@
 #contacts-list-title {
   margin: 0;
   overflow: hidden;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -100,7 +100,8 @@
   min-width: 0;
   max-width: 100%;
   padding: 2px 6px;
-  font-size: 12px;
+  font-size: 14px;
+  font-weight: 600;
   border: 1px solid var(--peppy-border);
   border-radius: 4px;
   background: var(--peppy-surface-input);
@@ -115,8 +116,36 @@
   white-space: nowrap;
 }
 #contacts-count[data-count-state="progress"] { display: inline-flex; align-items: center; gap: 6px; }
-/* Own-load progress: the same 4px accent bar as the sync progress strip. */
-#contacts-list-header progress { flex: 1 1 160px; min-width: 120px; height: 4px; accent-color: var(--peppy-accent); }
+/* Own-load progress: a 4px accent bar on a surface track, matching the sync progress strip. */
+#contacts-list-header #contacts-count-bar {
+  flex: 1 1 160px;
+  min-width: 120px;
+  height: 4px;
+  border: 0;
+  border-radius: 2px;
+  background: var(--peppy-surface-hover);
+  accent-color: var(--peppy-accent);
+  appearance: none;
+  -webkit-appearance: none;
+}
+#contacts-count-bar::-webkit-progress-bar { border-radius: 2px; background: var(--peppy-surface-hover); }
+#contacts-count-bar::-webkit-progress-value { border-radius: 2px; background: var(--peppy-accent); }
+#contacts-count-bar::-moz-progress-bar { border-radius: 2px; background: var(--peppy-accent); }
+
+/* Collapsed book rail handle: a quiet chevron tab at rest; the coral line appears only while hovered, pressed, or focused. */
+#contacts-book-resize.resize-handle-collapsed {
+  width: 16px;
+  color: var(--peppy-text-secondary);
+  cursor: pointer;
+}
+#contacts-book-resize.resize-handle-collapsed::after { opacity: 0; }
+#contacts-book-resize.resize-handle-collapsed:hover::after,
+#contacts-book-resize.resize-handle-collapsed:active::after,
+#contacts-book-resize.resize-handle-collapsed:focus-visible::after { opacity: 1; }
+#contacts-book-resize.resize-handle-collapsed:focus-visible {
+  outline: 2px solid var(--peppy-focus-ring);
+  outline-offset: -2px;
+}
 
 #contacts-header-actions { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
 /* Ghost icon buttons: no fill or border until hover, open, or focus. */

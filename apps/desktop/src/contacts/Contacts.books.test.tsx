@@ -247,6 +247,7 @@ describe("ContactsView book lookup", () => {
     render(<ContactsView />);
     expect(await screen.findByRole("option", { name: "Pixel 8, ID 1234, Active, hidden from names" })).toBeInTheDocument();
     expect(document.getElementById("contacts-book-use")).toBeInTheDocument();
+    expect(document.getElementById("contacts-book-use-title")).toBeNull();
     expect(screen.getByRole("switch", { name: "Use for names and recipient search" })).toBeInTheDocument();
     expect(document.getElementById("contacts-book-list")).not.toBeInTheDocument();
   });
@@ -391,6 +392,48 @@ describe("contact book rail collapse and resize", () => {
       if (originalWidth) Object.defineProperty(window, "innerWidth", originalWidth);
       else delete (window as { innerWidth?: number }).innerWidth;
     }
+  });
+});
+
+describe("book rail placement, hidden-name line, icon, and sync reason", () => {
+  beforeEach(() => resetContactBridgeMocks());
+  afterEach(() => restoreContactDomGlobals());
+
+  it("anchors the menu under its more button, never left of the rail", () => {
+    const panelRef = { current: null as HTMLElement | null };
+    render(<BookRail books={[mockContactBook, removedBook]} bookId={mockContactBook.id} width={220} panelRef={panelRef} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onNotice={vi.fn()} />);
+    vi.spyOn(panelRef.current!, "getBoundingClientRect").mockReturnValue({ left: 60 } as DOMRect);
+    const button = screen.getByRole("button", { name: "More actions for iPhone" });
+    vi.spyOn(button, "getBoundingClientRect").mockReturnValue({ left: 80, right: 100, top: 26, bottom: 50 } as DOMRect);
+    fireEvent.click(button);
+    expect(document.getElementById("contacts-book-menu")).toHaveStyle({ left: "64px", top: "54px" });
+  });
+
+  it("keeps a right-click menu's pointer position but clamps it to the rail", () => {
+    const panelRef = { current: null as HTMLElement | null };
+    render(<BookRail books={[mockContactBook, removedBook]} bookId={mockContactBook.id} width={220} panelRef={panelRef} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onNotice={vi.fn()} />);
+    vi.spyOn(panelRef.current!, "getBoundingClientRect").mockReturnValue({ left: 60 } as DOMRect);
+    fireEvent.contextMenu(document.querySelector<HTMLElement>('li[data-book-id="book-iphone"]')!, { clientX: 20, clientY: 90 });
+    expect(document.getElementById("contacts-book-menu")).toHaveStyle({ left: "64px", top: "90px" });
+  });
+
+  it("shows the hidden-name line only on an excluded book", () => {
+    renderRail([mockContactBook, { ...otherBook, lookupExcluded: true }]);
+    expect(document.querySelector('li[data-book-id="book-pixel8"] .contacts-book-hidden')).toBeNull();
+    expect(document.querySelector('li[data-book-id="book-other"] .contacts-book-hidden')).toHaveTextContent("Hidden from names");
+  });
+
+  it("marks the removed-book icon with its warning-colour class", () => {
+    renderRail([mockContactBook, removedBook]);
+    expect(document.querySelector('li[data-book-id="book-iphone"] svg')).toHaveClass("contacts-book-removed-icon");
+    expect(document.querySelector('li[data-book-id="book-pixel8"] svg')).not.toHaveClass("contacts-book-removed-icon");
+  });
+
+  it("gives Sync now a reason for a removed phone", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([removedBook, mockContactBook]);
+    render(<ContactsView />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sync now" })).toHaveAttribute("title", "Can't sync a removed phone"));
+    expect(screen.getByRole("button", { name: "Sync now" })).toBeDisabled();
   });
 });
 

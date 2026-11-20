@@ -14,20 +14,30 @@ const MENU_PADDING = 8;
 const MENU_GAP = 4;
 const VIEWPORT_MARGIN = 8;
 
-/** Opens under a ⋯ button, right-aligned to it. */
-export function underButtonPoint(rect: DOMRect): BookMenuPoint {
-  return { x: rect.right - MENU_WIDTH, y: rect.bottom + MENU_GAP };
-}
-
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(value, max));
+}
+
+/** Keeps the menu's left edge inside the rail (clear of the app's icon rail) and inside the window. */
+function clampMenuLeft(left: number, railLeft: number): number {
+  return clamp(left, railLeft + MENU_GAP, window.innerWidth - MENU_WIDTH - MENU_GAP);
+}
+
+/** Opens under a ⋯ button, right-aligned to it. */
+export function underButtonPoint(button: DOMRect, railLeft: number): BookMenuPoint {
+  return { x: clampMenuLeft(button.right - MENU_WIDTH, railLeft), y: button.bottom + MENU_GAP };
+}
+
+/** Context-menu point: the pointer position, clamped horizontally like the ⋯ placement. */
+export function pointerMenuPoint(clientX: number, clientY: number, railLeft: number): BookMenuPoint {
+  return { x: clampMenuLeft(clientX, railLeft), y: clientY };
 }
 
 function bookMenuPosition(point: BookMenuPoint, itemCount: number): CSSProperties {
   const height = itemCount * MENU_ITEM_HEIGHT + MENU_PADDING * 2;
   return {
     position: "fixed",
-    left: clamp(point.x, VIEWPORT_MARGIN, window.innerWidth - MENU_WIDTH - VIEWPORT_MARGIN),
+    left: point.x,
     top: clamp(point.y, VIEWPORT_MARGIN, window.innerHeight - height - VIEWPORT_MARGIN),
   };
 }

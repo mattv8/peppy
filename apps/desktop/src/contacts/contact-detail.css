@@ -40,7 +40,7 @@
 #contacts-detail-header h2 {
   margin: 0;
   overflow: hidden;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -83,6 +83,7 @@
   border-color: var(--peppy-error);
 }
 
+/* Ghost close button: no border or fill until hover or focus, like the toolbar icon buttons. */
 #contacts-detail-header > #contacts-detail-close {
   flex: 0 0 auto;
   align-self: flex-start;
@@ -92,6 +93,20 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  border: 0;
+  border-radius: var(--peppy-radius-sm);
+  background: transparent;
+  color: var(--peppy-text-secondary);
+}
+
+#contacts-detail-header > #contacts-detail-close:hover:not(:disabled) {
+  background: var(--peppy-surface-hover);
+  color: var(--peppy-text-primary);
+}
+
+#contacts-detail-header > #contacts-detail-close:focus-visible {
+  outline: 2px solid var(--peppy-focus-ring);
+  outline-offset: 1px;
 }
 
 #contacts-detail-back {
@@ -121,6 +136,11 @@
   }
 }
 
+/* Phone, email, and address lines: the label is secondary text beside its value. */
+.contacts-detail-label {
+  color: var(--peppy-text-secondary);
+}
+
 /* Photo pencil: the 64px avatar is a button with a 20px badge. Its outline mirrors the photo edit state. */
 .contacts-detail-photo {
   position: relative;
@@ -144,7 +164,9 @@
 }
 
 #contacts-detail-header #contacts-detail-photo:focus-visible {
+  outline: 2px solid var(--peppy-focus-ring);
   outline-offset: 2px;
+  border-radius: 50%;
 }
 
 #contacts-detail-header #contacts-detail-photo[aria-disabled="true"] {

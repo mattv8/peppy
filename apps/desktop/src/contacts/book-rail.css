@@ -90,6 +90,10 @@
   color: var(--peppy-warning-text);
 }
 
+.contacts-book-row > .contacts-book-removed-icon {
+  color: var(--peppy-warning-text);
+}
+
 /* The lookup switch keeps its column in every row; it is invisible (still focusable) until the row is hovered,
    focused, selected, excluded, or touched on a coarse pointer. */
 .contacts-book-use {
@@ -122,14 +126,14 @@
 
 .contacts-book-more {
   display: inline-flex;
-  flex: 0 0 24px;
+  flex: 0 0 28px;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--peppy-radius-sm);
   background: transparent;
   color: var(--peppy-text-secondary);
   cursor: pointer;
@@ -177,11 +181,12 @@
   outline: none;
 }
 
-#contacts-book-use { padding: 8px; border-bottom: 1px solid var(--peppy-border); }
+/* Compact lookup strip (rail hidden). With the list header's book select it is one row plus its hint; the title line shows only when no select does. */
+#contacts-book-use { padding: 6px 10px; border-bottom: 1px solid var(--peppy-border); }
 #contacts-book-use-title, .contacts-book-use-row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
 #contacts-book-use-title { justify-content: flex-start; gap: 6px; }
-.contacts-book-use-row { cursor: pointer; }
-#contacts-book-use-hint, #contacts-book-use-confirm p { color: var(--peppy-text-secondary); font-size: 12px; margin: 4px 0; }
+.contacts-book-use-row { cursor: pointer; font-size: 13px; }
+#contacts-book-use-hint, #contacts-book-use-confirm p { color: var(--peppy-text-secondary); font-size: 12px; margin: 2px 0 0; }
 #contacts-book-use-confirm { flex: 0 0 100%; padding: 8px; }
 .contacts-book-id, .contacts-book-hidden { display: block; color: var(--peppy-text-secondary); font-size: 12px; }
 .contacts-book-account { color: var(--peppy-text-secondary); }

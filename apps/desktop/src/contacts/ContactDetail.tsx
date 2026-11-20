@@ -221,7 +221,7 @@ export function ContactDetail({
         <div id="contacts-detail-identity">
           <div id="contacts-detail-title">
             <h2 title={name}>{name}</h2>
-            <small>{[contact.organization, contact.title].filter(Boolean).join(" · ")}</small>
+            <small>{[contact.organization, contact.title].filter(Boolean).join(", ")}</small>
           </div>
           {canWrite && (
             <div id="contacts-detail-actions">
@@ -274,7 +274,8 @@ export function ContactDetail({
           <h3>Phone numbers</h3>
           {contact.phones.map((phone, position) => (
             <p key={phoneKeys[position]}>
-              {phone.displayLabel ?? phone.label} · {formatPhoneNumber(phone.number)}
+              <span className="contacts-detail-label">{phone.displayLabel ?? phone.label}</span>{" "}
+              <span>{formatPhoneNumber(phone.number)}</span>
             </p>
           ))}
         </section>
@@ -284,7 +285,8 @@ export function ContactDetail({
           <h3>Email</h3>
           {contact.emails.map((email, position) => (
             <p key={emailKeys[position]}>
-              {email.displayLabel ?? email.label} · {email.address}
+              <span className="contacts-detail-label">{email.displayLabel ?? email.label}</span>{" "}
+              <span>{email.address}</span>
             </p>
           ))}
         </section>
@@ -294,9 +296,10 @@ export function ContactDetail({
           <h3>Addresses</h3>
           {contact.addresses.map((addr, position) => (
             <p key={addressKeys[position]}>
-              {addr.displayLabel ?? addr.label} · {[addr.street, addr.city, addr.state, addr.postalCode, addr.country]
+              <span className="contacts-detail-label">{addr.displayLabel ?? addr.label}</span>{" "}
+              <span>{[addr.street, addr.city, addr.state, addr.postalCode, addr.country]
                 .filter(Boolean)
-                .join(", ")}
+                .join(", ")}</span>
             </p>
           ))}
         </section>
