@@ -49,6 +49,7 @@ COPY packages/contracts ./packages/contracts
 COPY packages/desktop-ui ./packages/desktop-ui
 COPY packages/generated ./packages/generated
 COPY packages/mobile-design ./packages/mobile-design
+COPY packages/typescript-ast ./packages/typescript-ast
 RUN --mount=type=cache,id=peppy-browser-core-${BUILDARCH},target=/src/target/browser-core \
     --mount=type=cache,id=peppy-pnpm-${BUILDARCH},target=/root/.cache/pnpm \
     CARGO_TARGET_DIR=/src/target/browser-core \

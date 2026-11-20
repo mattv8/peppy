@@ -128,7 +128,7 @@ import { SetupLanding, savedSetupMode } from "./setup/SetupLanding";
 import { AppLockScreen, AppLockSettings } from "./shell/AppLock";
 import { UpdatesSettings } from "./updates/UpdatesSettings";
 import { isTauriUpdateHost, useUpdateActivity } from "./updates/updates";
-import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./shell/status";
+import { connectionText, historyStatus, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./shell/status";
 import { SyncTooLargeNotice } from "./shell/SyncTooLargeNotice";
 import { isSettingUp, liveSettingUpGatewayFor, resolveStoredRoute, settingUpGatewayFor } from "./setup/settingUpRoute";
 import { DEFAULT_MMS_LIMIT_BYTES, availabilityProblem, gatewayAvailability, importingRefusal, routeProblem, type RouteChoice } from "./setup/routeProblem";
@@ -194,6 +194,7 @@ import { CORAL_ACCENT_INDEX, accentAttribute, accentSwatchColor } from "./shell/
 import { useAccentColor } from "./shell/useAccentColor";
 import { senderLabel, senderRunEdges } from "./sender/attribution";
 import { conversationContactAddress } from "./contacts/conversation-contact";
+import { ContactNameChooser } from "./contacts/ContactNameChooser";
 import { hiddenTimeIds } from "./conversation/timestamp-bursts";
 import { createSeenReactionLedger, linkReactions, locateReactionTarget, mergeReactions, NO_REACTIONS, ReactionAnnouncer, ReactionBadges, ReactionNotice, ReactionSettings, useSeenBadges, useShowReactions, type ActorName, type MergedReactionBadge, type OwnChipState, type ReactionNoticeInfo, type ReactionTargetResult, type SeenReactionLedger } from "./reactions";
 import { type Announcement, isReactionEligible, MessageReactionLayer, NO_ANNOUNCEMENT, nativeSelection } from "./reactions/ReactionLayer";
@@ -2170,10 +2171,12 @@ function SettingsView({
 function StatusDetails({
   connection,
   encryption,
+  syncProgress,
   serverUnreachable = false,
 }: {
   connection?: DesktopSnapshot["connection"];
   encryption?: DesktopSnapshot["encryption"]["state"];
+  syncProgress?: DesktopSnapshot["syncProgress"];
   serverUnreachable?: boolean;
 }) {
   if (!connection || !encryption)
@@ -2185,11 +2188,16 @@ function StatusDetails({
       ? <LockKeyhole size={14} aria-hidden />
       : <Lock size={14} aria-hidden />;
   const label = connectionText(connection);
+  const history = encryption !== "locked" ? historyStatus(syncProgress) : undefined;
   return (
     <div className="status-details" data-status-details>
       <div className="status-details-row" data-disclosure="sync-state" data-sync-state={encryption} title={text}>
         {icon}<span>{text}</span>
       </div>
+      {history && <div className="status-details-row" data-disclosure="history" data-history-phase={history.phase}>
+        <History size={14} aria-hidden />
+        <dl className="status-details-pair"><dt>History</dt><dd>{history.value}</dd></dl>
+      </div>}
       <div className="status-details-row" data-disclosure="carrier-sms" title="Carrier SMS/MMS not end-to-end encrypted">
         <ShieldAlert size={14} aria-hidden />
         <span>Carrier SMS/MMS not end-to-end encrypted</span>
@@ -2317,6 +2325,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   useMaximizeButtonRegion({ bridge, enabled: !browserHost && platform === "windows" && !composerConversation });
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
+  const [nameChooser, setNameChooser] = useState<{ address: string; conversationId: string; returnFocus: HTMLElement | null }>();
   const [pendingSends, setPendingSends] = useState<PendingSend[]>([]);
   const [cancelledSendRestore, setCancelledSendRestore] = useState<CancelledSendRestore>();
   const cancelledSendSequence = useRef(0);
@@ -2359,6 +2368,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [mode, setMode] = useState<"hosted" | "self-hosted">(() => browserHost ? "self-hosted" : savedSetupMode());
   const headPanel = Boolean(composerConversation && (snapshot?.head.panel ?? headPanelBootstrap));
   const [selected, setSelected] = useState(composerConversation ?? "");
+  useEffect(() => { setNameChooser(undefined); }, [selected]);
   const [attachmentViews, setAttachmentViews] = useState<
     Record<string, AttachmentView>
   >({});
@@ -2861,10 +2871,27 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (draft) rememberHostDraft(draft);
     store.adopt(conversationId, draft);
   };
+  /**
+   * A merge redirected a requested conversation to its survivor. The draft moves with it and the selection
+   * follows in place; choose() is not called, so scroll, history window and folder view stay as they are.
+   */
+  const followRequestedRedirect = (redirect: { from: string; to: string }) => {
+    store.followMerge(redirect.from, redirect.to);
+    if (latestRequiredConversationRef.current === redirect.from) latestRequiredConversationRef.current = redirect.to;
+    // An open gallery keeps its loaded items and cursors, and paginates under the survivor's ID from now on.
+    if (sameGalleryConversation(galleryCacheRef.current.conversationId, redirect.from)) {
+      galleryCacheRef.current = { ...galleryCacheRef.current, conversationId: redirect.to };
+    }
+    if (sameGalleryConversation(galleryConversationRef.current, redirect.from)) galleryConversationRef.current = redirect.to;
+    if (selectedRef.current !== redirect.from) return;
+    selectedRef.current = redirect.to;
+    setSelected(redirect.to);
+  };
   const reconcileMissingRequestedConversation = (requestedConversationId: string | undefined, state: DesktopSnapshot) => {
     if (
       !requestedConversationId ||
       state.activeConversationId === requestedConversationId ||
+      state.requestedRedirect?.from === requestedConversationId ||
       state.conversations.some((conversation) => conversation.id === requestedConversationId)
     ) return;
     const missingSlot = store.get(requestedConversationId);
@@ -3222,7 +3249,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     const requestedConversationId = conversationId && !isLocalDraftKey(conversationId)
       ? conversationId
       : undefined;
-    const detached = detachedHistoryRef.current?.conversationId === conversationId
+    let detached = detachedHistoryRef.current?.conversationId === conversationId
       ? detachedHistoryRef.current
       : undefined;
     const latestRequired = latestRequiredConversationRef.current === conversationId;
@@ -3235,10 +3262,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       : historyFromMessageId
       ? await bridge.load_state(requestedConversationId, historyFromMessageId)
       : await bridge.load_state(requestedConversationId);
+    const redirect = state.requestedRedirect?.from === conversationId ? state.requestedRedirect : undefined;
+    const survivorId = redirect?.to ?? conversationId;
+    // A redirected snapshot is written with the redirect itself, so the view never shows a half-applied merge.
     if (
       mountedRef.current &&
       sessionKey === currentSearchSessionKey() &&
-      state.encryption.state !== "unlocked"
+      state.encryption.state !== "unlocked" &&
+      !redirect
     )
       setSnapshot(state);
     if (
@@ -3248,18 +3279,28 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       (detached && detachedHistoryRef.current !== detached)
     ) return;
     resetDraftAttachmentCache(state.sessionScopeId);
+    // Applies the merge's selection and draft move; it must share a flush with the snapshot write.
+    const followRedirect = () => {
+      if (redirect) followRequestedRedirect(redirect);
+    };
+    const detachedIsCurrent = () => Boolean(detached && detachedHistoryRef.current?.generation === detached.generation);
 
     if (detached && (detached.pendingLoad || !detached.messageIds.length)) {
-      setSnapshot((current) => {
-        if (!current || current.activeConversationId !== conversationId) return state;
-        const currentConversation = current.conversations.find((item) => item.id === conversationId);
-        return {
-          ...state,
-          activeConversationId: conversationId,
-          conversations: state.conversations.map((item) => item.id === conversationId && currentConversation
-            ? { ...item, messages: currentConversation.messages, hasOlderMessages: detached.hasOlder }
-            : item),
-        };
+      const pendingDetached = detached;
+      flushSync(() => {
+        followRedirect();
+        setSnapshot((current) => {
+          if (!current || current.activeConversationId !== conversationId) return state;
+          const currentConversation = current.conversations.find((item) => item.id === conversationId);
+          return {
+            ...state,
+            activeConversationId: survivorId,
+            conversations: state.conversations.map((item) => item.id === survivorId && currentConversation
+              ? { ...item, messages: currentConversation.messages, hasOlderMessages: pendingDetached.hasOlder }
+              : item),
+          };
+        });
+        if (redirect && detachedIsCurrent()) setDetached({ ...pendingDetached, conversationId: survivorId });
       });
       if (state.activeConversationId) {
         if (state.draft && store.isHydrated(state.activeConversationId)) applyAuthoritativeDraft(state.draft);
@@ -3271,7 +3312,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
 
     const refreshedWindow = detached
-      ? await bridge.load_message_window({ direction: "refresh", conversationId, messageIds: detached.messageIds.slice(0, DETACHED_HISTORY_LIMIT) })
+      ? await bridge.load_message_window({ direction: "refresh", conversationId: survivorId, messageIds: detached.messageIds.slice(0, DETACHED_HISTORY_LIMIT) })
       : undefined;
     if (
       !mountedRef.current ||
@@ -3281,6 +3322,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     ) return;
 
     const refreshed = state.conversations.find((item) => item.id === state.activeConversationId);
+    // Older messages are merged only when this response is for the requested conversation or its survivor.
+    const mergesHistory = Boolean(redirect || state.activeConversationId === conversationId);
     let refreshedDetached: DetachedHistory | undefined;
     const shouldPreserveScrollPosition = Boolean(!nearBottom.current && !historyLoadingRef.current);
     if (shouldPreserveScrollPosition) historyAnchorRef.current = captureHistoryAnchor(historyFromMessageId);
@@ -3290,20 +3333,21 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         const detachedMessages = mergeDetachedMessages(currentMessages, refreshedWindow.messages, "refresh").messages;
         refreshedDetached = {
           ...detached,
+          conversationId: survivorId,
           messageIds: detachedMessages.map((message) => message.id),
           hasOlder: refreshedWindow.hasOlder,
           hasNewer: refreshedWindow.hasNewer,
         };
         return {
           ...state,
-          activeConversationId: conversationId,
-          conversations: state.conversations.map((item) => item.id === conversationId
+          activeConversationId: survivorId,
+          conversations: state.conversations.map((item) => item.id === survivorId
             ? { ...item, messages: detachedMessages, hasOlderMessages: refreshedWindow.hasOlder }
             : item),
         };
       }
-      const previous = historyFromMessageId && current && current.activeConversationId === state.activeConversationId
-        ? current.conversations.find((item) => item.id === state.activeConversationId)
+      const previous = historyFromMessageId && mergesHistory && current && current.activeConversationId === conversationId
+        ? current.conversations.find((item) => item.id === conversationId)
         : undefined;
       if (!previous || !refreshed) return state;
       return {
@@ -3313,14 +3357,19 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           : item),
       };
     });
+    const commitSnapshot = () => {
+      followRedirect();
+      if (redirect && detachedIsCurrent()) setDetached({ ...detached!, conversationId: survivorId });
+      updateSnapshot();
+    };
     if (shouldPreserveScrollPosition) {
-      flushSync(updateSnapshot);
+      flushSync(commitSnapshot);
       correctHistoryAnchorScroll(historyAnchorRef.current);
     } else {
-      flushSync(updateSnapshot);
+      flushSync(commitSnapshot);
     }
-    if (refreshedDetached && detachedHistoryRef.current === detached) setDetached(refreshedDetached);
-    if (latestRequiredConversationRef.current === conversationId && !detached) {
+    if (refreshedDetached && detachedIsCurrent()) setDetached(refreshedDetached);
+    if (latestRequiredConversationRef.current === survivorId && !detached) {
       latestRequiredConversationRef.current = undefined;
     }
     if (state.activeConversationId) {
@@ -3331,8 +3380,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setRefreshNotice("");
     if (!composerConversation && !selectedRef.current && state.activeConversationId) choose(state.activeConversationId);
     const responseHasOlder = refreshedDetached?.hasOlder ?? refreshed?.hasOlderMessages ?? false;
-    const currentAnchor = snapshotRef.current?.activeConversationId === conversationId
-      ? snapshotRef.current.conversations.find((item) => item.id === conversationId)?.messages[0]?.id
+    const currentAnchor = snapshotRef.current?.activeConversationId === survivorId
+      ? snapshotRef.current.conversations.find((item) => item.id === survivorId)?.messages[0]?.id
       : undefined;
     if (currentAnchor === historyFromMessageId || !currentAnchor || detached) {
       hasOlderMessagesRef.current = responseHasOlder;
@@ -3390,8 +3439,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     const state = await bridge.load_state(conversationId);
     if (!mountedRef.current || generation !== navigationGeneration.current || sessionKey !== currentSearchSessionKey() || selectedRef.current !== conversationId) return;
     clearDetached();
-    if (state.activeConversationId !== conversationId) {
-      latestRequiredConversationRef.current = conversationId;
+    const redirect = state.requestedRedirect?.from === conversationId ? state.requestedRedirect : undefined;
+    const survivorId = redirect?.to ?? conversationId;
+    if (redirect) followRequestedRedirect(redirect);
+    if (state.activeConversationId !== survivorId) {
+      latestRequiredConversationRef.current = survivorId;
       setSnapshot({ ...state, activeConversationId: undefined });
       choose("");
       setNotice("The selected conversation is unavailable. Retry from search.", "warning");
@@ -3400,10 +3452,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     latestRequiredConversationRef.current = undefined;
     nearBottom.current = true;
     setSnapshot(state);
-    if (state.activeConversationId === conversationId) adoptHostDraft(conversationId, state.draft);
+    adoptHostDraft(survivorId, state.draft);
     setNewComposeKey(null);
     setNotice(unavailableNotice);
-    const conversation = state.conversations.find(item => item.id === conversationId);
+    const conversation = state.conversations.find(item => item.id === survivorId);
     const hasOlder = conversation?.hasOlderMessages ?? false;
     hasOlderMessagesRef.current = hasOlder;
     setHasOlderMessages(hasOlder);
@@ -3582,7 +3634,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           if (!mountedRef.current || attempt !== subscriptionAttempt) return;
           try {
             bindDraftSubscriptionAfterRefreshRef.current = bindAfterVerifiedRefresh;
-            await refresh(composerConversation ?? undefined);
+            // A composer window follows its conversation through a merge; its selection is the survivor after one.
+            await refresh(composerConversation ? selectedRef.current || composerConversation : undefined);
             if (!mountedRef.current || attempt !== subscriptionAttempt) return;
         } catch (error) {
           if (mountedRef.current && attempt === subscriptionAttempt) reportRefresh("")(error);
@@ -3726,16 +3779,20 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       setContactTarget(undefined);
       setNotificationActionNotice("");
       if (destination.kind !== "conversation") return;
-      const found = state.conversations.find(item => item.id === conversationId);
+      // A merged-away notification target opens its survivor, with the draft moved along.
+      const redirect = state.requestedRedirect?.from === conversationId ? state.requestedRedirect : undefined;
+      const targetId = redirect?.to ?? destination.conversationId;
+      const found = state.conversations.find(item => item.id === targetId);
       clearDetached();
+      if (redirect) store.followMerge(redirect.from, redirect.to);
       flushSync(() => {
         setSnapshot(state);
         setActiveViewNow("conversations");
-        choose(found ? destination.conversationId : "");
+        choose(found ? targetId : "");
         setNewComposeKey(null);
         setNotice(found ? "" : "This conversation is no longer available.", "warning");
         if (found) {
-          adoptHostDraft(destination.conversationId, state.draft);
+          adoptHostDraft(targetId, state.draft);
           const hasOlder = found.hasOlderMessages ?? false;
           hasOlderMessagesRef.current = hasOlder;
           setHasOlderMessages(hasOlder);
@@ -3910,6 +3967,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const active = snapshot?.conversations.find(
     (conversation) => conversation.id === slotKey,
   );
+  // A merge that followed the view keeps the view's first identity, so view-level resets and remounts skip it.
+  const viewIdentityRef = useRef<string | undefined>(undefined);
+  const previousViewIdentity = viewIdentityRef.current;
+  const viewIdentity = active && previousViewIdentity !== undefined && store.resolve(previousViewIdentity) === store.resolve(active.id)
+    ? previousViewIdentity
+    : active?.id;
+  viewIdentityRef.current = viewIdentity;
+  const sameGalleryConversation = (left: string | undefined, right: string | undefined) =>
+    left !== undefined && right !== undefined && store.resolve(left) === store.resolve(right);
   useEffect(() => {
     if (!cancelledSendRestore) return;
     const message = active?.messages.find(({ id }) => id === cancelledSendRestore.messageId);
@@ -3935,14 +4001,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     pendingSaveIdsRef.current.clear();
     galleryConversationRef.current = active?.id;
     galleryCacheRef.current = { conversationId: active?.id, items: [] };
-  }, [active?.id, appLock?.locked, snapshot?.encryption.state]);
+  }, [viewIdentity, appLock?.locked, snapshot?.encryption.state]);
   const conversationLoaded =
     Boolean(active) && snapshot?.activeConversationId === slotKey;
   const visiblePendingSendRows = visiblePendingSends(pendingSends, active, Boolean(detachedHistory && detachedHistory.conversationId === active?.id && detachedHistory.hasNewer));
   const trailingRowsKey = visiblePendingSendRows.map(({ id }) => id).join(",");
   const conversationTabsShown = Boolean(composerConversation) || conversationLoaded;
   const seenReactions = useMemo(() => createSeenReactionLedger({ mode: snapshot?.mode ?? "", origin: snapshot?.connection.origin }), [snapshot?.mode, snapshot?.connection.origin]);
-  const reactionScopeKey = JSON.stringify([renderedSearchSessionKey, slotKey]);
+  const reactionScopeKey = JSON.stringify([renderedSearchSessionKey, viewIdentity ?? slotKey]);
   const reactionReadEnabled = conversationLoaded && activeView === "conversations" && conversationTab === "messages" && snapshot?.encryption.state === "unlocked" && !appLock?.locked;
   const reactionReadContext = useRef({ key: reactionScopeKey, enabled: reactionReadEnabled });
   reactionReadContext.current = { key: reactionScopeKey, enabled: reactionReadEnabled };
@@ -4179,7 +4245,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (!conversationLoaded || detachedHistoryRef.current?.conversationId === slotKey || searchReadGate.current) return;
     stickToBottom();
     nearBottom.current = true;
-  }, [slotKey, conversationLoaded]);
+  }, [viewIdentity, conversationLoaded]);
   useLayoutEffect(() => {
     messageRows.current.forEach((candidate, id) => {
       if (id === searchTargetId || candidate.dataset.searchTarget !== "true") return;
@@ -5540,6 +5606,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const openSender = (address: string) => {
     const label = senderLabel(address, resolution);
+    if ((!label.contact && resolution[address]) || snapshot?.contactNameConflicts?.includes(address)) {
+      setNameChooser({ address, conversationId: active?.id ?? "", returnFocus: document.activeElement instanceof HTMLElement ? document.activeElement : null });
+      return;
+    }
     const requestId = ++contactTargetRequestId.current;
     const target: ContactTarget & { requestId: number } = label.contact
       ? { ...label.contact, requestId }
@@ -5547,8 +5617,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     void openContactTarget(target, "Sender not opened");
   };
   const addConversationContactAddress = conversationLoaded
-    ? conversationContactAddress({ conversation: active, resolution, books: snapshot?.contactBooks })
+    ? conversationContactAddress({ conversation: active, resolution, books: snapshot?.contactBooks, conflicts: snapshot?.contactNameConflicts })
     : undefined;
+  const chooserAddress = conversationLoaded && !active?.group && active?.participants?.length === 1 ? active.participants[0] : undefined;
+  const chooserState = chooserAddress && (snapshot?.contactNameConflicts?.includes(chooserAddress) ? "conflict" : resolution[chooserAddress]?.nameBasis);
+  const chooserOpen = nameChooser?.conversationId === active?.id;
+  const closeNameChooser = () => {
+    setNameChooser(undefined);
+    nameChooser?.returnFocus?.focus();
+  };
   const revealReactionTarget = (row: HTMLElement) => {
     reactionHighlightCleanupRef.current();
     let addedTabIndex = false;
@@ -6015,7 +6092,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   );
   const recipientPanel = isNewConversation ? (
     <RecipientPanel
-      key={newComposeKey ?? slotKey}
+      key={newComposeKey ?? composerDraftKey}
       recipients={content.recipientIds.map((id) => ({
         id,
         label: resolution[id]?.displayName ?? id,
@@ -6054,7 +6131,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       return;
     }
     const session = gallerySessionRef.current;
-    const isCurrent = () => gallerySessionRef.current === session && galleryConversationRef.current === conversationId;
+    const isCurrent = () => gallerySessionRef.current === session && sameGalleryConversation(galleryConversationRef.current, conversationId);
     try {
       const page = await bridge.media_page_around(conversationId, item.attachment.id, item.message.id, 40);
       if (!isCurrent()) return;
@@ -6141,7 +6218,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     />
       </div>
       {conversationTab === "media" && <div id="tabpanel-media" role="tabpanel" aria-labelledby="tab-media">
-        {active && <MediaPanel key={active.id} loadPage={async (cursor) => {
+        {active && <MediaPanel key={viewIdentity} loadPage={async (cursor) => {
           const page = await bridge.media_page(active.id, cursor as Parameters<typeof bridge.media_page>[1], 40);
           return { items: page.items.map(toGalleryItem), nextCursor: page.nextCursor };
         }} onOpen={(item) => void openGalleryItem(item)} refreshKey={mediaStateHint} />}
@@ -6154,7 +6231,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         const page = direction === "previous"
           ? await bridge.media_page_newer(cache.conversationId, cursor, 40)
           : await bridge.media_page(cache.conversationId, cursor, 40);
-        if (gallerySessionRef.current !== session || galleryConversationRef.current !== cache.conversationId) return undefined;
+        if (gallerySessionRef.current !== session || !sameGalleryConversation(galleryConversationRef.current, cache.conversationId)) return undefined;
         const pageItems = [...new Map(page.items.map(toGalleryItem).map(candidate => [`${candidate.message.id}:${candidate.attachment.id}`, candidate])).values()].filter((candidate) => !cache.items.some((known) => known.attachment.id === candidate.attachment.id && known.message.id === candidate.message.id));
         const orderedItems = direction === "previous" ? pageItems.reverse() : pageItems;
         cache.items = direction === "previous" ? [...orderedItems, ...cache.items] : [...cache.items, ...orderedItems];
@@ -6174,7 +6251,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     ? {
         tone: statusTone(snapshot.connection, snapshot.encryption.state, serverOffline),
         summary: statusSummary(snapshot.connection, snapshot.encryption.state),
-        details: <StatusDetails connection={snapshot.connection} encryption={snapshot.encryption.state} serverUnreachable={serverOffline} />,
+        details: <StatusDetails connection={snapshot.connection} encryption={snapshot.encryption.state} syncProgress={snapshot.syncProgress} serverUnreachable={serverOffline} />,
       }
     : {
         tone: "neutral" as const,
@@ -6520,6 +6597,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <Info size={16} aria-hidden />
               </button>}
               {conversationLoaded && <ConversationViewTabs value={conversationTab} onChange={setConversationTab} />}
+              {(chooserState || chooserOpen) && <div className="contact-source-anchor" data-contact-source-anchor>
+                {chooserState && <button id="conversation-contact-chooser" type="button" className="link-button" data-name-state={chooserState} aria-haspopup="dialog" aria-expanded={Boolean(chooserOpen)} onClick={event => chooserOpen ? closeNameChooser() : setNameChooser({ address: chooserAddress!, conversationId: active!.id, returnFocus: event.currentTarget })}>
+                  {chooserState === "conflict" ? "Choose contact" : chooserState === "pinned" ? "Name chosen" : "Contact sources"}
+                </button>}
+                {chooserOpen && nameChooser && <ContactNameChooser key={`${nameChooser.conversationId}:${nameChooser.address}`} address={nameChooser.address} state={snapshot?.contactNameConflicts?.includes(nameChooser.address) ? "conflict" : resolution[nameChooser.address]?.nameBasis ?? "conflict"} books={snapshot?.contactBooks ?? []} bridge={bridge} onClose={closeNameChooser} onRefresh={() => { void refresh(active?.id).catch(reportRefresh("")); }} onOpenContact={candidate => { setNameChooser(undefined); void openContactTarget({ bookId: candidate.bookId, contactId: candidate.contactId, requestId: ++contactTargetRequestId.current }); }} />}
+              </div>}
               {addConversationContactAddress && <button
                 id="add-conversation-contact"
                 aria-label={`Add ${formatPhoneNumber(addConversationContactAddress)} to contacts`}

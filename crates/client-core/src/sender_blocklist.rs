@@ -114,7 +114,7 @@ pub(crate) fn apply_result(
 
 fn effective_folder(conn: &Connection, id: ConversationId) -> Result<ConversationFolder, Error> {
     let folder: String = conn.query_row(
-        &format!("SELECT {} FROM (SELECT MAX(sort_at_ms) AS sort_at_ms FROM messages WHERE conversation_id=?1) c LEFT JOIN conversation_folders f ON f.conversation_id=?1", conversation_folders::effective_folder_sql("c.sort_at_ms")),
+        &format!("SELECT {} FROM (SELECT MAX(sort_at_ms) AS sort_at_ms FROM messages WHERE effective_conversation_id=?1) c LEFT JOIN conversation_folders f ON f.conversation_id=({})", conversation_folders::effective_folder_sql("c.sort_at_ms"), conversation_folders::winner_sql("?1")),
         [id.to_string()],
         |r| r.get(0),
     )?;
@@ -127,7 +127,7 @@ fn provider_owned(
     id: ConversationId,
     folder: ConversationFolder,
 ) -> Result<bool, Error> {
-    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM provider_folder_writes w JOIN conversation_folders f ON f.conversation_id=w.conversation_id AND f.logical_revision=w.logical_revision AND f.writer_device_id=w.writer_device_id WHERE w.conversation_id=? AND w.folder=?)", params![id.to_string(), folder.as_str()], |r| r.get(0))?)
+    Ok(conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM provider_folder_writes w JOIN conversation_folders f ON f.conversation_id=({}) AND f.logical_revision=w.logical_revision AND f.writer_device_id=w.writer_device_id WHERE w.conversation_id=?1 AND w.folder=?2)", conversation_folders::winner_sql("?1")), params![id.to_string(), folder.as_str()], |r| r.get(0))?)
 }
 
 /// Emits and applies a folder event; provider writes are recorded so they may later be reverted.
@@ -140,11 +140,10 @@ fn write_folder(
 ) -> Result<(), Error> {
     let current: Option<i64> = conn
         .query_row(
-            "SELECT logical_revision FROM conversation_folders WHERE conversation_id=?",
+            "SELECT MAX(logical_revision) FROM conversation_folders WHERE COALESCE((SELECT target_id FROM conversation_merges WHERE source_id=conversation_folders.conversation_id),conversation_id)=?",
             [id.to_string()],
             |r| r.get(0),
-        )
-        .optional()?;
+        )?;
     let clock = get_meta(conn, FOLDER_CLOCK)?
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
@@ -155,7 +154,7 @@ fn write_folder(
     let revision = base + 1;
     let archived_through_ms: Option<i64> = if folder == ConversationFolder::Archived {
         conn.query_row(
-            "SELECT MAX(sort_at_ms) FROM messages WHERE conversation_id=?",
+            "SELECT MAX(sort_at_ms) FROM messages WHERE effective_conversation_id=?",
             [id.to_string()],
             |r| r.get(0),
         )?
@@ -827,6 +826,45 @@ mod tests {
             .unlock(profile, header, "correct horse battery staple")
             .unwrap();
         client
+    }
+
+    #[test]
+    fn merged_source_newest_message_sets_archive_watermark() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let client = unlocked_client(
+            dir.path().join("merged-archive.db"),
+            vault_id,
+            &profile,
+            &header,
+            DeviceId::new(),
+        );
+        let survivor = ConversationId::new();
+        let source = ConversationId::new();
+        let mut store = client.lock().unwrap();
+        let (conn, ctx) = store.parts();
+        for (id, conversation, timestamp) in [("old", survivor, 10), ("new", source, 20)] {
+            conn.execute(
+                "INSERT INTO messages(id,conversation_id,effective_conversation_id,source_device_id,source_sequence,payload,seen,sort_at_ms) VALUES(?,?,?,?,?,'{}',0,?)",
+                params![id, conversation.to_string(), survivor.to_string(), ctx.device_id.to_string(), timestamp, timestamp],
+            ).unwrap();
+        }
+        write_folder(conn, &ctx, survivor, ConversationFolder::Archived, true).unwrap();
+        let watermark: i64 = conn
+            .query_row(
+                "SELECT archived_through_ms FROM conversation_folders WHERE conversation_id=?",
+                [survivor.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(watermark, 20);
+        assert_eq!(
+            effective_folder(conn, survivor).unwrap(),
+            ConversationFolder::Archived
+        );
     }
 
     #[test]

@@ -553,7 +553,7 @@ fn reaction_schema_fresh_install_creates_the_schema_61_objects_and_constraints()
         .conn
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 63);
+    assert_eq!(version, SCHEMA_VERSION);
     for table in [
         "reaction_requests",
         "reaction_capabilities",
@@ -613,7 +613,7 @@ fn reaction_schema_60_upgrade_adds_the_reaction_objects_and_index() {
         .conn
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 63);
+    assert_eq!(version, SCHEMA_VERSION);
     for table in [
         "reaction_requests",
         "reaction_capabilities",

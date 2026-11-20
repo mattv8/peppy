@@ -95,7 +95,7 @@ pub(crate) fn search(conn: &Connection, input: &str) -> Result<String, Error> {
             .chars()
             .all(|c| c.is_ascii_digit() || matches!(c, '+' | ' ' | '(' | ')' | '.' | '-'));
 
-    let visible_book_ids = contacts::visible_book_ids(conn)?;
+    let visible_book_ids = contacts::lookup_book_ids(conn)?;
     let mut books = HashMap::new();
     for row in conn
         .prepare("SELECT id,owner_device_id,state,body FROM contact_books WHERE forgotten=0")?

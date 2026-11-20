@@ -194,13 +194,18 @@ impl TestServer {
         Self::start_with(TransportOptions::default()).await
     }
 
+    /// For tests asserting explicit maintenance results: the fixture's immediate
+    /// first maintenance tick would otherwise race those calls.
+    async fn start_without_maintenance() -> Self {
+        Self::start_custom_mode(TransportOptions::default(), None, None, false).await
+    }
+
     async fn start_with(options: TransportOptions) -> Self {
         Self::start_custom(options, None, None).await
     }
 
-    /// A vault whose owner profile/header are real `peppy-crypto` values, so a real
-    /// `peppy_client_core::Client` (device = owner) can encrypt for it.
-    async fn start_real(
+    /// A real owner profile/header for client encryption, without competing maintenance.
+    async fn start_real_without_maintenance(
         profile: &peppy_crypto::KeyProfile,
         header: &peppy_crypto::VaultCheckHeader,
     ) -> Self {
@@ -210,7 +215,7 @@ impl TestServer {
             serde_json::to_vec(header).unwrap(),
             profile.vault_id,
         );
-        Self::start_custom(TransportOptions::default(), Some(real), None).await
+        Self::start_custom_mode(TransportOptions::default(), Some(real), None, false).await
     }
 
     async fn start_custom(
@@ -1928,7 +1933,7 @@ async fn origin_tags_allow_distinct_same_producer_records_and_deduplicate_cross_
 
 #[tokio::test]
 async fn compacted_same_producer_extra_origin_record_keeps_its_exact_retry_identity() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     let tag = [11; 32];
     let tag_base64 = base64::engine::general_purpose::STANDARD.encode(tag);
     let representative = with_origin_tag(
@@ -3854,7 +3859,7 @@ async fn snapshot_manifest_clamps_pages_at_five_thousand_entries() {
 
 #[tokio::test]
 async fn snapshot_manifest_observes_compaction_generation_and_deletion() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     let first = set_fingerprint(
         compacting_event(server.vault, server.owner_device, 1, Uuid::new_v4(), vec![]),
         &server.fingerprint,
@@ -3948,11 +3953,11 @@ struct RealVault {
     header: peppy_crypto::VaultCheckHeader,
 }
 
-async fn real_vault() -> RealVault {
+async fn real_vault_without_maintenance() -> RealVault {
     let profile = KeyProfile::new(Uuid::new_v4(), 1).unwrap();
     let root = derive_root_key(RESYNC_PASSPHRASE, &profile).unwrap();
     let header = peppy_crypto::create_vault_check_header(&root, profile.clone()).unwrap();
-    let server = TestServer::start_real(&profile, &header).await;
+    let server = TestServer::start_real_without_maintenance(&profile, &header).await;
     RealVault {
         server,
         dir: tempfile::TempDir::new().unwrap(),
@@ -4292,7 +4297,7 @@ fn is_flagged(envelope: &Value) -> bool {
 
 #[tokio::test]
 async fn verified_resync_downloads_only_the_records_the_journal_lacks() {
-    let real = real_vault().await;
+    let real = real_vault_without_maintenance().await;
     let server = &real.server;
     let producer = real.open("producer.db", server.owner_device);
     let held_device = real.open("held.db", Uuid::new_v4());
@@ -4353,7 +4358,7 @@ async fn verified_resync_downloads_only_the_records_the_journal_lacks() {
 
 #[tokio::test]
 async fn verified_resync_downloads_flagged_held_records_and_matches_a_full_import() {
-    let real = real_vault().await;
+    let real = real_vault_without_maintenance().await;
     let server = &real.server;
     let producer = real.open("producer.db", server.owner_device);
     let held_device = real.open("held.db", Uuid::new_v4());
@@ -4441,7 +4446,7 @@ async fn verified_resync_downloads_flagged_held_records_and_matches_a_full_impor
 
 #[tokio::test]
 async fn verified_resync_after_compaction_omits_compacted_cursors_and_fences_the_old_generation() {
-    let real = real_vault().await;
+    let real = real_vault_without_maintenance().await;
     let server = &real.server;
     let producer = real.open("producer.db", server.owner_device);
     let held_device = real.open("held.db", Uuid::new_v4());
@@ -4518,7 +4523,7 @@ async fn verified_resync_after_compaction_omits_compacted_cursors_and_fences_the
 
 #[tokio::test]
 async fn verified_resync_pages_missing_runs_across_manifest_boundaries() {
-    let real = real_vault().await;
+    let real = real_vault_without_maintenance().await;
     let server = &real.server;
     let producer = real.open("producer.db", server.owner_device);
     let held_device = real.open("held.db", Uuid::new_v4());
@@ -4632,7 +4637,7 @@ async fn manifest_cost_at_five_thousand_records() {
 
 #[tokio::test]
 async fn compaction_only_prunes_replay_expired_explicit_targets_and_fences_snapshot_pages() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     let first = set_fingerprint(
         compacting_event(server.vault, server.owner_device, 1, Uuid::new_v4(), vec![]),
         &server.fingerprint,
@@ -4789,7 +4794,7 @@ fn keyed(mut value: Value, group: u8) -> Value {
 
 #[tokio::test]
 async fn expired_terminal_root_is_kept_while_a_same_key_record_survives_outside_its_ancestry() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     let (o, v, f) = (
         server.owner_device,
         server.vault,
@@ -4825,7 +4830,7 @@ async fn expired_terminal_root_is_kept_while_a_same_key_record_survives_outside_
 
 #[tokio::test]
 async fn expired_terminal_roots_self_expire_with_their_ancestry_and_keep_retry_identity() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     let (o, v, f) = (
         server.owner_device,
         server.vault,
@@ -4911,7 +4916,7 @@ async fn expired_terminal_roots_self_expire_with_their_ancestry_and_keep_retry_i
 
 #[tokio::test]
 async fn unsaturated_compaction_pass_waits_the_full_daily_interval() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     let (o, v, f) = (
         server.owner_device,
         server.vault,
@@ -4938,7 +4943,7 @@ async fn unsaturated_compaction_pass_waits_the_full_daily_interval() {
 
 #[tokio::test]
 async fn compaction_collapses_chains_protects_targets_holds_pending_and_keeps_retry_identity() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     let gateway = server.provision_device("gateway").await;
     let (o, v, f) = (
         server.owner_device,
@@ -5093,7 +5098,7 @@ async fn compaction_collapses_chains_protects_targets_holds_pending_and_keeps_re
 
 #[tokio::test]
 async fn compaction_removes_a_seventy_record_supersession_chain_down_to_its_newest_record() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     let (o, v, f) = (
         server.owner_device,
         server.vault,
@@ -5163,7 +5168,7 @@ async fn compaction_removes_a_seventy_record_supersession_chain_down_to_its_newe
 
 #[tokio::test]
 async fn replay_expiry_and_ahead_cursors_resync_while_immutable_records_survive_pruning() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     let mut bodies = Vec::new();
     for sequence in 1..=10 {
         let body = server.owner_event(sequence);
@@ -6188,7 +6193,7 @@ async fn real_client_history_purges_on_the_real_server_and_fresh_snapshot_does_n
     let key_profile = peppy_crypto::KeyProfile::new(vault, 1).unwrap();
     let root = peppy_crypto::derive_root_key(pass, &key_profile).unwrap();
     let header = peppy_crypto::create_vault_check_header(&root, key_profile.clone()).unwrap();
-    let server = TestServer::start_real(&key_profile, &header).await;
+    let server = TestServer::start_real_without_maintenance(&key_profile, &header).await;
     let dir = tempfile::TempDir::new().unwrap();
     let open = |name: &str, device: Uuid| {
         let client = core::Client::open(
@@ -6565,7 +6570,7 @@ async fn cursor_write_rule_skips_intermediate_pages_and_recent_equal_values() {
 
 #[tokio::test]
 async fn ahead_and_expired_cursors_are_never_recorded() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     for sequence in 1..=10 {
         server.commit(&server.owner_event(sequence)).await;
     }
@@ -6594,7 +6599,7 @@ async fn ahead_and_expired_cursors_are_never_recorded() {
 
 #[tokio::test]
 async fn prune_stops_at_the_lowest_counted_cursor_even_when_every_row_is_young() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     for sequence in 1..=10 {
         server.commit(&server.owner_event(sequence)).await;
     }
@@ -6616,7 +6621,7 @@ async fn prune_stops_at_the_lowest_counted_cursor_even_when_every_row_is_young()
 
 #[tokio::test]
 async fn silent_device_stops_counting_once_its_report_is_older_than_the_retention() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     for sequence in 1..=10 {
         server.commit(&server.owner_event(sequence)).await;
     }
@@ -6631,7 +6636,7 @@ async fn silent_device_stops_counting_once_its_report_is_older_than_the_retentio
 
 #[tokio::test]
 async fn newly_paired_device_without_a_report_holds_the_floor_until_the_retention_passes() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     for sequence in 1..=10 {
         server.commit(&server.owner_event(sequence)).await;
     }
@@ -6650,7 +6655,7 @@ async fn newly_paired_device_without_a_report_holds_the_floor_until_the_retentio
 
 #[tokio::test]
 async fn revoked_device_does_not_count_and_its_cursor_row_is_deleted_over_http() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     for sequence in 1..=10 {
         server.commit(&server.owner_event(sequence)).await;
     }
@@ -6675,7 +6680,7 @@ async fn revoked_device_does_not_count_and_its_cursor_row_is_deleted_over_http()
 
 #[tokio::test]
 async fn caught_up_vault_with_only_young_rows_is_pruned() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     for sequence in 1..=10 {
         server.commit(&server.owner_event(sequence)).await;
     }
@@ -6688,7 +6693,7 @@ async fn caught_up_vault_with_only_young_rows_is_pruned() {
 
 #[tokio::test]
 async fn no_counted_device_prunes_by_age_only_and_young_rows_survive() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     for sequence in 1..=10 {
         server.commit(&server.owner_event(sequence)).await;
     }
@@ -6707,7 +6712,7 @@ async fn no_counted_device_prunes_by_age_only_and_young_rows_survive() {
 
 #[tokio::test]
 async fn candidate_sets_are_bounded_and_rotate_so_every_vault_is_pruned() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     let pool = server.pool.clone();
     // 100 vaults that hold their floor: a device at cursor 0 under young rows. They sort
     // first by vault_id, so an ordering by vault_id alone would keep choosing them.
@@ -6753,7 +6758,7 @@ async fn candidate_sets_are_bounded_and_rotate_so_every_vault_is_pruned() {
 
 #[tokio::test]
 async fn device_that_keeps_fetching_never_receives_cursor_expired_for_its_reported_cursor() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     for sequence in 1..=10 {
         server.commit(&server.owner_event(sequence)).await;
     }
@@ -6773,7 +6778,7 @@ async fn device_that_keeps_fetching_never_receives_cursor_expired_for_its_report
 
 #[tokio::test]
 async fn vaults_do_not_affect_each_other() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     for sequence in 1..=10 {
         server.commit(&server.owner_event(sequence)).await;
     }
@@ -6840,7 +6845,7 @@ async fn rewind_racing_a_prune_that_ends_below_the_new_floor_is_not_recorded() {
 /// A rewind committed before the prune reads progress is what the prune sees.
 #[tokio::test]
 async fn rewind_committed_before_the_prune_holds_the_floor_at_the_rewound_cursor() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     for sequence in 1..=10 {
         server.commit(&server.owner_event(sequence)).await;
     }
@@ -6960,7 +6965,7 @@ async fn non_writing_reports_do_not_wait_for_the_vault_lock() {
 /// is not recorded.
 #[tokio::test]
 async fn cursor_zero_under_a_positive_floor_resyncs_and_records_nothing() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     for sequence in 1..=10 {
         server.commit(&server.owner_event(sequence)).await;
     }

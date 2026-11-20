@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import purchaseOptionsFixture from "./purchase-options.fixture.json";
 
 const eventMock = vi.hoisted(() => ({
   handler: undefined as ((event: { payload: unknown }) => void) | undefined,
   windowHandlers: new Map<string, (event: { payload: unknown }) => void>(),
   stop: vi.fn(),
+  listen: vi.fn(),
   windowStop: vi.fn(),
   windowListen: vi.fn(),
 }));
@@ -13,10 +14,7 @@ const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async (_event: string, handler: (event: { payload: unknown }) => void) => {
-    eventMock.handler = handler;
-    return eventMock.stop;
-  }),
+  listen: eventMock.listen,
 }));
 
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
@@ -96,6 +94,11 @@ describe("bridge subscriptions", () => {
     invokeMock.mockClear();
     eventMock.handler = undefined;
     eventMock.stop.mockReset();
+    eventMock.listen.mockReset();
+    eventMock.listen.mockImplementation(async (_event: string, handler: (event: { payload: unknown }) => void) => {
+      eventMock.handler = handler;
+      return eventMock.stop;
+    });
     eventMock.windowStop.mockReset();
     eventMock.windowListen.mockReset();
     eventMock.windowListen.mockImplementation(async (event: string, handler: (event: { payload: unknown }) => void) => {
@@ -103,6 +106,80 @@ describe("bridge subscriptions", () => {
       return eventMock.windowStop;
     });
     eventMock.windowHandlers.clear();
+  });
+
+  afterEach(() => vi.useRealTimers());
+
+  it("retries state registration and delivers subsequent events", async () => {
+    vi.useFakeTimers();
+    eventMock.listen.mockRejectedValueOnce(new Error("listen failed"));
+    const listener = vi.fn();
+    const dispose = tauriBridge.subscribe(listener);
+    await vi.dynamicImportSettled();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(eventMock.listen).toHaveBeenCalledTimes(2);
+    expect(eventMock.handler).toEqual(expect.any(Function));
+    eventMock.handler?.({ payload: null });
+    expect(listener).toHaveBeenCalledTimes(2);
+    dispose();
+    expect(eventMock.stop).toHaveBeenCalledOnce();
+  });
+
+  it("catches up once after state registration", async () => {
+    const listener = vi.fn();
+    const dispose = tauriBridge.subscribe(listener);
+    await vi.waitFor(() => expect(listener).toHaveBeenCalledOnce());
+    dispose();
+  });
+
+  it("keeps the registration when the catch-up listener throws", async () => {
+    vi.useFakeTimers();
+    const listener = vi.fn().mockImplementationOnce(() => { throw new Error("listener failed"); });
+    const dispose = tauriBridge.subscribe(listener);
+    await vi.dynamicImportSettled();
+    expect(listener).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(eventMock.listen).toHaveBeenCalledOnce();
+    eventMock.handler?.({ payload: null });
+    expect(listener).toHaveBeenCalledTimes(2);
+    dispose();
+    expect(eventMock.stop).toHaveBeenCalledOnce();
+  });
+
+  it("unlistens without catching up when state registration finishes after disposal", async () => {
+    let finishRegistration: ((stop: () => void) => void) | undefined;
+    eventMock.listen.mockImplementationOnce(() => new Promise(resolve => { finishRegistration = resolve; }));
+    const listener = vi.fn();
+    const dispose = tauriBridge.subscribe(listener);
+    await vi.waitFor(() => expect(eventMock.listen).toHaveBeenCalledOnce());
+    dispose();
+    finishRegistration?.(eventMock.stop);
+    await vi.waitFor(() => expect(eventMock.stop).toHaveBeenCalledOnce());
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("cancels state registration retries on disposal", async () => {
+    vi.useFakeTimers();
+    eventMock.listen.mockRejectedValue(new Error("listen failed"));
+    const dispose = tauriBridge.subscribe(vi.fn());
+    await vi.dynamicImportSettled();
+    dispose();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(eventMock.listen).toHaveBeenCalledOnce();
+  });
+
+  it("doubles state registration retry delays up to 30 seconds", async () => {
+    vi.useFakeTimers();
+    eventMock.listen.mockRejectedValue(new Error("listen failed"));
+    const dispose = tauriBridge.subscribe(vi.fn());
+    await vi.dynamicImportSettled();
+    for (const [index, delay] of [1000, 2000, 4000, 8000, 16000, 30000, 30000].entries()) {
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(eventMock.listen).toHaveBeenCalledTimes(index + 1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(eventMock.listen).toHaveBeenCalledTimes(index + 2);
+    }
+    dispose();
   });
 
   it("returns a disposer for both missing-host subscriptions", () => {
@@ -357,6 +434,18 @@ describe("bridge subscriptions", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(37, "webhook_test", { id: "00000000-0000-4000-8000-000000000001" });
   });
 
+  it("sends contact book lookup and name pin commands with their arguments", async () => {
+    await tauriBridge.set_contact_book_lookup("book-id", false);
+    await tauriBridge.list_contact_name_candidates("+12025550123", "device-id");
+    await tauriBridge.set_contact_name_pin("+12025550123", "book-id", "contact-id", "device-id");
+    await tauriBridge.clear_contact_name_pin("+12025550123");
+
+    expect(invokeMock).toHaveBeenCalledWith("set_contact_book_lookup", { bookId: "book-id", enabled: false });
+    expect(invokeMock).toHaveBeenCalledWith("list_contact_name_candidates", { address: "+12025550123", sourceDeviceId: "device-id" });
+    expect(invokeMock).toHaveBeenCalledWith("set_contact_name_pin", { address: "+12025550123", sourceDeviceId: "device-id", bookId: "book-id", contactId: "contact-id" });
+    expect(invokeMock).toHaveBeenCalledWith("clear_contact_name_pin", { address: "+12025550123", sourceDeviceId: undefined });
+  });
+
   it("opens a media viewer with its conversation, attachment, and message", async () => {
     await tauriBridge.open_media_viewer?.("conversation-id", "attachment-id", "message-id");
 
@@ -447,6 +536,25 @@ describe("fixture draft saves", () => {
 
     await fixtureBridge.set_conversation_tone("contact:+15555550100", null);
     expect((await fixtureBridge.load_state()).toneOverrides).toEqual({});
+  });
+
+  it("hides a fixture book from names until restored, and honors a pin only for a current candidate", async () => {
+    await fixtureBridge.set_contact_book_lookup("book-pixel8", false);
+    expect((await fixtureBridge.list_contact_books()).find(book => book.id === "book-pixel8")?.lookupExcluded).toBe(true);
+    expect((await fixtureBridge.list_contact_name_candidates("+12025550123")).candidates).toEqual([]);
+
+    await fixtureBridge.set_contact_book_lookup("book-pixel8", true);
+    await fixtureBridge.set_contact_name_pin("+12025550123", "book-pixel8", "contact-aurora");
+    expect(await fixtureBridge.list_contact_name_candidates("+12025550123")).toEqual({
+      candidates: [{ bookId: "book-pixel8", contactId: "contact-aurora", displayName: "Aurora Chen" }],
+      pinned: { bookId: "book-pixel8", contactId: "contact-aurora" },
+      moreIndexing: false,
+    });
+
+    await fixtureBridge.clear_contact_name_pin("+12025550123");
+    expect((await fixtureBridge.list_contact_name_candidates("+12025550123")).pinned).toBeNull();
+    await expect(fixtureBridge.set_contact_name_pin("+12025550123", "book-pixel8", "contact-missing")).rejects.toMatchObject({ code: "not-found" });
+    await expect(fixtureBridge.set_contact_book_lookup("missing", false)).rejects.toMatchObject({ code: "not-found" });
   });
 
   it("reuses one blank draft without overwriting its content", async () => {

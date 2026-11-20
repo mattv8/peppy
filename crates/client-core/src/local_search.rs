@@ -407,7 +407,7 @@ fn message_hits(
         .map(|value| parse_message_cursor(&value.key))
         .transpose()?
         .unwrap_or((f64::NEG_INFINITY, i64::MAX, i64::MAX, String::new()));
-    store.conn.prepare("WITH scores AS (SELECT rowid,bm25(local_search_fts) AS score FROM local_search_fts WHERE local_search_fts MATCH ?1 LIMIT -1), page AS MATERIALIZED (SELECT m.local_order,m.id,m.conversation_id,m.sort_at_ms,s.score FROM scores s JOIN messages m INDEXED BY messages_search_metadata ON m.local_order=s.rowid WHERE NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (s.score>?2 OR (s.score=?2 AND (m.sort_at_ms<?3 OR (m.sort_at_ms=?3 AND (m.local_order<?4 OR (m.local_order=?4 AND m.id>?5)))))) ORDER BY s.score,m.sort_at_ms DESC,m.local_order DESC,m.id LIMIT ?6) SELECT page.id,page.conversation_id,COALESCE(json_extract(m.payload,'$.subject'),''),COALESCE(json_extract(m.payload,'$.body'),''),page.sort_at_ms,page.local_order,page.score FROM page JOIN messages m ON m.local_order=page.local_order ORDER BY page.score,page.sort_at_ms DESC,page.local_order DESC,page.id")?
+    store.conn.prepare("WITH scores AS (SELECT rowid,bm25(local_search_fts) AS score FROM local_search_fts WHERE local_search_fts MATCH ?1 LIMIT -1), page AS MATERIALIZED (SELECT m.local_order,m.id,m.sort_at_ms,s.score FROM scores s JOIN messages m INDEXED BY messages_search_metadata ON m.local_order=s.rowid WHERE NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed') AND (s.score>?2 OR (s.score=?2 AND (m.sort_at_ms<?3 OR (m.sort_at_ms=?3 AND (m.local_order<?4 OR (m.local_order=?4 AND m.id>?5)))))) ORDER BY s.score,m.sort_at_ms DESC,m.local_order DESC,m.id LIMIT ?6) SELECT page.id,m.effective_conversation_id,COALESCE(json_extract(m.payload,'$.subject'),''),COALESCE(json_extract(m.payload,'$.body'),''),page.sort_at_ms,page.local_order,page.score FROM page JOIN messages m ON m.local_order=page.local_order ORDER BY page.score,page.sort_at_ms DESC,page.local_order DESC,page.id")?
         .query_map(params![literal, score, timestamp, local_order, id, limit as i64], |row| {
             let message_id: String = row.get(0)?;
             let timestamp: i64 = row.get(4)?;
@@ -470,7 +470,7 @@ fn conversation_hits(
 ) -> Result<Vec<(LocalSearchHit, String)>, Error> {
     let phone_digits = phone_query_digits(query);
     let mut statement = store.conn.prepare(
-        "SELECT a.conversation_id,a.address,COALESCE((SELECT MAX(m.sort_at_ms) FROM messages m WHERE m.conversation_id=a.conversation_id),0) FROM addresses a",
+        "SELECT COALESCE(merge.target_id,a.conversation_id),a.address,COALESCE((SELECT MAX(m.sort_at_ms) FROM messages m WHERE m.effective_conversation_id=COALESCE(merge.target_id,a.conversation_id)),0) FROM addresses a LEFT JOIN conversation_merges merge ON merge.source_id=a.conversation_id",
     )?;
     let rows = statement
         .query_map([], |row| {
@@ -884,7 +884,7 @@ fn message_window(store: &Store, request: MessageWindowRequest) -> Result<Messag
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
-                "SELECT id FROM messages WHERE conversation_id=? AND id IN ({placeholders}) ORDER BY sort_at_ms,local_order,id"
+                "SELECT id FROM messages WHERE effective_conversation_id=? AND id IN ({placeholders}) ORDER BY sort_at_ms,local_order,id"
             );
             let values = std::iter::once(conversation_id.as_str())
                 .chain(message_ids.iter().map(String::as_str));
@@ -923,7 +923,7 @@ fn message_window(store: &Store, request: MessageWindowRequest) -> Result<Messag
     let (sort_at_ms, local_order): (i64, i64) = store
         .conn
         .query_row(
-            "SELECT sort_at_ms,local_order FROM messages WHERE id=? AND conversation_id=?",
+            "SELECT sort_at_ms,local_order FROM messages WHERE id=? AND effective_conversation_id=?",
             params![message_id, conversation_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -947,7 +947,7 @@ fn message_window(store: &Store, request: MessageWindowRequest) -> Result<Messag
         ),
     };
     let sql = format!(
-        "SELECT id FROM messages WHERE conversation_id=? AND {where_clause} ORDER BY {order} LIMIT {take}"
+        "SELECT id FROM messages WHERE effective_conversation_id=? AND {where_clause} ORDER BY {order} LIMIT {take}"
     );
     let mut ids = store
         .conn
@@ -960,7 +960,7 @@ fn message_window(store: &Store, request: MessageWindowRequest) -> Result<Messag
         ids.reverse();
     }
     if direction == "around" {
-        let newer = store.conn.prepare("SELECT id FROM messages WHERE conversation_id=?1 AND (sort_at_ms>?2 OR (sort_at_ms=?2 AND local_order>?3)) ORDER BY sort_at_ms,local_order LIMIT ?4")?.query_map(params![conversation_id, sort_at_ms, local_order, (HISTORY_WINDOW_LIMIT - ids.len()) as i64], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        let newer = store.conn.prepare("SELECT id FROM messages WHERE effective_conversation_id=?1 AND (sort_at_ms>?2 OR (sort_at_ms=?2 AND local_order>?3)) ORDER BY sort_at_ms,local_order LIMIT ?4")?.query_map(params![conversation_id, sort_at_ms, local_order, (HISTORY_WINDOW_LIMIT - ids.len()) as i64], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         ids.extend(newer);
     }
     let messages = load_messages(store, &conversation_id, &ids)?;
@@ -980,7 +980,7 @@ fn message_edge_flags(
     let edge_exists = |id: &str, newer: bool| -> Result<bool, Error> {
         let comparator = if newer { ">" } else { "<" };
         let sql = format!(
-            "SELECT EXISTS(SELECT 1 FROM messages candidate JOIN messages anchor ON anchor.id=? AND anchor.conversation_id=? WHERE candidate.conversation_id=? AND (candidate.sort_at_ms {comparator} anchor.sort_at_ms OR (candidate.sort_at_ms=anchor.sort_at_ms AND candidate.local_order {comparator} anchor.local_order)))"
+            "SELECT EXISTS(SELECT 1 FROM messages candidate JOIN messages anchor ON anchor.id=? AND anchor.effective_conversation_id=? WHERE candidate.effective_conversation_id=? AND (candidate.sort_at_ms {comparator} anchor.sort_at_ms OR (candidate.sort_at_ms=anchor.sort_at_ms AND candidate.local_order {comparator} anchor.local_order)))"
         );
         Ok(store
             .conn

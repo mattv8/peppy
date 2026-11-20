@@ -120,6 +120,11 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   useEffect(() => { deleteInFlight.current = false; }, [selected?.bookId, selected?.id]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<ReactNode>("");
+  const [bookUseBusy, setBookUseBusy] = useState(false);
+  const [confirmBookUse, setConfirmBookUse] = useState(false);
+  const bookUseSwitchRef = useRef<HTMLInputElement>(null);
+  const bookUseCancelRef = useRef<HTMLButtonElement>(null);
+  const focusBookUseAfterSave = useRef(false);
   const [offset, setOffset] = useState(0);
   const [scanStatus, setScanStatus] = useState<ContactScanStatus | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -342,6 +347,41 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   useEffect(() => loadPage(true), [loadPage]);
 
   const book = books.find(item => item.id === bookId);
+  const bookNameCounts = new Map<string, number>();
+  for (const item of books) bookNameCounts.set(item.deviceName, (bookNameCounts.get(item.deviceName) ?? 0) + 1);
+  const bookSuffix = (item: ContactBookView) => (bookNameCounts.get(item.deviceName) ?? 0) > 1 ? `ID ${item.id.slice(-4)}` : "";
+  const bookLabel = (item: ContactBookView) => [item.deviceName, bookSuffix(item)].filter(Boolean).join(", ");
+  useEffect(() => { setConfirmBookUse(false); }, [bookId]);
+  useEffect(() => { if (confirmBookUse) bookUseCancelRef.current?.focus(); }, [confirmBookUse]);
+  useLayoutEffect(() => {
+    if (!bookUseBusy && focusBookUseAfterSave.current) {
+      focusBookUseAfterSave.current = false;
+      bookUseSwitchRef.current?.focus();
+    }
+  });
+  const cancelBookUse = () => {
+    setConfirmBookUse(false);
+    bookUseSwitchRef.current?.focus();
+  };
+  const saveBookUse = async (item: ContactBookView, enabled: boolean) => {
+    setBookUseBusy(true);
+    setError("");
+    try {
+      await bridge.set_contact_book_lookup(item.id, enabled);
+      if (!mountedRef.current) return;
+      if (!enabled && confirmBookUse && currentBookRef.current === item.id) focusBookUseAfterSave.current = true;
+      setConfirmBookUse(false);
+      loadBooks();
+      const label = bookLabel(item);
+      setNotice(enabled
+        ? `${label} is used again for names and recipient search.`
+        : <span>Names and recipient search no longer use {label}. Its contacts are unchanged. <button type="button" data-action="undo-book-use" onClick={() => void saveBookUse(item, true)}>Undo</button></span>);
+    } catch {
+      if (mountedRef.current) setError("Couldn't save this change. Try again.");
+    } finally {
+      if (mountedRef.current) setBookUseBusy(false);
+    }
+  };
   const compactBookList = useMediaMatch(COMPACT_BOOK_LIST_QUERY);
   const compactDetail = useMediaMatch(COMPACT_DETAIL_QUERY);
   const detailOverlay = compactDetail && Boolean(selected || editing);
@@ -938,6 +978,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
             <li key={item.id}>
               <button
                 data-book-id={item.id}
+                data-book-use={item.lookupExcluded ? "excluded" : "included"}
                 className="contacts-book-row"
                 aria-current={item.id === bookId ? "location" : undefined}
                 onClick={() => handleSelectBook(item.id)}
@@ -945,6 +986,8 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
                   <Smartphone aria-hidden="true" size={16} strokeWidth={1.75} />
                 <span>
                   <b>{item.deviceName}</b>
+                  {bookSuffix(item) && <span className="contacts-book-id">{bookSuffix(item)}</span>}
+                  {item.lookupExcluded && <span className="contacts-book-hidden">Hidden from names</span>}
                   <small data-book-state={item.state}>
                     {bookStateText(item)}
                     {item.state === "active" ? ` · ${item.contactCount}` : ""}
@@ -966,9 +1009,29 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
             onChange={e => handleSelectBook(e.target.value)}
           >
             {books.map(item => (
-              <option key={item.id} value={item.id}>{`${item.deviceName} · ${bookStateText(item)}`}</option>
+              <option key={item.id} value={item.id}>{`${bookLabel(item)}, ${bookStateText(item)}${item.lookupExcluded ? ", hidden from names" : ""}`}</option>
             ))}
           </select>
+        )}
+        {book && (books.length >= 2 || book.lookupExcluded) && (
+          <section id="contacts-book-use" aria-label="Contact book use" aria-busy={bookUseBusy} onKeyDown={event => {
+            if (confirmBookUse && event.key === "Escape") { event.preventDefault(); cancelBookUse(); }
+          }}>
+            <div id="contacts-book-use-title"><span>{book.deviceName}</span>{bookSuffix(book) && <span className="contacts-book-id">{bookSuffix(book)}</span>}</div>
+            <label className="contacts-book-use-row" htmlFor="contacts-book-use-switch">
+              <span>Use for names and recipient search</span>
+              <span className="settings-switch"><input ref={bookUseSwitchRef} id="contacts-book-use-switch" data-action="toggle-book-use" type="checkbox" role="switch" aria-describedby="contacts-book-use-hint" checked={!book.lookupExcluded} disabled={bookUseBusy} onChange={event => {
+                if (!event.target.checked && books.filter(item => !item.lookupExcluded).length === 1) setConfirmBookUse(true);
+                else void saveBookUse(book, event.target.checked);
+              }} /><span aria-hidden="true" /></span>
+            </label>
+            <p id="contacts-book-use-hint">This computer only. Contacts stay here to browse.</p>
+            {confirmBookUse && <div id="contacts-book-use-confirm" role="group" aria-label="Confirm turning off the last contact book">
+              <p>No contact book will be used for names or recipient search. Conversations will show phone numbers.</p>
+              <button type="button" disabled={bookUseBusy} onClick={() => void saveBookUse(book, false)}>Turn off</button>
+              <button ref={bookUseCancelRef} type="button" disabled={bookUseBusy} onClick={cancelBookUse}>Cancel</button>
+            </div>}
+          </section>
         )}
         {!detailOverlay && unsavedBanner}
         {sync?.readiness && (sync.readiness.state !== "ready" || !sync.readiness.server_active) && (

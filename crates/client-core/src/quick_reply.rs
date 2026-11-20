@@ -148,7 +148,7 @@ fn current_recipients(
     }
     let payload: String = conn
         .query_row(
-            "SELECT payload FROM messages WHERE conversation_id=? ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
+            "SELECT payload FROM messages WHERE effective_conversation_id=? ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
             [conversation_id.to_string()],
             |row| row.get(0),
         )
@@ -216,7 +216,8 @@ fn existing_queued_send(
     let original_expected_member_revision =
         rcs_group::quick_reply_expected_revision(conn, input.command_id)?
             .unwrap_or(stored_group.expected_member_revision);
-    if payload.record.conversation_id != input.conversation_id
+    if crate::conversation_merge::survivor(conn, payload.record.conversation_id)?
+        != crate::conversation_merge::survivor(conn, input.conversation_id)?
         || payload.body != input.body
         || payload.transport != input.expected_transport
         || stored_gateway != *expected_gateway

@@ -34,3 +34,28 @@ fn production_library_refuses_legacy_raw_key_commands() {
     }
     assert!(!root.path().join("client.db").exists());
 }
+
+#[test]
+fn contact_name_commands_are_registered_but_require_an_open_session() {
+    let root = tempfile::tempdir().unwrap();
+    let mut core = BrowserCore::new(root.path().to_owned());
+    for (command, args) in [
+        (
+            "set_contact_book_lookup",
+            json!({"bookId":"b","enabled":false}),
+        ),
+        (
+            "list_contact_name_candidates",
+            json!({"address":"+12025550100"}),
+        ),
+        (
+            "set_contact_name_pin",
+            json!({"address":"+12025550100","bookId":"b","contactId":"c"}),
+        ),
+        ("clear_contact_name_pin", json!({"address":"+12025550100"})),
+    ] {
+        let result = response(&mut core, command, args);
+        assert_eq!(result["ok"], false, "{result}");
+        assert_ne!(result["error"]["code"], "unknown-command", "{result}");
+    }
+}

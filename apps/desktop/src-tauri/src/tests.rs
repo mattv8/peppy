@@ -2364,11 +2364,21 @@ mod real_server {
         device: DeviceId,
         token: &str,
     ) -> (tempfile::TempDir, AppState, Arc<Session>) {
+        desktop_with_notifier(server, device, token, Arc::new(|| {}), |_| {}).await
+    }
+
+    async fn desktop_with_notifier(
+        server: &Server,
+        device: DeviceId,
+        token: &str,
+        notifier: Notifier,
+        on_session: impl FnOnce(&Arc<Session>),
+    ) -> (tempfile::TempDir, AppState, Arc<Session>) {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::new(
             root.path().to_path_buf(),
             Arc::new(MemoryStore::default()),
-            Arc::new(|| {}),
+            notifier,
         );
         let credential = parse_credential(&credential_json(
             &server.url,
@@ -2381,6 +2391,7 @@ mod real_server {
             .await
             .unwrap();
         let session = state.session().await.unwrap().unwrap();
+        on_session(&session);
         let vault = sync::fetch_vault(
             &session.api,
             &session.binding.vault_id,
@@ -2542,6 +2553,182 @@ mod real_server {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "requires TEST_DATABASE_URL (local PostgreSQL); run with --include-ignored"]
+    async fn real_server_snapshot_resync_reports_progress_before_history() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let server = start().await;
+        let (late_id, late_token) = server.add_test_device("device").await;
+        let (gateway_id, gateway_token) = server.add_test_device("gateway").await;
+        let gateway_dir = tempfile::tempdir().unwrap();
+        let gateway = Client::open(
+            ClientConfig {
+                database_path: gateway_dir.path().join("gateway.db"),
+                vault_id: server.vault,
+                device_id: gateway_id,
+            },
+            DatabaseKey::new(&[5; 32]).unwrap(),
+        )
+        .unwrap();
+        gateway
+            .unlock(&server.profile, &server.header, PHRASE)
+            .unwrap();
+        // Span multiple apply batches so the asynchronous sampler can observe applying.
+        for n in 0..(peppy_client_core::MAX_APPLY_BATCH * 2 + 200) {
+            gateway
+                .capture_incoming(IncomingSms {
+                    conversation_id: None,
+                    sender_address: "+15555550999".into(),
+                    body: format!("history {n}"),
+                    provider_message_id: Some(format!("history-{n}")),
+                    imported: false,
+                })
+                .unwrap();
+        }
+        let http = reqwest::Client::new();
+        let envelopes = gateway.pending_outbox().unwrap();
+        assert!(
+            envelopes.len() > peppy_client_core::MAX_APPLY_BATCH * 2,
+            "history must span multiple apply batches"
+        );
+        for envelope in envelopes {
+            http.post(format!("{}/v1/events", server.url))
+                .bearer_auth(&gateway_token)
+                .json(&envelope)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap();
+        }
+        sqlx::query("UPDATE event_log SET created_at=now()-interval '40 days' WHERE vault_id=$1")
+            .bind(server.vault.0)
+            .execute(&server.pool)
+            .await
+            .unwrap();
+        assert!(
+            peppy_server::api::prune_replay_log(&server.pool, Duration::from_secs(30 * 86_400))
+                .await
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            http.get(format!("{}/v1/events?after=0", server.url))
+                .bearer_auth(&late_token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            409
+        );
+
+        let (ticks, mut receiver) =
+            tokio::sync::mpsc::unbounded_channel::<std::sync::mpsc::Sender<()>>();
+        let sampling_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let notifier_ready = sampling_ready.clone();
+        let notified_session = Arc::new(std::sync::OnceLock::<std::sync::Weak<Session>>::new());
+        let notifier_session = notified_session.clone();
+        let (session_sender, session_receiver) = tokio::sync::oneshot::channel();
+        let samples = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected = samples.clone();
+        let sampler = tokio::spawn(async move {
+            let sampling_session: Arc<Session> = session_receiver.await.unwrap();
+            while let Some(ack_sender) = receiver.recv().await {
+                let session = sampling_session.clone();
+                let sample = tokio::task::spawn_blocking(move || {
+                    session
+                        .snapshot_with_metadata_only(
+                            None,
+                            None,
+                            crate::head(),
+                            None,
+                            crate::notifications::NotificationPreferences::default(),
+                            true,
+                        )
+                        .unwrap()
+                        .0
+                })
+                .await
+                .unwrap();
+                let visible = !sample.conversations.is_empty();
+                collected
+                    .lock()
+                    .unwrap()
+                    .push((sample.sync_progress, visible));
+                let _ = ack_sender.send(());
+            }
+        });
+        let (_root, state, session) = desktop_with_notifier(
+            &server,
+            late_id,
+            &late_token,
+            Arc::new(move || {
+                if notifier_ready.load(std::sync::atomic::Ordering::Acquire) {
+                    let (ack_sender, ack_receiver) = std::sync::mpsc::channel();
+                    if ticks.send(ack_sender).is_ok()
+                        && notifier_session
+                            .get()
+                            .and_then(std::sync::Weak::upgrade)
+                            .is_some_and(|session| session.snapshot_applying())
+                    {
+                        let _ = ack_receiver.recv_timeout(Duration::from_secs(5));
+                    }
+                }
+            }),
+            |session| {
+                let _ = notified_session.set(Arc::downgrade(session));
+                let _ = session_sender.send(session.clone());
+                sampling_ready.store(true, std::sync::atomic::Ordering::Release);
+            },
+        )
+        .await;
+        until("snapshot history visible", 60, || {
+            !session.client.list_conversations().unwrap().is_empty()
+        })
+        .await;
+        until("live after snapshot", 20, || {
+            session.status.lock().unwrap().live
+        })
+        .await;
+        until("current progress after applying with history", 30, || {
+            let samples = samples.lock().unwrap();
+            let mut applying_seen = false;
+            samples.iter().any(|(progress, visible)| {
+                let phase = serde_json::to_value(progress).unwrap();
+                if phase["phase"] == "applying" {
+                    applying_seen = true;
+                }
+                applying_seen && *visible && phase["phase"] == "current"
+            })
+        })
+        .await;
+        state.close_session().await;
+        sampler.abort();
+        let serialized: Vec<_> = samples
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(progress, visible)| (serde_json::to_value(progress).unwrap(), *visible))
+            .collect();
+        assert!(
+            serialized
+                .iter()
+                .any(|(p, visible)| p["phase"] == "receiving"
+                    && !p["snapshotExpected"].is_null()
+                    && !visible),
+            "no receiving snapshot progress before history: {serialized:?}"
+        );
+        assert!(
+            serialized.iter().any(|(p, _)| p["phase"] == "applying"),
+            "no applying snapshot progress: {serialized:?}"
+        );
+        assert!(
+            serialized.iter().any(|(p, _)| p["phase"] == "current"),
+            "no final current progress: {serialized:?}"
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires TEST_DATABASE_URL (local PostgreSQL); run with --include-ignored"]
     async fn real_server_expired_cursor_resyncs_by_staged_snapshot_then_goes_live() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let server = start().await;
@@ -2557,17 +2744,33 @@ mod real_server {
         })
         .await;
         let draft = first
-            .save_draft(&input("draft-new", "", "history one", &[ADDRESS], "0"))
+            .save_draft(&routed(
+                input("draft-new", "", "history one", &[ADDRESS], "0"),
+                &gateway_id.to_string(),
+                "sim-1",
+            ))
             .unwrap();
+        let draft_id = peppy_client_core::DraftId::from_str(&draft.id).unwrap();
+        first.request_work();
+        until("history draft synced", 20, || {
+            first.client.draft_sync_status(draft_id).unwrap().state
+                == peppy_client_core::DraftSyncState::Synced
+        })
+        .await;
         assert!(
-            first
-                .send_draft(&routed(
+            crate::send_draft_for_window(
+                &first_state,
+                crate::tray::MAIN,
+                first.clone(),
+                routed(
                     input(&draft.id, "", "", &[], &draft.revision),
                     &gateway_id.to_string(),
                     "sim-1"
-                ))
-                .unwrap()
-                .accepted
+                ),
+            )
+            .await
+            .unwrap()
+            .accepted
         );
         until("history uploaded", 20, || {
             first.client.pending_outbox_batch(10).unwrap().is_empty()

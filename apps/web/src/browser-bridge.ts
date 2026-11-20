@@ -4,7 +4,7 @@ import type {
   DesktopBridge, DesktopSnapshot, DeviceRosterView, Draft, DraftInput, HistoryPage,
   HistorySearchAttemptInput, HistorySearchSnapshot, LocalSearchPage, LocalSearchRequest, MaximizeButtonRegion, MediaCursor, MediaOpen, MediaPage, MessageWindow,
   MessageWindowRequest, NotificationCheck, NotificationPreferences, NotificationTarget, OneTimeCodeTarget, PublicCopy,
-  RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, SendResultView, StartHistorySearchInput,
+  ContactNameCandidates, RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, SendResultView, StartHistorySearchInput,
   BillingSummaryView, HostedSignInProvider, PurchaseOptions, StartupStatus, StoreProduct,
   AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder, NotificationPersistence, NotificationPersistenceSettings, PastedImage, ReactionSubmitView,
 } from "@peppy/desktop-ui/bridge-contracts";
@@ -594,6 +594,10 @@ export class BrowserBridge implements DesktopBridge {
   }
   public list_contact_books(): Promise<ContactBookView[]> { return this.call("list_contact_books"); }
   public forget_contact_book(bookId: string): Promise<void> { return this.call("forget_contact_book", { bookId }); }
+  public set_contact_book_lookup(bookId: string, enabled: boolean): Promise<void> { return this.call("set_contact_book_lookup", { bookId, enabled }); }
+  public list_contact_name_candidates(address: string, sourceDeviceId?: string): Promise<ContactNameCandidates> { return this.call("list_contact_name_candidates", { address, sourceDeviceId }); }
+  public set_contact_name_pin(address: string, bookId: string, contactId: string, sourceDeviceId?: string): Promise<void> { return this.call("set_contact_name_pin", { address, sourceDeviceId, bookId, contactId }); }
+  public clear_contact_name_pin(address: string, sourceDeviceId?: string): Promise<void> { return this.call("clear_contact_name_pin", { address, sourceDeviceId }); }
   public list_contacts(bookId: string, query?: string, offset?: number, sort?: import("@peppy/desktop-ui/bridge-contracts").ContactSort): Promise<ContactView[]> { return this.call("list_contacts", { bookId, query, offset, sort }); }
   public submit_contact_edit(input: ContactEditRequestInput): Promise<ContactEditOutcome> { return this.call("submit_contact_edit", { input }); }
   public list_contact_edits(bookId?: string): Promise<ContactEditStatus[]> { return this.call("list_contact_edits", { bookId }); }

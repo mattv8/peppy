@@ -1551,6 +1551,21 @@ describe("browser host RPC", () => {
     ]);
   });
 
+  it("routes contact name choices through checkpointed mutations", async () => {
+    const session = new FakeSession();
+    const entries = [
+      ["set_contact_book_lookup", { bookId: "book", enabled: false }, true],
+      ["list_contact_name_candidates", { address: "+12025550100" }, false],
+      ["set_contact_name_pin", { address: "+12025550100", bookId: "book", contactId: "contact" }, true],
+      ["clear_contact_name_pin", { address: "+12025550100" }, true],
+    ] as const;
+    for (const [command, args] of entries) {
+      const result = await dispatchBrowserRpc(session, { id: 1, command, args });
+      expect(result.ok).toBe(true);
+    }
+    expect(session.calls).toEqual(entries.map(([command, args, mutation]) => ({ command, args, mutation })));
+  });
+
   it("routes frozen unread batches as a query and each read batch as a mutation", async () => {
     const session = new FakeSession();
 

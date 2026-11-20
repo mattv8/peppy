@@ -2,6 +2,59 @@ import { describe, expect, it, vi } from "vitest";
 import type { Draft, DraftInput } from "../bridge/bridge";
 import { DraftStore } from "./DraftStore";
 
+describe("DraftStore merge follow", () => {
+  it("moves a clean source draft to the survivor without a rekey notification", () => {
+    const rekeyed = vi.fn();
+    const store = new DraftStore(async () => { throw new Error("not expected"); }, { changed: () => {}, rekeyed });
+    store.adopt("conversation-one", draft({ text: "source text" }));
+
+    store.followMerge("conversation-one", "conversation-two");
+
+    expect(store.resolve("conversation-one")).toBe("conversation-two");
+    expect(store.get("conversation-one")).toBe(store.get("conversation-two"));
+    expect(store.get("conversation-two")?.content.text).toBe("source text");
+    expect(store.get("conversation-two")?.conversationId).toBe("conversation-two");
+    expect(rekeyed).not.toHaveBeenCalled();
+  });
+
+  it("keeps unsaved source text as a reviewed copy on a survivor with its own content", () => {
+    const notices: Array<[string, string]> = [];
+    const store = new DraftStore(
+      () => new Promise<Draft>(() => {}),
+      { changed: () => {}, rekeyed: () => {}, notice: (key, event) => notices.push([key, event]) },
+    );
+    store.adopt("conversation-one", draft({ text: "source text" }));
+    store.adopt("conversation-two", draft({ id: "draft-two", conversationId: "conversation-two", text: "survivor text" }));
+    void store.edit("conversation-one", { text: "source typed" });
+    void store.edit("conversation-two", { text: "survivor typed" });
+
+    store.followMerge("conversation-one", "conversation-two");
+
+    expect(store.resolve("conversation-one")).toBe("conversation-two");
+    expect(store.get("conversation-two")?.content.text).toBe("survivor typed");
+    expect(store.retainedTexts("conversation-two")).toEqual(["source typed"]);
+    expect(store.hasUndo("conversation-two")).toBe(false);
+    expect(notices).toContainEqual(["conversation-two", "moved"]);
+  });
+
+  it("drops a clean source without overwriting or noticing the survivor", () => {
+    const notices: Array<[string, string]> = [];
+    const store = new DraftStore(
+      async () => draft(),
+      { changed: () => {}, rekeyed: () => {}, notice: (key, event) => notices.push([key, event]) },
+    );
+    store.adopt("conversation-one", draft({ text: "stored source" }));
+    store.adopt("conversation-two", draft({ id: "draft-two", conversationId: "conversation-two", text: "survivor text" }));
+
+    store.followMerge("conversation-one", "conversation-two");
+
+    expect(store.get("conversation-two")?.content.text).toBe("survivor text");
+    expect(store.get("conversation-two")?.id).toBe("draft-two");
+    expect(store.retainedTexts("conversation-two")).toEqual([]);
+    expect(notices).toEqual([]);
+  });
+});
+
 const draft = (overrides: Partial<Draft> = {}): Draft => ({
   id: "draft-one",
   conversationId: "conversation-one",

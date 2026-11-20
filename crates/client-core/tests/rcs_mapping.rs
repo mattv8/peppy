@@ -102,7 +102,15 @@ fn capture_in_conversation(
     participant: &str,
     provider_id: &str,
 ) -> ConversationId {
-    let conversation_id = ConversationId::new();
+    capture_in_conversation_with_id(client, participant, provider_id, ConversationId::new())
+}
+
+fn capture_in_conversation_with_id(
+    client: &Client,
+    participant: &str,
+    provider_id: &str,
+    conversation_id: ConversationId,
+) -> ConversationId {
     client
         .capture_incoming(IncomingSms {
             conversation_id: Some(conversation_id),
@@ -495,20 +503,92 @@ fn a_send_addressed_to_someone_else_is_refused_and_leaves_the_chats_mapping() {
 
 #[test]
 fn a_send_from_a_thread_that_is_not_the_numbers_indexed_thread_is_refused() {
-    let gateway = send_gateway("rcs-mapping-send-duplicate");
-    capture_in_conversation(&gateway.client, THREAD_PEER, "row-a");
-    let duplicate = capture_in_conversation(&gateway.client, THREAD_PEER, "row-b");
-    let command_id = gateway.queue_text(duplicate, THREAD_PEER);
+    let lower = "00000000-0000-4000-8000-000000000001".parse().unwrap();
+    let higher = "ffffffff-ffff-4fff-8fff-ffffffffffff".parse().unwrap();
+    for (indexed, duplicate) in [(lower, higher), (higher, lower)] {
+        let gateway = send_gateway("rcs-mapping-send-duplicate");
+        capture_in_conversation_with_id(&gateway.client, THREAD_PEER, "row-a", indexed);
+        // A live mapping keeps these genuinely distinct threads out of carrier convergence.
+        let RcsMappingOutcome::Mapped(mapping) = gateway
+            .client
+            .verify_rcs_mapping(&observation(THREAD_PEER, 1), 1_000)
+            .unwrap()
+        else {
+            panic!("expected the indexed thread to have a mapping");
+        };
+        assert_eq!(mapping.conversation_id, indexed);
+        capture_in_conversation_with_id(&gateway.client, THREAD_PEER, "row-b", duplicate);
+        assert_ne!(indexed, duplicate);
+        let command_id = gateway.queue_text(duplicate, THREAD_PEER);
 
-    let outcome = gateway
-        .client
-        .verify_rcs_send_mapping(&observation(THREAD_PEER, 1), command_id, 1_000)
-        .unwrap();
+        // queue_text applies sync records, including bounded conversation convergence.
+        assert_eq!(gateway.client.conversation_redirect(indexed).unwrap(), None);
+        assert_eq!(
+            gateway.client.conversation_redirect(duplicate).unwrap(),
+            None
+        );
+        assert_eq!(
+            gateway.client.rcs_mapping(indexed).unwrap(),
+            Some(mapping.clone())
+        );
+        assert_eq!(gateway.client.rcs_mapping(duplicate).unwrap(), None);
 
-    assert_eq!(
-        outcome,
-        RcsMappingOutcome::Refused(RcsMappingRefusal::PeppyConversationAmbiguous)
-    );
+        let outcome = gateway
+            .client
+            .verify_rcs_send_mapping(&observation(THREAD_PEER, 2), command_id, 1_000)
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            RcsMappingOutcome::Refused(RcsMappingRefusal::PeppyConversationAmbiguous)
+        );
+        assert_eq!(gateway.client.rcs_mapping(indexed).unwrap(), Some(mapping));
+        assert_eq!(gateway.client.rcs_mapping(duplicate).unwrap(), None);
+    }
+}
+
+#[test]
+fn sends_from_converged_carrier_threads_map_only_from_the_survivor() {
+    let survivor = "00000000-0000-4000-8000-000000000001".parse().unwrap();
+    let source = "ffffffff-ffff-4fff-8fff-ffffffffffff".parse().unwrap();
+    for command_thread in [survivor, source] {
+        let gateway = send_gateway("rcs-mapping-send-converged");
+        capture_in_conversation_with_id(&gateway.client, THREAD_PEER, "row-a", source);
+        capture_in_conversation_with_id(&gateway.client, THREAD_PEER, "row-b", survivor);
+        assert_eq!(gateway.client.rcs_mapping(source).unwrap(), None);
+        assert_eq!(gateway.client.rcs_mapping(survivor).unwrap(), None);
+        let command_id = gateway.queue_text(command_thread, THREAD_PEER);
+
+        assert_eq!(
+            gateway.client.conversation_redirect(survivor).unwrap(),
+            None
+        );
+        assert_eq!(
+            gateway.client.conversation_redirect(source).unwrap(),
+            Some(survivor)
+        );
+        let outcome = gateway
+            .client
+            .verify_rcs_send_mapping(&observation(THREAD_PEER, 1), command_id, 1_000)
+            .unwrap();
+
+        if command_thread == survivor {
+            let RcsMappingOutcome::Mapped(mapping) = outcome else {
+                panic!("expected the surviving thread to map, got {outcome:?}");
+            };
+            assert_eq!(mapping.conversation_id, survivor);
+            assert_eq!(mapping.google_conversation_id, "google-conversation");
+            assert_eq!(gateway.client.rcs_mapping(survivor).unwrap(), Some(mapping));
+        } else {
+            // Fail closed: commands keep their original id; a merged-away id is currently refused as ambiguous, not redirected.
+            assert_eq!(
+                outcome,
+                RcsMappingOutcome::Refused(RcsMappingRefusal::PeppyConversationAmbiguous)
+            );
+            assert_eq!(gateway.client.rcs_mapping(survivor).unwrap(), None);
+        }
+        assert_eq!(gateway.client.rcs_mapping(source).unwrap(), None);
+    }
 }
 
 #[test]

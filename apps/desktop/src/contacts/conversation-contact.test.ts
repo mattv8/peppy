@@ -48,6 +48,8 @@ describe("conversationContactAddress", () => {
       resolution: { "+18015551234": { bookId: "book-1", contactId: "contact-1", displayName: "Ada" } },
       books: [writableBook],
     })).toBeUndefined();
+    expect(conversationContactAddress({ conversation: conversation(), resolution: { "+18015551234": { displayName: "Ada", nameBasis: "consensus" } }, books: [writableBook] })).toBeUndefined();
+    expect(conversationContactAddress({ conversation: conversation(), resolution, conflicts: ["+18015551234"], books: [writableBook] })).toBeUndefined();
     expect(conversationContactAddress({ conversation: conversation({ participants: ["+18015551234", "+18015551235"] }), resolution, books: [writableBook] })).toBeUndefined();
     expect(conversationContactAddress({ conversation: conversation({ draftOnly: true }), resolution, books: [writableBook] })).toBeUndefined();
     expect(conversationContactAddress({ conversation: conversation({ participants: ["911"] }), resolution, books: [writableBook] })).toBeUndefined();

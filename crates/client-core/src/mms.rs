@@ -519,14 +519,41 @@ impl Client {
             return Err(Error::MmsAcquisitionLimit);
         }
         let mapped = mapped_thread_conversation(&tx, &ctx.device_id.to_string(), &input.source)?;
-        let conversation_id = if let Some(mapped) = mapped {
-            mapped
+        let participants = crate::conversation_match::mms_participant_set(
+            &tx,
+            input.direction,
+            input.sender_address.as_deref(),
+            &input.recipients,
+            Some((&ctx.device_id, &input.source.subscription_id)),
+            Some(&crate::conversation_match::identity_region(&tx)?),
+            &mut crate::conversation_match::OwnAddressCache::new(),
+        )?;
+        let fallback = if mapped.is_none() {
+            conversation_for_mms_participants(&tx, ctx.device_id, &input)?
         } else {
-            let chosen = conversation_for_mms_participants(&tx, ctx.device_id, &input)?
-                .unwrap_or_else(ConversationId::new);
-            link_thread_conversation(&tx, &ctx.device_id.to_string(), &input.source, chosen)?;
-            chosen
+            mapped
         };
+        let resolved = match participants.as_ref() {
+            Some(participants)
+                if participants.len() == 1 && mirrored_message_id(&input).is_none() =>
+            {
+                crate::conversation_match::resolve_carrier_counterpart(
+                    &tx,
+                    participants.iter().next().expect("one participant"),
+                    fallback,
+                )?
+            }
+            _ => None,
+        };
+        let conversation_id = resolved.or(fallback).unwrap_or_else(ConversationId::new);
+        if resolved.is_some() || mapped.is_none() {
+            link_thread_conversation(
+                &tx,
+                &ctx.device_id.to_string(),
+                &input.source,
+                conversation_id,
+            )?;
+        }
         let source_sequence = next_acquisition_sequence(&tx, conversation_id, ctx.device_id)?;
         let acquisition = MmsAcquisition {
             acquisition_id: uuid::Uuid::new_v4().to_string(),
@@ -1437,7 +1464,7 @@ fn link_thread_conversation(
         return Ok(());
     };
     conn.execute(
-        "INSERT INTO mms_thread_conversations(source_device_id,source_generation,subscription_id,provider_thread_id,conversation_id) VALUES(?,?,?,?,?)",
+        "INSERT INTO mms_thread_conversations(source_device_id,source_generation,subscription_id,provider_thread_id,conversation_id) VALUES(?,?,?,?,?) ON CONFLICT(source_device_id,source_generation,subscription_id,provider_thread_id) DO UPDATE SET conversation_id=excluded.conversation_id",
         params![device_id, source.source_generation, source.subscription_id, thread, conversation.to_string()],
     )?;
     Ok(())

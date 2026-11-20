@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require 'fileutils'
+require 'json'
 require 'open3'
 require 'shellwords'
 require 'tmpdir'
@@ -26,23 +27,31 @@ assert.call(ci_jobs.fetch('gate').fetch('needs').include?('google-messages-go'),
 gate_environment = ci_jobs.fetch('gate').fetch('steps').find { |step| step['name'] == 'Evaluate CI gate' }.fetch('env')
 assert.call(gate_environment.fetch('GOOGLE_MESSAGES_GO_RESULT') == '${{ needs.google-messages-go.result }}' && gate_environment.fetch('GOOGLE_MESSAGES_GO_REQUIRED') == '${{ needs.changes.outputs.android }}', 'the Go result must be evaluated by the common required-job gate')
 assert.call(ci_jobs.fetch('desktop').fetch('timeout-minutes') == 60, 'public CI desktop must allow 60 minutes uniformly for native cold-cache builds')
-desktop_linux_setup_steps = ci_jobs.fetch('desktop').fetch('steps').select { |step| step['run']&.include?('sudo apt-get update') }
-assert.call(desktop_linux_setup_steps.length == 1, 'desktop must have exactly one Linux apt setup command')
-desktop_linux_setup = desktop_linux_setup_steps.first.fetch('run')
+repository_root = File.expand_path('../..', __dir__)
+desktop_linux_setup_steps = ci_jobs.fetch('desktop').fetch('steps').select { |step| step['run']&.include?('install-apt-packages.sh') }
+assert.call(desktop_linux_setup_steps.length == 1, 'desktop must have exactly one Linux package installer call')
+desktop_linux_setup_step = desktop_linux_setup_steps.first
+assert.call(desktop_linux_setup_step['if'] == "runner.os == 'Linux'" && desktop_linux_setup_step['timeout-minutes'] == 30, 'desktop Linux package installation must stay Linux-only and bounded to 30 minutes')
+desktop_linux_setup = desktop_linux_setup_step.fetch('run')
 desktop_linux_packages = %w[build-essential pkg-config libsqlite3-dev libssl-dev libsodium-dev libsecret-1-dev libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev]
+apt_options = '-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120'
+timeout_path, _, timeout_status = Open3.capture3('which', 'timeout')
+assert.call(timeout_status.success?, 'desktop package installer fixture requires GNU timeout on PATH')
+timeout_directory = File.dirname(timeout_path.strip)
 Dir.mktmpdir('desktop-apt-index-refresh') do |fixture|
   bin = File.join(fixture, 'bin')
   FileUtils.mkdir_p(bin)
   File.write(File.join(bin, 'sudo'), <<~'SH')
     #!/bin/bash
     set -euo pipefail
-    printf '%s\n' "$*" >> "$PEPPY_TEST_SUDO_LOG"
+    if [[ "$1" != du ]]; then printf '%s\n' "$*" >> "$PEPPY_TEST_SUDO_LOG"; fi
     exec "$@"
   SH
   File.write(File.join(bin, 'apt-get'), <<~'SH')
     #!/bin/bash
     set -euo pipefail
     printf '%s\n' "$*" >> "$PEPPY_TEST_APT_LOG"
+    while [[ "${1:-}" == -o ]]; do shift 2; done
     case "$1" in
       update)
         # Modelled APT behaviour: without --error-on=any a failed index refresh only warns and succeeds.
@@ -59,36 +68,53 @@ Dir.mktmpdir('desktop-apt-index-refresh') do |fixture|
         fi
         ;;
       install)
-        [[ -z "${APT_INSTALL_FAILURE:-}" ]] || exit 42
+        # Only the final package install may fail; the download-only phase must still succeed.
+        if [[ " $* " != *" --download-only "* && -n "${APT_INSTALL_FAILURE:-}" ]]; then
+          exit 42
+        fi
         ;;
       *)
         exit 97
         ;;
     esac
   SH
-  [File.join(bin, 'sudo'), File.join(bin, 'apt-get')].each { |path| File.chmod(0o755, path) }
+  File.write(File.join(bin, 'dpkg-query'), "#!/bin/bash\nprintf 'not-installed'\n")
+  # A constant size means no attempt ever makes progress, so the stagnation rule decides every failure.
+  File.write(File.join(bin, 'du'), "#!/bin/bash\nprintf '0\\t%s\\n' \"${*: -1}\"\n")
+  [File.join(bin, 'sudo'), File.join(bin, 'apt-get'), File.join(bin, 'dpkg-query'), File.join(bin, 'du')].each { |path| File.chmod(0o755, path) }
   run_linux_setup = lambda do |environment|
     sudo_log = File.join(fixture, 'sudo.log')
     apt_log = File.join(fixture, 'apt.log')
     [sudo_log, apt_log].each { |path| File.write(path, '') }
     _, stderr, status = Open3.capture3(
-      environment.merge('PATH' => "#{bin}:/usr/bin:/bin", 'PEPPY_TEST_SUDO_LOG' => sudo_log, 'PEPPY_TEST_APT_LOG' => apt_log),
+      environment.merge('PATH' => "#{bin}:#{timeout_directory}:/usr/bin:/bin", 'PEPPY_APT_RETRY_PAUSE_SECONDS' => '0', 'PEPPY_TEST_SUDO_LOG' => sudo_log, 'PEPPY_TEST_APT_LOG' => apt_log),
       'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', desktop_linux_setup,
-      chdir: fixture
+      chdir: repository_root
     )
     [status, stderr, File.readlines(sudo_log, chomp: true), File.readlines(apt_log, chomp: true)]
   end
-  expected_apt_calls = ['update --error-on=any', "install --yes #{desktop_linux_packages.join(' ')}"]
+  update_call = "#{apt_options} update --error-on=any"
+  download_call = "#{apt_options} install --yes --download-only #{desktop_linux_packages.join(' ')}"
+  install_call = "#{apt_options} install --yes #{desktop_linux_packages.join(' ')}"
+  sudo_wraps_apt = ->(sudo_calls, apt_calls) { sudo_calls.length == apt_calls.length && sudo_calls.zip(apt_calls).all? { |sudo, apt| sudo.end_with?("apt-get #{apt}") } }
 
   status, stderr, sudo_calls, apt_calls = run_linux_setup.call('APT_UPDATE_FAILURE' => '1')
-  assert.call(status.exitstatus == 100 && apt_calls == ['update --error-on=any'] && sudo_calls == ['apt-get update --error-on=any'], "Linux desktop setup must fail closed on an APT index refresh failure before installing packages: #{stderr}")
+  assert.call(status.exitstatus == 100 && apt_calls == [update_call] * 3 && sudo_wraps_apt.call(sudo_calls, apt_calls) && apt_calls.none? { |call| call.include?(' install ') }, "Linux desktop setup must fail closed on every strict APT index refresh attempt before installing packages: #{stderr}")
 
   status, stderr, sudo_calls, apt_calls = run_linux_setup.call({})
-  assert.call(status.success? && apt_calls == expected_apt_calls && sudo_calls == ['apt-get update --error-on=any', "apt-get install --yes #{desktop_linux_packages.join(' ')}"], "healthy Linux desktop setup must refresh strictly and install the existing package list: #{stderr}")
+  assert.call(status.success? && apt_calls == [update_call, download_call, install_call] && sudo_wraps_apt.call(sudo_calls, apt_calls) && sudo_calls[0..1].all? { |call| call.start_with?('timeout --kill-after=15s ') } && !sudo_calls[2].include?('timeout'), "healthy Linux desktop setup must refresh strictly, download within bounds, then install the existing package list unbounded: #{stderr}")
 
   status, stderr, _, apt_calls = run_linux_setup.call('APT_INSTALL_FAILURE' => '1')
-  assert.call(status.exitstatus == 42 && apt_calls == expected_apt_calls, "Linux desktop package installation failure must propagate: #{stderr}")
+  assert.call(status.exitstatus == 42 && apt_calls == [update_call, download_call, install_call], "Linux desktop package installation failure must propagate: #{stderr}")
 end
+installer_workflows = %w[ci.yml build-artifacts.yml test-android.yml].to_h { |name| [name, load_workflow.call(name)] }
+installer_steps = installer_workflows.flat_map do |name, workflow|
+  workflow.fetch('jobs').flat_map { |job_name, job| job.fetch('steps', []).map { |step| [name, job_name, step] } }
+end
+assert.call(installer_steps.none? { |_, _, step| step['run'].to_s.include?('apt-get') }, 'workflows must not invoke apt-get directly; they must use install-apt-packages.sh')
+bounded_installer_steps = installer_steps.select { |_, _, step| step['run'].to_s.include?('install-apt-packages.sh') }
+assert.call(bounded_installer_steps.length == 13, "every Linux apt call site must use install-apt-packages.sh; found #{bounded_installer_steps.length}")
+assert.call(bounded_installer_steps.all? { |_, _, step| step['timeout-minutes'].is_a?(Integer) && step['timeout-minutes'] <= 30 }, 'every install-apt-packages.sh step must have an integer timeout of at most 30 minutes')
 %w[desktop-windows-build desktop-windows-check desktop-windows].each do |job|
   assert.call(ci_jobs[job]&.fetch('timeout-minutes') == 60, "#{job} must retain a 60-minute timeout")
 end
@@ -513,9 +539,25 @@ stable = ci_jobs.fetch('stable-release')
 assert.call(stable.fetch('needs').sort == %w[gate publish-production-mcp publish-production-relay publish-production-server version], 'stable release must wait for the gate and all three edge publishers')
 assert.call(ci_jobs.fetch('notify-hosted-production').fetch('needs').sort == %w[gate publish-production-mcp publish-production-relay publish-production-server], 'hosted dispatch must keep its server and relay payload contract and wait for the MCP image')
 assert.call(stable.fetch('permissions') == { 'contents' => 'write', 'actions' => 'write', 'attestations' => 'write', 'id-token' => 'write' }, 'stable release must grant its nested publisher provenance permissions and the TestFlight dispatch')
-testflight_dispatch = load_workflow.('release.yml').fetch('jobs').fetch('dispatch-testflight')
-assert.call(testflight_dispatch.fetch('permissions') == { 'actions' => 'write', 'contents' => 'read' }, 'TestFlight dispatch must request only actions: write, which the stable-release caller grants')
-assert.call(testflight_dispatch.fetch('continue-on-error') == true, 'a TestFlight dispatch failure must not fail the release')
+testflight_call = load_workflow.('release.yml').fetch('jobs')['publish-testflight']
+assert.call(!testflight_call.nil?, 'release must call TestFlight directly')
+assert.call(testflight_call.fetch('needs') == %w[prepare publish] && testflight_call.fetch('uses') == './.github/workflows/testflight.yml', 'TestFlight must follow desktop publication through a reusable workflow')
+assert.call(testflight_call.fetch('permissions') == { 'contents' => 'read' } && !testflight_call.key?('continue-on-error'), 'TestFlight failures must fail the release with read-only permissions')
+assert.call(testflight_call.fetch('if') == "${{ !inputs.dry_run && needs.publish.result == 'success' && needs.prepare.outputs.desktop_existing != 'true' }}", 'TestFlight must run only for a new non-dry-run desktop release')
+assert.call(testflight_call.fetch('with') == { 'version' => '${{ needs.prepare.outputs.version }}', 'ref' => '${{ needs.prepare.outputs.sha }}' }, 'TestFlight must use the prepared version and SHA')
+testflight = load_workflow.call('testflight.yml')
+testflight_secrets = %w[APPLE_MAS_CERTIFICATE_P12 APPLE_MAS_CERTIFICATE_PASSWORD APPLE_MAS_INSTALLER_CERTIFICATE APPLE_MAS_PROVISIONING_PROFILE_BASE64 APPLE_MAS_SIGNING_IDENTITY APPLE_MAS_INSTALLER_IDENTITY APPLE_ASC_KEY_ID APPLE_ASC_ISSUER_ID APPLE_ASC_PRIVATE_KEY]
+assert.call(testflight_call.fetch('secrets') == testflight_secrets.to_h { |name| [name, "${{ secrets.#{name} }}"] }, 'TestFlight call must forward its named environment secrets')
+assert.call(testflight.fetch(true).fetch('workflow_call').fetch('secrets').keys.sort == testflight_secrets.sort, 'TestFlight callable interface must declare all forwarded secrets')
+%w[version ref].each do |input|
+  %w[workflow_call workflow_dispatch].each do |event|
+    definition = testflight.fetch(true).fetch(event).fetch('inputs').fetch(input)
+    assert.call(definition['required'] == true && definition['type'] == 'string', "TestFlight #{event} must require string #{input}")
+  end
+end
+%w[publish-android publish-play publish-server-image publish-relay-image publish-mcp-image].each do |name|
+  assert.call(!Array(load_workflow.call('release.yml').fetch('jobs').fetch(name)['needs']).include?('publish-testflight'), "#{name} must not wait on TestFlight")
+end
 assert.call(stable.fetch('concurrency').fetch('group') == 'stable-release', 'automatic stable release must serialize with manual release')
 assert.call(stable.fetch('with') == { 'bump' => 'auto', 'version' => '', 'dry_run' => false }, 'automatic release must use the safe automatic inputs')
 
@@ -783,6 +825,24 @@ assert.call(
   desktop_matrix.include?('"path":"apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.pkg'),
   'macOS artifact matrix must retain one universal App Store entry and both direct architectures'
 )
+matrix_entries = desktop_matrix.scan(/'(\{"include":[^']*)'/).map { |(literal)| JSON.parse(literal).fetch('include') }
+assert.call(matrix_entries.length == 3, 'desktop artifact matrix must define the App Store, direct, and direct-without-Intel-macOS JSON literals')
+matrix_names = ->(entries) { entries.map { |entry| entry.fetch('name') } }
+app_store_matrix = matrix_entries.find { |entries| matrix_names.call(entries) == %w[macos] }
+direct_matrix = matrix_entries.find { |entries| matrix_names.call(entries).include?('macos-x64') }
+without_intel_matrix = matrix_entries.find { |entries| matrix_names.call(entries).include?('macos-arm64') && !matrix_names.call(entries).include?('macos-x64') }
+assert.call(!app_store_matrix.nil? && !direct_matrix.nil? && !without_intel_matrix.nil?, 'desktop artifact matrix must include App Store, default direct, and no-Intel direct variants')
+assert.call(matrix_names.call(direct_matrix) == %w[linux macos-arm64 macos-x64 windows], 'default desktop artifact matrix must build linux, macos-arm64, macos-x64, and windows')
+assert.call(matrix_names.call(without_intel_matrix) == %w[linux macos-arm64 windows] && without_intel_matrix == direct_matrix.reject { |entry| entry['name'] == 'macos-x64' }, 'no-Intel desktop artifact matrix must equal the default matrix minus exactly the macos-x64 entry')
+assert.call(matrix_names.call(app_store_matrix) == %w[macos], 'App Store desktop artifact matrix must keep its single universal macos entry')
+build_artifacts_triggers = load_workflow.call('build-artifacts.yml').fetch(true)
+%w[workflow_call workflow_dispatch].each do |event|
+  definition = build_artifacts_triggers.fetch(event).fetch('inputs').fetch('build_macos_x64')
+  assert.call(definition['type'] == 'boolean' && definition['default'] == true, "build-artifacts #{event} must declare build_macos_x64 as a boolean defaulting to true")
+end
+assert.call(ci_jobs.fetch('development-artifacts').fetch('with').fetch('build_macos_x64') == "${{ github.event_name != 'pull_request' }}", 'CI development artifacts must skip the Intel macOS bundle only for pull requests')
+build_artifact_calls = %w[release.yml testflight.yml].flat_map { |name| load_workflow.call(name).fetch('jobs').values.select { |job| job['uses'] == './.github/workflows/build-artifacts.yml' } }
+assert.call(build_artifact_calls.length == 2 && build_artifact_calls.none? { |job| job.fetch('with', {}).key?('build_macos_x64') }, 'release and TestFlight artifact builds must keep the default Intel macOS bundle without passing build_macos_x64')
 mode_validation = desktop_steps.find { |step| step['run'] == 'bash .github/scripts/release-signing-readiness.sh --validate-modes' }
 assert.call(!mode_validation.nil?, 'trusted builds must validate both signing modes before platform work')
 mode_env = mode_validation.fetch('env')

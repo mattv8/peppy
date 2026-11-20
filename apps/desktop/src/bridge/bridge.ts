@@ -47,6 +47,7 @@ import type {
   ContactEditOutcome,
   ContactEditStatus,
   ContactSyncStatus,
+  ContactNameCandidate,
   RecipientSuggestion,
   RestorableContact,
   ResolvedContact,
@@ -240,6 +241,28 @@ const fixtureMailNotificationIcon = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr
 export function addFixtureMessageForTests(conversationId: string, message: MessageView): void {
   fixtureSnapshot.conversations.find((conversation) => conversation.id === conversationId)?.messages.push(message);
 }
+/**
+ * Tests and the browser fixture: merges `from` into `to` as the core does for a merged-away conversation.
+ * The survivor gains the source's messages, `from` leaves the list, and later requests for `from` return
+ * `requestedRedirect` with `to` as the active conversation. The returned function undoes the merge.
+ */
+export function mergeFixtureConversation(from: string, to: string): () => void {
+  const conversations = fixtureSnapshot.conversations;
+  const source = conversations.find((conversation) => conversation.id === from);
+  const survivor = conversations.find((conversation) => conversation.id === to);
+  if (!source || !survivor) throw new Error(`Fixture merge needs both conversations: ${from} -> ${to}`);
+  const { messages: survivorMessages, unread: survivorUnread } = survivor;
+  survivor.messages = [...source.messages, ...survivorMessages].sort((left, right) => Number(left.timestamp) - Number(right.timestamp));
+  survivor.unread += source.unread;
+  fixtureSnapshot.conversations = conversations.filter((conversation) => conversation.id !== from);
+  fixtureRedirects.set(from, to);
+  return () => {
+    survivor.messages = survivorMessages;
+    survivor.unread = survivorUnread;
+    fixtureSnapshot.conversations = conversations;
+    fixtureRedirects.delete(from);
+  };
+}
 
 const fixtureSnapshot: DesktopSnapshot = { version: "1", mode: "fixture", connection: { state: "connected", origin: "https://push.example.com" }, encryption: { state: "unlocked" }, gateways: [{ id: "gateway-pixel8", name: "Pixel 8", simId: "sim-1", online: true, simulated: true, supportsSms: true, supportsMms: true, mmsContentVersion: 2, mmsMaxBytes: 300 * 1024, mmsLimitSource: "fallback", mmsMaxRecipients: 20 }], conversations: [{ id: "conv-aurora", name: "Aurora Chen", preview: "Can you send over the estimate?", unread: 2, messages: fixtureMessages }, { id: "conv-river", name: "River Park", preview: "Attachment received", unread: 0, participants: ["River Park", "Mina Torres"], messages: [{ id: "message-river-1", revision: "1", sender: "other", body: "Attachment received", timestamp: "1788348060000", transport: "mms", subject: "Estimate", attachments: [{ id: "attachment-river-1", name: "estimate.pdf", mediaType: "application/pdf", byteSize: 182000, state: "ready", transfer: "download", retryable: true }] }] }, { id: "conv-short-code", name: "5556", preview: "Short code", unread: 0, messages: [] }, { id: "conv-unresolved-number", name: "+18015551234", preview: "Unresolved number", unread: 0, participants: ["+18015551234"], messages: [] }, { id: "conv-group-numbers", name: "+18015551234, +15555550199", preview: "Group conversation", unread: 0, participants: ["+18015551234", "+15555550199"], messages: [] }], activeConversationId: "conv-aurora", draft: undefined, head: { enabled: true, capability: "supported" }, deviceRole: "owner", pendingCount: 1, quarantineCount: 0, notifications: [{ target: { sourceDeviceId: "gateway-pixel8", notificationKey: "chat-42", lifetime: "1" }, packageName: "com.example.chat", appName: "Chat", appIconPngBase64: fixtureChatNotificationIcon, title: "Morgan", text: "Are we still meeting after lunch?", postedAt: Date.now() - 120000, dismissible: true, seen: false, dismissalPending: false }, { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "chat-43", lifetime: "1" }, packageName: "com.example.chat", appName: "Chat", appIconPngBase64: fixtureChatNotificationIcon, title: "Verification", text: "Your verification code is 839201.", oneTimeCode: "839201", postedAt: Date.now() - 180000, dismissible: true, seen: false, dismissalPending: false }, { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "mail-7", lifetime: "1" }, packageName: "com.example.mail", appName: "Mail", appIconPngBase64: fixtureMailNotificationIcon, title: "Project update", text: "A detailed update is ready for your review.", postedAt: Date.now() - 3600000, dismissible: true, seen: false, dismissalPending: false }], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full", muteWithHeads: true } };
 fixtureSnapshot.notifications.push(
@@ -259,6 +282,16 @@ const fixtureDevices: ManagedDeviceView[] = [
   { id: "device-old-iphone", name: "Old iPhone", kind: "ios", role: "owner", revoked: true },
 ];
 const fixtureScanStatuses = new Map<string, ContactScanStatus>();
+const fixtureContactBooks: ContactBookView[] = [{ id: "book-pixel8", deviceName: "Pixel 8", state: "active", capabilities: { canWrite: true, canDelete: true, canRestore: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true, canSync: true }, ownerDeviceId: "device-pixel8", contactCount: 3, defaultAccountLabel: "Google · aurora@example.com", lastSyncAt: "Just now", pendingEditCount: 1 }, { id: "book-iphone-retired", deviceName: "iPhone", state: "retired", capabilities: { canWrite: false, canDelete: false, supportsNotes: false, supportsPhoto: true, canSync: false }, sourceRevoked: true, ownerDeviceId: "device-old-iphone", contactCount: 0, lastSyncAt: "3 days ago", pendingEditCount: 0 }];
+const fixtureLookupExcludedBookIds = new Set<string>();
+const fixtureNameCandidates: Array<ContactNameCandidate & { address: string }> = [
+  { address: "+12025550123", bookId: "book-pixel8", contactId: "contact-aurora", displayName: "Aurora Chen" },
+  { address: "+12025550124", bookId: "book-pixel8", contactId: "contact-river", displayName: "River Park" },
+];
+const fixtureNamePins = new Map<string, { bookId: string; contactId: string }>();
+const fixtureNameCandidatesFor = (address: string): ContactNameCandidate[] => fixtureNameCandidates
+  .filter(candidate => candidate.address === address && !fixtureLookupExcludedBookIds.has(candidate.bookId))
+  .map(({ bookId, contactId, displayName }) => ({ bookId, contactId, displayName }));
 // Exercise the same display-only contact resolution path as the native snapshot.
 fixtureSnapshot.conversations[0].name = "+12025550123";
 fixtureSnapshot.conversations[0].participants = ["+12025550123"];
@@ -310,6 +343,8 @@ fixtureSnapshot.conversations.push({ id: "conv-resend", name: "Resend states", p
 
 /** Fixture drafts keyed by conversation ID; mirrors the native compose-draft save contract (session.rs). */
 const fixtureDrafts = new Map<string, Draft>();
+/** Merged-away conversation ID to its survivor; requests for the former resolve to the latter, as the core does. */
+const fixtureRedirects = new Map<string, string>();
 const fixtureToneOverrides = new Map<string, number>();
 let fixtureCreated = 0;
 let fixturePhoneApproved = false;
@@ -453,7 +488,9 @@ let fixtureNotificationPersistence: NotificationPersistence = { seconds: 5 };
 let fixtureNotificationQuickReply = false;
 export const fixtureBridge: DesktopBridge = {
   load_state: async (conversationId, historyFromMessageId, options) => {
-    const active = conversationId && fixtureConversationIds().includes(conversationId) ? conversationId : fixtureSnapshot.activeConversationId!;
+    const redirectedTo = conversationId ? fixtureRedirects.get(conversationId) : undefined;
+    const active = redirectedTo ?? (conversationId && fixtureConversationIds().includes(conversationId) ? conversationId : fixtureSnapshot.activeConversationId!);
+    const requestedRedirect = redirectedTo && conversationId ? { from: conversationId, to: redirectedTo } : undefined;
     const conversations = fixtureSnapshot.conversations.map(conversation => {
       if (conversation.id !== active || options?.metadataOnly) return { ...conversation, messages: [] };
       const anchorIndex = historyFromMessageId === undefined ? -1 : conversation.messages.findIndex(message => message.id === historyFromMessageId);
@@ -461,7 +498,7 @@ export const fixtureBridge: DesktopBridge = {
       const messages = historyFromMessageId === undefined ? conversation.messages.slice(-50) : conversation.messages.slice(anchorIndex);
       return { ...conversation, messages, hasOlderMessages: historyFromMessageId === undefined ? conversation.messages.length > messages.length : anchorIndex > 0 };
     });
-    return { ...fixtureSnapshot, conversations: [...conversations, ...fixtureDraftConversations()], activeConversationId: active, draft: fixtureDrafts.get(active) };
+    return { ...fixtureSnapshot, conversations: [...conversations, ...fixtureDraftConversations()], activeConversationId: active, draft: fixtureDrafts.get(active), ...(requestedRedirect ? { requestedRedirect } : {}) };
   },
   search_local: async input => fixtureSearch(input),
   advance_search_index: async (): Promise<SearchIndexProgress> => ({ indexState: "ready", processed: 0, remaining: 0 }),
@@ -702,8 +739,24 @@ export const fixtureBridge: DesktopBridge = {
   mcp_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },
   mcp_approve_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },
   mcp_deny_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },
-  list_contact_books: async () => [{ id: "book-pixel8", deviceName: "Pixel 8", state: "active", capabilities: { canWrite: true, canDelete: true, canRestore: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true, canSync: true }, ownerDeviceId: "device-pixel8", contactCount: 3, defaultAccountLabel: "Google · aurora@example.com", lastSyncAt: "Just now", pendingEditCount: 1 }, { id: "book-iphone-retired", deviceName: "iPhone", state: "retired", capabilities: { canWrite: false, canDelete: false, supportsNotes: false, supportsPhoto: true, canSync: false }, sourceRevoked: true, ownerDeviceId: "device-old-iphone", contactCount: 0, lastSyncAt: "3 days ago", pendingEditCount: 0 }],
+  list_contact_books: async () => fixtureContactBooks.map(book => ({ ...book, lookupExcluded: fixtureLookupExcludedBookIds.has(book.id) })),
   forget_contact_book: async () => undefined,
+  set_contact_book_lookup: async (bookId, enabled) => {
+    if (!fixtureContactBooks.some(book => book.id === bookId)) throw fixtureError("not-found", "Contact book not found.");
+    if (enabled) fixtureLookupExcludedBookIds.delete(bookId);
+    else fixtureLookupExcludedBookIds.add(bookId);
+  },
+  list_contact_name_candidates: async address => {
+    const candidates = fixtureNameCandidatesFor(address);
+    const pin = fixtureNamePins.get(address);
+    const pinned = pin && candidates.some(candidate => candidate.bookId === pin.bookId && candidate.contactId === pin.contactId) ? pin : null;
+    return { candidates, pinned, moreIndexing: false };
+  },
+  set_contact_name_pin: async (address, bookId, contactId) => {
+    if (!fixtureNameCandidatesFor(address).some(candidate => candidate.bookId === bookId && candidate.contactId === contactId)) throw fixtureError("not-found", "Contact not found.");
+    fixtureNamePins.set(address, { bookId, contactId });
+  },
+  clear_contact_name_pin: async address => { fixtureNamePins.delete(address); },
   list_contacts: async (bookId, query = "", offset = 0, sort = { key: "family" as const, direction: "asc" as const }) => {
     const contacts = [{ id: "contact-aurora", bookId, revision: "1", displayName: "Aurora Chen", givenName: "Aurora", familyName: "Chen", phones: [{ label: "mobile", number: "+12025550123" }], emails: [{ label: "work", address: "aurora@example.com" }], addresses: [], organization: "Northstar", title: "Director", notes: "Prefers SMS", pendingEditId: "edit-aurora", pendingEditState: "pending" as const, pendingEditSummary: "Phone number update" }, { id: "contact-river", bookId, revision: "1", displayName: "River Park", givenName: "River", familyName: "Park", phones: [{ label: "mobile", number: "+12025550124" }], emails: [], addresses: [] }, { id: "contact-mina", bookId, revision: "1", displayName: "Mina Torres", givenName: "Mina", familyName: "Torres", phones: [{ label: "work", number: "+12025550125" }], emails: [], addresses: [] }];
     const sortKey: "givenName" | "familyName" = sort.key === "given" ? "givenName" : "familyName";
@@ -895,8 +948,8 @@ export const tauriBridge: DesktopBridge = {
   account_access: () => invoke("account_access"),
   attachment_retention_state: attachmentId => invoke("attachment_retention_state", { attachmentId }),
   retryRcsMediaDownload: (messageId, attachmentIndex) => invoke("retry_rcs_media_download", { messageId, attachmentIndex }),
-  load_state: (conversationId, historyFromMessageId, options) => invoke("load_state", { conversationId, historyFromMessageId, metadataOnly: options?.metadataOnly }), search_local: input => invoke("search_local", { input }), advance_search_index: input => invoke("advance_search_index", { input }), get_history_search: () => invoke("get_history_search"), start_history_search: ({ operationId }) => invoke("start_history_search", { input: { operationId } }), cancel_history_search: ({ attemptId }) => invoke("cancel_history_search", { input: { attemptId } }), load_message_window: input => invoke("load_message_window", { input }), open_external_url: url => invoke("open_external_url", { url }), load_history: (conversationId, beforeMessageId) => invoke("load_history", { conversationId, beforeMessageId }), configure_server: origin => invoke("configure_server", { origin }), unlock_sync: () => invoke("unlock_sync"), get_app_lock_status: () => invoke("get_app_lock_status"), retry_app_lock_check: () => invoke("retry_app_lock_check"), set_app_lock: enabled => invoke("set_app_lock", { enabled }), unlock_app: () => invoke("unlock_app"), save_draft: input => invoke("save_draft", { input }), discard_draft: input => invoke("discard_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), copy_one_time_code: target => invoke("copy_one_time_code", { target }), mark_all_read: () => invoke("mark_all_read"), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), open_notification_settings: () => invoke("open_notification_settings"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), retry_snapshot_import: async () => undefined, save_attachment: id => invoke("save_attachment", { id }), request_attachment_download: id => invoke("request_attachment_download", { id }), media_page: (conversationId, cursor, limit) => invoke("media_page", { conversationId, cursor, limit }), open_media: id => invoke("open_media", { id }), close_media: (id, url) => invoke("close_media", { id, url }), load_media: id => invoke("load_media", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), set_maximize_button_region: region => invoke("set_maximize_button_region", { region }), subscribe: listener => subscribeEvent("peppy://state", () => listener()), subscribe_maximize_button_hover: listener => subscribeWindowEvent("peppy://maximize-button-hover", payload => { if (typeof payload === "boolean") listener(payload); }), subscribe_drafts: listener => subscribeWindowEvent("peppy://draft", payload => { if (isDraft(payload)) listener(payload); }), subscribe_typing: listener => subscribeWindowEvent("peppy://typing", payload => { if (isTypingSignal(payload)) listener(payload); }), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
-   list_devices: () => invoke("list_devices"), revoke_device: deviceId => invoke("revoke_device", { deviceId }), list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), list_contacts: (bookId, query, offset, sort) => invoke("list_contacts", { bookId, query, offset, sort }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), request_contact_sync: bookId => invoke("request_contact_sync", { bookId }), get_contact_sync_request: bookId => invoke("get_contact_sync_request", { bookId }), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_origin_url: () => invoke("hosted_origin_url"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), billing_summary: () => invoke("billing_summary"), enrollment_discover: discoverEnrollment, enrollment_start_over: () => invoke("enrollment_start_over"), enrollment_create_owner: input => invoke("enrollment_create_owner", { input }), enrollment_sign_in: input => invoke("enrollment_sign_in", { input }), enrollment_connect_shared_secret: input => invoke("enrollment_connect_shared_secret", { input }), enrollment_begin_vault_request: input => invoke("enrollment_begin_vault_request", { input }), enrollment_vault_request_status: () => invoke("enrollment_vault_request_status"), enrollment_create_vault: input => invoke("enrollment_create_vault", { input }), enrollment_add_phone: method => invoke("enrollment_add_phone", { method }), enrollment_rotate_phone: method => invoke("enrollment_rotate_phone", { method }), enrollment_cancel_phone: () => invoke("enrollment_cancel_phone"), reveal_vault_secret: () => invoke("reveal_vault_secret"), enrollment_status: () => invoke("enrollment_status"), enrollment_approve: () => invoke("enrollment_approve"), enrollment_cancel: () => invoke("enrollment_cancel"), enrollment_sign_out: () => invoke("enrollment_sign_out"),
+  load_state: (conversationId, historyFromMessageId, options) => invoke("load_state", { conversationId, historyFromMessageId, metadataOnly: options?.metadataOnly }), search_local: input => invoke("search_local", { input }), advance_search_index: input => invoke("advance_search_index", { input }), get_history_search: () => invoke("get_history_search"), start_history_search: ({ operationId }) => invoke("start_history_search", { input: { operationId } }), cancel_history_search: ({ attemptId }) => invoke("cancel_history_search", { input: { attemptId } }), load_message_window: input => invoke("load_message_window", { input }), open_external_url: url => invoke("open_external_url", { url }), load_history: (conversationId, beforeMessageId) => invoke("load_history", { conversationId, beforeMessageId }), configure_server: origin => invoke("configure_server", { origin }), unlock_sync: () => invoke("unlock_sync"), get_app_lock_status: () => invoke("get_app_lock_status"), retry_app_lock_check: () => invoke("retry_app_lock_check"), set_app_lock: enabled => invoke("set_app_lock", { enabled }), unlock_app: () => invoke("unlock_app"), save_draft: input => invoke("save_draft", { input }), discard_draft: input => invoke("discard_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), copy_one_time_code: target => invoke("copy_one_time_code", { target }), mark_all_read: () => invoke("mark_all_read"), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), open_notification_settings: () => invoke("open_notification_settings"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), retry_snapshot_import: async () => undefined, save_attachment: id => invoke("save_attachment", { id }), request_attachment_download: id => invoke("request_attachment_download", { id }), media_page: (conversationId, cursor, limit) => invoke("media_page", { conversationId, cursor, limit }), open_media: id => invoke("open_media", { id }), close_media: (id, url) => invoke("close_media", { id, url }), load_media: id => invoke("load_media", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), set_maximize_button_region: region => invoke("set_maximize_button_region", { region }), subscribe: listener => subscribeEvent("peppy://state", () => listener(), listener), subscribe_maximize_button_hover: listener => subscribeWindowEvent("peppy://maximize-button-hover", payload => { if (typeof payload === "boolean") listener(payload); }), subscribe_drafts: listener => subscribeWindowEvent("peppy://draft", payload => { if (isDraft(payload)) listener(payload); }), subscribe_typing: listener => subscribeWindowEvent("peppy://typing", payload => { if (isTypingSignal(payload)) listener(payload); }), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
+   list_devices: () => invoke("list_devices"), revoke_device: deviceId => invoke("revoke_device", { deviceId }), list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), set_contact_book_lookup: (bookId, enabled) => invoke("set_contact_book_lookup", { bookId, enabled }), list_contact_name_candidates: (address, sourceDeviceId) => invoke("list_contact_name_candidates", { address, sourceDeviceId }), set_contact_name_pin: (address, bookId, contactId, sourceDeviceId) => invoke("set_contact_name_pin", { address, sourceDeviceId, bookId, contactId }), clear_contact_name_pin: (address, sourceDeviceId) => invoke("clear_contact_name_pin", { address, sourceDeviceId }), list_contacts: (bookId, query, offset, sort) => invoke("list_contacts", { bookId, query, offset, sort }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), request_contact_sync: bookId => invoke("request_contact_sync", { bookId }), get_contact_sync_request: bookId => invoke("get_contact_sync_request", { bookId }), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_origin_url: () => invoke("hosted_origin_url"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), billing_summary: () => invoke("billing_summary"), enrollment_discover: discoverEnrollment, enrollment_start_over: () => invoke("enrollment_start_over"), enrollment_create_owner: input => invoke("enrollment_create_owner", { input }), enrollment_sign_in: input => invoke("enrollment_sign_in", { input }), enrollment_connect_shared_secret: input => invoke("enrollment_connect_shared_secret", { input }), enrollment_begin_vault_request: input => invoke("enrollment_begin_vault_request", { input }), enrollment_vault_request_status: () => invoke("enrollment_vault_request_status"), enrollment_create_vault: input => invoke("enrollment_create_vault", { input }), enrollment_add_phone: method => invoke("enrollment_add_phone", { method }), enrollment_rotate_phone: method => invoke("enrollment_rotate_phone", { method }), enrollment_cancel_phone: () => invoke("enrollment_cancel_phone"), reveal_vault_secret: () => invoke("reveal_vault_secret"), enrollment_status: () => invoke("enrollment_status"), enrollment_approve: () => invoke("enrollment_approve"), enrollment_cancel: () => invoke("enrollment_cancel"), enrollment_sign_out: () => invoke("enrollment_sign_out"),
   open_mcp_oauth_redirect: url => invoke("open_mcp_oauth_redirect", { url }),
   mcp_status: () => invoke("mcp_status"),
   mcp_enable: () => invoke("mcp_enable"),
@@ -952,11 +1005,28 @@ const isTypingSignal = (value: unknown): value is TypingSignal => {
     (signal.expiresAtMs === undefined || isCanonicalU64(signal.expiresAtMs)) &&
     (signal.participant === undefined || typeof signal.participant === "string");
 };
-const subscribeEvent = (event: string, listener: (payload: unknown) => void) => {
+const subscribeEvent = (event: string, listener: (payload: unknown) => void, onRegistered?: () => void) => {
   let disposed = false;
   let unlisten: (() => void) | undefined;
-  void import("@tauri-apps/api/event").then(({ listen }) => listen(event, payload => listener(payload.payload))).then(stop => { unlisten = stop; if (disposed) stop(); }).catch(() => {});
-  return () => { disposed = true; unlisten?.(); };
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let retryDelay = 1000;
+  const maxRetryDelay = 30_000;
+  const register = () => {
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) => listen(event, payload => listener(payload.payload)))
+      .then(stop => {
+        unlisten = stop;
+        if (disposed) { stop(); return; }
+        // A catch-up callback failure must not trigger a registration retry.
+        try { onRegistered?.(); } catch { /* Listener errors do not affect registration. */ }
+      }, () => {
+        if (disposed) return;
+        retryTimer = setTimeout(register, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, maxRetryDelay);
+      }).catch(() => {});
+  };
+  register();
+  return () => { disposed = true; clearTimeout(retryTimer); unlisten?.(); };
 };
 type WindowSubscription = (() => void) & { ready: Promise<void> };
 const subscribeWindowEvent = (event: string, listener: (payload: unknown) => void): WindowSubscription => {

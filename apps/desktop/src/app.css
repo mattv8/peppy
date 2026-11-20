@@ -504,6 +504,9 @@ mark { background: var(--peppy-warning-surface); color: var(--peppy-text-primary
 .status-details { display: grid; gap: 6px; }
 .status-details-row { display: flex; align-items: flex-start; gap: 8px; color: var(--peppy-text-secondary); font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
 .status-details-row > svg, .status-details-row > .connection-dot { flex: 0 0 auto; margin-top: 1px; }
+.status-details-pair { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
+.status-details-pair dt { color: var(--peppy-text-primary); font-weight: 600; }
+.status-details-pair dd { margin: 0; font-variant-numeric: tabular-nums; }
 .status-details-row[data-sync-state="mismatch"] { color: var(--peppy-warning-text); }
 #connection-status[data-connection-state="error"],
 #connection-status[data-connection-state="missing-native-host"] { color: var(--peppy-error); }

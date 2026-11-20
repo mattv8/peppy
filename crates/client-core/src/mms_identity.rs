@@ -6,17 +6,19 @@ use peppy_protocol::EnvelopePurpose;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use std::collections::BTreeSet;
 
-const LATEST_MMS_SQL: &str = "SELECT payload FROM messages WHERE conversation_id=? AND json_extract(payload,'$.transport')='mms' ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1";
-const LATEST_CONTEXTUAL_MMS_SQL: &str = "SELECT payload FROM messages WHERE conversation_id=? AND json_extract(payload,'$.mms_context') IS NOT NULL ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1";
+const LATEST_MMS_SQL: &str = "SELECT payload FROM messages WHERE effective_conversation_id=? AND json_extract(payload,'$.transport')='mms' ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1";
+const LATEST_CONTEXTUAL_MMS_SQL: &str = "SELECT payload FROM messages WHERE effective_conversation_id=? AND json_extract(payload,'$.mms_context') IS NOT NULL ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1";
 
 pub(crate) fn install_query_indexes(conn: &rusqlite::Connection) -> Result<(), Error> {
     conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS messages_latest_mms
-           ON messages(conversation_id,sort_at_ms DESC,local_order DESC)
+        "CREATE INDEX IF NOT EXISTS messages_effective_latest_mms
+           ON messages(effective_conversation_id,sort_at_ms DESC,local_order DESC)
            WHERE json_extract(payload,'$.transport')='mms';
-         CREATE INDEX IF NOT EXISTS messages_latest_mms_context
-           ON messages(conversation_id,sort_at_ms DESC,local_order DESC)
-           WHERE json_extract(payload,'$.mms_context') IS NOT NULL;",
+         CREATE INDEX IF NOT EXISTS messages_effective_latest_mms_context
+           ON messages(effective_conversation_id,sort_at_ms DESC,local_order DESC)
+           WHERE json_extract(payload,'$.mms_context') IS NOT NULL;
+         DROP INDEX IF EXISTS messages_latest_mms;
+         DROP INDEX IF EXISTS messages_latest_mms_context;",
     )?;
     Ok(())
 }
@@ -287,6 +289,78 @@ mod tests {
     use super::*;
     use crate::{ClientConfig, DatabaseKey, MessageId, MmsContext, SourceSequence, VaultId};
     use peppy_domain::MessageRecord;
+
+    #[test]
+    fn merged_source_mms_and_context_are_used_for_reply() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("merged-mms.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[31; 32]).unwrap(),
+        )
+        .unwrap();
+        let survivor = ConversationId::new();
+        let source = ConversationId::new();
+        let device = DeviceId::new();
+        let mut payload = crate::MessagePayload {
+            record: MessageRecord {
+                message_id: MessageId::new(),
+                conversation_id: source,
+                source_sequence: SourceSequence(1),
+                attachments: vec![],
+            },
+            source_device_id: device,
+            provider_message_id: None,
+            sender_address: Some("+15555550101".into()),
+            recipients: vec!["+15555550100".into(), "+15555550102".into()],
+            subject: Some("context".into()),
+            body: "incoming".into(),
+            transport: Transport::Mms,
+            direction: crate::Direction::Incoming,
+            rcs_capture: false,
+            imported: false,
+            sent_at_ms: Some(10),
+            ordered_at_ms: None,
+            mms_context: Some(MmsContext {
+                source_generation: "generation".into(),
+                subscription_id: "sim".into(),
+                provider_thread_id: None,
+            }),
+        };
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute(
+                "INSERT INTO messages(id,conversation_id,effective_conversation_id,source_device_id,source_sequence,payload,seen,sort_at_ms) VALUES(?,?,?,?,?,?,0,10)",
+                params![payload.record.message_id.to_string(), source.to_string(), survivor.to_string(), device.to_string(), 1, serde_json::to_string(&payload).unwrap()],
+            ).unwrap();
+            apply_mms_own_address(&store.conn, device, "sim", "+15555550100", 1).unwrap();
+        }
+        assert_eq!(
+            client.mms_reply_context(survivor).unwrap().recipients,
+            vec!["+15555550101", "+15555550102"]
+        );
+        payload.record.message_id = MessageId::new();
+        payload.record.conversation_id = survivor;
+        payload.record.source_sequence = SourceSequence(2);
+        payload.direction = crate::Direction::Outgoing;
+        payload.sender_address = None;
+        payload.recipients = vec!["+15555550100".into(), "+15555550102".into()];
+        payload.mms_context = None;
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute(
+                "INSERT INTO messages(id,conversation_id,effective_conversation_id,source_device_id,source_sequence,payload,seen,sort_at_ms) VALUES(?,?,?,?,?,?,0,20)",
+                params![payload.record.message_id.to_string(), survivor.to_string(), survivor.to_string(), device.to_string(), 2, serde_json::to_string(&payload).unwrap()],
+            ).unwrap();
+        }
+        assert_eq!(
+            client.mms_reply_context(survivor).unwrap().recipients,
+            vec!["+15555550102"]
+        );
+    }
 
     #[test]
     fn incoming_group_without_sender_replies_to_all_participants() {

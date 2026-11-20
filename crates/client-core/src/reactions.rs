@@ -437,7 +437,10 @@ impl Client {
             return Ok(refused(SubmitRefusal::InvalidEmoji));
         }
         let message = self.message_by_id(message_id)?.ok_or(Error::NotFound)?;
-        let conversation_id = message.payload.record.conversation_id;
+        let conversation_id = crate::conversation_merge::survivor(
+            &self.lock()?.conn,
+            message.payload.record.conversation_id,
+        )?;
         let support = self.reaction_support(conversation_id)?;
         if message.payload.transport == Transport::Rcs
             && support.support == ReactionSupport::NeedsPhoneUpdate
@@ -903,7 +906,7 @@ pub(crate) fn support_view(
         });
     }
     let has_messages: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=?)",
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE effective_conversation_id=?)",
         [conversation_id.to_string()],
         |row| row.get(0),
     )?;
@@ -930,7 +933,8 @@ pub(crate) fn project_message(
     message: &mut Message,
 ) -> Result<(), Error> {
     let id = message.payload.record.message_id;
-    let conversation_id = message.payload.record.conversation_id;
+    let conversation_id =
+        crate::conversation_merge::survivor(conn, message.payload.record.conversation_id)?;
     let support = support_view(conn, epoch, conversation_id)?.support;
     let stored: Option<String> = conn
         .query_row(

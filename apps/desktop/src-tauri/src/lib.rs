@@ -1056,6 +1056,7 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
         app_filters: vec![],
         notification_preferences: NotificationPreferences::default(),
         active_conversation_id: None,
+        requested_redirect: None,
         draft: None,
         head: head(),
         desktop: None,
@@ -1063,6 +1064,7 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
         pending_count: 0,
         quarantine_count: 0,
         contact_resolution: None,
+        contact_name_conflicts: None,
         contact_books: None,
         contacts_pending_count: None,
         contact_sync: None,
@@ -1196,25 +1198,52 @@ async fn load_state_for_window_with_options(
         })
         .await;
     }
+    let source = tray::composer_conversation(label).ok_or_else(window_error)?;
+    let redirected = blocking({
+        let session = session.clone();
+        move || session.redirected_conversation(source)
+    })
+    .await?;
+    if let Some(target) = redirected {
+        if conversation_id
+            .as_deref()
+            .and_then(|id| ConversationId::from_str(id).ok())
+            .is_some_and(|id| id == source || id == target)
+        {
+            remember_composer_target(state, label, &session, &target.to_string());
+        }
+    }
+    let requested_source = conversation_id
+        .as_deref()
+        .and_then(|id| ConversationId::from_str(id).ok())
+        == Some(source);
     let conversation_id =
         effective_composer_conversation(state, label, &session, conversation_id.as_deref())?
             .expect("composer conversation");
     blocking(move || {
-        if metadata_only {
-            return session.snapshot_scoped_metadata_only(
+        let mut result = if metadata_only {
+            session.snapshot_scoped_metadata_only(
                 &conversation_id.to_string(),
                 head(),
                 origin,
                 preferences,
-            );
+            )?
+        } else {
+            session.snapshot_scoped(
+                &conversation_id.to_string(),
+                history_from_message_id.as_deref(),
+                head(),
+                origin,
+                preferences,
+            )?
+        };
+        if requested_source && source != conversation_id {
+            result.0.requested_redirect = Some(peppy_desktop_api::RequestedRedirect {
+                from: source.to_string(),
+                to: conversation_id.to_string(),
+            });
         }
-        session.snapshot_scoped(
-            &conversation_id.to_string(),
-            history_from_message_id.as_deref(),
-            head(),
-            origin,
-            preferences,
-        )
+        Ok(result)
     })
     .await
 }
@@ -3569,6 +3598,63 @@ async fn forget_contact_book(state: State<'_, AppState>, book_id: String) -> Bri
     let operation = admit_update_operation(&state)?;
     let session = state.require_session_admitted(&operation).await?;
     blocking(move || contacts::forget_book(&session, &book_id)).await
+}
+
+#[tauri::command]
+async fn set_contact_book_lookup(
+    state: State<'_, AppState>,
+    book_id: String,
+    enabled: bool,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    blocking(move || contacts::set_book_lookup(&session, &book_id, enabled)).await
+}
+
+#[tauri::command]
+async fn list_contact_name_candidates(
+    state: State<'_, AppState>,
+    address: String,
+    source_device_id: Option<String>,
+) -> BridgeResult<serde_json::Value> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    blocking(move || contacts::name_candidates(&session, &address, source_device_id.as_deref()))
+        .await
+}
+
+#[tauri::command]
+async fn set_contact_name_pin(
+    state: State<'_, AppState>,
+    address: String,
+    source_device_id: Option<String>,
+    book_id: String,
+    contact_id: String,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    blocking(move || {
+        contacts::set_name_pin(
+            &session,
+            &address,
+            source_device_id.as_deref(),
+            &book_id,
+            &contact_id,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn clear_contact_name_pin(
+    state: State<'_, AppState>,
+    address: String,
+    source_device_id: Option<String>,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    blocking(move || contacts::clear_name_pin(&session, &address, source_device_id.as_deref()))
+        .await
 }
 
 #[tauri::command]
@@ -7270,6 +7356,10 @@ pub fn run() {
         list_contact_books,
         list_contacts,
         forget_contact_book,
+        set_contact_book_lookup,
+        list_contact_name_candidates,
+        set_contact_name_pin,
+        clear_contact_name_pin,
         submit_contact_edit,
         list_contact_edits,
         pick_contact_photo,

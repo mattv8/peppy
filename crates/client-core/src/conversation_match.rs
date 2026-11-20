@@ -143,7 +143,7 @@ pub(crate) fn conversation_for_recipients(
     }
     let mut own_addresses = OwnAddressCache::new();
     let mut statement = conn.prepare(
-        "SELECT conversation_id,payload FROM (SELECT conversation_id,payload,sort_at_ms,local_order,ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY sort_at_ms DESC,local_order DESC) AS newest FROM messages) WHERE newest=1 ORDER BY sort_at_ms DESC,local_order DESC",
+        "SELECT effective_conversation_id,payload FROM (SELECT effective_conversation_id,payload,sort_at_ms,local_order,ROW_NUMBER() OVER (PARTITION BY effective_conversation_id ORDER BY sort_at_ms DESC,local_order DESC) AS newest FROM messages) WHERE newest=1 ORDER BY sort_at_ms DESC,local_order DESC",
     )?;
     let rows = statement.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -184,4 +184,42 @@ pub(crate) fn address_conversation(
         }
     }
     Ok(None)
+}
+
+/// Resolve an eligible carrier counterpart before reserving a message sequence.
+/// `None` leaves non-phone and RCS-linked conversations on their existing routing path.
+pub(crate) fn resolve_carrier_counterpart(
+    conn: &Connection,
+    address: &str,
+    fallback: Option<ConversationId>,
+) -> Result<Option<ConversationId>, Error> {
+    let region = identity_region(conn)?;
+    let canonical = canonical_address(address, Some(&region));
+    if !canonical.starts_with('+') || !parse(None, &canonical).is_ok_and(|number| number.is_valid())
+    {
+        return Ok(None);
+    }
+    let owner = address_conversation(conn, &canonical)?;
+    for conversation in [owner, fallback].into_iter().flatten() {
+        if !carrier_conversation_eligible(conn, conversation)? {
+            return Ok(None);
+        }
+    }
+    let conversation = owner.or(fallback).unwrap_or_else(ConversationId::new);
+    crate::index_address(conn, address, conversation)?;
+    Ok(Some(conversation))
+}
+
+pub(crate) fn carrier_conversation_eligible(
+    conn: &Connection,
+    conversation: ConversationId,
+) -> Result<bool, Error> {
+    let mirrored: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_mirror_ids WHERE conversation_id=?)",
+        [conversation.to_string()],
+        |row| row.get(0),
+    )?;
+    Ok(!mirrored
+        && !crate::rcs_mapping::has_live_mapping(conn, conversation)?
+        && !crate::rcs_group::is_group_conversation(conn, conversation)?)
 }

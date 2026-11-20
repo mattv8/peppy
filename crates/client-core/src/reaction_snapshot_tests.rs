@@ -641,7 +641,7 @@ fn reaction_schema_61_upgrade_rebuilds_the_staging_table_per_producer() {
         .conn
         .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 63);
+    assert_eq!(version, SCHEMA_VERSION);
     assert!(table_exists(&store.conn, "reaction_sets_staged").unwrap());
     let key_columns: Vec<String> = store
         .conn
