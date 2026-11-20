@@ -26,10 +26,17 @@ assert.call(ci_jobs.fetch('gate').fetch('needs').include?('google-messages-go'),
 gate_environment = ci_jobs.fetch('gate').fetch('steps').find { |step| step['name'] == 'Evaluate CI gate' }.fetch('env')
 assert.call(gate_environment.fetch('GOOGLE_MESSAGES_GO_RESULT') == '${{ needs.google-messages-go.result }}' && gate_environment.fetch('GOOGLE_MESSAGES_GO_REQUIRED') == '${{ needs.changes.outputs.android }}', 'the Go result must be evaluated by the common required-job gate')
 assert.call(ci_jobs.fetch('desktop').fetch('timeout-minutes') == 60, 'public CI desktop must allow 60 minutes uniformly for native cold-cache builds')
-desktop_linux_setup_steps = ci_jobs.fetch('desktop').fetch('steps').select { |step| step['run']&.include?('sudo apt-get update') }
-assert.call(desktop_linux_setup_steps.length == 1, 'desktop must have exactly one Linux apt setup command')
-desktop_linux_setup = desktop_linux_setup_steps.first.fetch('run')
+repository_root = File.expand_path('../..', __dir__)
+desktop_linux_setup_steps = ci_jobs.fetch('desktop').fetch('steps').select { |step| step['run']&.include?('install-apt-packages.sh') }
+assert.call(desktop_linux_setup_steps.length == 1, 'desktop must have exactly one Linux package installer call')
+desktop_linux_setup_step = desktop_linux_setup_steps.first
+assert.call(desktop_linux_setup_step['if'] == "runner.os == 'Linux'" && desktop_linux_setup_step['timeout-minutes'] == 20, 'desktop Linux package installation must stay Linux-only and bounded to 20 minutes')
+desktop_linux_setup = desktop_linux_setup_step.fetch('run')
 desktop_linux_packages = %w[build-essential pkg-config libsqlite3-dev libssl-dev libsodium-dev libsecret-1-dev libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev]
+apt_options = '-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120'
+timeout_path, _, timeout_status = Open3.capture3('which', 'timeout')
+assert.call(timeout_status.success?, 'desktop package installer fixture requires GNU timeout on PATH')
+timeout_directory = File.dirname(timeout_path.strip)
 Dir.mktmpdir('desktop-apt-index-refresh') do |fixture|
   bin = File.join(fixture, 'bin')
   FileUtils.mkdir_p(bin)
@@ -43,6 +50,7 @@ Dir.mktmpdir('desktop-apt-index-refresh') do |fixture|
     #!/bin/bash
     set -euo pipefail
     printf '%s\n' "$*" >> "$PEPPY_TEST_APT_LOG"
+    while [[ "${1:-}" == -o ]]; do shift 2; done
     case "$1" in
       update)
         # Modelled APT behaviour: without --error-on=any a failed index refresh only warns and succeeds.
@@ -59,36 +67,51 @@ Dir.mktmpdir('desktop-apt-index-refresh') do |fixture|
         fi
         ;;
       install)
-        [[ -z "${APT_INSTALL_FAILURE:-}" ]] || exit 42
+        # Only the final package install may fail; the download-only phase must still succeed.
+        if [[ " $* " != *" --download-only "* && -n "${APT_INSTALL_FAILURE:-}" ]]; then
+          exit 42
+        fi
         ;;
       *)
         exit 97
         ;;
     esac
   SH
-  [File.join(bin, 'sudo'), File.join(bin, 'apt-get')].each { |path| File.chmod(0o755, path) }
+  File.write(File.join(bin, 'dpkg-query'), "#!/bin/bash\nprintf 'not-installed'\n")
+  [File.join(bin, 'sudo'), File.join(bin, 'apt-get'), File.join(bin, 'dpkg-query')].each { |path| File.chmod(0o755, path) }
   run_linux_setup = lambda do |environment|
     sudo_log = File.join(fixture, 'sudo.log')
     apt_log = File.join(fixture, 'apt.log')
     [sudo_log, apt_log].each { |path| File.write(path, '') }
     _, stderr, status = Open3.capture3(
-      environment.merge('PATH' => "#{bin}:/usr/bin:/bin", 'PEPPY_TEST_SUDO_LOG' => sudo_log, 'PEPPY_TEST_APT_LOG' => apt_log),
+      environment.merge('PATH' => "#{bin}:#{timeout_directory}:/usr/bin:/bin", 'PEPPY_APT_RETRY_PAUSE_SECONDS' => '0', 'PEPPY_TEST_SUDO_LOG' => sudo_log, 'PEPPY_TEST_APT_LOG' => apt_log),
       'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', desktop_linux_setup,
-      chdir: fixture
+      chdir: repository_root
     )
     [status, stderr, File.readlines(sudo_log, chomp: true), File.readlines(apt_log, chomp: true)]
   end
-  expected_apt_calls = ['update --error-on=any', "install --yes #{desktop_linux_packages.join(' ')}"]
+  update_call = "#{apt_options} update --error-on=any"
+  download_call = "#{apt_options} install --yes --download-only #{desktop_linux_packages.join(' ')}"
+  install_call = "#{apt_options} install --yes #{desktop_linux_packages.join(' ')}"
+  sudo_wraps_apt = ->(sudo_calls, apt_calls) { sudo_calls.length == apt_calls.length && sudo_calls.zip(apt_calls).all? { |sudo, apt| sudo.end_with?("apt-get #{apt}") } }
 
   status, stderr, sudo_calls, apt_calls = run_linux_setup.call('APT_UPDATE_FAILURE' => '1')
-  assert.call(status.exitstatus == 100 && apt_calls == ['update --error-on=any'] && sudo_calls == ['apt-get update --error-on=any'], "Linux desktop setup must fail closed on an APT index refresh failure before installing packages: #{stderr}")
+  assert.call(status.exitstatus == 100 && apt_calls == [update_call] * 3 && sudo_wraps_apt.call(sudo_calls, apt_calls) && apt_calls.none? { |call| call.include?(' install ') }, "Linux desktop setup must fail closed on every strict APT index refresh attempt before installing packages: #{stderr}")
 
   status, stderr, sudo_calls, apt_calls = run_linux_setup.call({})
-  assert.call(status.success? && apt_calls == expected_apt_calls && sudo_calls == ['apt-get update --error-on=any', "apt-get install --yes #{desktop_linux_packages.join(' ')}"], "healthy Linux desktop setup must refresh strictly and install the existing package list: #{stderr}")
+  assert.call(status.success? && apt_calls == [update_call, download_call, install_call] && sudo_wraps_apt.call(sudo_calls, apt_calls) && sudo_calls[0..1].all? { |call| call.start_with?('timeout --kill-after=15s ') } && !sudo_calls[2].include?('timeout'), "healthy Linux desktop setup must refresh strictly, download within bounds, then install the existing package list unbounded: #{stderr}")
 
   status, stderr, _, apt_calls = run_linux_setup.call('APT_INSTALL_FAILURE' => '1')
-  assert.call(status.exitstatus == 42 && apt_calls == expected_apt_calls, "Linux desktop package installation failure must propagate: #{stderr}")
+  assert.call(status.exitstatus == 42 && apt_calls == [update_call, download_call, install_call], "Linux desktop package installation failure must propagate: #{stderr}")
 end
+installer_workflows = %w[ci.yml build-artifacts.yml test-android.yml].to_h { |name| [name, load_workflow.call(name)] }
+installer_steps = installer_workflows.flat_map do |name, workflow|
+  workflow.fetch('jobs').flat_map { |job_name, job| job.fetch('steps', []).map { |step| [name, job_name, step] } }
+end
+assert.call(installer_steps.none? { |_, _, step| step['run'].to_s.include?('apt-get') }, 'workflows must not invoke apt-get directly; they must use install-apt-packages.sh')
+bounded_installer_steps = installer_steps.select { |_, _, step| step['run'].to_s.include?('install-apt-packages.sh') }
+assert.call(bounded_installer_steps.length == 13, "every Linux apt call site must use install-apt-packages.sh; found #{bounded_installer_steps.length}")
+assert.call(bounded_installer_steps.all? { |_, _, step| step['timeout-minutes'].is_a?(Integer) && step['timeout-minutes'] <= 20 }, 'every install-apt-packages.sh step must have an integer timeout of at most 20 minutes')
 %w[desktop-windows-build desktop-windows-check desktop-windows].each do |job|
   assert.call(ci_jobs[job]&.fetch('timeout-minutes') == 60, "#{job} must retain a 60-minute timeout")
 end

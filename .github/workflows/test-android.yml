@@ -40,7 +40,8 @@ jobs:
           shared-key: ubuntu-24.04-android-ndk-27.2.12479018-android
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/production' }}
           cache-on-failure: true
-      - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev libsodium-dev
+      - run: bash .github/scripts/install-apt-packages.sh build-essential pkg-config libssl-dev libsodium-dev
+        timeout-minutes: 20
       - name: Install Android SDK and NDK
         run: |
           set +e
@@ -154,9 +155,11 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Install Linux build dependencies
+        timeout-minutes: 20
+        run: bash .github/scripts/install-apt-packages.sh build-essential pkg-config libssl-dev libsodium-dev
       - name: Install Android runtime dependencies
         run: |
-          sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev libsodium-dev
           set +e
           set +o pipefail
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018"
@@ -221,9 +224,11 @@ jobs:
         with:
           go-version: '1.27.3'
           cache: false
+      - name: Install Linux build dependencies
+        timeout-minutes: 20
+        run: bash .github/scripts/install-apt-packages.sh build-essential pkg-config libssl-dev libsodium-dev
       - name: Install Android runtime dependencies
         run: |
-          sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev libsodium-dev
           set +e
           set +o pipefail
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018"
@@ -294,9 +299,11 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Install Linux build dependencies
+        timeout-minutes: 20
+        run: bash .github/scripts/install-apt-packages.sh build-essential pkg-config libssl-dev libsodium-dev
       - name: Install Android runtime dependencies
         run: |
-          sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev libsodium-dev
           set +e
           set +o pipefail
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018"
