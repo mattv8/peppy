@@ -60,15 +60,119 @@ describe("SyncProgress", () => {
     expect(document.querySelector("[data-sync-count]")).toHaveTextContent("42,000 of 108,882 items");
   });
 
-  it("shows an indeterminate organizing bar without snapshot counts", () => {
+  it("shows no organizing bar without a total", () => {
     const { rerender } = render(<SyncProgress progress={progress()} />);
     expect(screen.queryByRole("progressbar")).toBeNull();
     expect(document.querySelector("[data-sync-count]")).toBeNull();
     rerender(<SyncProgress progress={progress({ phase: "applying" })} />);
-    const bar = screen.getByRole("progressbar", { name: "Organizing downloaded history" });
-    expect(bar).not.toHaveAttribute("value");
-    expect(bar).not.toHaveAttribute("max");
+    expect(screen.queryByRole("progressbar")).toBeNull();
     expect(document.querySelector("[data-sync-count]")).toBeNull();
+  });
+
+  it("shows the completed portion of a known organizing total", () => {
+    render(<SyncProgress progress={progress({ phase: "applying", snapshotRemaining: "25", snapshotTotal: "100" })} />);
+    const bar = screen.getByRole("progressbar", { name: "Organizing downloaded history" });
+    expect(bar).toHaveAttribute("value", "75");
+    expect(bar).toHaveAttribute("max", "100");
+    expect(document.querySelector("[data-sync-count]")).toHaveTextContent("75 of 100 items");
+  });
+
+  it("holds the last organizing ratio when the total temporarily disappears, but resets on leaving applying", () => {
+    const { rerender } = render(<SyncProgress progress={progress({ phase: "applying", snapshotRemaining: "25", snapshotTotal: "100" })} />);
+    rerender(<SyncProgress progress={progress({ phase: "applying", snapshotRemaining: "20" })} />);
+    expect(screen.getByRole("progressbar")).toHaveAttribute("value", "75");
+    rerender(<SyncProgress progress={progress({ phase: "receiving" })} />);
+    rerender(<SyncProgress progress={progress({ phase: "applying", snapshotRemaining: "20" })} />);
+    expect(screen.queryByRole("progressbar")).toBeNull();
+  });
+
+  it.each([["0", "0"], ["10", "11"], ["10", "-1"], ["9007199254740992", "1"], ["10", "invalid"], ["10", ""]])(
+    "omits the organizing ratio for invalid total %s and remaining %s", (snapshotTotal, snapshotRemaining) => {
+      render(<SyncProgress progress={progress({ phase: "applying", snapshotTotal, snapshotRemaining })} />);
+      expect(screen.queryByRole("progressbar")).toBeNull();
+    },
+  );
+
+  it("delays repair and displays a static repair state", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress />);
+    rerender(<SyncProgress progress={progress({ phase: "repairing" })} />);
+    expect(region()).toBeNull();
+    act(() => vi.advanceTimersByTime(SHOW_DELAY_MS));
+    expect(region()).toHaveAttribute("data-sync-phase", "repairing");
+    expect(region()?.querySelector(".lucide-clock")).not.toBeNull();
+    expect(region()?.querySelector(".busy-indicator-icon")).toBeNull();
+    expect(region()).toHaveTextContent("History is incomplete");
+    expect(region()).toHaveAccessibleDescription("A repair is waiting to run. Some history may not show until it finishes.");
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(announcement()).toHaveTextContent("History is incomplete. A repair is waiting to run.");
+  });
+
+  it("suppresses repair that clears before the delay, including on initial mount", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress progress={progress({ phase: "repairing" })} />);
+    expect(region()).toBeNull();
+    act(() => vi.advanceTimersByTime(SHOW_DELAY_MS - 1));
+    rerender(<SyncProgress progress={progress({ phase: "current" })} />);
+    act(() => vi.advanceTimersByTime(SHOW_DELAY_MS));
+    expect(region()).toBeNull();
+    expect(announcement()).toHaveTextContent("");
+  });
+
+  it("delays blocked, persists while blocked, and clears without a completion confirmation", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress />);
+    rerender(<SyncProgress progress={progress({ phase: "blocked" })} />);
+    expect(region()).toBeNull();
+    act(() => vi.advanceTimersByTime(SHOW_DELAY_MS));
+    expect(region()).toHaveAttribute("data-sync-phase", "blocked");
+    expect(region()?.querySelector(".lucide-triangle-alert")).not.toBeNull();
+    expect(region()?.querySelector(".busy-indicator-icon")).toBeNull();
+    expect(region()).toHaveTextContent("Couldn't finish loading history");
+    expect(region()).toHaveAccessibleDescription("Some history may be missing.");
+    expect(announcement()).toHaveTextContent("Peppy couldn't finish loading your history. Some history may be missing.");
+    act(() => vi.advanceTimersByTime(HIDE_LINGER_MS * 2));
+    expect(region()).toHaveAttribute("data-sync-phase", "blocked");
+    rerender(<SyncProgress progress={progress({ phase: "current" })} />);
+    expect(region()).toBeNull();
+    act(() => vi.advanceTimersByTime(HIDE_LINGER_MS));
+    expect(region()).toBeNull();
+    expect(announcement()).not.toHaveTextContent("Your history is up to date.");
+  });
+
+  it("shows the latest active phase and announces each swap, then confirms repair completion", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress progress={progress()} />);
+    for (const phase of ["blocked", "repairing", "applying", "receiving", "repairing"] as const) {
+      rerender(<SyncProgress progress={progress({ phase })} />);
+      expect(region()).toHaveAttribute("data-sync-phase", phase);
+    }
+    expect(announcement()).toHaveTextContent("History is incomplete. A repair is waiting to run.");
+    rerender(<SyncProgress progress={progress({ phase: "current" })} />);
+    expect(region()).toHaveAttribute("data-sync-phase", "current");
+    expect(region()).not.toHaveAttribute("aria-describedby");
+    act(() => vi.advanceTimersByTime(HIDE_LINGER_MS));
+    expect(announcement()).toHaveTextContent("Your history is up to date.");
+  });
+
+  it("suppresses an initial blocked blip", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress progress={progress({ phase: "blocked" })} />);
+    expect(region()).toBeNull();
+    rerender(<SyncProgress progress={progress({ phase: "current" })} />);
+    act(() => vi.advanceTimersByTime(SHOW_DELAY_MS));
+    expect(region()).toBeNull();
+    expect(announcement()).toHaveTextContent("");
+  });
+
+  it("does not confirm completion when blocked progress becomes absent", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress progress={progress({ phase: "blocked" })} />);
+    act(() => vi.advanceTimersByTime(SHOW_DELAY_MS));
+    rerender(<SyncProgress />);
+    expect(region()).toBeNull();
+    act(() => vi.advanceTimersByTime(HIDE_LINGER_MS));
+    expect(announcement()).not.toHaveTextContent("Your history is up to date.");
   });
 
   it("falls back to the plain banner when the download total is zero", () => {
@@ -98,6 +202,8 @@ describe("SyncProgress", () => {
       progress(),
       progress({ phase: "applying" }),
       progress({ phase: "waitingForKeys" }),
+      progress({ phase: "repairing" }),
+      progress({ phase: "blocked" }),
     ];
     const { rerender } = render(<SyncProgress progress={states[0]} />);
     for (const state of states) {

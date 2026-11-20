@@ -29,6 +29,11 @@ describe("history status", () => {
     expect(historyStatus({ ...progress, phase: "current" })).toBeUndefined();
     expect(historyStatus()).toBeUndefined();
   });
+
+  it("reports incomplete history in the status popover", () => {
+    expect(historyStatus({ ...progress, phase: "repairing" })).toEqual({ phase: "repairing", value: "History is incomplete; a repair is waiting to run" });
+    expect(historyStatus({ ...progress, phase: "blocked" })).toEqual({ phase: "blocked", value: "Couldn't finish loading history" });
+  });
 });
 
 describe("status severity", () => {

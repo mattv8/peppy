@@ -1,6 +1,6 @@
 import type { ReactElement } from "react";
 import { useEffect, useRef, useState } from "react";
-import { Check, Lock, LoaderCircle } from "lucide-react";
+import { Check, Clock, Lock, LoaderCircle, TriangleAlert } from "lucide-react";
 import type { SyncProgress as SyncProgressSnapshot } from "./bridge-contracts";
 
 type SyncPhase = SyncProgressSnapshot["phase"];
@@ -19,12 +19,16 @@ const TITLES: Record<ActivePhase, string> = {
   receiving: "Loading your history…",
   applying: "Organizing downloaded history…",
   waitingForKeys: "Waiting for vault keys to continue loading history…",
+  repairing: "History is incomplete",
+  blocked: "Couldn't finish loading history",
 };
 
 const PHASE_ANNOUNCEMENTS: Record<SyncPhase, string> = {
   receiving: "Loading your history.",
   applying: "Organizing downloaded history.",
   waitingForKeys: "Waiting for vault keys to continue loading history.",
+  repairing: "History is incomplete. A repair is waiting to run.",
+  blocked: "Peppy couldn't finish loading your history. Some history may be missing.",
   current: "Your history is up to date.",
 };
 const DOWNLOADING_COUNT = "%s of %s items";
@@ -39,6 +43,23 @@ function snapshotCounts(progress: SyncProgressSnapshot) {
   return { received, expected };
 }
 
+function organizingCounts(progress: SyncProgressSnapshot) {
+  const { snapshotTotal, snapshotRemaining } = progress;
+  if (!snapshotTotal || !snapshotRemaining || !/^\d+$/.test(snapshotTotal) || !/^\d+$/.test(snapshotRemaining)) return;
+  const total = Number(snapshotTotal);
+  const remaining = Number(snapshotRemaining);
+  if (!Number.isSafeInteger(total) || !Number.isSafeInteger(remaining) || total <= 0 || remaining > total) return;
+  return { done: total - remaining, total };
+}
+
+function delayedOnInitialMount(phase: ActivePhase | undefined) {
+  return phase === "repairing" || phase === "blocked";
+}
+
+function canConfirmCompletion(phase: ActivePhase) {
+  return phase === "receiving" || phase === "applying" || phase === "repairing";
+}
+
 function activePhase(phase: SyncPhase | undefined): ActivePhase | undefined {
   return phase === undefined || phase === "current" ? undefined : phase;
 }
@@ -46,19 +67,24 @@ function activePhase(phase: SyncPhase | undefined): ActivePhase | undefined {
 export function SyncProgress({ progress }: SyncProgressProps): ReactElement {
   const phase = progress?.phase;
   const active = activePhase(phase);
-  const initialActive = active;
+  const initialActive = delayedOnInitialMount(active) ? undefined : active;
   const [displayedPhase, setDisplayedPhase] = useState<ActivePhase | undefined>(initialActive);
   const [announcement, setAnnouncement] = useState(initialActive ? PHASE_ANNOUNCEMENTS[initialActive] : "");
   const showTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const latestPhaseRef = useRef(phase);
-  const latestProgressRef = useRef(progress);
   const lastActiveProgressRef = useRef<SyncProgressSnapshot | undefined>(initialActive ? progress : undefined);
   const inactivePhaseRef = useRef<"current" | "absent" | undefined>(undefined);
+  const lastOrganizingCountsRef = useRef<ReturnType<typeof organizingCounts>>(undefined);
+
+  const currentOrganizingCounts = phase === "applying" && progress ? organizingCounts(progress) : undefined;
+  useEffect(() => {
+    if (phase !== "applying") lastOrganizingCountsRef.current = undefined;
+    else if (currentOrganizingCounts) lastOrganizingCountsRef.current = currentOrganizingCounts;
+  }, [phase, progress]);
 
   useEffect(() => {
     latestPhaseRef.current = phase;
-    latestProgressRef.current = progress;
     if (active) lastActiveProgressRef.current = progress;
 
     if (displayedPhase) {
@@ -73,6 +99,10 @@ export function SyncProgress({ progress }: SyncProgressProps): ReactElement {
         return;
       }
 
+      if (!canConfirmCompletion(displayedPhase)) {
+        setDisplayedPhase(undefined);
+        return;
+      }
       const inactivePhase = phase === "current" ? "current" : "absent";
       inactivePhaseRef.current = inactivePhase;
       if (!hideTimerRef.current) {
@@ -120,16 +150,20 @@ export function SyncProgress({ progress }: SyncProgressProps): ReactElement {
   }, []);
 
   const cursorProgress = progress ?? lastActiveProgressRef.current;
-  const complete = phase === "current";
-  const counts = cursorProgress && snapshotCounts(cursorProgress);
-  const countText = counts && displayedPhase === "receiving"
-    ? DOWNLOADING_COUNT.replace("%s", number.format(counts.received)).replace("%s", number.format(counts.expected))
+  const complete = phase === "current" && displayedPhase !== undefined && canConfirmCompletion(displayedPhase);
+  const receivingCounts = cursorProgress && snapshotCounts(cursorProgress);
+  const applyingCounts = currentOrganizingCounts ?? (phase === "applying" && progress?.snapshotTotal === undefined ? lastOrganizingCountsRef.current : undefined);
+  const counts = displayedPhase === "receiving" && receivingCounts ? { done: receivingCounts.received, total: receivingCounts.expected }
+    : displayedPhase === "applying" ? applyingCounts : undefined;
+  const countText = counts
+    ? DOWNLOADING_COUNT.replace("%s", number.format(counts.done)).replace("%s", number.format(counts.total))
     : undefined;
   return <>
     {displayedPhase && cursorProgress && <section
       id="sync-progress"
       className="sync-progress"
       aria-label="History sync"
+      aria-describedby={!complete && (displayedPhase === "repairing" || displayedPhase === "blocked") ? "sync-progress-detail" : undefined}
       data-sync-progress
       data-sync-phase={complete ? "current" : displayedPhase}
     >
@@ -137,12 +171,18 @@ export function SyncProgress({ progress }: SyncProgressProps): ReactElement {
         ? <Check className="sync-progress-icon" size={14} strokeWidth={1.75} aria-hidden />
         : displayedPhase === "waitingForKeys"
         ? <Lock className="sync-progress-icon" size={14} strokeWidth={1.75} aria-hidden />
+        : displayedPhase === "repairing"
+        ? <Clock className="sync-progress-icon" size={14} strokeWidth={1.75} aria-hidden />
+        : displayedPhase === "blocked"
+        ? <TriangleAlert className="sync-progress-icon" size={14} strokeWidth={1.75} aria-hidden />
         : <LoaderCircle className="busy-indicator-icon sync-progress-icon" size={14} strokeWidth={1.75} aria-hidden />}
       <div className="sync-progress-main">
         <p className="sync-progress-title" data-sync-title>{complete ? "History is up to date" : TITLES[displayedPhase]}</p>
-        {!complete && displayedPhase === "receiving" && counts && <progress id="sync-progress-bar" aria-label="Loading your history" value={counts.received} max={counts.expected} />}
-        {!complete && displayedPhase === "applying" && <progress id="sync-progress-bar" aria-label="Organizing downloaded history" />}
+        {!complete && displayedPhase === "receiving" && counts && <progress id="sync-progress-bar" aria-label="Loading your history" value={counts.done} max={counts.total} />}
+        {!complete && displayedPhase === "applying" && counts && <progress id="sync-progress-bar" aria-label="Organizing downloaded history" value={counts.done} max={counts.total} />}
         {!complete && countText && <p data-sync-count>{countText}</p>}
+        {!complete && displayedPhase === "repairing" && <p id="sync-progress-detail" data-sync-detail>A repair is waiting to run. Some history may not show until it finishes.</p>}
+        {!complete && displayedPhase === "blocked" && <p id="sync-progress-detail" data-sync-detail>Some history may be missing.</p>}
       </div>
     </section>}
     <span id="sync-progress-announcement" className="sr-only" role="status" aria-live="polite" data-sync-announcement>{announcement}</span>
