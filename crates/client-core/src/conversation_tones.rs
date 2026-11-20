@@ -50,6 +50,7 @@ impl Client {
         palette_index: Option<u8>,
     ) -> Result<(), Error> {
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let (conn, ctx) = guard.parts();
         if ctx
             .active_epoch

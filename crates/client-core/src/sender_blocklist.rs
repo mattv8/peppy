@@ -471,6 +471,7 @@ impl Client {
         can_unblock: bool,
     ) -> Result<bool, Error> {
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let (conn, ctx) = guard.parts();
         require_keys(&ctx)?;
         let device = ctx.device_id.to_string();
@@ -554,6 +555,7 @@ impl Client {
         archived_thread_ids: Vec<String>,
     ) -> Result<u32, Error> {
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let (conn, ctx) = guard.parts();
         require_keys(&ctx)?;
         let device = ctx.device_id.to_string();
@@ -636,6 +638,7 @@ impl Client {
     /// the conversation to Inbox in the same transaction.
     pub fn request_sender_unblock(&self, conversation_id: ConversationId) -> Result<(), Error> {
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let (conn, ctx) = guard.parts();
         require_keys(&ctx)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -713,6 +716,7 @@ impl Client {
         let request = uuid::Uuid::parse_str(request_id)
             .map_err(|_| Error::InvalidRequest("sender unblock"))?;
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let (conn, ctx) = guard.parts();
         require_keys(&ctx)?;
         let device = ctx.device_id.to_string();
