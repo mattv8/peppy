@@ -9,6 +9,7 @@ const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength;
 const combinedText = (draft: string, reply: string) => draft && reply ? `${draft}\n${reply}` : `${draft}${reply}`;
 const reasonText = (reason: string) => reason === "needs-route-choice"
   ? "Choose a phone or SIM in your draft before sending."
+  : reason === "update-in-progress" ? UPDATE_REPLY_REASON
   : reason === "members-changed" ? "The group changed. Review the conversation before sending."
     : "This reply could not be queued. Review it before adding it to your draft.";
 
@@ -153,3 +154,4 @@ export function NotificationReplyRecovery({ bridge, conversationId, sessionKey, 
     </Modal>}
   </div>;
 }
+import { UPDATE_REPLY_REASON } from "@peppy/desktop-ui";

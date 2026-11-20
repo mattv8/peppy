@@ -6,6 +6,22 @@ import { TonePicker } from "./TonePicker";
 
 describe("TonePicker", () => {
   afterEach(cleanup);
+  it("keeps a disabled trigger focusable and guarded", () => {
+    const onSelect = vi.fn();
+    render(<TonePicker id="tone" seed="contact" automaticIndex={9} disabled onSelect={onSelect} />);
+    const trigger = screen.getByRole("button", { name: "Change conversation color" });
+    expect(trigger).toHaveAttribute("aria-disabled", "true");
+    expect(trigger).toBeEnabled();
+    fireEvent.click(trigger);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+  it("closes an open picker when it becomes disabled", () => {
+    const { rerender } = render(<TonePicker id="tone" seed="contact" automaticIndex={9} onSelect={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Change conversation color" }));
+    expect(screen.getByRole("dialog", { name: "Conversation color" })).toBeVisible();
+    rerender(<TonePicker id="tone" seed="contact" automaticIndex={9} disabled onSelect={() => {}} />);
+    expect(screen.queryByRole("dialog", { name: "Conversation color" })).toBeNull();
+  });
   it("moves focus without persisting until the active color is confirmed", () => {
     const onSelect = vi.fn();
     render(<TonePicker id="tone" seed="contact" automaticIndex={9} value={60} onSelect={onSelect} />);

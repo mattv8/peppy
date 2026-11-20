@@ -49,14 +49,14 @@ const original = (sendRecovery: SendRecovery = { kind: "not-sent", canSendAgain:
   ...overrides,
 });
 
-type HostOptions = Partial<Pick<SendAgainHostProps, "gateways" | "serverOffline" | "onGoToLatest">> & { messages?: MessageView[] };
+type HostOptions = Partial<Pick<SendAgainHostProps, "gateways" | "serverOffline" | "onGoToLatest" | "writesPaused">> & { messages?: MessageView[] };
 
 /** Renders the real flow: the host, the bubble notices, and the popover it opens. Rerender through the returned helper. */
 function renderHost(initial: HostOptions = {}) {
   const state: HostOptions & { version: number } = { messages: [original()], gateways: [phone()], serverOffline: false, onGoToLatest: vi.fn(), version: 0, ...initial };
   const build = () => {
     const messages = state.messages ?? [];
-    return <SendAgainHost conversation={{ id: "c1", name: "Ana", preview: "", unread: 0, messages }} gateways={state.gateways ?? []} routeLabel={routeLabel} serverOffline={state.serverOffline ?? false} onGoToLatest={state.onGoToLatest ?? (() => {})}>
+    return <SendAgainHost conversation={{ id: "c1", name: "Ana", preview: "", unread: 0, messages }} gateways={state.gateways ?? []} routeLabel={routeLabel} serverOffline={state.serverOffline ?? false} writesPaused={state.writesPaused} onGoToLatest={state.onGoToLatest ?? (() => {})}>
       {messages.map((message) => <SendRecoveryNotice key={`${message.id}-${state.version}`} message={message} />)}
     </SendAgainHost>;
   };
@@ -75,6 +75,12 @@ function renderHost(initial: HostOptions = {}) {
 }
 
 const openSendAgain = (id = "m1") => fireEvent.click(document.getElementById(`message-send-again-${id}`)!);
+it("disables send again while writes are paused", () => {
+  const host = renderHost({ writesPaused: true });
+  expect(document.getElementById("message-send-again-m1")).toBeDisabled();
+  host.update({ writesPaused: false });
+  expect(document.getElementById("message-send-again-m1")).toBeEnabled();
+});
 const popover = (id = "m1") => document.getElementById(`send-again-popover-${id}`);
 const confirmButton = (id = "m1") => document.getElementById(`send-again-confirm-${id}`) as HTMLButtonElement;
 const cancelButton = (id = "m1") => document.getElementById(`send-again-cancel-${id}`) as HTMLButtonElement;

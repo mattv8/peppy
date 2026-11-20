@@ -96,7 +96,7 @@ export function draftNoticeView(candidate: DraftNoticeCandidate): DraftNoticeVie
         ...recoveryAction(candidate),
       };
     case "send-failed":
-      return { kind: candidate.kind, message: `Not sent: ${candidate.detail}`, tone: "error", role: "alert" };
+      return { kind: candidate.kind, message: candidate.detail.startsWith("Not sent: ") ? candidate.detail : `Not sent: ${candidate.detail}`, tone: "error", role: "alert" };
     case "attachment-feedback":
       return { kind: candidate.kind, message: candidate.detail ?? "Couldn’t add pasted image.", tone: "warning", role: "alert" };
     case "moved":

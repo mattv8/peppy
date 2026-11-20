@@ -1,3 +1,4 @@
+import { UPDATE_PAUSED_DESCRIPTION } from "./updatePausedCopy";
 import type { ClipboardEvent, KeyboardEvent, PointerEvent, ReactElement, ReactNode, Ref } from "react";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import {
@@ -62,7 +63,8 @@ export { TonePicker, TONE_PRESETS, type TonePickerProps } from "./TonePicker";
 export { ToneOverridesProvider, incomingToneSeed, toneIndex, toneStyle, useToneOverrides, useToneStyle, type ToneOverrides } from "./tone";
 export { OmniSearch, type OmniNotificationHit, type OmniNotificationResults, type OmniSearchProps, type OmniSearchScope, type OmniTextSegment } from "./OmniSearch";
 export { ResizeHandle, type ResizeHandleProps } from "./ResizeHandle";
-export { SyncProgress, type SyncProgressProps } from "./SyncProgress";
+export { SyncProgress, SHOW_DELAY_MS, updateCounts, type SyncProgressProps } from "./SyncProgress";
+export { UPDATE_ANNOUNCEMENT, UPDATE_COMPLETE_ANNOUNCEMENT, UPDATE_COMPLETE_TITLE, UPDATE_COMPOSER_DETAIL, UPDATE_COMPOSER_MESSAGE, UPDATE_CONTACTS_NOTE, UPDATE_DETAIL, UPDATE_ERROR, UPDATE_LABEL, UPDATE_NOTIFICATION_NOTE, UPDATE_PAUSED_DESCRIPTION, UPDATE_REPLY_REASON, UPDATE_SEND_FAILURE, UPDATE_SEND_REASON, UPDATE_STATUS_TERM, UPDATE_TITLE } from "./updatePausedCopy";
 export { AttachmentStorageSettings, attachmentStorageRemovalText, type AttachmentStorageCopy, type AttachmentStorageSettingsProps, type StoragePurchaseProps, type StoragePurchaseState } from "./AttachmentStorageSettings";
 export { BillingElsewhereNotice, type BillingElsewhereCopy, type BillingElsewhereNoticeProps, type BillingElsewhereVariant } from "./BillingElsewhereNotice";
 export { StorePlanOptions, type StorePlanOptionsCopy, type StorePlanOptionsProps, type StorePlanState } from "./StorePlanOptions";
@@ -1023,6 +1025,7 @@ export function ConversationList({
   onPopout,
   onDelete,
   onTogglePin,
+  actionsPaused = false,
   onCancelDelete,
   deleteConfirmationId,
   deletingId,
@@ -1044,6 +1047,7 @@ export function ConversationList({
   onDelete?(id: string): void;
   /** Requests the desired durable pin state for an established conversation. */
   onTogglePin?(id: string, pinned: boolean): void;
+  actionsPaused?: boolean;
   onCancelDelete?(): void;
   deleteConfirmationId?: string;
   deletingId?: string;
@@ -1084,8 +1088,9 @@ export function ConversationList({
                   className={`conversation-pin conversation-pin-leading ${isPinPending ? "pending" : ""}`}
                   data-pin-conversation-id={c.id}
                   aria-label="Unpin conversation"
-                  title={`Unpin ${c.name}`}
-                  disabled={isOtherActionPending}
+                  title={actionsPaused ? UPDATE_PAUSED_DESCRIPTION : `Unpin ${c.name}`}
+                  aria-describedby={actionsPaused ? "update-paused-description" : undefined}
+                  disabled={actionsPaused || isOtherActionPending}
                   onClick={() => onTogglePin?.(c.id, false)}
                 >
                   {isPinPending ? <Loader className="busy-indicator-icon" size={12} aria-hidden /> : <><Pin className="conversation-pin-icon" size={12} aria-hidden /><PinOff className="conversation-unpin-icon" size={12} aria-hidden /></>}
@@ -1110,8 +1115,9 @@ export function ConversationList({
                     className={`conversation-pin ${isPinPending ? "pending" : ""}`}
                     data-pin-conversation-id={c.id}
                     aria-label="Pin conversation"
-                    title={`Pin ${c.name}`}
-                    disabled={isOtherActionPending}
+                    title={actionsPaused ? UPDATE_PAUSED_DESCRIPTION : `Pin ${c.name}`}
+                    aria-describedby={actionsPaused ? "update-paused-description" : undefined}
+                    disabled={actionsPaused || isOtherActionPending}
                     onClick={(event) => {
                       event.stopPropagation();
                       onTogglePin?.(c.id, true);
@@ -1131,11 +1137,12 @@ export function ConversationList({
                       className={`conversation-folder-action ${isActive ? "pending" : ""}`}
                       {...{ [action.hook]: c.id }}
                       aria-label={action.label}
-                      title={blockedNotSpam ? `Not spam: unblock ${c.name} on your phone` : action.title(c.name)}
+                      title={actionsPaused ? UPDATE_PAUSED_DESCRIPTION : blockedNotSpam ? `Not spam: unblock ${c.name} on your phone` : action.title(c.name)}
+                      aria-describedby={actionsPaused ? "update-paused-description" : undefined}
                       aria-haspopup={confirms ? "dialog" : undefined}
                       aria-expanded={confirms ? isConfirming : undefined}
                       aria-controls={isConfirming ? blockedNotSpam ? SENDER_UNBLOCK_CONFIRMATION_ID : FOLDER_CONFIRMATION_ID : undefined}
-                      disabled={isOtherActionPending}
+                      disabled={actionsPaused || isOtherActionPending}
                       onClick={(event) => {
                         event.stopPropagation();
                         onRequestFolderChange(c.id, action.to, event.currentTarget);

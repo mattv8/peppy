@@ -1,5 +1,5 @@
 import { useCallback, useState, type ReactNode } from "react";
-import { Clock, TriangleAlert, X } from "@peppy/desktop-ui";
+import { Clock, TriangleAlert, UPDATE_PAUSED_DESCRIPTION, X } from "@peppy/desktop-ui";
 import type { MessageView } from "@peppy/desktop-ui/bridge-contracts";
 import type { ReactionBadgeInfo, ReactionNoticeInfo } from "./link";
 import type { MergedReactionBadge, OwnReactionChip, OwnChipState } from "./merge";
@@ -60,11 +60,12 @@ function ChipContent({ badge }: { badge: MergedReactionBadge }) {
   </>;
 }
 
-function ReactionChip({ messageId, badge, label, chipRef, onActivate }: {
+function ReactionChip({ messageId, badge, label, chipRef, writesPaused, onActivate }: {
   messageId: string;
   badge: MergedReactionBadge;
   label: string;
   chipRef?: ChipRef;
+  writesPaused: boolean;
   onActivate(badge: MergedReactionBadge, anchor: HTMLElement): void;
 }) {
   const registryKey = JSON.stringify([messageId, badge.emoji]);
@@ -79,18 +80,20 @@ function ReactionChip({ messageId, badge, label, chipRef, onActivate }: {
     <ChipContent badge={badge} />
   </span>;
   const recoverable = own.state === "not_sent" || own.state === "unknown";
-  return <button ref={ref} type="button" className="reaction-badge reaction-badge-own" tabIndex={recoverable ? 0 : -1} aria-label={label} aria-busy={own.state === "removing" || undefined} {...hooks}
-    onClick={(event) => onActivate(badge, event.currentTarget)}>
+  const pausedAction = writesPaused && own.state === "sent";
+  return <button ref={ref} type="button" className="reaction-badge reaction-badge-own" tabIndex={recoverable ? 0 : -1} aria-label={label} aria-busy={own.state === "removing" || undefined} aria-disabled={pausedAction || undefined} aria-describedby={pausedAction ? "update-paused-description" : undefined} title={pausedAction ? UPDATE_PAUSED_DESCRIPTION : undefined} {...hooks}
+    onClick={(event) => { if (!pausedAction) onActivate(badge, event.currentTarget); }}>
     <ChipContent badge={badge} />
   </button>;
 }
 
-export function ReactionBadges({ messageId, badges, actorName, chipRef, placement = "row", onOwnChip, onRetry, onDismiss }: {
+export function ReactionBadges({ messageId, badges, actorName, chipRef, placement = "row", writesPaused = false, onOwnChip, onRetry, onDismiss }: {
   messageId: string;
   badges: MergedReactionBadge[] | ReactionBadgeInfo[];
   actorName: ActorName;
   chipRef?: ChipRef;
   placement?: ReactionPlacement;
+  writesPaused?: boolean;
   onOwnChip?(badge: MergedReactionBadge): void;
   onRetry?(requestId: string, emoji: string | null): void;
   onDismiss?(requestId: string): void;
@@ -119,8 +122,8 @@ export function ReactionBadges({ messageId, badges, actorName, chipRef, placemen
   return <span id={`reactions-${messageId}`} className={placement === "overlay-bottom-start" ? "reaction-badges reaction-badges-overlay" : "reaction-badges"} data-reaction-badges={messageId} data-reaction-placement={placement}
     role="group" aria-label="Reactions" aria-describedby={labelId} title={label}>
     <span id={labelId} className="sr-only">{label}</span>
-    {chips.map((chip, index) => <ReactionChip key={chipKey(chip)} messageId={messageId} badge={chip} label={labels[index]} chipRef={chipRef} onActivate={activate} />)}
-    {openChip && issue && <ReactionIssuePopover messageId={messageId} badge={openChip} anchor={issue.anchor} onRetry={onRetry} onDismiss={onDismiss} onClose={closeIssue} />}
+    {chips.map((chip, index) => <ReactionChip key={chipKey(chip)} messageId={messageId} badge={chip} label={labels[index]} chipRef={chipRef} writesPaused={writesPaused} onActivate={activate} />)}
+    {openChip && issue && <ReactionIssuePopover messageId={messageId} badge={openChip} anchor={issue.anchor} writesPaused={writesPaused} onRetry={onRetry} onDismiss={onDismiss} onClose={closeIssue} />}
   </span>;
 }
 

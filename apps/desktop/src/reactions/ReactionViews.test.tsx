@@ -169,6 +169,19 @@ describe("failed and unknown recovery", () => {
     expect(document.getElementById("reaction-issue-m1")).toBeNull();
   });
 
+  it("blocks retry but keeps local discard available while paused", () => {
+    const onRetry = vi.fn();
+    const onDismiss = vi.fn();
+    renderIn([failed], { onRetry, onDismiss, writesPaused: true });
+    fireEvent.click(screen.getByRole("button", { name: "Couldn't send your ❤️ reaction. Nothing was sent." }));
+    const retry = screen.getByRole("button", { name: "Try again" });
+    expect(retry).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(retry);
+    expect(onRetry).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(onDismiss).toHaveBeenCalledWith("req-add");
+  });
+
   it("discards a failed add and hands focus back to the message when the chip is gone", () => {
     const onDismiss = vi.fn();
     const { rerender } = renderIn([failed], { onDismiss });

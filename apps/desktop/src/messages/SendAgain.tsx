@@ -1,3 +1,4 @@
+import { UPDATE_PAUSED_DESCRIPTION } from "@peppy/desktop-ui";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, type ReactElement } from "react";
 import type { MessageView, SendRecoveryKind } from "@peppy/desktop-ui/bridge-contracts";
 import { peppyCopy } from "../generated/peppyCopy";
@@ -9,6 +10,8 @@ export type SendAgainOutcome = { kind: "sent"; messageId: string } | { kind: "al
  * a sent-again result survive closing, reopening and another message's popover.
  */
 export type SendAgainStore = {
+  writesPaused?: boolean;
+  onUpdateInProgress?(error: unknown): void;
   open(message: MessageView, trigger: HTMLElement): void;
   close(messageId: string): void;
   /** Moves to the new message row, or scrolls to the live tail when the row is not rendered. */
@@ -57,6 +60,6 @@ export function SendRecoveryNotice({ message }: { message: MessageView }): React
     {sentAgainId !== undefined ? <div ref={doneRef} data-message-send-again-done={message.id} id={`message-send-again-done-${message.id}`} tabIndex={-1}>
       <span className="message-sent-again-fact">{peppyCopy.message_send_again_sent}</span>
       <button type="button" id={`message-send-again-show-${message.id}`} className="message-meta-action message-meta-text-action" aria-label={peppyCopy.message_send_again_show_label} onClick={() => store?.showSentAgain(sentAgainId)}>{peppyCopy.message_send_again_show}</button>
-    </div> : canSendAgain && <button type="button" id={`message-send-again-${message.id}`} className="message-meta-action message-meta-text-action" onClick={(event) => store?.open(message, event.currentTarget)}>{peppyCopy.message_send_again_action}</button>}
+    </div> : canSendAgain && <button type="button" id={`message-send-again-${message.id}`} className="message-meta-action message-meta-text-action" disabled={store?.writesPaused} title={store?.writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined} aria-describedby={store?.writesPaused ? "update-paused-description" : undefined} onClick={(event) => store?.open(message, event.currentTarget)}>{peppyCopy.message_send_again_action}</button>}
   </div>;
 }

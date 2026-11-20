@@ -70,6 +70,7 @@
 #contacts-readiness-status,
 #contacts-sync-status,
 #contacts-scan-status,
+#contacts-update-paused,
 #contacts-sync-unavailable {
   margin: 0;
   padding: 8px;
@@ -85,6 +86,7 @@
 #contacts-target-status { background: var(--peppy-surface-active); color: var(--peppy-text-primary); }
 #contacts-error,
 #contacts-target-error { background: var(--peppy-error-surface); color: var(--peppy-error-text); }
+#contacts-error[data-banner-state="warning"] { background: var(--peppy-warning-surface); color: var(--peppy-warning-text); }
 #contacts-scan-status[data-scan-state="completed"] { background: var(--peppy-surface-active); color: var(--peppy-text-primary); }
 #contacts-scan-status[data-scan-state="blocked"],
 #contacts-scan-status[data-scan-state="failed"] { background: var(--peppy-error-surface); color: var(--peppy-error-text); }

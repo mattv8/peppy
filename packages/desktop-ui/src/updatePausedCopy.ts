@@ -1,0 +1,16 @@
+export const UPDATE_PAUSED_DESCRIPTION = "Paused while Peppy updates your messages.";
+export const UPDATE_TITLE = "Updating your messages for this version…";
+export const UPDATE_LABEL = "Updating your messages";
+export const UPDATE_STATUS_TERM = "Messages update";
+export const UPDATE_COMPLETE_TITLE = "Messages updated";
+export const UPDATE_SEND_REASON = "Peppy is updating your messages";
+export const UPDATE_DETAIL = "New messages, sending and changes to conversations, contacts and notification settings wait until this finishes. Your drafts are saved.";
+export const UPDATE_ANNOUNCEMENT = "Updating your messages. New messages, sending and settings changes are paused until it finishes.";
+export const UPDATE_COMPLETE_ANNOUNCEMENT = "Your messages are updated. Sending and changes are available again.";
+export const UPDATE_COMPOSER_MESSAGE = "Sending is paused while Peppy updates your messages.";
+export const UPDATE_COMPOSER_DETAIL = "Your draft is saved. You can send when the update finishes.";
+export const UPDATE_SEND_FAILURE = "Not sent: Peppy is updating your messages. Your draft is kept.";
+export const UPDATE_ERROR = "Peppy is updating your messages. Try again when it finishes.";
+export const UPDATE_CONTACTS_NOTE = "Contact changes are paused while Peppy updates your messages.";
+export const UPDATE_NOTIFICATION_NOTE = "Notification settings can't change while Peppy updates your messages.";
+export const UPDATE_REPLY_REASON = "Peppy was updating your messages, so this reply wasn't sent. Add it to your draft to send it later.";

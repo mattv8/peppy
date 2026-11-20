@@ -2,6 +2,7 @@ import type { ReactElement } from "react";
 import { useEffect, useRef, useState } from "react";
 import { Check, Clock, Lock, LoaderCircle, TriangleAlert } from "lucide-react";
 import type { SyncProgress as SyncProgressSnapshot } from "./bridge-contracts";
+import { UPDATE_ANNOUNCEMENT, UPDATE_COMPLETE_ANNOUNCEMENT, UPDATE_COMPLETE_TITLE, UPDATE_DETAIL, UPDATE_LABEL, UPDATE_STATUS_TERM, UPDATE_TITLE } from "./updatePausedCopy";
 
 type SyncPhase = SyncProgressSnapshot["phase"];
 type ActivePhase = Exclude<SyncPhase, "current">;
@@ -16,6 +17,7 @@ export type SyncProgressProps = {
 
 /** Compact, truthful phase labels. */
 const TITLES: Record<ActivePhase, string> = {
+  updating: UPDATE_TITLE,
   receiving: "Loading your history…",
   applying: "Organizing downloaded history…",
   waitingForKeys: "Waiting for vault keys to continue loading history…",
@@ -24,6 +26,7 @@ const TITLES: Record<ActivePhase, string> = {
 };
 
 const PHASE_ANNOUNCEMENTS: Record<SyncPhase, string> = {
+  updating: UPDATE_ANNOUNCEMENT,
   receiving: "Loading your history.",
   applying: "Organizing downloaded history.",
   waitingForKeys: "Waiting for vault keys to continue loading history.",
@@ -52,12 +55,21 @@ function organizingCounts(progress: SyncProgressSnapshot) {
   return { done: total - remaining, total };
 }
 
+export function updateCounts(progress: SyncProgressSnapshot) {
+  const { updateCompleted, updateTotal } = progress;
+  if (!updateCompleted || !updateTotal || !/^\d+$/.test(updateCompleted) || !/^\d+$/.test(updateTotal)) return;
+  const done = Number(updateCompleted);
+  const total = Number(updateTotal);
+  if (!Number.isSafeInteger(done) || !Number.isSafeInteger(total) || total <= 0 || done > total) return;
+  return { done, total };
+}
+
 function delayedOnInitialMount(phase: ActivePhase | undefined) {
-  return phase === "repairing" || phase === "blocked";
+  return phase === "updating" || phase === "repairing" || phase === "blocked";
 }
 
 function canConfirmCompletion(phase: ActivePhase) {
-  return phase === "receiving" || phase === "applying" || phase === "repairing";
+  return phase === "updating" || phase === "receiving" || phase === "applying" || phase === "repairing";
 }
 
 function activePhase(phase: SyncPhase | undefined): ActivePhase | undefined {
@@ -106,9 +118,10 @@ export function SyncProgress({ progress }: SyncProgressProps): ReactElement {
       const inactivePhase = phase === "current" ? "current" : "absent";
       inactivePhaseRef.current = inactivePhase;
       if (!hideTimerRef.current) {
+        if (displayedPhase === "updating") setAnnouncement(UPDATE_COMPLETE_ANNOUNCEMENT);
         hideTimerRef.current = setTimeout(() => {
           setDisplayedPhase(undefined);
-          if (inactivePhaseRef.current === "current") setAnnouncement(PHASE_ANNOUNCEMENTS.current);
+          if (inactivePhaseRef.current === "current" && displayedPhase !== "updating") setAnnouncement(PHASE_ANNOUNCEMENTS.current);
           hideTimerRef.current = undefined;
           inactivePhaseRef.current = undefined;
         }, HIDE_LINGER_MS);
@@ -150,11 +163,12 @@ export function SyncProgress({ progress }: SyncProgressProps): ReactElement {
   }, []);
 
   const cursorProgress = progress ?? lastActiveProgressRef.current;
-  const complete = phase === "current" && displayedPhase !== undefined && canConfirmCompletion(displayedPhase);
+  const complete = displayedPhase !== undefined && canConfirmCompletion(displayedPhase) && (phase === "current" || (phase === undefined && displayedPhase === "updating"));
   const receivingCounts = cursorProgress && snapshotCounts(cursorProgress);
   const applyingCounts = currentOrganizingCounts ?? (phase === "applying" && progress?.snapshotTotal === undefined ? lastOrganizingCountsRef.current : undefined);
   const counts = displayedPhase === "receiving" && receivingCounts ? { done: receivingCounts.received, total: receivingCounts.expected }
-    : displayedPhase === "applying" ? applyingCounts : undefined;
+    : displayedPhase === "applying" ? applyingCounts
+    : displayedPhase === "updating" && cursorProgress ? updateCounts(cursorProgress) : undefined;
   const countText = counts
     ? DOWNLOADING_COUNT.replace("%s", number.format(counts.done)).replace("%s", number.format(counts.total))
     : undefined;
@@ -162,10 +176,11 @@ export function SyncProgress({ progress }: SyncProgressProps): ReactElement {
     {displayedPhase && cursorProgress && <section
       id="sync-progress"
       className="sync-progress"
-      aria-label="History sync"
-      aria-describedby={!complete && (displayedPhase === "repairing" || displayedPhase === "blocked") ? "sync-progress-detail" : undefined}
+      aria-label={displayedPhase === "updating" ? UPDATE_STATUS_TERM : "History sync"}
+      aria-describedby={!complete && (displayedPhase === "updating" || displayedPhase === "repairing" || displayedPhase === "blocked") ? "sync-progress-detail" : undefined}
       data-sync-progress
       data-sync-phase={complete ? "current" : displayedPhase}
+      data-sync-after={complete && displayedPhase === "updating" ? "updating" : undefined}
     >
       {complete
         ? <Check className="sync-progress-icon" size={14} strokeWidth={1.75} aria-hidden />
@@ -177,12 +192,14 @@ export function SyncProgress({ progress }: SyncProgressProps): ReactElement {
         ? <TriangleAlert className="sync-progress-icon" size={14} strokeWidth={1.75} aria-hidden />
         : <LoaderCircle className="busy-indicator-icon sync-progress-icon" size={14} strokeWidth={1.75} aria-hidden />}
       <div className="sync-progress-main">
-        <p className="sync-progress-title" data-sync-title>{complete ? "History is up to date" : TITLES[displayedPhase]}</p>
+        <p className="sync-progress-title" data-sync-title>{complete ? displayedPhase === "updating" ? UPDATE_COMPLETE_TITLE : "History is up to date" : TITLES[displayedPhase]}</p>
         {!complete && displayedPhase === "receiving" && counts && <progress id="sync-progress-bar" aria-label="Loading your history" value={counts.done} max={counts.total} />}
         {!complete && displayedPhase === "applying" && counts && <progress id="sync-progress-bar" aria-label="Organizing downloaded history" value={counts.done} max={counts.total} />}
+        {!complete && displayedPhase === "updating" && counts && <progress id="sync-progress-bar" aria-label={UPDATE_LABEL} value={counts.done} max={counts.total} />}
         {!complete && countText && <p data-sync-count>{countText}</p>}
         {!complete && displayedPhase === "repairing" && <p id="sync-progress-detail" data-sync-detail>A repair is waiting to run. Some history may not show until it finishes.</p>}
         {!complete && displayedPhase === "blocked" && <p id="sync-progress-detail" data-sync-detail>Some history may be missing.</p>}
+        {!complete && displayedPhase === "updating" && <p id="sync-progress-detail" data-sync-detail>{UPDATE_DETAIL}</p>}
       </div>
     </section>}
     <span id="sync-progress-announcement" className="sr-only" role="status" aria-live="polite" data-sync-announcement>{announcement}</span>

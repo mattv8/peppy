@@ -2,9 +2,10 @@ import { createPortal } from "react-dom";
 import type { CSSProperties, KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Info, TriangleAlert, XCircle } from "lucide-react";
+import { UPDATE_PAUSED_DESCRIPTION } from "./updatePausedCopy";
 
 export type InlineStatusTone = "info" | "warning" | "error";
-export type InlineStatusAction = { id: string; label: string; onAction(): void; disabled?: boolean; ariaLabel?: string; confirm?: { title: string; body: string; confirmLabel: string; cancelLabel?: string } };
+export type InlineStatusAction = { id: string; label: string; onAction(): void; disabled?: boolean; describedBy?: string; ariaLabel?: string; confirm?: { title: string; body: string; confirmLabel: string; cancelLabel?: string } };
 export type InlineStatusItem = { key: string; tone: InlineStatusTone; message: string; detail?: string; detailItems?: string[]; role?: "status" | "alert"; id?: string; hooks?: Record<`data-${string}`, string | undefined>; actions?: InlineStatusAction[]; srOnly?: boolean };
 export type InlineStatusLabels = { more?(count: number): string; dialog?: string };
 
@@ -99,7 +100,7 @@ export function InlineStatus({ items, idPrefix = "inline-status", labels }: { it
     close();
     setConfirming({ itemKey, actionId: action.id });
   };
-  const actionButton = (itemKey: string, action: InlineStatusAction, id: string) => <button key={id} id={id} type="button" data-inline-status-action={action.id} aria-label={action.ariaLabel} aria-disabled={action.disabled || undefined} onClick={(event) => {
+  const actionButton = (itemKey: string, action: InlineStatusAction, id: string) => <button key={id} id={id} type="button" data-inline-status-action={action.id} aria-label={action.ariaLabel} aria-disabled={action.disabled || undefined} aria-describedby={action.describedBy} title={action.describedBy ? UPDATE_PAUSED_DESCRIPTION : undefined} onClick={(event) => {
     if (action.disabled) return;
     if (action.confirm) openConfirmation(itemKey, action, event.currentTarget);
     else {
@@ -216,5 +217,5 @@ function Confirmation({ action, position, onCancel, onConfirm }: { action: Inlin
       event.stopPropagation();
       onCancel();
     }
-  }}><strong id={`${action.id}-confirm-title`}>{confirm.title}</strong><p id={`${action.id}-confirm-body`}>{confirm.body}</p><div data-inline-status-confirmation-actions><button ref={cancelRef} type="button" onClick={onCancel}>{confirm.cancelLabel ?? "Cancel"}</button><button type="button" data-inline-status-tone="warning" onClick={onConfirm}>{confirm.confirmLabel}</button></div></div>;
+  }}><strong id={`${action.id}-confirm-title`}>{confirm.title}</strong><p id={`${action.id}-confirm-body`}>{confirm.body}</p><div data-inline-status-confirmation-actions><button ref={cancelRef} type="button" onClick={onCancel}>{confirm.cancelLabel ?? "Cancel"}</button><button type="button" data-inline-status-tone="warning" aria-describedby={action.describedBy} title={action.describedBy ? UPDATE_PAUSED_DESCRIPTION : undefined} aria-disabled={action.disabled || undefined} onClick={() => { if (!action.disabled) onConfirm(); }}>{confirm.confirmLabel}</button></div></div>;
 }

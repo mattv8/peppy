@@ -8,6 +8,13 @@ type EncryptionState = DesktopSnapshot["encryption"]["state"];
 describe("history status", () => {
   const progress = { phase: "receiving" as const, receivedThrough: "0", processedThrough: "0" };
 
+  it("reports valid update counts and falls back for invalid ones", () => {
+    expect(historyStatus({ ...progress, phase: "updating", updateCompleted: "14592", updateTotal: "91652" }))
+      .toEqual({ phase: "updating", value: "Updating your messages: 14,592 of 91,652 items" });
+    expect(historyStatus({ ...progress, phase: "updating", updateCompleted: "2", updateTotal: "1" }))
+      .toEqual({ phase: "updating", value: "Updating your messages" });
+  });
+
   it("formats valid snapshot counts", () => {
     expect(historyStatus({ ...progress, snapshotReceived: "38400", snapshotExpected: "108708" }))
       .toEqual({ phase: "receiving", value: `Loading ${new Intl.NumberFormat().format(38400)} of ${new Intl.NumberFormat().format(108708)} items` });
