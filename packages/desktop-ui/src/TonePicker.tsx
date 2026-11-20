@@ -53,6 +53,9 @@ export function TonePicker({ id, seed, value, automaticIndex, disabled = false, 
     setFocusIndex(0);
   }, [seed]);
   useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+  useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: PointerEvent) => {
       if (event.target instanceof Node && !wrapper.current?.contains(event.target)) setOpen(false);

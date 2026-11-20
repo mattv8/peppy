@@ -1,3 +1,6 @@
+import { UPDATE_CONTACTS_NOTE, UPDATE_ERROR } from "@peppy/desktop-ui";
+import { UPDATE_PAUSED_DESCRIPTION } from "@peppy/desktop-ui";
+import { errorCode, errorText } from "../bridge/bridgeErrors";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Check, ContactAvatar, Clock, ListFilter, ResizeHandle, RotateCw, Smartphone, UserPlus, X, contactSeed, formatPhoneNumber, seedKey } from "@peppy/desktop-ui";
@@ -88,7 +91,7 @@ function useMediaMatch(query: string) {
   return matches;
 }
 
-export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard, target, onTargetConsumed, headerHost, toneOverrides = {}, toneDisabled = false, pendingToneSeeds = {}, toneErrors = {}, onSelectTone }: {
+export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard, target, onTargetConsumed, headerHost, toneOverrides = {}, toneDisabled = false, writesPaused = false, pauseNoticeVisible = writesPaused, onUpdateInProgress, pendingToneSeeds = {}, toneErrors = {}, onSelectTone }: {
   books?: ContactBookView[];
   sync?: ContactSyncStatus;
   onNavigationGuard?(guard: ContactNavigationGuard | null): void;
@@ -97,10 +100,20 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   headerHost?: Element | null;
   toneOverrides?: Record<string, number>;
   toneDisabled?: boolean;
+  writesPaused?: boolean;
+  pauseNoticeVisible?: boolean;
+  onUpdateInProgress?(error: unknown): void;
   pendingToneSeeds?: Record<string, true>;
   toneErrors?: Record<string, string>;
   onSelectTone?(seed: string, index: number | null): void;
 }) {
+  const contactFailure = (error: unknown) => {
+    if (errorCode(error) === "update-in-progress") {
+      onUpdateInProgress?.(error);
+      return errorText(error);
+    }
+    return contactErrorText(error);
+  };
   const contactsRepairState = sync?.projection?.state === "rebuilding" ? "rebuilding"
     : sync?.projection?.state === "failed" ? (sync.repairRequired ? "repairWaiting" : "failed")
     : sync?.repairRequired ? "needsRepair" : undefined;
@@ -387,8 +400,8 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       setNotice(enabled
         ? `${label} is used again for names and recipient search.`
         : <span>Names and recipient search no longer use {label}. Its contacts are unchanged. <button type="button" data-action="undo-book-use" onClick={() => void saveBookUse(item, true)}>Undo</button></span>);
-    } catch {
-      if (mountedRef.current) setError("Couldn't save this change. Try again.");
+    } catch (error) {
+      if (mountedRef.current) setError(errorCode(error) === "update-in-progress" ? contactFailure(error) : "Couldn't save this change. Try again.");
     } finally {
       if (mountedRef.current) setBookUseBusy(false);
     }
@@ -547,7 +560,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
         pending.action();
       }
     } catch (e) {
-      const message = contactErrorText(e);
+      const message = contactFailure(e);
       setError(message);
       setValidationError(message);
     } finally {
@@ -594,7 +607,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       setNotice(outcome.state === "pending" ? <span>Delete sent to <IsolatedText text={book.deviceName} />. Waiting for the phone.</span> : "");
       loadPage(false);
     } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
+      setError(contactFailure(e));
     } finally {
       deleteInFlight.current = false;
       setBusy(false);
@@ -880,7 +893,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
         }
       })
       .catch(error => {
-        if (mountedRef.current && action === syncActionRef.current && currentBookRef.current === requestedBook) setError(contactErrorText(error));
+        if (mountedRef.current && action === syncActionRef.current && currentBookRef.current === requestedBook) setError(contactFailure(error));
       })
       .finally(() => {
         if (mountedRef.current && action === syncActionRef.current && currentBookRef.current === requestedBook) setSyncing(false);
@@ -936,8 +949,8 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
         <button ref={sortButtonRef} type="button" aria-label={sortLabel} title={sortLabel} aria-haspopup="menu" aria-expanded={sortOpen} aria-controls="contacts-sort-menu" onClick={() => setSortOpen(open => !open)} onKeyDown={event => { if (event.key === "ArrowDown") { event.preventDefault(); setSortOpen(true); } }}><ListFilter size={16} aria-hidden /></button>
       </div>
       <button ref={restoreTriggerRef} type="button" aria-label="Recently deleted contacts" title={!book ? selectBookTitle : detailOverlay || editing ? closeDetailTitle : "Recently deleted"} disabled={!book || detailOverlay || Boolean(editing)} onClick={openRecentlyDeleted}><Clock size={16} aria-hidden /></button>
-      <button id="contacts-sync-now" type="button" aria-label={syncing ? "Requesting…" : "Sync now"} title={syncDisabledReason ?? "Sync now"} aria-busy={syncing} aria-describedby={syncDisabledReason ? "contacts-sync-unavailable" : undefined} disabled={Boolean(syncDisabledReason) || syncing} onClick={requestSync}><RotateCw className={syncing ? "contacts-sync-icon" : undefined} size={16} aria-hidden /></button>
-      <button ref={newContactTriggerRef} type="button" data-action="create-contact" aria-label="New contact" title={book ? "New contact" : selectBookTitle} disabled={!book} onClick={() => handleEditStart()}><UserPlus size={16} strokeWidth={1.75} aria-hidden /></button>
+      <button id="contacts-sync-now" type="button" aria-label={syncing ? "Requesting…" : "Sync now"} title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : syncDisabledReason ?? "Sync now"} aria-busy={syncing} aria-describedby={writesPaused ? "update-paused-description" : syncDisabledReason ? "contacts-sync-unavailable" : undefined} disabled={writesPaused || Boolean(syncDisabledReason) || syncing} onClick={requestSync}><RotateCw className={syncing ? "contacts-sync-icon" : undefined} size={16} aria-hidden /></button>
+      <button ref={newContactTriggerRef} type="button" data-action="create-contact" aria-label="New contact" title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : book ? "New contact" : selectBookTitle} aria-describedby={writesPaused ? "update-paused-description" : undefined} disabled={writesPaused || !book} onClick={() => handleEditStart()}><UserPlus size={16} strokeWidth={1.75} aria-hidden /></button>
     </div>
   );
   const availableDetailWidth = contactsLayout.viewWidth - contactsLayout.bookWidth - CONTACTS_LIST_MIN_WIDTH - DETAIL_RESIZE_HANDLE_WIDTH;
@@ -968,7 +981,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     </p>
   );
   const visibleError = error || loadError;
-  const errorBanner = !editing && visibleError && <p id="contacts-error" role="alert" data-banner-state="error">{visibleError}<button aria-label="Dismiss" onClick={() => { setError(""); setLoadError(""); }}><X size={12} /></button></p>;
+  const errorBanner = !editing && visibleError && <p id="contacts-error" role={visibleError === UPDATE_ERROR ? "status" : "alert"} data-banner-state={visibleError === UPDATE_ERROR ? "warning" : "error"}>{visibleError}<button aria-label="Dismiss" onClick={() => { setError(""); setLoadError(""); }}><X size={12} /></button></p>;
   const targetStatus = targetError && <p id="contacts-target-error" role="status" data-target-state="error">{targetError}</p>;
   const targetLoadingStatus = targetLoading && (
     <p id="contacts-target-status" role="status" data-target-state="loading">
@@ -982,6 +995,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
 
   return (
     <section ref={contactsViewRef} id="contacts-view" role="region" aria-label="Contacts browser">
+      {pauseNoticeVisible && <p id="contacts-update-paused" role="status">{UPDATE_CONTACTS_NOTE}</p>}
       {sortMenu && (sortPortalHost ? createPortal(sortMenu, sortPortalHost) : sortMenu)}
       <aside ref={booksPanelRef} id="contacts-book-list" aria-label="Contact books">
         <ul id="contacts-books">
@@ -1072,6 +1086,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
         {restore ? (
           <Restore
             list={restore.items}
+            writesPaused={writesPaused}
             canRestore={Boolean(books.find(candidate => candidate.id === restore.bookId)?.capabilities.canRestore)}
             notice={noticeBanner}
             error={errorBanner}
@@ -1091,7 +1106,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
                   loadPage(false);
                 }
               } catch (e) {
-                setError(contactErrorText(e));
+                setError(contactFailure(e));
               }
             }}
           />
@@ -1179,6 +1194,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
                 busy={busy}
                 bookCapabilities={books.find(candidate => candidate.id === editorBookId)?.capabilities}
                 saveDisabled={!books.some(candidate => candidate.id === editorBookId)}
+                writesPaused={writesPaused}
                 toneControl={isCreateEditing(editing) ? undefined : (() => {
                   return { value: editorToneSeed ? toneOverrides[editorToneSeed] : undefined, pending: Boolean(editorToneSeed && pendingToneSeeds[editorToneSeed]), error: editorToneSeed ? toneErrors[editorToneSeed] : undefined, disabled: toneDisabled, onSelect: (index: number | null) => { if (editorToneSeed) onSelectTone?.(editorToneSeed, index); } };
                 })()}
@@ -1189,6 +1205,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
                 <Detail
                   contact={selected}
                   canWrite={Boolean(book?.capabilities.canWrite)}
+                  writesPaused={writesPaused}
                   confirm={confirmDelete}
                   onEdit={() => handleEditStart(selected)}
                   onDelete={handleDelete}
@@ -1206,6 +1223,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
 function Detail({
   contact,
   canWrite,
+  writesPaused,
   confirm,
   onEdit,
   onDelete,
@@ -1213,6 +1231,7 @@ function Detail({
 }: {
   contact: ContactView;
   canWrite: boolean;
+  writesPaused: boolean;
   confirm: boolean;
   onEdit(): void;
   onDelete(): void;
@@ -1254,6 +1273,9 @@ function Detail({
             <button
               data-action="edit-contact"
               aria-label="Edit contact"
+              disabled={writesPaused}
+              title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined}
+              aria-describedby={writesPaused ? "update-paused-description" : undefined}
               onClick={onEdit}
             >
               Edit
@@ -1262,6 +1284,9 @@ function Detail({
               data-action="delete-contact"
               data-confirm-delete={confirm ? "pending" : undefined}
               aria-label={confirm ? "Confirm delete" : "Delete contact"}
+              disabled={writesPaused}
+              title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined}
+              aria-describedby={writesPaused ? "update-paused-description" : undefined}
               onKeyDown={e => { if (e.key === "Escape" && confirm) { e.preventDefault(); onCancelConfirm(); } }}
               onBlur={confirm ? onCancelConfirm : undefined}
               onClick={onDelete}
@@ -1337,6 +1362,7 @@ function Detail({
 function Restore({
   list,
   canRestore,
+  writesPaused,
   notice,
   error,
   onClose,
@@ -1345,6 +1371,7 @@ function Restore({
   list: RestorableContact[];
   onClose(): void;
   canRestore: boolean;
+  writesPaused: boolean;
   notice: ReactNode;
   error: ReactNode;
   onRestore(item: RestorableContact): void;
@@ -1389,6 +1416,9 @@ function Restore({
                 <button
                   data-action="restore-contact"
                   aria-label={`Restore ${item.displayName}`}
+                  disabled={writesPaused}
+                  title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined}
+                  aria-describedby={writesPaused ? "update-paused-description" : undefined}
                   onClick={() => onRestore(item)}
                 >
                   Restore

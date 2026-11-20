@@ -5,6 +5,7 @@ import { emojiGraphemes, pickerHint, type ReactionPlatform } from "./emoji";
 export const INVALID_CAPTURE_COPY = "Pick an emoji, not text.";
 
 export type ReactionCaptureProps = {
+  writesPaused?: boolean;
   route: "native" | "text";
   platform: ReactionPlatform;
   coarse: boolean;
@@ -20,8 +21,10 @@ export type ReactionCaptureProps = {
  * The capture field for the OS emoji panel. Typed or pasted text is reduced to its first emoji grapheme.
  * Blur never dismisses: the OS panel takes window focus, and the field takes it back when the window refocuses.
  */
-export function ReactionCapture({ route, platform, coarse, openPicker, onCommit, onBack, announce }: ReactionCaptureProps) {
+export function ReactionCapture({ route, platform, coarse, openPicker, writesPaused = false, onCommit, onBack, announce }: ReactionCaptureProps) {
   const input = useRef<HTMLInputElement>(null);
+  const pausedRef = useRef(writesPaused);
+  pausedRef.current = writesPaused;
   const [invalid, setInvalid] = useState(false);
   const [failed, setFailed] = useState(false);
   const nativePicker = Boolean(openPicker);
@@ -30,12 +33,12 @@ export function ReactionCapture({ route, platform, coarse, openPicker, onCommit,
 
   useEffect(() => {
     const field = input.current;
-    field?.focus();
-    const returnFocus = () => { if (document.activeElement !== input.current) input.current?.focus(); };
+    if (!pausedRef.current) field?.focus();
+    const returnFocus = () => { if (!pausedRef.current && document.activeElement !== input.current) input.current?.focus(); };
     window.addEventListener("focus", returnFocus);
     // The OS panel only inserts into a focused field, so it opens after focus is confirmed for one frame.
     const frame = requestAnimationFrame(() => {
-      if (!openPicker || document.activeElement !== input.current) return;
+      if (pausedRef.current || !openPicker || document.activeElement !== input.current) return;
       openPicker().catch(() => setFailed(true));
     });
     return () => {
@@ -45,7 +48,7 @@ export function ReactionCapture({ route, platform, coarse, openPicker, onCommit,
   }, [openPicker]);
 
   const accept = (value: string) => {
-    if (value === "") return;
+    if (writesPaused || value === "") return;
     const emojis = emojiGraphemes(value);
     if (!emojis.length) {
       setInvalid(true);
@@ -81,7 +84,9 @@ export function ReactionCapture({ route, platform, coarse, openPicker, onCommit,
         type="text"
         placeholder="Emoji"
         aria-label="Emoji reaction"
-        aria-describedby="message-reaction-capture-hint"
+        aria-describedby={writesPaused ? "message-reaction-capture-hint update-paused-description" : "message-reaction-capture-hint"}
+        aria-disabled={writesPaused || undefined}
+        readOnly={writesPaused}
         aria-invalid={invalid || undefined}
         autoComplete="off"
         autoCorrect="off"

@@ -1,3 +1,4 @@
+import { UPDATE_COMPOSER_MESSAGE, UPDATE_COMPOSER_DETAIL } from "@peppy/desktop-ui";
 import { formatComposerReason, type InlineStatusItem } from "@peppy/desktop-ui";
 import { peppyCopy } from "../generated/peppyCopy";
 import { GROUP_STATUS_PRIORITY } from "../group/groupComposerStatus";
@@ -5,6 +6,8 @@ import { GROUP_STATUS_PRIORITY } from "../group/groupComposerStatus";
 type RcsBlock = { kind: "none" | "unproven" } | { kind: "link"; help: "relink" | "phone" };
 
 export type ComposerStatusInput = {
+  writesPaused?: boolean;
+  showUpdateNotice?: boolean;
   pendingRecipientReason?: string;
   groupLeft: boolean;
   draftSendBlock?: string;
@@ -18,7 +21,7 @@ export type ComposerStatusInput = {
 };
 
 const SEND_BLOCKER_KEYS = new Set([
-  "pending-recipient", "group-left", "group-withdrawn", "attachment-block", "draft-offline", "draft-conflict", "failed-attachment", "route-problem", "rcs-unproven", "rcs-relink", "rcs-phone",
+  "update-paused", "pending-recipient", "group-left", "group-withdrawn", "attachment-block", "draft-offline", "draft-conflict", "failed-attachment", "route-problem", "rcs-unproven", "rcs-relink", "rcs-phone",
 ]);
 
 const GROUP_PRIORITY_ORDER = { 1: 10, 2: 21, 3: 60, 4: 80 } as const;
@@ -48,6 +51,13 @@ export function composerStatusItems(input: ComposerStatusInput): InlineStatusIte
     priority: GROUP_PRIORITY_ORDER[GROUP_STATUS_PRIORITY[item.key]],
     item,
   }));
+  if (input.writesPaused) items.push({ priority: 5, item: {
+    key: "update-paused", tone: "warning",
+    message: UPDATE_COMPOSER_MESSAGE,
+    detail: UPDATE_COMPOSER_DETAIL,
+    hooks: { "data-send-block": "update" },
+    srOnly: input.showUpdateNotice === false,
+  } });
   if (input.pendingRecipientReason) items.push({ priority: 20, rawReason: input.pendingRecipientReason, item: { key: "pending-recipient", tone: "warning", message: formatComposerReason(input.mainWindowRecovery ? `${input.pendingRecipientReason} in the main window` : input.pendingRecipientReason) } });
   if (input.draftSendBlock) {
     const key = input.draftBlockKind === "attachment" ? "attachment-block" : input.draftBlockKind === "offline" ? "draft-offline" : input.draftBlockKind === "conflict" ? "draft-conflict" : "failed-attachment";

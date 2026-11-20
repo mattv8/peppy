@@ -22,7 +22,7 @@ describe("notification quick-reply RCS policy corpus", () => {
     const nowMs = 100;
     const expiresAtMs = fixture.expired ? "100" : "101";
     const snapshot: DesktopSnapshot = {
-      version: "1",
+      writesPaused: false, version: "1",
       mode: "native",
       connection: { state: "connected" },
       encryption: { state: "unlocked" },

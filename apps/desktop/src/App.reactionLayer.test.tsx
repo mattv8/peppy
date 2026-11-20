@@ -62,6 +62,37 @@ afterEach(() => {
 });
 
 describe("reaction layer", () => {
+  it("does not send reactions while paused and resumes afterward", async () => {
+    snapshot.writesPaused = true;
+    await openConversation("conv-reaction-states");
+    keyOpen("reaction-own-sent");
+    const choice = document.querySelector<HTMLButtonElement>('[data-reaction-quick="thumbs-up"]');
+    if (choice) fireEvent.click(choice);
+    expect(bridge.react_to_message).not.toHaveBeenCalled();
+    cleanup();
+    snapshot.writesPaused = false;
+    await openConversation("conv-reaction-states");
+    keyOpen("reaction-own-sent");
+    fireEvent.click(document.querySelector('[data-reaction-quick="thumbs-up"]')!);
+    expect(bridge.react_to_message).toHaveBeenCalledWith({ messageId: "reaction-own-sent", emoji: "👍" });
+  });
+
+  it("guards a reaction bar that was already open when a pause arrives", async () => {
+    let refresh = () => {};
+    vi.mocked(bridge.subscribe).mockImplementation(listener => { refresh = listener; return () => {}; });
+    await openConversation("conv-reaction-states");
+    keyOpen("reaction-own-sent");
+    snapshot.writesPaused = true;
+    act(() => refresh());
+    await waitFor(() => expect(document.querySelector('[data-reaction-quick="thumbs-up"]')).toHaveAttribute("aria-disabled", "true"));
+    fireEvent.click(document.querySelector('[data-reaction-quick="thumbs-up"]')!);
+    expect(bridge.react_to_message).not.toHaveBeenCalled();
+    snapshot.writesPaused = false;
+    act(() => refresh());
+    await waitFor(() => expect(document.querySelector('[data-reaction-quick="thumbs-up"]')).not.toHaveAttribute("aria-disabled"));
+    fireEvent.click(document.querySelector('[data-reaction-quick="thumbs-up"]')!);
+    expect(bridge.react_to_message).toHaveBeenCalled();
+  });
   it("keeps one roving tab stop among reactable messages, defaulting to the newest", async () => {
     await openConversation("conv-reaction-states");
     const stops = [...document.querySelectorAll<HTMLElement>("article[data-reaction-ok]")].filter((node) => node.tabIndex === 0);

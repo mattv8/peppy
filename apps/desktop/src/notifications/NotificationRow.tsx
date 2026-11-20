@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { BellOff, Clock, formatDateTime, formatElapsedShort, isoDateTime, X } from "@peppy/desktop-ui";
+import { BellOff, Clock, UPDATE_PAUSED_DESCRIPTION, formatDateTime, formatElapsedShort, isoDateTime, X } from "@peppy/desktop-ui";
 import type { AppFilter, MirroredNotification, NotificationTarget } from "../bridge/bridge";
 import type { OneTimeCodeTarget } from "@peppy/desktop-ui/bridge-contracts";
 import { OneTimeCodeButton } from "../one-time-code/OneTimeCodeButton";
@@ -13,6 +13,7 @@ export type NotificationLabels = {
 };
 
 export type NotificationRowProps = {
+  writesPaused?: boolean;
   notification: MirroredNotification;
   labels: NotificationLabels;
   filter: AppFilter;
@@ -65,7 +66,7 @@ function NotificationRowText({ id, text, query }: { id: string; text: string; qu
 }
 
 export function NotificationRow({
-  notification, labels, filter, unread, showPhone, query, onDismiss, onMute, onCopy, onAction, hideAppName,
+  notification, labels, filter, unread, showPhone, query, onDismiss, onMute, onCopy, onAction, hideAppName, writesPaused = false,
 }: NotificationRowProps) {
   const pending = notification.dismissalPending;
   const key = notificationTuple(notification.target.sourceDeviceId, notification.target.notificationKey, notification.target.lifetime);
@@ -122,7 +123,7 @@ export function NotificationRow({
         {formatElapsedShort(notification.postedAt) ?? "Unknown time"}
       </time>
       <div className="notif-row-actions">
-        <button className="notif-inline-action" title={muteLabel} aria-label={muteLabel} onClick={() => { onAction([key]); onMute(filter); }}>
+        <button className="notif-inline-action" title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : muteLabel} aria-label={muteLabel} disabled={writesPaused} aria-describedby={writesPaused ? "update-paused-description" : undefined} onClick={() => { onAction([key]); onMute(filter); }}>
           <BellOff size={14} aria-hidden />
         </button>
         <button ref={dismissButton} className="notif-dismiss-btn" disabled={pending || !notification.dismissible} title={pending ? "Dismissal pending — will apply on your phone's next sync." : "Dismiss"} aria-label={dismissLabel} onClick={() => { dismissRequested.current = true; onAction([key]); onDismiss(notification.target); }}>

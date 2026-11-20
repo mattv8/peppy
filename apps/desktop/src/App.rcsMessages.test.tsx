@@ -22,7 +22,7 @@ const message = (id: string, overrides: Partial<MessageView> = {}): MessageView 
 
 function snapshot(messages: MessageView[]): DesktopSnapshot {
   return {
-    version: "1",
+    writesPaused: false, version: "1",
     mode: "native",
     connection: { state: "connected", origin: "https://example.test" },
     encryption: { state: "unlocked" },

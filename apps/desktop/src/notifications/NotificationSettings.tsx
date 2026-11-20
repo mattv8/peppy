@@ -1,3 +1,6 @@
+import { UPDATE_NOTIFICATION_NOTE } from "@peppy/desktop-ui";
+import { UPDATE_PAUSED_DESCRIPTION } from "@peppy/desktop-ui";
+import { errorCode } from "../bridge/bridgeErrors";
 import { useEffect, useRef, useState } from "react";
 import { ExternalLink } from "@peppy/desktop-ui";
 import { DEFAULT_NOTIFICATION_PERSISTENCE, notificationPersistence, type NotificationPersistence, type NotificationPersistenceSettings, type NotificationQuickReplySettings } from "@peppy/desktop-ui/bridge-contracts";
@@ -41,13 +44,15 @@ function macosPersistenceStatus(style: NotificationPersistenceSettings["macosSty
   return "Peppy can't read this setting. Check Peppy's page in System Settings.";
 }
 
-export function NotificationSettings({ notifications, filters, sources, preferences, headsSupported, locked, soundSettings, persistenceSettings, quickReplySettings, onPreferences, onMute, onPermission, onOpenSettings }: {
+export function NotificationSettings({ notifications, filters, sources, preferences, headsSupported, locked, writesPaused = false, pauseNoticeVisible = writesPaused, soundSettings, persistenceSettings, quickReplySettings, onPreferences, onMute, onPermission, onOpenSettings }: {
   notifications: MirroredNotification[];
   filters: AppFilter[];
   sources: { id: string; name: string }[];
   preferences: NotificationPreferences;
   headsSupported: boolean;
   locked: boolean;
+  writesPaused?: boolean;
+  pauseNoticeVisible?: boolean;
   soundSettings?: { load(): Promise<boolean>; save(enabled: boolean): Promise<void> };
   persistenceSettings?: { load(): Promise<NotificationPersistenceSettings>; save(value: NotificationPersistence): Promise<void> };
   quickReplySettings?: { load(): Promise<NotificationQuickReplySettings>; save(enabled: boolean): Promise<void> };
@@ -178,6 +183,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   const muteWithHeads = preferences.muteWithHeads ?? true;
   const previewMode = preferences.preview === "full" ? "full" : preferences.showSource ? "source" : "hidden";
   const lockedNoteId = locked ? "notification-banner-locked-note" : undefined;
+  const syncedDescription = [lockedNoteId, writesPaused && (pauseNoticeVisible ? "notification-update-note" : "update-paused-description")].filter(Boolean).join(" ") || undefined;
   const quickReplyDescribedBy = ["notification-quick-reply-hint", lockedNoteId, quickReplyError && "notification-quick-reply-error"].filter(Boolean).join(" ") || undefined;
   const persistenceDescribedBy = ["notification-persistence-hint", lockedNoteId, persistenceError && "notification-persistence-error"].filter(Boolean).join(" ") || undefined;
   const clearErrors = () => {
@@ -189,12 +195,12 @@ export function NotificationSettings({ notifications, filters, sources, preferen
     setBusy(true);
     clearErrors();
     try { await action(); }
-    catch { setError("Could not save notification settings. Try again."); }
+    catch (error) { if (errorCode(error) !== "update-in-progress") setError("Could not save notification settings. Try again."); }
     finally { setBusy(false); }
   };
   // Vault-synced banner preferences cannot change while locked; per-app mutes are not affected.
   const savePreferences = (value: NotificationPreferences) => {
-    if (locked) return;
+    if (locked || writesPaused) return;
     void save(() => onPreferences(value));
   };
   const checkPermission = async () => {
@@ -260,11 +266,12 @@ export function NotificationSettings({ notifications, filters, sources, preferen
       <p>Mirrored app notifications use encrypted device sync. Carrier SMS/MMS has separate security boundaries.</p>
       <NotificationSettingsGroup id="notification-banner-group" title="Banners" badge="All devices" help={<NotificationSettingsHelp id="notification-banner-help" title="Banner choices"><p id="notification-banner-sync-note">Banner choices apply to every computer and browser in this vault. System notification permission is set on each device.</p></NotificationSettingsHelp>}>
         {locked && <p id="notification-banner-locked-note" className="settings-note">Unlock Peppy to change banner settings.</p>}
+        {pauseNoticeVisible && <p id="notification-update-note" className="settings-note">{UPDATE_NOTIFICATION_NOTE}</p>}
         <div className="settings-control-row">
           <span className="notification-setting-label"><label htmlFor="notification-message-banners">SMS/MMS banners</label></span>
           <span className="settings-switch">
             <input id="notification-message-banners" type="checkbox" role="switch"
-              checked={preferences.messageBanners} aria-checked={preferences.messageBanners} disabled={busy || locked} aria-describedby={lockedNoteId}
+              checked={preferences.messageBanners} aria-checked={preferences.messageBanners} disabled={busy || locked || writesPaused} aria-describedby={syncedDescription} title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined}
               onChange={event => savePreferences({ ...preferences, messageBanners: event.target.checked })} />
             <span aria-hidden />
           </span>
@@ -273,7 +280,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
           <span className="notification-setting-label"><label htmlFor="notification-mute-with-heads" id="notification-mute-with-heads-label">Mute while a chat head is open</label><NotificationSettingsHelp id="notification-mute-with-heads-help" title="Mute while a chat head is open"><p>Skip SMS/MMS banners for conversations that have a chat head, collapsed or expanded. Messages and unread counts still appear. Other conversations and app notifications are unaffected.</p></NotificationSettingsHelp></span>
           <span className="settings-switch">
             <input id="notification-mute-with-heads" type="checkbox" role="switch" checked={muteWithHeads} aria-checked={muteWithHeads}
-              aria-labelledby="notification-mute-with-heads-label" aria-describedby={lockedNoteId} disabled={busy || locked}
+              aria-labelledby="notification-mute-with-heads-label" aria-describedby={syncedDescription} disabled={busy || locked || writesPaused} title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined}
               onChange={event => savePreferences({ ...preferences, muteWithHeads: event.target.checked })} />
             <span aria-hidden />
           </span>
@@ -282,17 +289,17 @@ export function NotificationSettings({ notifications, filters, sources, preferen
           <span className="notification-setting-label"><label htmlFor="notification-mirrored-banners">App notification banners</label></span>
           <span className="settings-switch">
             <input id="notification-mirrored-banners" type="checkbox" role="switch"
-              checked={preferences.mirroredBanners} aria-checked={preferences.mirroredBanners} disabled={busy || locked} aria-describedby={lockedNoteId}
+              checked={preferences.mirroredBanners} aria-checked={preferences.mirroredBanners} disabled={busy || locked || writesPaused} aria-describedby={syncedDescription} title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined}
               onChange={event => savePreferences({ ...preferences, mirroredBanners: event.target.checked })} />
             <span aria-hidden />
           </span>
         </div>
-        {hasDesktopBanners && <fieldset id="notification-preview" className="settings-option-cards" disabled={busy || locked} aria-labelledby="notification-preview-legend" aria-describedby={lockedNoteId}>
+        {hasDesktopBanners && <fieldset id="notification-preview" className="settings-option-cards" disabled={busy || locked || writesPaused} aria-labelledby="notification-preview-legend" aria-describedby={syncedDescription} title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined}>
           <legend><span id="notification-preview-legend">Banner preview</span> <NotificationSettingsHelp id="notification-preview-help" title="Banner preview"><p>Choose whether banners show the full message, only who it is from, or a generic notice. Quick reply applies to message banners, not mirrored app notifications.</p></NotificationSettingsHelp></legend>
           <div className="settings-option-card-list">
             {[["full", "Full content", quickReplyAvailable ? "Sender and message, with quick reply." : "Sender and message."], ["source", "Sender or app only", quickReplyAvailable ? "Who it's from. Choose Show message to read it." : "Who it's from."], ["hidden", "Hidden", "A generic notice with no details."]].map(([value, label, description]) => (
               <label key={value} className="settings-option-card">
-                <input type="radio" name="notification-preview" value={value} checked={previewMode === value} aria-labelledby={`notification-preview-${value}-label`} aria-describedby={`notification-preview-${value}-description`}
+                <input type="radio" name="notification-preview" value={value} checked={previewMode === value} aria-labelledby={`notification-preview-${value}-label`} aria-describedby={[`notification-preview-${value}-description`, syncedDescription].filter(Boolean).join(" ")}
                   onChange={() => savePreferences({ ...preferences, preview: value === "full" ? "full" : "hidden", showSource: value === "source" })} />
                 <span id={`notification-preview-${value}-label`}>{label}</span><span id={`notification-preview-${value}-description`}>{description}</span>
               </label>
@@ -392,7 +399,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
       {error && <p id="notification-settings-action-error" role="alert" aria-label="Notification settings action failed">{error}</p>}
       <NotificationSettingsGroup id="notification-apps-group" title="Mirrored apps" badge={apps.length ? `${apps.length} apps${apps.filter(app => app.muted).length ? `, ${apps.filter(app => app.muted).length} muted` : ""}` : undefined} help={<NotificationSettingsHelp id="notification-apps-help" title="Mirrored apps"><p>Apps are mirrored by default. Changes apply on the phone&apos;s next sync.</p><p>Notification history counts toward the vault&apos;s 100,000-record history import budget. Mute noisy apps to limit storage growth.</p></NotificationSettingsHelp>}>
       {apps.length ? (
-        <NotificationSettingsApps apps={apps} notifications={notifications} sources={sources} busy={busy} onMute={filter => void save(() => onMute(filter))} />
+        <NotificationSettingsApps apps={apps} notifications={notifications} sources={sources} busy={busy} writesPaused={writesPaused} pauseNoticeVisible={pauseNoticeVisible} onMute={filter => void save(() => onMute(filter))} />
       ) : <p id="notification-apps-empty-state">No apps observed yet. Enable mirroring in the Android companion to begin.</p>}
       </NotificationSettingsGroup>
     </section>

@@ -42,6 +42,32 @@ const openAppRules = () => {
   if (summary) fireEvent.click(summary);
 };
 
+it("pauses synced notification controls without pausing local quick reply", async () => {
+  render(<NotificationSettings {...props()} writesPaused quickReplySettings={quickReplySettings()} />);
+  expect(screen.getByRole("switch", { name: "SMS/MMS banners" })).toBeDisabled();
+  await waitFor(() => expect(screen.getByRole("switch", { name: "Quick reply in notifications" })).toBeEnabled());
+  openAppRules();
+  expect(screen.getByRole("switch", { name: "Mirror Chat from Pixel" })).toBeDisabled();
+  expect(document.getElementById("notification-update-note")).toBeInTheDocument();
+});
+
+it("retains both descriptions when settings are locked and paused", () => {
+  render(<NotificationSettings {...props()} locked writesPaused />);
+  expect(screen.getByRole("switch", { name: "SMS/MMS banners" })).toHaveAttribute(
+    "aria-describedby", "notification-banner-locked-note notification-update-note",
+  );
+});
+
+it("disables synced settings before the delayed note becomes visible", () => {
+  const { rerender } = render(<NotificationSettings {...props()} writesPaused pauseNoticeVisible={false} />);
+  const control = screen.getByRole("switch", { name: "SMS/MMS banners" });
+  expect(control).toBeDisabled();
+  expect(control).toHaveAttribute("aria-describedby", "update-paused-description");
+  expect(document.getElementById("notification-update-note")).toBeNull();
+  rerender(<NotificationSettings {...props()} writesPaused pauseNoticeVisible />);
+  expect(document.getElementById("notification-update-note")).toBeInTheDocument();
+});
+
 it("hides quick reply without a supported adapter and saves only after loading", async () => {
   const input = props();
   const settings = quickReplySettings();
@@ -142,6 +168,7 @@ it("keeps the confirmed source-only selection through transitions and rejected s
   await waitFor(() => expect(value.onPreferences).toHaveBeenCalledWith({ ...sourcePreferences, preview: "full", showSource: false }));
   expect(screen.getByRole("radio", { name: /Sender or app only/ })).toBeChecked();
 
+  await waitFor(() => expect(screen.getByRole("switch", { name: "SMS/MMS banners" })).toBeEnabled());
   fireEvent.click(screen.getByRole("switch", { name: "SMS/MMS banners" }));
   await waitFor(() => expect(value.onPreferences).toHaveBeenCalledWith({ ...sourcePreferences, messageBanners: false }));
 });
