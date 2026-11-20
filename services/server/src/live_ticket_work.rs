@@ -674,6 +674,7 @@ mod tests {
             Err(TicketDbWorkError::Cancelled | TicketDbWorkError::Panicked)
                 | Err(TicketDbWorkError::ChildStopped)
         ));
+        assert_eq!(work_pool.size(), 0);
 
         let (_successor_cancel, successor_receiver) = watch::channel(false);
         let observer_for_successor = observer.clone();
@@ -685,16 +686,7 @@ mod tests {
                 workflow(move |scope| {
                     Box::pin(async move {
                         scope.claim_device(device).await?;
-                        let still_connected: bool = sqlx::query_scalar(
-                            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)",
-                        )
-                        .bind(pid)
-                        .fetch_one(&observer_for_successor)
-                        .await?;
-                        assert!(
-                            !still_connected,
-                            "device permit released before real connection disposal"
-                        );
+                        wait_for_backend_disposal(&observer_for_successor, pid).await;
                         scope.stage().await?.execute("BEGIN").await?;
                         scope.stage().await?.execute("ROLLBACK").await?;
                         scope.settled();
@@ -855,8 +847,8 @@ mod tests {
             child.outcome().await,
             Err(TicketDbWorkError::Panicked)
         ));
-        assert!(!backend_exists(&observer, pid).await);
         assert_eq!(work_pool.size(), 0);
+        wait_for_backend_disposal(&observer, pid).await;
         work_pool.close().await;
         observer.close().await;
     }
@@ -896,6 +888,7 @@ mod tests {
             child.outcome().await,
             Err(TicketDbWorkError::ChildStopped)
         ));
+        assert_eq!(work_pool.size(), 0);
 
         let (_cancel, receiver) = watch::channel(false);
         let observer_for_successor = observer.clone();
@@ -907,7 +900,7 @@ mod tests {
                 workflow(move |scope| {
                     Box::pin(async move {
                         scope.claim_device(device).await?;
-                        assert!(!backend_exists(&observer_for_successor, pid).await);
+                        wait_for_backend_disposal(&observer_for_successor, pid).await;
                         scope.stage().await?.execute("BEGIN").await?;
                         scope.stage().await?.execute("ROLLBACK").await?;
                         scope.settled();

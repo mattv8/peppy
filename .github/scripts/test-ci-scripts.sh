@@ -27,6 +27,37 @@ expect_failure() {
   fi
 }
 
+mkdir -p "$temp_dir/bin"
+cat > "$temp_dir/bin/rustup" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1 $2" in
+  'toolchain list') cat "$RUSTUP_LIST" ;;
+  'toolchain uninstall')
+    printf '%s\n' "$3" >> "$RUSTUP_REMOVED"
+    grep -Fvx "$3" "$RUSTUP_LIST" > "$RUSTUP_LIST.new" || true
+    mv "$RUSTUP_LIST.new" "$RUSTUP_LIST"
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$temp_dir/bin/rustup"
+toolchains="$temp_dir/toolchains"
+removed="$temp_dir/removed"
+cleanup="$SCRIPT_DIR/remove-unpinned-rust-toolchains.sh"
+printf '%s\n' '1.98.1-x86_64-pc-windows-msvc' '1.100.0-x86_64-pc-windows-msvc' '1.98.10-x86_64-pc-windows-msvc' > "$toolchains"
+: > "$removed"
+env PATH="$temp_dir/bin:$PATH" RUSTUP_LIST="$toolchains" RUSTUP_REMOVED="$removed" bash "$cleanup" 1.98.1
+expect_output "$toolchains" '1.98.1-x86_64-pc-windows-msvc'
+expect_output "$removed" '1.100.0-x86_64-pc-windows-msvc'
+expect_output "$removed" '1.98.10-x86_64-pc-windows-msvc'
+[[ $(wc -l < "$toolchains") -eq 1 && $(wc -l < "$removed") -eq 2 ]]
+: > "$removed"
+env PATH="$temp_dir/bin:$PATH" RUSTUP_LIST="$toolchains" RUSTUP_REMOVED="$removed" bash "$cleanup" 1.98.1
+[[ ! -s "$removed" ]]
+printf '%s\n' '1.100.0-x86_64-pc-windows-msvc' > "$toolchains"
+expect_failure env PATH="$temp_dir/bin:$PATH" RUSTUP_LIST="$toolchains" RUSTUP_REMOVED="$removed" bash "$cleanup" 1.98.1
+
 scope_cases=(force_full production_push production_reuse schedule docs_only rust_shared rust_mobile rust_desktop rust_browser rust_server android_bindings desktop web android ios mobile_design server build ci unclassified)
 for case_name in "${scope_cases[@]}"; do
   output="$temp_dir/$case_name"
@@ -52,6 +83,11 @@ for case_name in "${scope_cases[@]}"; do
     build) env GITHUB_OUTPUT="$output" FILTER_BUILD=true "$SCOPE" ;;
     ci) env GITHUB_OUTPUT="$output" FILTER_CI=true "$SCOPE" ;;
     unclassified) env GITHUB_OUTPUT="$output" FILTER_UNCLASSIFIED=true "$SCOPE" ;;
+  esac
+  case "$case_name" in
+    force_full|production_push|schedule|rust_shared|rust_desktop|desktop|ci|unclassified)
+      expect_output "$output" 'desktop_windows=true' ;;
+    *) expect_output "$output" 'desktop_windows=false' ;;
   esac
 done
 expect_failure env GITHUB_OUTPUT="$temp_dir/reuse_without_production_push" REUSE_VERIFIED=true "$SCOPE"
@@ -92,7 +128,7 @@ for name in rust integration desktop android swift_bindings container_image arti
 done
 
 for case_name in force_full desktop rust_shared rust_desktop; do
-  expect_output "$temp_dir/$case_name" 'desktop_matrix=[{"os":"ubuntu-24.04","index":1,"count":1},{"os":"macos-15","index":1,"count":1},{"os":"windows-2025","index":1,"count":4},{"os":"windows-2025","index":2,"count":4},{"os":"windows-2025","index":3,"count":4},{"os":"windows-2025","index":4,"count":4}]'
+  expect_output "$temp_dir/$case_name" 'desktop_matrix=[{"os":"ubuntu-24.04","index":1,"count":1},{"os":"macos-15","index":1,"count":1}]'
 done
 for case_name in server web rust_browser rust_server; do
   expect_output "$temp_dir/$case_name" 'desktop_matrix=[{"os":"ubuntu-24.04","index":1,"count":1}]'
@@ -189,9 +225,13 @@ gate_env=(
   RELEASE_MACOS_TOOLING_RESULT=success RELEASE_MACOS_TOOLING_REQUIRED=true
   DEVELOPMENT_TOOLS_RESULT=success DEVELOPMENT_TOOLS_REQUIRED=true
   RUST_RESULT=success RUST_REQUIRED=true
+  INTEGRATION_BUILD_RESULT=success INTEGRATION_BUILD_REQUIRED=true
   INTEGRATION_RESULT=success INTEGRATION_REQUIRED=true
   FRONTEND_RESULT=success FRONTEND_REQUIRED=true
   DESKTOP_RESULT=success DESKTOP_REQUIRED=true
+  DESKTOP_WINDOWS_BUILD_RESULT=success DESKTOP_WINDOWS_BUILD_REQUIRED=true
+  DESKTOP_WINDOWS_CHECK_RESULT=success DESKTOP_WINDOWS_CHECK_REQUIRED=true
+  DESKTOP_WINDOWS_RESULT=success DESKTOP_WINDOWS_REQUIRED=true
   DESKTOP_UPDATER_RESULT=success DESKTOP_UPDATER_REQUIRED=true
   ANDROID_RESULT=success ANDROID_REQUIRED=true
   GOOGLE_MESSAGES_GO_RESULT=success GOOGLE_MESSAGES_GO_REQUIRED=true
@@ -211,7 +251,7 @@ expect_failure env "${gate_env[@]}" RUST_RESULT=invalid "$GATE"
 expect_failure env CHANGES_RESULT=success "$GATE"
 expect_failure env "${gate_env[@]}" CHANGES_RESULT=failure RUST_RESULT=skipped RUST_REQUIRED= "$GATE"
 
-for prefix in INTEGRATION FRONTEND DESKTOP DESKTOP_UPDATER GOOGLE_MESSAGES_GO DEVELOPMENT_ARTIFACTS; do
+for prefix in INTEGRATION_BUILD INTEGRATION FRONTEND DESKTOP DESKTOP_WINDOWS_BUILD DESKTOP_WINDOWS_CHECK DESKTOP_WINDOWS DESKTOP_UPDATER GOOGLE_MESSAGES_GO DEVELOPMENT_ARTIFACTS; do
   env "${gate_env[@]}" "${prefix}_RESULT=skipped" "${prefix}_REQUIRED=false" "$GATE"
   expect_failure env "${gate_env[@]}" "${prefix}_RESULT=skipped" "${prefix}_REQUIRED=true" "$GATE"
   expect_failure env "${gate_env[@]}" "${prefix}_RESULT=failure" "$GATE"

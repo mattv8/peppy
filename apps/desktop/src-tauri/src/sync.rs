@@ -3723,19 +3723,22 @@ mod transport_status_tests {
             let session = session.clone();
             async move { crate::attachment_retention::negotiate(&session).await }
         });
-        tokio::time::timeout(Duration::from_secs(1), async {
+        // Deadlock guards only: the waits cover HTTP round trips and blocking
+        // storage work, which can take seconds on a loaded CI runner.
+        const DEADLOCK_GUARD: Duration = Duration::from_secs(10);
+        tokio::time::timeout(DEADLOCK_GUARD, async {
             while entered.try_recv().is_err() {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .unwrap();
+        .expect("capability negotiation never reached the held request");
 
         let replaying = tokio::spawn({
             let session = session.clone();
             async move { replay(&session).await }
         });
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(DEADLOCK_GUARD, async {
             while session
                 .attachment_retention_epoch
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -3745,7 +3748,7 @@ mod transport_status_tests {
             }
         })
         .await
-        .unwrap();
+        .expect("replay never advanced the attachment retention epoch");
         release_sender.send(()).unwrap();
         replaying.await.unwrap().unwrap();
         negotiating.await.unwrap().unwrap();

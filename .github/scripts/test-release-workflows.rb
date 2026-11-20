@@ -89,6 +89,9 @@ Dir.mktmpdir('desktop-apt-index-refresh') do |fixture|
   status, stderr, _, apt_calls = run_linux_setup.call('APT_INSTALL_FAILURE' => '1')
   assert.call(status.exitstatus == 42 && apt_calls == expected_apt_calls, "Linux desktop package installation failure must propagate: #{stderr}")
 end
+%w[desktop-windows-build desktop-windows-check desktop-windows].each do |job|
+  assert.call(ci_jobs[job]&.fetch('timeout-minutes') == 60, "#{job} must retain a 60-minute timeout")
+end
 android_ci = load_workflow.call('test-android.yml')
 android_ci_jobs = android_ci.fetch('jobs')
 android_call = ci_jobs.fetch('android')
@@ -523,7 +526,8 @@ play_call = release.fetch('jobs')['publish-play']
 assert.call(!play_call.nil?, 'stable release must invoke Play after Android publication')
 assert.call(play_call.fetch('needs').sort == %w[prepare publish-android signing], 'Play must wait for preparation, signing and Android publication')
 assert.call(play_call.fetch('uses') == './.github/workflows/play-publish.yml', 'Play must use the verified publisher')
-assert.call(play_call.fetch('permissions') == { 'contents' => 'read', 'attestations' => 'read' } && !play_call.key?('secrets'), 'Play call must grant read permissions without passing secrets')
+assert.call(play_call.fetch('permissions') == { 'contents' => 'read', 'attestations' => 'read' }, 'Play call must grant read-only permissions')
+assert.call(play_call.fetch('secrets') == { 'PLAY_SERVICE_ACCOUNT_JSON' => '${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}' }, 'Play call must pass only the Play environment credential by name')
 assert.call(play_call.fetch('with') == { 'release_tag' => 'android-v${{ needs.prepare.outputs.android_version }}', 'track' => 'internal' }, 'Play must publish the prepared Android tag to internal')
 play_context = {
   event: 'push', ref: 'refs/heads/production', cancelled: false, implicit_success: false,
@@ -546,7 +550,7 @@ assert.call(!condition_allows.call(play_condition, **play_context.merge(outputs:
 assert.call(play.fetch('concurrency') == { 'group' => 'play-publish', 'cancel-in-progress' => false }, 'all Play edits must share a non-cancelling lock')
 play_inputs = play.fetch(true).fetch('workflow_call').fetch('inputs')
 assert.call(play_inputs.fetch('release_tag') == { 'required' => true, 'type' => 'string' } && play_inputs.fetch('track') == { 'required' => false, 'type' => 'string', 'default' => 'internal' }, 'reusable Play inputs must validate the tag and default to internal')
-assert.call(!play.fetch(true).fetch('workflow_call').key?('secrets'), 'Play credential must not be passed through workflow_call')
+assert.call(play.fetch(true).fetch('workflow_call').fetch('secrets') == { 'PLAY_SERVICE_ACCOUNT_JSON' => { 'required' => false } }, 'reusable Play must declare only its environment credential')
 dispatch_inputs = play.fetch(true).fetch('workflow_dispatch').fetch('inputs')
 assert.call(dispatch_inputs.fetch('track').fetch('options') == %w[internal alpha] && dispatch_inputs.fetch('track').fetch('default') == 'internal', 'manual Play track options and default must remain unchanged')
 play_prepare = play.fetch('jobs').fetch('prepare')
@@ -572,6 +576,14 @@ assert.call(verify_play.include?('gpg --batch --status-fd 1 --verify') && verify
 play_publish = play.fetch('jobs').fetch('publish')
 assert.call(play_publish.fetch('environment') == 'play-store' && !play_publish.key?('if'), 'Play upload must always use its protected environment')
 assert.call(play_publish.fetch('steps').last.dig('with', 'serviceAccountJsonPlainText') == '${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}', 'Play credential must come from the protected environment')
+play_credential_check = play_publish.fetch('steps')[-2]
+assert.call(play_credential_check.fetch('name') == 'Require the Play service account credential', 'Play upload must be preceded by the credential check')
+assert.call(play_credential_check.fetch('env') == { 'PLAY_SERVICE_ACCOUNT_JSON' => '${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}' }, 'Play credential check must read the environment credential')
+{ '{"type":"service_account","sentinel":"play-credential-sentinel"}' => true, '' => false }.each do |credential, accepted|
+  stdout, stderr, status = Open3.capture3({ 'PLAY_SERVICE_ACCOUNT_JSON' => credential }, 'bash', '-e', '-c', play_credential_check.fetch('run'))
+  assert.call(status.success? == accepted, 'Play credential check must reject only an empty credential')
+  assert.call(!"#{stdout}#{stderr}".include?('play-credential-sentinel'), 'Play credential check must never print the credential')
+end
 assert.call(release.fetch(true).key?('workflow_call'), 'release must be reusable')
 assert.call(release.fetch('concurrency').fetch('cancel-in-progress') == false, 'release serialization must not cancel publication')
 prepare = release.fetch('jobs').fetch('prepare')

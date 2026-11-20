@@ -34,11 +34,7 @@ func TestHostOutputsPreserveAdmissionOrder(t *testing.T) {
 		releaseFirst:  make(chan struct{}),
 		secondEntered: make(chan struct{}),
 	}
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer link.Close()
+	link := openTestLink(t, nil, host)
 	go link.emit("conn", "recovered", 0)
 	<-host.firstEntered
 	go link.emit("conn", "temporary_error", 0)
@@ -93,11 +89,7 @@ func (host *replacementFenceHost) index(value string) int {
 
 func TestOldOutputEntersHostBeforeReplacementPairAdmission(t *testing.T) {
 	host := &replacementFenceHost{oldEntered: make(chan struct{}), releaseOld: make(chan struct{})}
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer link.Close()
+	link := openTestLink(t, nil, host)
 	setSafetyState(link, stateLinked, nil)
 	go link.emitFor(link.generation, "conn", "recovered", 0)
 	<-host.oldEntered
@@ -253,10 +245,7 @@ func TestHostCallbackCanReenterPair(t *testing.T) {
 	fixture := newPhoneFixture(t, nil)
 	fixture.configure(func(knobs *fixtureKnobs) { knobs.configRedirect = true })
 	host := &reentrantOperationHost{result: make(chan error, 1)}
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	link := openTestLink(t, nil, host)
 	setSafetyState(link, stateSignedOut, nil)
 	host.operation = func() error { return link.Pair(canaryCookieJSON(t)) }
 
@@ -273,10 +262,7 @@ func TestHostCallbackCanReenterPair(t *testing.T) {
 
 func TestHostCallbackCanReenterUnlink(t *testing.T) {
 	host := &reentrantOperationHost{result: make(chan error, 1)}
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	link := openTestLink(t, nil, host)
 	setSafetyState(link, stateLinked, nil)
 	host.operation = link.Unlink
 
@@ -305,11 +291,7 @@ func (*ownedIdentityHost) ShowEmoji(string, int64, int64) {}
 
 func TestTerminalCompletionCarriesRetirementIdentity(t *testing.T) {
 	host := &ownedIdentityHost{identity: make(chan [2]int64, 1)}
-	link, err := Open(nil, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer link.Close()
+	link := openTestLink(t, nil, host)
 	setSafetyState(link, stateLinked, nil)
 	link.mu.Lock()
 	link.generation = 7

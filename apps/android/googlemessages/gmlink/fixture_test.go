@@ -788,6 +788,13 @@ func (host *safetyHost) lastEnvelope(t *testing.T) persistedState {
 func openSafetyLink(t *testing.T, state []byte) (*Link, *safetyHost) {
 	t.Helper()
 	host := newSafetyHost()
+	return openTestLink(t, state, host), host
+}
+
+// openTestLink waits for admitted output to release the process slot at cleanup.
+func openTestLink(t *testing.T, state []byte, host Host) *Link {
+	t.Helper()
+	awaitSafety(t, "free link process slot", func() bool { return openLink.Load() == nil })
 	link, err := Open(state, host)
 	if err != nil {
 		t.Fatal(err)
@@ -796,7 +803,7 @@ func openSafetyLink(t *testing.T, state []byte) (*Link, *safetyHost) {
 		link.Close()
 		awaitSafety(t, "link output drain", func() bool { return openLink.Load() != link })
 	})
-	return link, host
+	return link
 }
 
 func setSafetyState(link *Link, state string, auth *libgm.AuthData) {
