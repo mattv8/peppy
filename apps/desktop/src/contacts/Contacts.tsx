@@ -995,7 +995,6 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
 
   return (
     <section ref={contactsViewRef} id="contacts-view" role="region" aria-label="Contacts browser">
-      {pauseNoticeVisible && <p id="contacts-update-paused" role="status">{UPDATE_CONTACTS_NOTE}</p>}
       {sortMenu && (sortPortalHost ? createPortal(sortMenu, sortPortalHost) : sortMenu)}
       <aside ref={booksPanelRef} id="contacts-book-list" aria-label="Contact books">
         <ul id="contacts-books">
@@ -1059,6 +1058,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
           </section>
         )}
         {!detailOverlay && unsavedBanner}
+        {pauseNoticeVisible && <p id="contacts-update-paused" role="status">{UPDATE_CONTACTS_NOTE}</p>}
         {sync?.readiness && (sync.readiness.state !== "ready" || !sync.readiness.server_active) && (
           <p id="contacts-readiness-status" role="status" data-banner-state={sync.readiness.state}>
             {sync.readiness.state === "server_unsupported" ? "Contact changes need a server that supports contact sync." : sync.readiness.state === "needs_unlock" ? "Contact changes are paused until all required keys are unlocked." : sync.readiness.state === "backfill_pending" ? "Contact changes are preparing historical records." : "Contact sync is ready."}
