@@ -2990,7 +2990,7 @@ describe("new-recipient drafts", () => {
       capabilities: { canWrite: true, canDelete: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true },
       lastSyncAt: "now", pendingEditCount: 0,
     }]);
-    vi.spyOn(bridge, "list_contacts").mockResolvedValue([]);
+    vi.spyOn(bridge, "list_contacts_page").mockResolvedValue({ contacts: [], total: 0 });
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Contacts" }));
     await screen.findByRole("region", { name: "Contacts browser" });
@@ -3030,16 +3030,17 @@ describe("new-recipient drafts", () => {
       query: "Ada", items: [{ kind: "contact", bookId: "book", contactId: "ada", title: "Ada", subtitle: "Contact", phones: [], phoneCount: 0 }], indexState: "ready",
       hasMore: { conversation: false, message: false, contact: false },
     });
-    const listContacts = vi.spyOn(bridge, "list_contacts").mockImplementation(async (_book, _query, offset) => offset === 0
-      ? firstPage
-      : [{ id: "ada", bookId: "book", revision: "1", displayName: "Ada", phones: [{ label: "Work", number: "short code / 1" }], emails: [], addresses: [] }]);
+    const listContacts = vi.spyOn(bridge, "list_contacts_page").mockResolvedValue({
+      contacts: [...firstPage, { id: "ada", bookId: "book", revision: "1", displayName: "Ada", phones: [{ label: "Work", number: "short code / 1" }], emails: [], addresses: [] }],
+      total: 201, throughFound: true,
+    });
     render(<App />);
     const omni = await screen.findByRole("combobox", { name: "Search Peppy" });
     fireEvent.change(omni, { target: { value: "Ada" } });
     fireEvent.click(await screen.findByRole("option", { name: "Start conversation with Ada" }));
 
     await waitFor(() => expect(host.drafts.get("conv-new-1")?.recipientIds).toEqual(["short code / 1"]));
-    expect(listContacts).toHaveBeenNthCalledWith(2, "book", "", 200, { key: "family", direction: "asc" });
+    expect(listContacts).toHaveBeenCalledWith("book", { through: "ada", sort: { key: "family", direction: "asc" } });
   });
 
   it("keeps a missing contact lookup inline and does not create a draft", async () => {
@@ -3047,7 +3048,7 @@ describe("new-recipient drafts", () => {
       query: "Missing", items: [{ kind: "contact", bookId: "book", contactId: "missing", title: "Missing", subtitle: "Contact", phones: [], phoneCount: 0 }], indexState: "ready",
       hasMore: { conversation: false, message: false, contact: false },
     });
-    vi.spyOn(bridge, "list_contacts").mockResolvedValue([]);
+    vi.spyOn(bridge, "list_contacts_page").mockResolvedValue({ contacts: [], total: 0, throughFound: false });
     render(<App />);
     fireEvent.change(await screen.findByRole("combobox", { name: "Search Peppy" }), { target: { value: "Missing" } });
     fireEvent.click(await screen.findByRole("option", { name: "Start conversation with Missing" }));
@@ -3087,7 +3088,7 @@ describe("new-recipient drafts", () => {
       id: "book", deviceName: "Phone", state: "active", contactCount: 0,
       capabilities: { canWrite: true, canDelete: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true }, lastSyncAt: "now", pendingEditCount: 0,
     }]);
-    vi.spyOn(bridge, "list_contacts").mockResolvedValue([]);
+    vi.spyOn(bridge, "list_contacts_page").mockResolvedValue({ contacts: [], total: 0 });
     const pendingSave = deferred<Draft>();
     vi.spyOn(bridge, "save_draft").mockReturnValueOnce(pendingSave.promise);
     render(<App />);
@@ -3113,7 +3114,7 @@ describe("new-recipient drafts", () => {
       id: "book", deviceName: "Phone", state: "active", contactCount: 0,
       capabilities: { canWrite: true, canDelete: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true }, lastSyncAt: "now", pendingEditCount: 0,
     }]);
-    vi.spyOn(bridge, "list_contacts").mockResolvedValue([]);
+    vi.spyOn(bridge, "list_contacts_page").mockResolvedValue({ contacts: [], total: 0 });
     render(<App />);
     await screen.findByLabelText("Message");
     host.failSaves = { code: "offline", message: "offline" };

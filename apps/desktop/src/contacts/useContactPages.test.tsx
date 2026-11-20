@@ -28,8 +28,8 @@ describe("useContactPages", () => {
     restoreContactDomGlobals();
   });
 
-  it("has more rows only while the last page is full, even when the book count is stale", async () => {
-    vi.mocked(bridge.list_contacts).mockResolvedValueOnce(contactsFrom("a", 200)).mockResolvedValueOnce(contactsFrom("b", 10));
+  it("continues using the returned cursor and stops when none remains", async () => {
+    vi.mocked(bridge.list_contacts_page).mockResolvedValueOnce({ contacts: contactsFrom("a", 200), total: 210, nextCursor: "next" }).mockResolvedValueOnce({ contacts: contactsFrom("b", 10), total: 210 });
     const { result } = renderPages({ bookId: "book-pixel8" });
     await waitFor(() => expect(result.current.contacts).toHaveLength(200));
     expect(result.current.hasMore).toBe(true);
@@ -37,27 +37,28 @@ describe("useContactPages", () => {
     act(() => result.current.loadMore());
     await waitFor(() => expect(result.current.contacts).toHaveLength(210));
     expect(result.current.hasMore).toBe(false);
-    expect(bridge.list_contacts).toHaveBeenLastCalledWith("book-pixel8", "", 200, SORT);
+    expect(result.current.total).toBe(210);
+    expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-pixel8", { cursor: "next", sort: SORT });
   });
 
   it("drops loaded rows and starts again when the book changes, discarding the old book's response", async () => {
-    const oldBook = deferred<ContactView[]>();
-    vi.mocked(bridge.list_contacts).mockReturnValueOnce(oldBook.promise).mockResolvedValueOnce(contactsFrom("new", 2));
+    const oldBook = deferred<{ contacts: ContactView[]; total: number }>();
+    vi.mocked(bridge.list_contacts_page).mockReturnValueOnce(oldBook.promise).mockResolvedValueOnce({ contacts: contactsFrom("new", 2), total: 2 });
     const { result, rerender } = renderPages({ bookId: "book-old" });
     expect(result.current.loading).toBe(true);
 
     rerender({ bookId: "book-pixel8" });
 
     await waitFor(() => expect(result.current.contacts.map(contact => contact.id)).toEqual(["new-0", "new-1"]));
-    await act(async () => oldBook.resolve(contactsFrom("old", 5)));
+    await act(async () => oldBook.resolve({ contacts: contactsFrom("old", 5), total: 5 }));
     expect(result.current.contacts.map(contact => contact.id)).toEqual(["new-0", "new-1"]);
   });
 
   it("keeps the shown rows when a refresh fails and reports the error", async () => {
     let fail = false;
-    vi.mocked(bridge.list_contacts).mockImplementation(async () => {
+    vi.mocked(bridge.list_contacts_page).mockImplementation(async () => {
       if (fail) throw new Error("offline");
-      return contactsFrom("a", 3);
+      return { contacts: contactsFrom("a", 3), total: 3 };
     });
     const { result, onError } = renderPages({ bookId: "book-pixel8" });
     await waitFor(() => expect(result.current.contacts).toHaveLength(3));
@@ -67,5 +68,21 @@ describe("useContactPages", () => {
 
     await waitFor(() => expect(onError.mock.lastCall?.[0]).toBeTruthy());
     expect(result.current.contacts).toHaveLength(3);
+  });
+
+  it("refreshes until the previously loaded count and swaps all pages at once", async () => {
+    const second = deferred<{ contacts: ContactView[]; total: number }>();
+    vi.mocked(bridge.list_contacts_page)
+      .mockResolvedValueOnce({ contacts: contactsFrom("old", 3), total: 3 })
+      .mockResolvedValueOnce({ contacts: contactsFrom("new", 1), total: 3, nextCursor: "next" })
+      .mockReturnValueOnce(second.promise);
+    const { result } = renderPages({ bookId: "book-pixel8" });
+    await waitFor(() => expect(result.current.contacts).toHaveLength(3));
+    act(() => result.current.refresh());
+    await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-pixel8", { cursor: "next", sort: SORT }));
+    expect(result.current.contacts.map(contact => contact.id)).toEqual(["old-0", "old-1", "old-2"]);
+    await act(async () => second.resolve({ contacts: contactsFrom("rest", 2), total: 3 }));
+    expect(result.current.contacts.map(contact => contact.id)).toEqual(["new-0", "rest-0", "rest-1"]);
+    expect(result.current.hasMore).toBe(false);
   });
 });

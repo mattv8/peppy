@@ -46,6 +46,10 @@ export const mockContactRiver: ContactView = {
   addresses: [],
 };
 
+export function contactPage(contacts: ContactView[], through?: string) {
+  return { contacts, total: contacts.length, ...(through === undefined ? {} : { throughFound: contacts.some(contact => contact.id === through) }) };
+}
+
 export const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
 export const storedPreferences = new Map<string, string>();
 export const preferenceStorage = {
@@ -81,10 +85,7 @@ export function resetContactBridgeMocks() {
     value: vi.fn(),
   });
   vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook]);
-  vi.mocked(bridge.list_contacts).mockResolvedValue([
-    mockContactAurora,
-    mockContactRiver,
-  ]);
+  vi.mocked(bridge.list_contacts_page).mockImplementation(async (_book, { through }) => contactPage([mockContactAurora, mockContactRiver], through));
   vi.mocked(bridge.forget_contact_book).mockResolvedValue(undefined);
   vi.mocked(bridge.list_restorable_contacts).mockResolvedValue([]);
 }

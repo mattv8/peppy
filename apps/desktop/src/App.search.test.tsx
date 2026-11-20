@@ -429,6 +429,15 @@ describe("App search navigation", () => {
   });
 
   it("consumes a contact target once so returning to Contacts does not reapply it", async () => {
+    const listContactsPage = bridge.list_contacts_page;
+    vi.spyOn(bridge, "list_contacts_page").mockImplementation(async (bookId, request) => {
+      if (!request.through) return listContactsPage(bookId, request);
+      return {
+        contacts: [{ id: "contact-river", bookId, displayName: "River Park", phones: [{ label: "mobile", number: "+12025550124" }], emails: [], addresses: [] }],
+        total: 430,
+        throughFound: true,
+      };
+    });
     render(<App hostKind="browser" />);
     await screen.findAllByText("Can you send over the estimate?");
     await activate({ kind: "contact", bookId: "book-pixel8", contactId: "contact-river", title: "River Park", subtitle: "+12025550124", phones: ["+12025550124"], phoneCount: 1 });

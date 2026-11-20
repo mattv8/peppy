@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { ContactsView } from "./Contacts";
 import { ContactDetail } from "./ContactDetail";
 import { bridge, type ContactBookView, type ContactView } from "../bridge/bridge";
-import { DeferredCropImage, mockContactAurora, mockContactBook, mockContactRiver, resetContactBridgeMocks, restoreContactDomGlobals } from "./contacts-test-utils";
+import { contactPage, DeferredCropImage, mockContactAurora, mockContactBook, mockContactRiver, resetContactBridgeMocks, restoreContactDomGlobals } from "./contacts-test-utils";
 
 vi.mock("../bridge/bridge", { spy: true });
 
@@ -60,10 +60,10 @@ describe("ContactsView detail panel", () => {
   });
 
   it("places the X after the h2 and every contact banner after the header", async () => {
-    vi.mocked(bridge.list_contacts).mockResolvedValue([
+    vi.mocked(bridge.list_contacts_page).mockResolvedValue(contactPage([
       { ...mockContactAurora, pendingEditId: "edit-aurora", pendingEditState: "pending", pendingEditSummary: "Phone number update" },
       mockContactRiver,
-    ]);
+    ]));
     const { container } = render(<ContactsView />);
     fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
 
@@ -214,13 +214,13 @@ describe("ContactDetail photo pencil", () => {
   it("reloads the contact list after a photo edit from the ContactsView detail", async () => {
     render(<ContactsView />);
     fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
-    const listCallsBefore = vi.mocked(bridge.list_contacts).mock.calls.length;
+    const listCallsBefore = vi.mocked(bridge.list_contacts_page).mock.calls.length;
 
     fireEvent.click(screen.getByRole("button", { name: "Change photo for Aurora Chen" }));
     await confirmCrop();
 
     await waitFor(() => expect(bridge.submit_contact_edit).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(vi.mocked(bridge.list_contacts).mock.calls.length).toBeGreaterThan(listCallsBefore));
+    await waitFor(() => expect(vi.mocked(bridge.list_contacts_page).mock.calls.length).toBeGreaterThan(listCallsBefore));
   });
 
   it("opens a menu with Choose photo and Remove photo when a photo exists", () => {

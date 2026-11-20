@@ -19,7 +19,7 @@ describe("ContactsView status slot priority", () => {
 
   it("shows a load error before the removed-book strip", async () => {
     vi.mocked(bridge.list_contact_books).mockResolvedValue([removedBook, mockContactBook]);
-    vi.mocked(bridge.list_contacts).mockRejectedValue(new Error("boom"));
+    vi.mocked(bridge.list_contacts_page).mockRejectedValue(new Error("boom"));
     render(<ContactsView />);
     await waitFor(() => expect(document.querySelector("#contacts-status")).toHaveAttribute("data-status-kind", "error"));
     expect(document.querySelector("#contacts-error")).toBeInTheDocument();

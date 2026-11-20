@@ -4558,7 +4558,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   ) => {
     const result = await findContactTarget(
       { bookId: hit.bookId, contactId: hit.contactId },
-      bridge.list_contacts,
+      bridge.list_contacts_page,
       signal,
     );
     if (signal.aborted) return [];

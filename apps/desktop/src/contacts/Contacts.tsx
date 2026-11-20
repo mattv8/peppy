@@ -562,7 +562,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       const controller = new AbortController();
       targetLookupAbortRef.current = controller;
       void (async () => {
-        const result = await findContactTarget(requestedTarget, bridge.list_contacts, controller.signal, (bookId) => booksRef.current.some((book) => book.id === bookId), sortRef.current);
+        const result = await findContactTarget(requestedTarget, bridge.list_contacts_page, controller.signal, (bookId) => booksRef.current.some((book) => book.id === bookId), sortRef.current);
         if (!isCurrent()) return;
         if (result.state === "cancelled") {
           if (!booksRef.current.some((book) => book.id === requestedTarget.bookId)) {
@@ -588,7 +588,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
           }
           currentBookRef.current = requestedTarget.bookId;
           setBookId(requestedTarget.bookId);
-          pages.resetTo(results, { bookId: requestedTarget.bookId, sort: sortRef.current });
+          pages.resetTo({ contacts: results, total: result.total, nextCursor: result.nextCursor }, { bookId: requestedTarget.bookId, sort: sortRef.current });
           setRestore(null);
           setSelected(contact);
           setEditing(null);
@@ -1016,7 +1016,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
 
       <section id="contacts-center-pane" {...(detailOverlay ? { inert: true } : {})}>
         <ContactsActionNotice notice={actionNotice} onDismiss={() => setActionNotice(undefined)} />
-        <ContactListHeader books={books} bookId={bookId} booksLoaded={booksLoaded} railVisible={railVisible} loaded={contacts.length} loadingMore={pages.loadingMore} onSelectBook={handleSelectBook}>
+        <ContactListHeader books={books.map(item => item.id === bookId ? { ...item, contactCount: pages.total ?? item.contactCount } : item)} bookId={bookId} booksLoaded={booksLoaded} railVisible={railVisible} loaded={contacts.length} loadingMore={pages.loadingMore} onSelectBook={handleSelectBook}>
           {headerActions}
         </ContactListHeader>
         {!railVisible && book && (books.length >= 2 || book.lookupExcluded) && (
@@ -1060,7 +1060,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
             loadingMore={pages.loadingMore}
             loadMoreError={pages.loadMoreError}
             hasMore={pages.hasMore}
-            contactCount={book?.contactCount}
+            contactCount={pages.total ?? book?.contactCount}
             deviceName={book?.deviceName}
             canWrite={Boolean(book?.capabilities.canWrite)}
             emptyFailed={contactsRepairState === "failed" || contactsRepairState === "repairWaiting"}

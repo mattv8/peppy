@@ -136,7 +136,7 @@ describe("App conversation tones", () => {
       contactCount: 1,
       pendingEditCount: 0,
     }]);
-    vi.spyOn(bridge, "list_contacts").mockResolvedValue([contact]);
+    vi.spyOn(bridge, "list_contacts_page").mockResolvedValue({ contacts: [contact], total: 1 });
     const saveTone = vi.spyOn(bridge, "set_conversation_tone").mockImplementation(async (seed, index) => {
       currentSnapshot.toneOverrides = index === null ? {} : { [seed]: index };
     });

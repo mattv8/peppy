@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ContactsView } from "./Contacts";
 import { bridge, type ContactBookView } from "../bridge/bridge";
-import { mockContactBook, mockContactRiver, resetContactBridgeMocks, restoreContactDomGlobals } from "./contacts-test-utils";
+import { contactPage, mockContactBook, mockContactRiver, resetContactBridgeMocks, restoreContactDomGlobals } from "./contacts-test-utils";
 
 vi.mock("../bridge/bridge", { spy: true });
 
@@ -64,6 +64,7 @@ describe("ContactsView list header", () => {
     [0, "No contacts"],
   ])("counts a book with %i contacts as %s", async (contactCount, text) => {
     vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, contactCount }]);
+    vi.mocked(bridge.list_contacts_page).mockResolvedValue({ contacts: [], total: contactCount });
     render(<ContactsView />);
     expect(await screen.findByText(text)).toHaveAttribute("id", "contacts-count");
     expect(document.getElementById("contacts-count")).toHaveAttribute("data-count-state", "known");
@@ -72,6 +73,7 @@ describe("ContactsView list header", () => {
   it("shows the book selector in place of the title when the rail is hidden, and switches books through it", async () => {
     stubMediaQueries(["(max-width: 700px)"]);
     vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, otherBook]);
+    vi.mocked(bridge.list_contacts_page).mockImplementation(async bookId => ({ contacts: [], total: bookId === "book-other" ? 1 : 2 }));
     render(<ContactsView />);
     const selector = await screen.findByRole("combobox", { name: "Contact book" });
     expect(selector).toBe(document.getElementById("contacts-book-selector"));
@@ -80,7 +82,7 @@ describe("ContactsView list header", () => {
     expect(screen.getByRole("option", { name: "Other, Active" })).toBeInTheDocument();
 
     fireEvent.change(selector, { target: { value: "book-other" } });
-    await waitFor(() => expect(bridge.list_contacts).toHaveBeenLastCalledWith("book-other", "", 0, expect.anything()));
+    await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-other", { cursor: undefined, sort: expect.anything() }));
     expect(await screen.findByText("1 contact")).toBeInTheDocument();
   });
 
@@ -128,7 +130,7 @@ describe("ContactsView list header", () => {
     });
 
     it("reorders a structured Ada Lovelace name between the two View menu orders", async () => {
-      vi.mocked(bridge.list_contacts).mockResolvedValue([{ ...mockContactRiver, id: "contact-ada", displayName: "Ada Lovelace", givenName: "Ada", familyName: "Lovelace" }]);
+      vi.mocked(bridge.list_contacts_page).mockResolvedValue(contactPage([{ ...mockContactRiver, id: "contact-ada", displayName: "Ada Lovelace", givenName: "Ada", familyName: "Lovelace" }]));
       render(<ContactsView />);
       expect(await screen.findByRole("button", { name: /^Ada Lovelace,/ })).toBeInTheDocument();
 
@@ -149,7 +151,7 @@ describe("ContactsView list header", () => {
     });
 
     it("keeps the display name for a contact with only one structured name part", async () => {
-      vi.mocked(bridge.list_contacts).mockResolvedValue([{ ...mockContactRiver, givenName: undefined, familyName: "Park" }]);
+      vi.mocked(bridge.list_contacts_page).mockResolvedValue(contactPage([{ ...mockContactRiver, givenName: undefined, familyName: "Park" }]));
       localStorage.setItem("peppy.contacts.nameFormat.v1", "last-first");
       render(<ContactsView />);
       expect(await screen.findByRole("button", { name: /^River Park,/ })).toBeInTheDocument();

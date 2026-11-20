@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { bridge, type ContactSort, type ContactView } from "../bridge/bridge";
 import { contactErrorText } from "./contact-labels";
-import { CONTACTS_PAGE_SIZE } from "./contact-target";
 
 /** A live refresh re-fetches at most this many loaded pages, then swaps the whole range in at once. */
 const REFRESH_MAX_PAGES = 10;
@@ -16,6 +15,7 @@ export function pageScopeKey({ bookId, sort }: PageScope): string {
 
 export type ContactPages = {
   contacts: ContactView[];
+  total: number | undefined;
   /** The first page of the current list is in flight. */
   loading: boolean;
   loadingMore: boolean;
@@ -26,7 +26,7 @@ export type ContactPages = {
   /** Re-fetches the loaded range and swaps it in at once; loaded rows stay until the swap. */
   refresh(): void;
   /** Shows contacts a target lookup already fetched for `scope`, without another request. */
-  resetTo(contacts: ContactView[], scope: PageScope): void;
+  resetTo(page: { contacts: ContactView[]; total: number; nextCursor?: string }, scope: PageScope): void;
 };
 
 type Options = PageScope & {
@@ -39,28 +39,29 @@ type Operation = "first" | "more" | "refresh";
 type PageView = {
   scope: string;
   contacts: ContactView[];
-  /** Rows fetched so far, before id de-duplication; the offset of the next page. */
-  fetched: number;
-  /** The last fetched page was full, so another page may exist. */
-  lastFull: boolean;
+  total: number | undefined;
+  nextCursor: string | undefined;
   loading: boolean;
   loadingMore: boolean;
   loadMoreError: string;
 };
 
-/** The only place that requests list pages. PR2 replaces this one function with cursor requests. */
-function fetchPage(bookId: string, sort: ContactSort, offset: number): Promise<ContactView[]> {
-  return bridge.list_contacts(bookId, "", offset, sort);
+function fetchPage(bookId: string, sort: ContactSort, cursor?: string) {
+  return bridge.list_contacts_page(bookId, { cursor, sort });
 }
 
-async function fetchLoadedRange(bookId: string, sort: ContactSort, pageCount: number): Promise<{ rows: ContactView[]; lastFull: boolean }> {
+async function fetchLoadedRange(bookId: string, sort: ContactSort, loadedCount: number) {
   const rows: ContactView[] = [];
-  for (let page = 0; page < pageCount; page += 1) {
-    const batch = await fetchPage(bookId, sort, page * CONTACTS_PAGE_SIZE);
-    rows.push(...batch);
-    if (batch.length < CONTACTS_PAGE_SIZE) return { rows, lastFull: false };
+  let cursor: string | undefined;
+  let total = 0;
+  for (let page = 0; page < REFRESH_MAX_PAGES; page += 1) {
+    const batch = await fetchPage(bookId, sort, cursor);
+    rows.push(...batch.contacts);
+    cursor = batch.nextCursor;
+    total = batch.total;
+    if (cursor === undefined || rows.length >= loadedCount) break;
   }
-  return { rows, lastFull: true };
+  return { contacts: rows, total, nextCursor: cursor };
 }
 
 function mergeById(...lists: ContactView[][]): ContactView[] {
@@ -68,16 +69,15 @@ function mergeById(...lists: ContactView[][]): ContactView[] {
 }
 
 function idleView(scope: string, loading: boolean): PageView {
-  return { scope, contacts: NO_CONTACTS, fetched: 0, lastFull: false, loading, loadingMore: false, loadMoreError: "" };
+  return { scope, contacts: NO_CONTACTS, total: undefined, nextCursor: undefined, loading, loadingMore: false, loadMoreError: "" };
 }
 
-function loadedView(scope: string, contacts: ContactView[], fetched: number, lastFull: boolean): PageView {
-  return { ...idleView(scope, false), contacts: mergeById(contacts), fetched, lastFull };
+function loadedView(scope: string, page: { contacts: ContactView[]; total: number; nextCursor?: string }): PageView {
+  return { ...idleView(scope, false), ...page, contacts: mergeById(page.contacts) };
 }
 
-/** A full last page means another may exist; the book's count can lag behind a projection, so it is not used. */
 function hasMoreRows(view: PageView): boolean {
-  return view.lastFull;
+  return view.nextCursor !== undefined;
 }
 
 /**
@@ -122,10 +122,10 @@ export function useContactPages({ bookId, sort, onError }: Options): ContactPage
     commit(idleView(scope, true));
     const list = document.getElementById("contacts-list");
     if (list) list.scrollTop = 0;
-    fetchPage(bookId, sort, 0)
-      .then(rows => {
+    fetchPage(bookId, sort)
+      .then(page => {
         if (sequence !== sequenceRef.current) return;
-        commit(loadedView(scope, rows, rows.length, rows.length === CONTACTS_PAGE_SIZE));
+        commit(loadedView(scope, page));
         onErrorRef.current("");
       })
       .catch(error => {
@@ -154,15 +154,15 @@ export function useContactPages({ bookId, sort, onError }: Options): ContactPage
     if (current.scope !== scope || operationRef.current || current.loadMoreError || !hasMoreRows(current)) return;
     const sequence = begin("more");
     commit({ ...current, loadingMore: true });
-    fetchPage(bookId, sort, current.fetched)
-      .then(rows => {
+    fetchPage(bookId, sort, current.nextCursor)
+      .then(page => {
         if (sequence !== sequenceRef.current) return;
         const latest = viewRef.current;
         commit({
           ...latest,
-          contacts: mergeById(latest.contacts, rows),
-          fetched: latest.fetched + rows.length,
-          lastFull: rows.length === CONTACTS_PAGE_SIZE,
+          contacts: mergeById(latest.contacts, page.contacts),
+          total: page.total,
+          nextCursor: page.nextCursor,
           loadingMore: false,
         });
       })
@@ -182,13 +182,12 @@ export function useContactPages({ bookId, sort, onError }: Options): ContactPage
     const { bookId, sort, scope } = paramsRef.current;
     const current = viewRef.current;
     if (!bookId || current.scope !== scope || current.loading) return;
-    const pageCount = Math.min(REFRESH_MAX_PAGES, Math.max(1, Math.ceil(current.fetched / CONTACTS_PAGE_SIZE)));
     const sequence = begin("refresh");
     commit({ ...current, loadingMore: false });
-    fetchLoadedRange(bookId, sort, pageCount)
-      .then(({ rows, lastFull }) => {
+    fetchLoadedRange(bookId, sort, current.contacts.length)
+      .then(page => {
         if (sequence !== sequenceRef.current) return;
-        commit({ ...loadedView(scope, rows, rows.length, lastFull), loadMoreError: viewRef.current.loadMoreError });
+        commit({ ...loadedView(scope, page), loadMoreError: viewRef.current.loadMoreError });
         onErrorRef.current("");
       })
       .catch(error => {
@@ -198,17 +197,17 @@ export function useContactPages({ bookId, sort, onError }: Options): ContactPage
       .finally(() => end(sequence));
   }, [begin, commit, end]);
 
-  const resetTo = useCallback((contacts: ContactView[], target: PageScope) => {
+  const resetTo = useCallback((page: { contacts: ContactView[]; total: number; nextCursor?: string }, target: PageScope) => {
     sequenceRef.current += 1;
     operationRef.current = null;
-    const fullLastPage = contacts.length > 0 && contacts.length % CONTACTS_PAGE_SIZE === 0;
-    commit(loadedView(pageScopeKey(target), contacts, contacts.length, fullLastPage));
+    commit(loadedView(pageScopeKey(target), page));
   }, [commit]);
 
   // A view for another scope is not shown: the list is empty and loading until its first page lands.
   const view = state.scope === scope ? state : idleView(scope, Boolean(bookId));
   return {
     contacts: view.contacts,
+    total: view.total,
     loading: view.loading,
     loadingMore: view.loadingMore,
     loadMoreError: view.loadMoreError,

@@ -1,38 +1,33 @@
-import type { ContactSort, ContactView } from "../bridge/bridge";
+import type { DesktopBridge, ContactSort, ContactView } from "../bridge/bridge";
 
-export const MAX_TARGET_LOOKUP_PAGES = 500;
 export const CONTACTS_PAGE_SIZE = 200;
+const MAX_TARGET_ROWS = 2_000;
 
 export type ContactTargetLookup = {
   bookId: string;
   contactId: string;
 };
 
-/** `contacts` holds every page fetched up to and including the target's page, in list order. */
+/** `contacts` holds the ordered rows through the target. */
 export type ContactTargetResult =
-  | { state: "found"; contact: ContactView; contacts: ContactView[] }
+  | { state: "found"; contact: ContactView; contacts: ContactView[]; total: number; nextCursor?: string }
   | { state: "unavailable" }
   | { state: "oversized" }
   | { state: "cancelled" };
 
 export async function findContactTarget(
   target: ContactTargetLookup,
-  listContacts: (bookId: string, query: string, offset: number, sort: ContactSort) => Promise<ContactView[]>,
+  listContacts: DesktopBridge["list_contacts_page"],
   signal: AbortSignal,
   isBookAvailable: (bookId: string) => boolean = () => true,
   sort: ContactSort = { key: "family", direction: "asc" },
 ): Promise<ContactTargetResult> {
-  const fetched: ContactView[] = [];
-  for (let page = 0; page < MAX_TARGET_LOOKUP_PAGES; page += 1) {
-    if (signal.aborted || !isBookAvailable(target.bookId)) return { state: "cancelled" };
-    const offset = page * CONTACTS_PAGE_SIZE;
-    const contacts = await listContacts(target.bookId, "", offset, sort);
-    if (signal.aborted || !isBookAvailable(target.bookId)) return { state: "cancelled" };
-    fetched.push(...contacts);
-    const contact = contacts.find((candidate) => candidate.id === target.contactId);
-    if (contact) return { state: "found", contact, contacts: fetched };
-    if (contacts.length < CONTACTS_PAGE_SIZE) return { state: "unavailable" };
-  }
-
-  return signal.aborted ? { state: "cancelled" } : { state: "oversized" };
+  if (signal.aborted || !isBookAvailable(target.bookId)) return { state: "cancelled" };
+  const page = await listContacts(target.bookId, { through: target.contactId, sort });
+  if (signal.aborted || !isBookAvailable(target.bookId)) return { state: "cancelled" };
+  const contact = page.contacts.find(candidate => candidate.id === target.contactId);
+  if (page.throughFound && contact) return { state: "found", contact, contacts: page.contacts, total: page.total, nextCursor: page.nextCursor };
+  // Core returns only the first page when the target lies beyond the cap, so the target may still exist past it.
+  const mayLieBeyondCap = !page.throughFound && page.total > MAX_TARGET_ROWS;
+  return { state: mayLieBeyondCap ? "oversized" : "unavailable" };
 }
