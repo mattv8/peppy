@@ -2740,6 +2740,18 @@ impl Client {
         let (conn, ctx) = store.parts();
         contact_sync_requests::request(conn, &ctx, input)
     }
+    /// Deletes a removed device's synced contact book for every device in the vault. Input is
+    /// `{"book_id", "revoked_device_ids"}`; the revoked list is the host's trusted fact. Refusals
+    /// are `Error::InvalidRequest` with a static reason: "contact book deletion input is invalid",
+    /// "contact book is not on this device", "contact book was already deleted for all devices",
+    /// "contact book owner is not a removed device", "contact book belongs to this device" and
+    /// "contact book owner was succeeded by another device". A locked vault returns
+    /// `KeysUnavailable`. Success returns `{"status":"deleted","book_id","contacts"}`.
+    pub fn delete_contact_book(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        contact_book_deletion::delete(conn, &ctx, input)
+    }
     /// Returns this caller's durable status for a requested book scan.
     pub fn contact_sync_request_status(&self, input: &str) -> Result<String, Error> {
         let store = self.lock()?;

@@ -2,10 +2,13 @@
 //! late-record suppression, and the tag on consumed unknown event kinds.
 
 use crate::common::*;
-use peppy_crypto::{KeyPurpose, derive_purpose_key, derive_root_key, encrypt};
+use peppy_crypto::{
+    EncryptedEnvelope, KeyPurpose, decrypt, derive_purpose_key, derive_root_key, encrypt,
+};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::path::Path;
+use std::time::Instant;
 use tempfile::TempDir;
 
 const BOOK: &str = "address-book";
@@ -380,5 +383,425 @@ fn consumed_unknown_event_kind_is_tagged_on_its_journal_row() {
         ),
         3,
         "ordinary applied records stay untagged"
+    );
+}
+
+/// The owner captures `contacts` and publishes them; a second device syncs the book from the log,
+/// so the observer's records carry the owner's compaction frontier.
+struct Captured {
+    vault: Vault,
+    owner_config: ClientConfig,
+    owner: Client,
+    observer_config: ClientConfig,
+    observer: Client,
+    server: Server,
+}
+
+fn captured(dir: &TempDir, contacts: Vec<Value>) -> Captured {
+    let vault = Vault::new();
+    let owner_config = config(dir, "owner", &vault);
+    let owner = unlocked(&owner_config, &vault);
+    let observer_config = config(dir, "observer", &vault);
+    let observer = unlocked(&observer_config, &vault);
+    crate::snapshot_projection::capture(
+        &owner,
+        &crate::snapshot_projection::book(&owner_config, BOOK),
+        contacts,
+    );
+    let mut server = Server::default();
+    server.upload(&owner);
+    server.sync(&observer);
+    // `Server::sync` applies one bounded batch; drain the rest so every contact is visible.
+    crate::snapshot_projection::settle(&observer);
+    Captured {
+        vault,
+        owner_config,
+        owner,
+        observer_config,
+        observer,
+        server,
+    }
+}
+
+fn two_contacts() -> Vec<Value> {
+    vec![
+        crate::snapshot_projection::contact(BOOK, "c1", "Ada"),
+        crate::snapshot_projection::contact(BOOK, "c2", "Bea"),
+    ]
+}
+
+fn delete_input(revoked: &[String]) -> String {
+    json!({"book_id": BOOK, "revoked_device_ids": revoked}).to_string()
+}
+
+/// The decrypted payload of a sealed Event envelope.
+fn opened(vault: &Vault, envelope: &Envelope) -> PrivatePayload {
+    let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
+    let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    let (nonce, ciphertext) = envelope.ciphertext.split_at(24);
+    let encrypted = EncryptedEnvelope {
+        nonce: nonce.try_into().unwrap(),
+        ciphertext: ciphertext.to_vec(),
+    };
+    let plain = decrypt(&key, &envelope.aad_bytes().unwrap(), &encrypted).unwrap();
+    serde_json::from_slice(&plain).unwrap()
+}
+
+/// Pending envelopes with their payloads. The key is derived once: deriving it per envelope is
+/// a password-hash cost that dominates a thousand-record outbox.
+fn outbox(client: &Client, vault: &Vault) -> Vec<(Envelope, PrivatePayload)> {
+    let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
+    let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    client
+        .pending_outbox()
+        .unwrap()
+        .into_iter()
+        .map(|envelope| {
+            let (nonce, ciphertext) = envelope.ciphertext.split_at(24);
+            let encrypted = EncryptedEnvelope {
+                nonce: nonce.try_into().unwrap(),
+                ciphertext: ciphertext.to_vec(),
+            };
+            let plain = decrypt(&key, &envelope.aad_bytes().unwrap(), &encrypted).unwrap();
+            let payload = serde_json::from_slice(&plain).unwrap();
+            (envelope, payload)
+        })
+        .collect()
+}
+
+#[test]
+fn delete_fences_the_book_and_enqueues_one_terminal_member_per_contact() {
+    let dir = TempDir::new().unwrap();
+    let fixture = captured(&dir, two_contacts());
+    let owner = fixture.owner_config.device_id.to_string();
+    let owner_records: Vec<(u64, PrivatePayload)> = fixture
+        .server
+        .log
+        .iter()
+        .map(|envelope| {
+            (
+                envelope.producer_sequence.0,
+                opened(&fixture.vault, envelope),
+            )
+        })
+        .collect();
+
+    let out: Value = serde_json::from_str(
+        &fixture
+            .observer
+            .delete_contact_book(&delete_input(std::slice::from_ref(&owner)))
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        out,
+        json!({"status": "deleted", "book_id": BOOK, "contacts": 2})
+    );
+    assert!(book_ids(&fixture.observer).is_empty());
+    let path = &fixture.observer_config.database_path;
+    assert_eq!(count(path, "SELECT COUNT(*) FROM contacts"), 0);
+    assert_eq!(
+        count(
+            path,
+            "SELECT COUNT(*) FROM deleted_contact_books WHERE book_id='address-book' AND generation=1"
+        ),
+        1
+    );
+
+    let records = outbox(&fixture.observer, &fixture.vault);
+    let fences: Vec<&Envelope> = records
+        .iter()
+        .filter(|(_, p)| matches!(p, PrivatePayload::ContactBookDeleted { .. }))
+        .map(|(envelope, _)| envelope)
+        .collect();
+    let members: Vec<(&Envelope, &str)> = records
+        .iter()
+        .filter_map(|(envelope, payload)| match payload {
+            PrivatePayload::ContactBookDeletedMember { contact_id, .. } => {
+                Some((envelope, contact_id.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fences.len(), 1);
+    assert_eq!(members.len(), 2);
+    assert_eq!(records.len(), 3, "nothing but the fence and members");
+
+    // The fence is the book's retained frontier; members are terminal and supersede the
+    // owner's records of the same contact.
+    let fence_compaction = fences[0].compaction.as_ref().unwrap();
+    assert!(!fence_compaction.terminal);
+    let book_state = owner_records
+        .iter()
+        .find(|(_, p)| matches!(p, PrivatePayload::ContactBookState { .. }))
+        .unwrap();
+    assert!(
+        fence_compaction
+            .supersedes
+            .iter()
+            .any(|r| r.producer_device_id.to_string() == owner
+                && r.producer_sequence.0 == book_state.0),
+        "fence supersedes the owner's book state"
+    );
+    for (envelope, contact_id) in members {
+        let compaction = envelope.compaction.as_ref().unwrap();
+        assert!(compaction.terminal);
+        let upsert = owner_records
+            .iter()
+            .find(|(_, p)| {
+                matches!(p, PrivatePayload::ContactUpserted { contact, .. } if contact["id"] == contact_id)
+            })
+            .unwrap();
+        assert!(
+            compaction
+                .supersedes
+                .iter()
+                .any(|r| r.producer_device_id.to_string() == owner
+                    && r.producer_sequence.0 == upsert.0),
+            "member {contact_id} supersedes the owner's upsert"
+        );
+    }
+}
+
+#[test]
+fn delete_refusals_each_carry_their_own_reason() {
+    let dir = TempDir::new().unwrap();
+    let fixture = captured(&dir, two_contacts());
+    let owner = fixture.owner_config.device_id.to_string();
+    let refusal = |client: &Client, input: String| {
+        client
+            .delete_contact_book(&input)
+            .expect_err("the delete must be refused")
+    };
+
+    assert_eq!(
+        refusal(
+            &fixture.observer,
+            json!({"book_id": "missing", "revoked_device_ids": [owner]}).to_string()
+        ),
+        Error::InvalidRequest("contact book is not on this device")
+    );
+    assert_eq!(
+        refusal(&fixture.observer, delete_input(&[])),
+        Error::InvalidRequest("contact book owner is not a removed device")
+    );
+    assert_eq!(
+        refusal(&fixture.observer, "{not json".into()),
+        Error::InvalidRequest("contact book deletion input is invalid")
+    );
+    assert_eq!(
+        refusal(&fixture.observer, json!({"book_id": BOOK}).to_string()),
+        Error::InvalidRequest("contact book deletion input is invalid")
+    );
+    assert_eq!(
+        refusal(&fixture.owner, delete_input(std::slice::from_ref(&owner))),
+        Error::InvalidRequest("contact book belongs to this device")
+    );
+
+    // A succeeded owner's book belongs to its successor: refused until that link is gone.
+    let successor = DeviceId::new();
+    let path = fixture.observer_config.database_path.clone();
+    sqlcipher(&path)
+        .execute(
+            "INSERT INTO device_successions(predecessor,successor,platform,hint_tag,key_epoch) VALUES(?,?,'android','hint',1)",
+            params![owner, successor.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        refusal(
+            &fixture.observer,
+            delete_input(std::slice::from_ref(&owner))
+        ),
+        Error::InvalidRequest("contact book owner was succeeded by another device")
+    );
+    sqlcipher(&path)
+        .execute("DELETE FROM device_successions", [])
+        .unwrap();
+
+    fixture
+        .observer
+        .delete_contact_book(&delete_input(std::slice::from_ref(&owner)))
+        .unwrap();
+    assert_eq!(
+        refusal(
+            &fixture.observer,
+            delete_input(std::slice::from_ref(&owner))
+        ),
+        Error::InvalidRequest("contact book was already deleted for all devices"),
+        "a re-run after success is a clean refusal"
+    );
+}
+
+#[test]
+fn delete_on_a_locked_vault_reports_keys_unavailable() {
+    let dir = TempDir::new().unwrap();
+    let fixture = captured(&dir, two_contacts());
+    let owner = fixture.owner_config.device_id.to_string();
+    let observer_config = fixture.observer_config.clone();
+    drop(fixture.observer);
+
+    let locked = open(&observer_config);
+
+    assert_eq!(
+        locked
+            .delete_contact_book(&delete_input(&[owner]))
+            .unwrap_err(),
+        Error::KeysUnavailable
+    );
+    assert_eq!(
+        count(
+            &observer_config.database_path,
+            "SELECT COUNT(*) FROM contacts"
+        ),
+        2,
+        "a refused delete changes nothing"
+    );
+}
+
+#[test]
+fn delete_of_a_thousand_contact_book_completes_in_one_call() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let observer_config = config(&dir, "observer", &vault);
+    let observer = unlocked(&observer_config, &vault);
+    let owner = DeviceId::new();
+    // Seeds the stored book directly: publishing 1,000 contacts through capture and sync costs
+    // minutes in a debug build and is not what this test measures. The delete path is unchanged.
+    let seeded = sqlcipher(&observer_config.database_path);
+    seeded
+        .execute(
+            "INSERT INTO contact_books(id,owner_device_id,generation,state,body,forgotten) VALUES(?,?,1,'active',?,0)",
+            params![BOOK, owner.to_string(), book(owner, "1").to_string()],
+        )
+        .unwrap();
+    for index in 0..1_000 {
+        let id = format!("c{index:04}");
+        let body = json!({"id": id, "book_id": BOOK, "revision": "1", "display_name": "Member"});
+        seeded
+            .execute(
+                "INSERT INTO contacts(id,book_id,revision,body,deleted_at) VALUES(?,?,1,?,NULL)",
+                params![id, BOOK, body.to_string()],
+            )
+            .unwrap();
+    }
+    drop(seeded);
+
+    let started = Instant::now();
+    let out: Value = serde_json::from_str(
+        &observer
+            .delete_contact_book(&delete_input(&[owner.to_string()]))
+            .unwrap(),
+    )
+    .unwrap();
+    eprintln!(
+        "delete of 1,000 contacts enqueued 1,001 records and applied locally in {:?}",
+        started.elapsed()
+    );
+
+    assert_eq!(out["contacts"], 1_000);
+    assert_eq!(outbox(&observer, &vault).len(), 1_001);
+    assert_eq!(
+        count(
+            &observer_config.database_path,
+            "SELECT COUNT(*) FROM contacts"
+        ),
+        0
+    );
+    assert!(book_ids(&observer).is_empty());
+}
+
+#[test]
+fn edit_request_for_a_deleted_book_creates_no_ledger_row() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    let request = |id: &str| {
+        json!({
+            "schema_version": 1,
+            "request_id": id,
+            "target_owner": owner.to_string(),
+            "book_id": BOOK,
+            "kind": "update",
+            "contact_id": "ada",
+            "base_revision": "1",
+            "expires_at": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                + 86_400,
+            "patches": [{"op": "replace", "path": "name.given", "value": "Augusta"}]
+        })
+    };
+    let ledger = |id: &str| {
+        count(
+            &config.database_path,
+            &format!("SELECT COUNT(*) FROM contact_edit_ledger WHERE request_id='{id}'"),
+        )
+    };
+    sync(
+        &[sealed(
+            &vault,
+            DeviceId::new(),
+            1,
+            PrivatePayload::ContactEditRequest {
+                request: request("before"),
+            },
+        )],
+        &observer,
+    );
+    assert_eq!(ledger("before"), 1, "control: a live request is recorded");
+
+    let report = sync(
+        &[sealed(&vault, DeviceId::new(), 2, fence(owner, "1"))],
+        &observer,
+    );
+    assert_eq!(report.quarantined, 0);
+    let report = sync(
+        &[sealed(
+            &vault,
+            DeviceId::new(),
+            3,
+            PrivatePayload::ContactEditRequest {
+                request: request("after"),
+            },
+        )],
+        &observer,
+    );
+
+    assert_eq!(
+        report.quarantined, 0,
+        "a request for a deleted book is a no-op"
+    );
+    assert_eq!(ledger("after"), 0, "no ledger row for a deleted book");
+}
+
+#[test]
+fn restored_pre_delete_backup_removes_the_book_when_the_fence_replays() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    drop(observer);
+    // Rollback-journal database: copying the file after the client closed captures all of it.
+    let backup = dir.path().join("pre-delete.db");
+    std::fs::copy(&config.database_path, &backup).unwrap();
+    let restored_config = ClientConfig {
+        database_path: backup,
+        ..config.clone()
+    };
+    let restored = unlocked(&restored_config, &vault);
+    assert_eq!(book_ids(&restored), vec![BOOK.to_owned()]);
+
+    let report = sync(
+        &[sealed(&vault, DeviceId::new(), 1, fence(owner, "1"))],
+        &restored,
+    );
+
+    assert_eq!(report.quarantined, 0);
+    assert!(book_ids(&restored).is_empty());
+    assert_eq!(
+        count(
+            &restored_config.database_path,
+            "SELECT COUNT(*) FROM contacts"
+        ),
+        0
     );
 }

@@ -6,11 +6,24 @@
 //! history can be pruned. The fence lives in `deleted_contact_books`. Every later record of the
 //! same book at or below the fenced generation is a no-op, so replays and delayed records never
 //! resurrect deleted data, while higher generations are unaffected.
-use crate::Error;
-use crate::PrivatePayload;
 use crate::contact_media;
 use crate::contacts::{canonical_decimal, invalid};
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::{
+    Ctx, EnvelopePurpose, Error, MAX_SEAL_BATCH, PrivatePayload, enqueue_without_sealing,
+    seal_pending,
+};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde_json::{Value, json};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Refusal reasons of `delete`, carried by `Error::InvalidRequest`. Hosts map them to copy.
+pub(crate) const DELETE_INPUT: &str = "contact book deletion input is invalid";
+pub(crate) const DELETE_NOT_FOUND: &str = "contact book is not on this device";
+pub(crate) const DELETE_ALREADY_DELETED: &str = "contact book was already deleted for all devices";
+pub(crate) const DELETE_OWNER_NOT_REMOVED: &str = "contact book owner is not a removed device";
+pub(crate) const DELETE_OWNER_IS_THIS_DEVICE: &str = "contact book belongs to this device";
+pub(crate) const DELETE_OWNER_SUCCEEDED: &str =
+    "contact book owner was succeeded by another device";
 
 /// Book-keyed local state removed with a deleted book. Scan children are deleted before their
 /// scans. Every statement binds the book id as `?1`.
@@ -88,6 +101,100 @@ pub(crate) fn apply(conn: &Connection, payload: &PrivatePayload) -> Result<bool,
         }
         _ => Err(invalid()),
     }
+}
+
+/// Deletes a removed device's contact book for the whole vault. `input` is
+/// `{"book_id", "revoked_device_ids"}`, where the revoked list is the host's trusted fact. One
+/// transaction enqueues the book fence and one member record per stored contact (compaction
+/// metadata is captured before any local projection), seals them, then applies the fence here.
+pub(crate) fn delete(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Result<String, Error> {
+    crate::contacts::require_unlocked(ctx)?;
+    let input: Value =
+        serde_json::from_str(input).map_err(|_| Error::InvalidRequest(DELETE_INPUT))?;
+    let book_id = text(&input, "book_id")?;
+    let revoked = input
+        .get("revoked_device_ids")
+        .and_then(Value::as_array)
+        .ok_or(Error::InvalidRequest(DELETE_INPUT))?
+        .iter()
+        .map(|id| id.as_str().ok_or(Error::InvalidRequest(DELETE_INPUT)))
+        .collect::<Result<Vec<&str>, _>>()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if fence_generation(&tx, book_id)?.is_some() {
+        return Err(Error::InvalidRequest(DELETE_ALREADY_DELETED));
+    }
+    let (owner, generation): (String, i64) = tx
+        .query_row(
+            "SELECT owner_device_id,generation FROM contact_books WHERE id=?",
+            [book_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or(Error::InvalidRequest(DELETE_NOT_FOUND))?;
+    if !revoked.contains(&owner.as_str()) {
+        return Err(Error::InvalidRequest(DELETE_OWNER_NOT_REMOVED));
+    }
+    if owner == ctx.device_id.to_string() {
+        return Err(Error::InvalidRequest(DELETE_OWNER_IS_THIS_DEVICE));
+    }
+    if has_successor(&tx, &owner)? {
+        return Err(Error::InvalidRequest(DELETE_OWNER_SUCCEEDED));
+    }
+    // Every stored contact gets a member record, tombstones included, so each contact's history
+    // is superseded and can be pruned. The reported count is the live contacts.
+    let members = contact_ids(&tx, book_id)?;
+    let live: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM contacts WHERE book_id=? AND deleted_at IS NULL",
+        [book_id],
+        |row| row.get(0),
+    )?;
+    let generation = generation.to_string();
+    let fence = PrivatePayload::ContactBookDeleted {
+        book_id: book_id.to_owned(),
+        owner_device_id: owner.clone(),
+        generation: generation.clone(),
+        deleted_at_ms: now_ms(),
+    };
+    enqueue_without_sealing(&tx, ctx, EnvelopePurpose::Event, None, None, &fence)?;
+    for contact_id in members {
+        let member = PrivatePayload::ContactBookDeletedMember {
+            book_id: book_id.to_owned(),
+            contact_id,
+            owner_device_id: owner.clone(),
+            generation: generation.clone(),
+        };
+        enqueue_without_sealing(&tx, ctx, EnvelopePurpose::Event, None, None, &member)?;
+    }
+    loop {
+        if seal_pending(&tx, ctx, MAX_SEAL_BATCH)? < MAX_SEAL_BATCH {
+            break;
+        }
+    }
+    apply(&tx, &fence)?;
+    tx.commit()?;
+    Ok(json!({"status": "deleted", "book_id": book_id, "contacts": live}).to_string())
+}
+
+/// Whether records of `owner` are ignored on this device: its own book, or a book whose owner
+/// was succeeded. Staging applies the same rule as live apply.
+pub(crate) fn owner_ignored(conn: &Connection, me: &str, owner: &str) -> Result<bool, Error> {
+    Ok(owner == me || has_successor(conn, owner)?)
+}
+
+fn text<'a>(input: &'a Value, key: &str) -> Result<&'a str, Error> {
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or(Error::InvalidRequest(DELETE_INPUT))
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// Highest generation fenced for `book_id` by a vault-wide deletion, if any.
@@ -195,7 +302,7 @@ fn has_successor(conn: &Connection, owner: &str) -> Result<bool, Error> {
     )?)
 }
 
-fn check_ids(book_id: &str, owner: &str) -> Result<(), Error> {
+pub(crate) fn check_ids(book_id: &str, owner: &str) -> Result<(), Error> {
     if book_id.is_empty() || owner.is_empty() {
         return Err(invalid());
     }

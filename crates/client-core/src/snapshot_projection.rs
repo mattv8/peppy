@@ -45,9 +45,9 @@
 use crate::{
     AppFilter, Client, Ctx, Cursor, EnvelopePurpose, Error, MAX_SNAPSHOT_PAGE_BYTES,
     NotificationTarget, NotificationWire, Opened, PrivatePayload, add_column_if_missing,
-    contact_media, contacts, conversation_folders, conversation_pinning, conversation_tones,
-    notification_preferences, notifications, open_payload, parse_wire, rcs_receive,
-    take_within_budget, to_i64,
+    contact_book_deletion, contact_media, contacts, conversation_folders, conversation_pinning,
+    conversation_tones, notification_preferences, notifications, open_payload, parse_wire,
+    rcs_receive, take_within_budget, to_i64,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
@@ -135,6 +135,9 @@ CREATE TABLE IF NOT EXISTS projection_rcs_conversation_metadata(generation INTEG
     rcs_encryption INTEGER CHECK(rcs_encryption IN (0,1)), rcs_history_gap INTEGER NOT NULL CHECK(rcs_history_gap IN (0,1)),
     logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL, producer_device_id TEXT NOT NULL,
     source_sequence INTEGER NOT NULL, PRIMARY KEY(generation,conversation_id));
+CREATE TABLE IF NOT EXISTS projection_deleted_books(generation INTEGER NOT NULL, book_id TEXT NOT NULL,
+    owner_device_id TEXT NOT NULL, book_generation INTEGER NOT NULL, deleted_at_ms INTEGER NOT NULL,
+    PRIMARY KEY(generation,book_id));
 ",
     )?;
     add_column_if_missing(
@@ -748,9 +751,10 @@ pub(super) fn reduce(
             )?;
             Ok(true)
         }
-        // Book deletion fences and member records are not staged yet (lane D1b adds staging).
-        PrivatePayload::ContactBookDeleted { .. }
-        | PrivatePayload::ContactBookDeletedMember { .. } => Ok(true),
+        deletion @ (PrivatePayload::ContactBookDeleted { .. }
+        | PrivatePayload::ContactBookDeletedMember { .. }) => {
+            stage_deletion(conn, generation, me, &deletion)
+        }
         // Own contact books are local truth, rebuilt by rescanning the OS provider.
         PrivatePayload::ContactBookState { .. }
         | PrivatePayload::ContactUpserted { .. }
@@ -995,6 +999,10 @@ fn stage_contact_payload(
                     return Ok(true);
                 }
             }
+            // Without an embedded book the removal is judged by the book's generation as known.
+            if tombstone.get("book").is_none() && staged_covered(conn, generation, book_id, None)? {
+                return Ok(true);
+            }
             let revision = contacts::revision(tombstone, "revision")?;
             let Some(deleted_at) = tombstone.get("deleted_at").and_then(Value::as_i64) else {
                 return Ok(false);
@@ -1023,6 +1031,85 @@ fn stage_contact_payload(
     }
 }
 
+/// Stages a vault-wide deletion fence or member record. Nothing live changes here: the fence
+/// takes effect at promotion. Records of a book this device owns, or of a succeeded owner, are
+/// ignored as live apply ignores them.
+fn stage_deletion(
+    conn: &Connection,
+    generation: i64,
+    me: &str,
+    payload: &PrivatePayload,
+) -> Result<bool, Error> {
+    match payload {
+        PrivatePayload::ContactBookDeleted {
+            book_id,
+            owner_device_id,
+            generation: deleted_generation,
+            deleted_at_ms,
+        } => {
+            contact_book_deletion::check_ids(book_id, owner_device_id)?;
+            if contact_book_deletion::owner_ignored(conn, me, owner_device_id)? {
+                return Ok(true);
+            }
+            let deleted_generation = contacts::canonical_decimal(deleted_generation)?;
+            conn.execute(
+                "INSERT INTO projection_deleted_books(generation,book_id,owner_device_id,book_generation,deleted_at_ms) VALUES(?,?,?,?,?) ON CONFLICT(generation,book_id) DO UPDATE SET owner_device_id=excluded.owner_device_id,book_generation=excluded.book_generation,deleted_at_ms=excluded.deleted_at_ms WHERE excluded.book_generation>projection_deleted_books.book_generation",
+                params![generation, book_id, owner_device_id, deleted_generation, deleted_at_ms],
+            )?;
+            Ok(true)
+        }
+        PrivatePayload::ContactBookDeletedMember {
+            book_id,
+            contact_id,
+            owner_device_id,
+            generation: member_generation,
+        } => {
+            contact_book_deletion::check_ids(book_id, owner_device_id)?;
+            if contact_book_deletion::owner_ignored(conn, me, owner_device_id)? {
+                return Ok(true);
+            }
+            let member_generation = contacts::canonical_decimal(member_generation)?;
+            if staged_covered(conn, generation, book_id, Some(member_generation))? {
+                conn.execute(
+                    "DELETE FROM projection_contacts WHERE generation=? AND book_id=? AND contact_id=?",
+                    params![generation, book_id, contact_id],
+                )?;
+            }
+            Ok(true)
+        }
+        _ => Ok(true),
+    }
+}
+
+/// Whether a record of `book_id` at `record_generation` is fenced: a deletion staged in this
+/// generation or already live covers every record at or below its fence generation. `None`
+/// judges the book's generation as staged, else live, else 0, so a book with no record at all is
+/// covered by any fence.
+fn staged_covered(
+    conn: &Connection,
+    generation: i64,
+    book_id: &str,
+    record_generation: Option<i64>,
+) -> Result<bool, Error> {
+    let fenced: Option<i64> = conn.query_row(
+        "SELECT MAX(g) FROM (SELECT book_generation AS g FROM projection_deleted_books WHERE generation=?1 AND book_id=?2 UNION ALL SELECT generation AS g FROM deleted_contact_books WHERE book_id=?2)",
+        params![generation, book_id],
+        |row| row.get(0),
+    )?;
+    let Some(fenced) = fenced else {
+        return Ok(false);
+    };
+    let record = match record_generation {
+        Some(record) => record,
+        None => conn.query_row(
+            "SELECT COALESCE((SELECT book_generation FROM projection_books WHERE generation=?1 AND book_id=?2),(SELECT generation FROM contact_books WHERE id=?2),0)",
+            params![generation, book_id],
+            |row| row.get(0),
+        )?,
+    };
+    Ok(record <= fenced)
+}
+
 /// Stages book state. `Ok(false)`: the producer does not own the book (ignored record).
 fn stage_book(
     conn: &Connection,
@@ -1035,6 +1122,9 @@ fn stage_book(
         return Ok(false);
     }
     let book_generation = contacts::revision(book, "generation")?;
+    if staged_covered(conn, generation, id, Some(book_generation))? {
+        return Ok(false);
+    }
     if !known_owner(conn, generation, id)?
         .map(|owner| contacts::owner_or_successor(conn, &owner, producer))
         .transpose()?
@@ -1120,6 +1210,33 @@ pub(super) fn stage_removal(
 /// Reconciles remote-owned compactable rows against the complete stage (caller's
 /// transaction). Absent remote rows are removed; staged rows merge through the live gates so a
 /// snapshot can never roll a revision, generation or source sequence back.
+/// Vault-wide deletions retained by this snapshot take effect here, whatever the record order.
+/// Each staged fence joins the live fence table, and a live book it covers is removed as a live
+/// deletion would remove it. Staged books and contacts it covers are dropped before the rest of
+/// promotion reads them. Contacts are filtered first, while their staged book rows still exist.
+fn promote_deletions(conn: &Connection, generation: i64, me: &str) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO deleted_contact_books(book_id,owner_device_id,generation,deleted_at_ms) SELECT book_id,owner_device_id,book_generation,deleted_at_ms FROM projection_deleted_books WHERE generation=?1 AND owner_device_id<>?2 ON CONFLICT(book_id) DO UPDATE SET owner_device_id=excluded.owner_device_id,generation=excluded.generation,deleted_at_ms=excluded.deleted_at_ms WHERE excluded.generation>deleted_contact_books.generation",
+        params![generation, me],
+    )?;
+    let books: Vec<String> = conn
+        .prepare("SELECT c.id FROM contact_books c JOIN projection_deleted_books d ON d.generation=?1 AND d.book_id=c.id AND d.owner_device_id=c.owner_device_id WHERE c.generation<=d.book_generation")?
+        .query_map([generation], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    for book_id in &books {
+        contact_book_deletion::remove_local_book(conn, book_id)?;
+    }
+    conn.execute(
+        "DELETE FROM projection_contacts WHERE generation=?1 AND EXISTS(SELECT 1 FROM deleted_contact_books d WHERE d.book_id=projection_contacts.book_id AND d.generation>=COALESCE((SELECT b.book_generation FROM projection_books b WHERE b.generation=projection_contacts.generation AND b.book_id=projection_contacts.book_id),(SELECT c.generation FROM contact_books c WHERE c.id=projection_contacts.book_id),0))",
+        [generation],
+    )?;
+    conn.execute(
+        "DELETE FROM projection_books WHERE generation=?1 AND EXISTS(SELECT 1 FROM deleted_contact_books d WHERE d.book_id=projection_books.book_id AND d.generation>=projection_books.book_generation)",
+        [generation],
+    )?;
+    Ok(())
+}
+
 fn promote(
     conn: &Connection,
     ctx: &Ctx,
@@ -1127,6 +1244,7 @@ fn promote(
     high_water: i64,
     me: &str,
 ) -> Result<(), Error> {
+    promote_deletions(conn, generation, me)?;
     // Contact books owned elsewhere; deleting a book cascades to its contacts.
     conn.execute(
         "DELETE FROM contact_books WHERE owner_device_id!=?1 AND NOT EXISTS(SELECT 1 FROM projection_books s WHERE s.generation=?2 AND s.book_id=contact_books.id)",
@@ -1684,6 +1802,7 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
     for table in [
         "projection_books",
         "projection_contacts",
+        "projection_deleted_books",
         "projection_notifications",
         "projection_tombstones",
         "projection_filters",
@@ -1709,6 +1828,7 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
     conn.execute(
         "DELETE FROM projection_generations WHERE state='superseded' AND NOT EXISTS(SELECT 1 FROM projection_retained r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_books r WHERE r.generation=projection_generations.generation)
+           AND NOT EXISTS(SELECT 1 FROM projection_deleted_books r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_contacts r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_notifications r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_tombstones r WHERE r.generation=projection_generations.generation)

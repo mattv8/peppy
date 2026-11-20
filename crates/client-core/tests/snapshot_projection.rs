@@ -1447,6 +1447,64 @@ fn legacy_state_applied_after_unlock_during_staging_survives_promotion() {
     assert_eq!(muted(&unlocked_client, "com.example.news"), Some(true));
 }
 
+/// Whether `client` still lists the book itself, not only its contacts.
+fn listed(client: &Client, book_id: &str) -> bool {
+    let raw: Value = serde_json::from_str(&client.list_contact_books_json().unwrap()).unwrap();
+    raw["books"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|book| book["id"] == book_id)
+}
+
+fn opened(vault: &Vault, envelope: &Envelope) -> PrivatePayload {
+    let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
+    let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    let (nonce, ciphertext) = envelope.ciphertext.split_at(24);
+    let encrypted = EncryptedEnvelope {
+        nonce: nonce.try_into().unwrap(),
+        ciphertext: ciphertext.to_vec(),
+    };
+    let plain = decrypt(&key, &envelope.aad_bytes().unwrap(), &encrypted).unwrap();
+    serde_json::from_slice(&plain).unwrap()
+}
+
+/// The owner publishes two contacts; the peer syncs them; a third device then deletes the book
+/// for the vault after the owner was removed, and publishes the fence and member records.
+fn deleted_by_another_device(p: &mut Pair) {
+    capture(
+        &p.owner,
+        &book(&p.owner_cfg, BOOK),
+        vec![contact(BOOK, "c1", "Ada"), contact(BOOK, "c2", "Bea")],
+    );
+    p.server.upload(&p.owner);
+    p.server.sync(&p.peer);
+    let deleter = unlocked(&config(&p._dir, "deleter", &p.vault), &p.vault);
+    p.server.sync(&deleter);
+    call(
+        deleter.delete_contact_book(
+            &json!({"book_id": BOOK, "revoked_device_ids": [p.owner_cfg.device_id.to_string()]})
+                .to_string(),
+        ),
+    );
+    p.server.upload(&deleter);
+}
+
+#[test]
+fn deleted_book_snapshot_stays_visible_until_promotion_then_stays_removed() {
+    let mut p = pair();
+    deleted_by_another_device(&mut p);
+    // The peer was offline for the deletion and imports the whole history, one row per step.
+    let high_water = p.server.log.len();
+    import(&p.peer, &full(&p.server.log), high_water, Some(7));
+    p.peer.apply_pending(1).unwrap();
+    assert_eq!(
+        visible(&p.peer, BOOK),
+        ["c1", "c2"],
+        "staging must not change live rows"
+    );
+    assert!(listed(&p.peer, BOOK));
+
 /// The owner's authoritative full scan observes exactly `contacts`: unobserved rows are deleted
 /// and observed rows take their supplied bodies.
 fn replace_contacts(owner: &Client, book_id: &str, scan: &str, contacts: Vec<Value>) {
@@ -1532,6 +1590,66 @@ fn snapshot_promotion_between_cursor_pages_keeps_keyset_order() {
         state(&p.peer),
         Some((SnapshotProjectionState::Promoted, None))
     );
+    assert!(visible(&p.peer, BOOK).is_empty());
+    assert!(!listed(&p.peer, BOOK));
+
+    // A later compacted snapshot cannot bring it back either.
+    import(&p.peer, &compact(&p.server.log, true), high_water, Some(8));
+    settle(&p.peer);
+    assert!(visible(&p.peer, BOOK).is_empty());
+    assert!(!listed(&p.peer, BOOK));
+}
+
+#[test]
+fn deletion_records_ahead_of_owner_records_in_a_snapshot_still_remove_the_book() {
+    let mut p = pair();
+    deleted_by_another_device(&mut p);
+    // A receiver that never saw the log imports a snapshot re-sequenced so the fence and members
+    // stage before the owner's records. Cursors are fresh, so nothing is journaled yet.
+    let late = unlocked(&config(&p._dir, "late", &p.vault), &p.vault);
+    let (deletions, rest): (Vec<Envelope>, Vec<Envelope>) =
+        p.server.log.iter().cloned().partition(|envelope| {
+            matches!(
+                opened(&p.vault, envelope),
+                PrivatePayload::ContactBookDeleted { .. }
+                    | PrivatePayload::ContactBookDeletedMember { .. }
+            )
+        });
+    assert_eq!(deletions.len(), 3, "one fence and two members");
+    let records: Vec<SnapshotRecord> = deletions
+        .into_iter()
+        .chain(rest)
+        .enumerate()
+        .map(|(index, envelope)| SnapshotRecord {
+            cursor: Cursor(index as u64 + 1),
+            envelope,
+        })
+        .collect();
+
+    import(&late, &records, records.len(), Some(7));
+    settle(&late);
+
+    assert_eq!(
+        state(&late),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert!(visible(&late, BOOK).is_empty());
+    assert!(!listed(&late, BOOK));
+}
+
+#[test]
+fn legacy_snapshot_after_a_deletion_cannot_resurrect_the_book() {
+    let mut p = pair();
+    deleted_by_another_device(&mut p);
+    p.server.sync(&p.peer);
+    assert!(!listed(&p.peer, BOOK), "live apply removed the book");
+
+    let high_water = p.server.log.len();
+    import(&p.peer, &full(&p.server.log), high_water, None);
+    settle(&p.peer);
+
+    assert!(!listed(&p.peer, BOOK));
+    assert!(visible(&p.peer, BOOK).is_empty());
 
     // Rows sorting after the cursor key ("Bea") in the promoted state.
     let promoted = call(p.peer.contact_book_view(

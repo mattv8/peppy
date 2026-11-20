@@ -2469,6 +2469,10 @@ fn apply_peer(
             validate_request(request)?;
             let target = req(request, "target_owner")?;
             let book_id = req(request, "book_id")?;
+            // A request for a book deleted vault-wide is an applied no-op: no ledger row, no permit.
+            if crate::contact_book_deletion::covers(conn, book_id, None)? {
+                return Ok(true);
+            }
             let expires = request
                 .get("expires_at")
                 .and_then(Value::as_i64)
