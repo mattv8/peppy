@@ -184,3 +184,129 @@ fn omitted_sort_preserves_legacy_id_order_and_malformed_sort_is_rejected() {
         );
     }
 }
+
+#[test]
+fn cursor_pages_match_offset_order() {
+    let fixture = client_with(vec![
+        contact("1", Some("émile"), Some("Ångström"), "émile Ångström"),
+        contact("2", Some("Ada"), None, "Ada"),
+        contact("3", None, None, ""),
+        contact("4", Some("ada"), None, "Ada"),
+        contact("5", None, Some("Smith"), "Smith"),
+    ]);
+    for key in ["given", "family"] {
+        for direction in ["asc", "desc"] {
+            let sort = json!({"key": key, "direction": direction});
+            let expected = ids(&fixture.client, view(sort.clone()));
+            let mut actual = Vec::new();
+            let mut after = None;
+            loop {
+                let mut input = json!({"book_id": BOOK, "sort": sort, "limit": 2});
+                if let Some(cursor) = after {
+                    input["after"] = cursor;
+                }
+                let output: Value = serde_json::from_str(
+                    &fixture
+                        .client
+                        .contact_book_view(&input.to_string())
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(output["total"], 5);
+                actual.extend(
+                    output["contacts"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|row| row["id"].as_str().unwrap().to_owned()),
+                );
+                if output["next_cursor"].is_null() {
+                    break;
+                }
+                after = Some(output["next_cursor"].clone());
+            }
+            assert_eq!(actual, expected);
+        }
+    }
+}
+
+#[test]
+fn cursor_validation_total_and_through() {
+    let fixture = client_with(vec![
+        contact("a", Some("Ada"), None, "Ada"),
+        contact("b", Some("Bea"), None, "Bea"),
+        contact("c", Some("Cato"), None, "Cato"),
+        contact("d", Some("Dora"), None, "Dora"),
+    ]);
+    let call = |input: Value| -> Value {
+        serde_json::from_str(
+            &fixture
+                .client
+                .contact_book_view(&input.to_string())
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let first = call(json!({"book_id": BOOK, "limit": 2, "through": "d"}));
+    assert_eq!(first["total"], 4);
+    assert_eq!(first["contacts"].as_array().unwrap().len(), 4);
+    assert_eq!(first["through_found"], true);
+    assert!(first["next_cursor"].is_null());
+    let first = call(json!({"book_id": BOOK, "limit": 2, "through": "missing"}));
+    assert_eq!(first["contacts"].as_array().unwrap().len(), 2);
+    assert_eq!(first["through_found"], false);
+    let cursor = first["next_cursor"].clone();
+    let short = call(json!({"book_id": BOOK, "limit": 2, "through": "a"}));
+    assert_eq!(short["contacts"].as_array().unwrap().len(), 2);
+    assert_eq!(short["through_found"], true);
+    let through_after = call(json!({"book_id": BOOK, "limit": 1, "after": cursor, "through": "d"}));
+    assert_eq!(through_after["contacts"].as_array().unwrap().len(), 2);
+    assert_eq!(through_after["through_found"], true);
+    let last = call(json!({"book_id": BOOK, "limit": 2, "after": cursor}));
+    assert!(last["next_cursor"].is_null());
+    let remaining: Vec<&str> = last["contacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(remaining, ["c", "d"]);
+    let searched = call(json!({"book_id": BOOK, "search": "ada"}));
+    assert_eq!(searched["total"], 1);
+    for input in [
+        json!({"book_id": BOOK, "after": "not-a-cursor"}),
+        json!({"book_id": BOOK, "after": cursor, "offset": 0}),
+        json!({"book_id": BOOK, "after": cursor, "sort": {"key": "given", "direction": "asc"}}),
+    ] {
+        assert!(
+            fixture
+                .client
+                .contact_book_view(&input.to_string())
+                .is_err()
+        );
+    }
+    assert_eq!(
+        fixture.client.contact_book_view(
+            &json!({"book_id": BOOK, "after": cursor, "sort": {"key": "given", "direction": "asc"}}).to_string()
+        ).unwrap_err(),
+        peppy_client_core::Error::InvalidRequest("contact cursor sort mismatch")
+    );
+}
+
+#[test]
+fn through_beyond_cap_returns_only_first_page() {
+    let contacts = (0..2001)
+        .map(|i| contact(&format!("{i:04}"), None, None, ""))
+        .collect();
+    let fixture = client_with(contacts);
+    let output: Value = serde_json::from_str(
+        &fixture
+            .client
+            .contact_book_view(&json!({"book_id": BOOK, "limit": 2, "through": "2000"}).to_string())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(output["total"], 2001);
+    assert_eq!(output["contacts"].as_array().unwrap().len(), 2);
+    assert_eq!(output["through_found"], false);
+}

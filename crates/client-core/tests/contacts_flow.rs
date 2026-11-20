@@ -222,6 +222,44 @@ fn capture_reaches_peer_sanitized_with_core_minted_revisions() {
 }
 
 #[test]
+fn cursor_resumes_after_deleted_boundary_and_new_rows() {
+    let p = pair();
+    let b = book(&p.owner_cfg, "1", "auto");
+    capture(
+        &p.owner,
+        &b,
+        vec![contact("a", "Ada"), contact("b", "Bea"), contact("c", "Cy")],
+    );
+    let sort = json!({"key":"given","direction":"asc"});
+    let first = call(
+        p.owner
+            .contact_book_view(&json!({"book_id":BOOK,"sort":sort,"limit":2}).to_string()),
+    );
+    let cursor = first["next_cursor"].clone();
+    begin(&p.owner, "cursor-scan", "1", "full", true);
+    for row in [
+        contact("a", "Ada"),
+        contact("c", "Cy"),
+        contact("before", "Abby"),
+        contact("after", "Bob"),
+    ] {
+        observe(&p.owner, "cursor-scan", row).unwrap();
+    }
+    assert_eq!(finish(&p.owner, "cursor-scan", true)["deleted"], 1);
+    let next = call(p.owner.contact_book_view(
+        &json!({"book_id":BOOK,"sort":sort,"limit":10,"after":cursor}).to_string(),
+    ));
+    let ids: Vec<&str> = next["contacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    // Keyset paging excludes new rows before the boundary and includes rows after it.
+    assert_eq!(ids, ["after", "c"]);
+}
+
+#[test]
 fn scan_inserts_new_updates_changed_and_tombstones_missing() {
     let mut p = pair();
     let b = book(&p.owner_cfg, "1", "auto");

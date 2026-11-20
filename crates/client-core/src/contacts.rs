@@ -1081,6 +1081,8 @@ pub(crate) fn finish_scan(
     Ok(out.to_string())
 }
 
+const CONTACT_VIEW_THROUGH_MAX: usize = 2_000;
+
 pub(crate) fn view(conn: &Connection, input: &str) -> Result<String, Error> {
     let v = parse(input)?;
     let book_id = req(&v, "book_id")?;
@@ -1091,6 +1093,19 @@ pub(crate) fn view(conn: &Connection, input: &str) -> Result<String, Error> {
         .unwrap_or(100)
         .min(200) as usize;
     let offset = v.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+    if v.get("after").is_some() && v.get("offset").is_some() {
+        return Err(invalid());
+    }
+    let cursor = v
+        .get("after")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(invalid)
+                .and_then(|text| ContactViewCursor::decode(text, sort))
+        })
+        .transpose()?;
+    let through = v.get("through").map(|_| req(&v, "through")).transpose()?;
     let search = v
         .get("search")
         .and_then(Value::as_str)
@@ -1107,41 +1122,157 @@ pub(crate) fn view(conn: &Connection, input: &str) -> Result<String, Error> {
             .ok_or(Error::NotFound)?,
     )
     .map_err(|_| Error::Database)?;
-    // Search runs before pagination and only over displayable text. Unsorted callers keep
-    // the legacy lazy parse and ID ordering; explicit sorts parse the complete match set.
+    // Search runs before pagination and only over displayable text. Unsorted callers
+    // retain the legacy ID order.
     let rows = conn
         .prepare("SELECT body FROM contacts WHERE book_id=? AND deleted_at IS NULL ORDER BY id")?
         .query_map([book_id], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    let contacts: Vec<Value> = match sort {
-        Some(sort) => {
-            let mut contacts = rows
-                .into_iter()
-                .filter_map(|body| serde_json::from_str::<Value>(&body).ok())
-                .filter(|contact| search.is_empty() || searchable(contact).contains(&search))
-                .map(|contact| {
-                    let keys = ContactSortKeys::from_contact(&contact, sort.key);
-                    (contact, keys)
-                })
-                .collect::<Vec<_>>();
-            contacts.sort_by(|(_, left), (_, right)| left.cmp(right, sort.direction));
-            contacts
-                .into_iter()
-                .skip(offset)
-                .take(limit)
-                .map(|(contact, _)| crate::contact_media::present(conn, sanitize(contact)))
-                .collect()
-        }
-        None => rows
-            .into_iter()
-            .filter_map(|body| serde_json::from_str::<Value>(&body).ok())
-            .filter(|contact| search.is_empty() || searchable(contact).contains(&search))
-            .skip(offset)
-            .take(limit)
-            .map(|contact| crate::contact_media::present(conn, sanitize(contact)))
-            .collect(),
+    let mut rows = rows
+        .into_iter()
+        .filter_map(|body| serde_json::from_str::<Value>(&body).ok())
+        .filter(|contact| search.is_empty() || searchable(contact).contains(&search))
+        .map(|contact| {
+            let keys = ContactViewCursor::keys(&contact, sort);
+            (contact, keys)
+        })
+        .collect::<Vec<_>>();
+    if let Some(sort) = sort {
+        rows.sort_by(|(_, left), (_, right)| left.cmp(right, sort.direction));
+    }
+    let total = rows.len();
+    let start = cursor
+        .as_ref()
+        .map(|cursor| {
+            rows.partition_point(|(_, keys)| {
+                keys.cmp(&cursor.keys, cursor.direction) != Ordering::Greater
+            })
+        })
+        .unwrap_or(offset)
+        .min(total);
+    let found = through.and_then(|id| {
+        rows[start..]
+            .iter()
+            .take(CONTACT_VIEW_THROUGH_MAX)
+            .position(|(_, keys)| keys.id == id)
+    });
+    let count = found.map_or(limit, |position| limit.max(position + 1));
+    let end = start.saturating_add(count).min(total);
+    let next_cursor = if end < total && end > start {
+        Some(ContactViewCursor::encode(&rows[end - 1].1, sort))
+    } else {
+        None
     };
-    Ok(json!({"schema_version":1,"book":sanitize(book),"contacts":contacts,"offset":offset,"limit":limit}).to_string())
+    let contacts: Vec<Value> = rows
+        .into_iter()
+        .skip(start)
+        .take(end - start)
+        .map(|(contact, _)| crate::contact_media::present(conn, sanitize(contact)))
+        .collect();
+    let mut result = json!({"schema_version":1,"book":sanitize(book),"contacts":contacts,"offset":offset,"limit":limit,"total":total,"next_cursor":next_cursor});
+    if through.is_some() {
+        result["through_found"] = json!(found.is_some());
+    }
+    Ok(result.to_string())
+}
+
+struct ContactViewCursor {
+    keys: ContactSortKeys,
+    direction: ContactSortDirection,
+}
+
+impl ContactViewCursor {
+    fn tag(sort: Option<ContactSort>) -> &'static str {
+        match sort {
+            None => "id",
+            Some(ContactSort {
+                key: ContactSortKey::Given,
+                direction: ContactSortDirection::Asc,
+            }) => "given-asc",
+            Some(ContactSort {
+                key: ContactSortKey::Given,
+                direction: ContactSortDirection::Desc,
+            }) => "given-desc",
+            Some(ContactSort {
+                key: ContactSortKey::Family,
+                direction: ContactSortDirection::Asc,
+            }) => "family-asc",
+            Some(ContactSort {
+                key: ContactSortKey::Family,
+                direction: ContactSortDirection::Desc,
+            }) => "family-desc",
+        }
+    }
+
+    fn keys(contact: &Value, sort: Option<ContactSort>) -> ContactSortKeys {
+        match sort {
+            Some(sort) => ContactSortKeys::from_contact(contact, sort.key),
+            None => ContactSortKeys {
+                primary: String::new(),
+                other: String::new(),
+                display: String::new(),
+                id: contact
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                named: false,
+            },
+        }
+    }
+
+    fn encode(keys: &ContactSortKeys, sort: Option<ContactSort>) -> String {
+        use base64::Engine as _;
+        let value = json!({"v":1,"s":Self::tag(sort),"k":[keys.primary, keys.other, keys.display],"id":keys.id});
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string())
+    }
+
+    fn decode(text: &str, sort: Option<ContactSort>) -> Result<Self, Error> {
+        use base64::Engine as _;
+        if text.len() > 32_768 {
+            return Err(invalid());
+        }
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(text)
+            .map_err(|_| invalid())?;
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+        if value.get("v").and_then(Value::as_u64) != Some(1) {
+            return Err(invalid());
+        }
+        let tag = value.get("s").and_then(Value::as_str).ok_or_else(invalid)?;
+        if !["id", "given-asc", "given-desc", "family-asc", "family-desc"].contains(&tag) {
+            return Err(invalid());
+        }
+        if tag != Self::tag(sort) {
+            return Err(Error::InvalidRequest("contact cursor sort mismatch"));
+        }
+        let parts = value
+            .get("k")
+            .and_then(Value::as_array)
+            .filter(|parts| parts.len() == 3)
+            .ok_or_else(invalid)?;
+        let part = |i: usize| parts[i].as_str().map(str::to_owned).ok_or_else(invalid);
+        let primary = part(0)?;
+        let other = part(1)?;
+        let display = part(2)?;
+        let id = req(&value, "id")?.to_owned();
+        if primary.is_empty() && (!other.is_empty() || !display.is_empty()) {
+            return Err(invalid());
+        }
+        if sort.is_none() && (!primary.is_empty() || !other.is_empty() || !display.is_empty()) {
+            return Err(invalid());
+        }
+        Ok(Self {
+            keys: ContactSortKeys {
+                named: !primary.is_empty(),
+                primary,
+                other,
+                display,
+                id,
+            },
+            direction: sort.map_or(ContactSortDirection::Asc, |sort| sort.direction),
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
