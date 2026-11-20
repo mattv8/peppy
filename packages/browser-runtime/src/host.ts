@@ -247,6 +247,7 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   set_contact_name_pin: { coreCommand: "set_contact_name_pin", mutation: true },
   clear_contact_name_pin: { coreCommand: "clear_contact_name_pin", mutation: true },
   list_contacts: { coreCommand: "list_contacts", mutation: false },
+  list_contacts_page: { coreCommand: "list_contacts_page", mutation: false },
   submit_contact_edit: { coreCommand: "submit_contact_edit", mutation: true },
   list_contact_edits: { coreCommand: "list_contact_edits", mutation: false },
   search_contact_recipients: { coreCommand: "search_contact_recipients", mutation: false },

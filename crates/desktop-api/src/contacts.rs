@@ -155,6 +155,43 @@ pub fn list_sort(value: Option<&Value>) -> ContactResult<Value> {
     Ok(json!({"key": key, "direction": direction}))
 }
 
+pub fn contact_page_input(book_id: &str, request: &Value) -> ContactResult<Value> {
+    if !valid_id(book_id) {
+        return Err(invalid("The contact book is invalid."));
+    }
+    let request = request
+        .as_object()
+        .ok_or_else(|| invalid("The contact page is invalid."))?;
+    let sort = list_sort(request.get("sort").filter(|value| !value.is_null()))?;
+    let mut input =
+        json!({"schema_version": 1, "book_id": book_id, "limit": PAGE_LIMIT, "sort": sort});
+    for (source, target) in [("cursor", "after"), ("through", "through")] {
+        if let Some(value) = request.get(source).filter(|value| !value.is_null()) {
+            let text = value
+                .as_str()
+                .filter(|value| !value.is_empty() && (source != "through" || valid_id(value)))
+                .ok_or_else(|| invalid("The contact page is invalid."))?;
+            input[target] = json!(text);
+        }
+    }
+    Ok(input)
+}
+
+pub fn contact_page_view(raw: &Value, contacts: Vec<Value>) -> ContactResult<Value> {
+    let total = raw
+        .get("total")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid("The contact page is invalid."))?;
+    let mut page = json!({"contacts": contacts, "total": total});
+    if let Some(cursor) = raw.get("next_cursor").and_then(Value::as_str) {
+        page["nextCursor"] = json!(cursor);
+    }
+    if let Some(found) = raw.get("through_found").and_then(Value::as_bool) {
+        page["throughFound"] = json!(found);
+    }
+    Ok(page)
+}
+
 // ---------------------------------------------------------------------------------------------
 // Books
 // ---------------------------------------------------------------------------------------------

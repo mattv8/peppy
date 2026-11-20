@@ -333,6 +333,21 @@ pub fn list_contacts(
             .to_string(),
         ),
     )?;
+    contact_list_view(session, book_id, &raw)
+}
+
+pub fn list_contacts_page(
+    session: &Session,
+    book_id: &str,
+    request: &Value,
+) -> BridgeResult<Value> {
+    let input = shared::contact_page_input(book_id, request).map_err(BridgeError::from)?;
+    let raw = parse_core(session.client.contact_book_view(&input.to_string()))?;
+    let contacts = contact_list_view(session, book_id, &raw)?;
+    shared::contact_page_view(&raw, contacts).map_err(BridgeError::from)
+}
+
+fn contact_list_view(session: &Session, book_id: &str, raw: &Value) -> BridgeResult<Vec<Value>> {
     let contacts = raw
         .get("contacts")
         .and_then(Value::as_array)

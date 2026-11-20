@@ -295,6 +295,67 @@ fn views_are_whitelisted_and_capabilities_follow_the_owner_book() {
 }
 
 #[test]
+fn contact_page_reports_through_and_rejects_invalid_sort() {
+    let h = Harness::new(json!({"read": true, "write": true}), "auto");
+    let page = list_contacts_page(&h.session, BOOK, &json!({"through": "c1"})).unwrap();
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["throughFound"], true);
+    assert_eq!(
+        page["contacts"],
+        json!(list_contacts(&h.session, BOOK, None, None, None).unwrap())
+    );
+    let error = list_contacts_page(
+        &h.session,
+        BOOK,
+        &json!({"sort": {"key": "family", "direction": "up"}}),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "invalid-contact-edit");
+}
+
+#[test]
+fn contact_page_cursor_matches_offset_order() {
+    let mut h = Harness::new(json!({"read": true, "write": true}), "auto");
+    let contacts: Vec<_> = (0..205)
+        .map(|i| {
+            let mut contact = ada();
+            contact["id"] = json!(format!("c-{i:03}"));
+            contact["display_name"] = json!(format!("Contact {i:03}"));
+            contact["name"] = json!({"family": format!("{i:03}")});
+            contact["provenance"]["source_id"] = json!(format!("native:src-{i}"));
+            contact
+        })
+        .collect();
+    h.owner
+        .capture_contact_book(
+            &json!({
+                "schema_version": 1,
+                "book": owner_book(&h.owner_id, json!({"read": true, "write": true}), "auto"),
+                "contacts": contacts,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    h.sync_to_desktop();
+    h.sync_to_desktop();
+    h.sync_to_desktop();
+    let first = list_contacts_page(&h.session, BOOK, &json!({})).unwrap();
+    let second =
+        list_contacts_page(&h.session, BOOK, &json!({"cursor": first["nextCursor"]})).unwrap();
+    let total = first["total"].as_u64().unwrap();
+    assert!(total >= 205);
+    assert_eq!(first["contacts"].as_array().unwrap().len(), 200);
+    assert_eq!(
+        second["contacts"],
+        json!(list_contacts(&h.session, BOOK, None, Some(200), None).unwrap())
+    );
+    assert_eq!(
+        second["contacts"].as_array().unwrap().len() as u64,
+        total - 200
+    );
+}
+
+#[test]
 fn list_contacts_direct_helper_rejects_a_malformed_explicit_sort() {
     let h = Harness::new(json!({"read": true, "write": true, "photo": true}), "auto");
     assert_eq!(

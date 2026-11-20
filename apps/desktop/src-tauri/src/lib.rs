@@ -3520,6 +3520,17 @@ async fn rename_device(
 }
 
 #[tauri::command]
+async fn list_contacts_page(
+    state: State<'_, AppState>,
+    book_id: String,
+    request: serde_json::Value,
+) -> BridgeResult<serde_json::Value> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    blocking(move || contacts::list_contacts_page(&session, &book_id, &request)).await
+}
+
+#[tauri::command]
 async fn list_contacts(
     state: State<'_, AppState>,
     book_id: String,
@@ -7367,6 +7378,7 @@ pub fn run() {
         rename_device,
         list_contact_books,
         list_contacts,
+        list_contacts_page,
         forget_contact_book,
         set_contact_book_lookup,
         list_contact_name_candidates,
