@@ -13,6 +13,8 @@ type LayoutPatch = {
   navigationPosition?: NavigationPosition;
   popoutMode?: PopoutMode;
   contactsDetailWidth?: number;
+  contactsBookCollapsed?: boolean;
+  contactsBookWidth?: number;
   compactTimestamps?: boolean;
   shareTyping?: boolean;
   theme?: "light" | "dark" | "system";
@@ -64,6 +66,15 @@ function readStoredLayout(): StoredLayout | undefined {
 
 export function readContactsDetailWidth(): number | undefined {
   const value = readStoredLayout()?.contactsDetailWidth;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+export function readContactsBookCollapsed(): boolean {
+  return readStoredLayout()?.contactsBookCollapsed === true;
+}
+
+export function readContactsBookWidth(): number | undefined {
+  const value = readStoredLayout()?.contactsBookWidth;
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
