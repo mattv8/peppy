@@ -16,15 +16,19 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use peppy_hosted_api::mcp::{
     McpDeviceState, McpWorkerActivateRequest, McpWorkerCallRequest, McpWorkerCancelRequest,
-    McpWorkerCompleteRequest, McpWorkerPrepareRequest, McpWorkerRevokeRequest,
-    McpWorkerStatusRequest, McpWorkerStatusResponse, McpWorkerWebhookOp, McpWorkerWebhookRequest,
+    McpWorkerCompleteRequest, McpWorkerPrepareRequest, McpWorkerRevokeGrantRequest,
+    McpWorkerRevokeRequest, McpWorkerStatusRequest, McpWorkerStatusResponse, McpWorkerWebhookOp,
+    McpWorkerWebhookRequest,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::{
-    config::WorkerConfig, custody::read_private, enrollment::EnrollmentManager,
-    registry::RuntimeRegistry,
+    config::WorkerConfig,
+    custody::read_private,
+    enrollment::EnrollmentManager,
+    registry::{RevokedGrant, RuntimeRegistry},
+    tools::ToolError,
 };
 
 /// How often abandoned claimants are swept even without enrollment traffic.
@@ -74,6 +78,7 @@ impl WorkerHttp {
             .route("/internal/mcp/cancel", post(cancel))
             .route("/internal/mcp/status", post(status))
             .route("/internal/mcp/revoke", post(revoke))
+            .route("/internal/mcp/revoke-grant", post(revoke_grant))
             .route("/internal/mcp/webhooks", post(webhooks))
             .layer(DefaultBodyLimit::max(64 * 1024));
         let calls = Router::new()
@@ -325,6 +330,24 @@ async fn revoke(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn revoke_grant(
+    State(state): State<WorkerHttp>,
+    headers: HeaderMap,
+    Json(request): Json<McpWorkerRevokeGrantRequest>,
+) -> Result<StatusCode, StatusCode> {
+    authorize(&headers, &state)?;
+    state
+        .runtimes
+        .revoke_grant(RevokedGrant {
+            vault_id: request.vault_id,
+            device_id: request.device_id,
+            grant_id: request.grant_id,
+        })
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn webhooks(
     State(state): State<WorkerHttp>,
     headers: HeaderMap,
@@ -448,7 +471,10 @@ async fn call(
                 .map_err(|_| StatusCode::FORBIDDEN)?;
             crate::tools::call_tool(&runtime, &request)
                 .await
-                .map_err(|_| StatusCode::BAD_REQUEST)?
+                .map_err(|error| match error {
+                    ToolError::Revoked => StatusCode::FORBIDDEN,
+                    _ => StatusCode::BAD_REQUEST,
+                })?
         }
         _ => return Err(StatusCode::BAD_REQUEST),
     };
@@ -468,8 +494,58 @@ async fn call(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn revoke_grant_unknown_runtime_requires_authentication() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let config = crate::config::WorkerConfig {
+            api_url: "http://127.0.0.1:1".into(),
+            public_api_url: "http://127.0.0.1:1".into(),
+            state_dir: root.path().join("state"),
+            key_file: root.path().join("storage-key"),
+            worker_token_file: root.path().join("control-token"),
+            bind_addr: ([127, 0, 0, 1], 0).into(),
+        };
+        let worker = WorkerHttp::new(config.clone()).unwrap();
+        let token = fs::read_to_string(&config.worker_token_file).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/internal/mcp/revoke-grant",
+            listener.local_addr().unwrap()
+        );
+        let server =
+            tokio::spawn(async move { axum::serve(listener, worker.router()).await.unwrap() });
+        let client = reqwest::Client::new();
+        let grant = RevokedGrant {
+            vault_id: uuid::Uuid::new_v4(),
+            device_id: uuid::Uuid::new_v4(),
+            grant_id: uuid::Uuid::new_v4(),
+        };
+        let body = json!({"vault_id":grant.vault_id,"device_id":grant.device_id,"grant_id":grant.grant_id});
+        let bad = client
+            .post(&url)
+            .bearer_auth("wrong")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+        let good = client
+            .post(&url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(good.status(), StatusCode::NO_CONTENT);
+        server.abort();
+        let reopened = RuntimeRegistry::open(config).unwrap();
+        assert!(reopened.has_revoked_grant(grant).await);
+    }
     use super::{WorkerHttp, create_control_token, load_or_create_control_token, subtle_eq};
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use std::{fs, io, net::SocketAddr};
 
     use crate::config::WorkerConfig;
@@ -644,6 +720,262 @@ mod tests {
             .unwrap();
         assert_eq!(accepted.status(), reqwest::StatusCode::NO_CONTENT);
         server.abort();
+    }
+
+    /// Test-only gateway. It answers a valid roster and capability route. While
+    /// armed, the capability response waits at a barrier so a send can be held
+    /// during route selection, before its command write.
+    struct RouteGate {
+        armed: std::sync::atomic::AtomicBool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        roster: Value,
+        capabilities: Value,
+    }
+
+    async fn serve_route_gateway(
+        listener: tokio::net::TcpListener,
+        roster: Value,
+        capabilities: Value,
+    ) -> Arc<RouteGate> {
+        use std::sync::atomic::Ordering;
+        async fn devices(State(gate): State<Arc<RouteGate>>) -> Json<Value> {
+            Json(gate.roster.clone())
+        }
+        async fn capability_route(State(gate): State<Arc<RouteGate>>) -> Json<Value> {
+            if gate.armed.load(Ordering::SeqCst) {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
+            Json(gate.capabilities.clone())
+        }
+        let gate = Arc::new(RouteGate {
+            armed: std::sync::atomic::AtomicBool::new(false),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            roster,
+            capabilities,
+        });
+        let router = Router::new()
+            .route("/v1/devices", get(devices))
+            .route("/v1/capabilities", get(capability_route))
+            .with_state(gate.clone());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        gate
+    }
+
+    struct RouteStack {
+        worker: WorkerHttp,
+        runtime: Arc<crate::runtime::Runtime>,
+        gate: Arc<RouteGate>,
+        control: String,
+        token: String,
+    }
+
+    /// A worker whose runtime routes sends through the test gateway. The control
+    /// route is served over real HTTP, as the host calls it.
+    async fn route_stack(root: &Path) -> RouteStack {
+        let config = WorkerConfig {
+            api_url: "http://127.0.0.1:1".into(),
+            public_api_url: "http://127.0.0.1:1".into(),
+            state_dir: root.join("state"),
+            key_file: root.join("storage-key"),
+            worker_token_file: root.join("control-token"),
+            bind_addr: ([127, 0, 0, 1], 0).into(),
+        };
+        let worker = WorkerHttp::new(config.clone()).unwrap();
+        let token = fs::read_to_string(&config.worker_token_file)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", gateway.local_addr().unwrap());
+        let runtime =
+            crate::runtime::Runtime::test_runtime_for_registry(root.join("runtime"), origin);
+        let gateway_device = uuid::Uuid::new_v4();
+        let roster = json!({"devices":[
+            {"device_id":runtime.device_id().0,"role":"device","revoked":false},
+            {"device_id":gateway_device,"role":"gateway","revoked":false,
+             "presence":{"state":"connected","last_seen_age_seconds":null}}
+        ]});
+        let capabilities = json!({"capabilities":[{"device_id":gateway_device,"simulator":false,
+            "capabilities":{"sims":[{"subscription_id":"sim-1","sms":"available",
+            "mms":"available","mms_content_version":2}]}}]});
+        let gate = serve_route_gateway(gateway, roster, capabilities).await;
+        let vault_id = runtime.vault_id().0;
+        worker.runtimes.insert(runtime).await.unwrap();
+        let runtime = worker.runtimes.get(vault_id).await.unwrap();
+
+        let control_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control = format!("http://{}", control_listener.local_addr().unwrap());
+        let served = worker.clone();
+        tokio::spawn(async move {
+            axum::serve(control_listener, served.router())
+                .await
+                .unwrap()
+        });
+        RouteStack {
+            worker,
+            runtime,
+            gate,
+            control,
+            token,
+        }
+    }
+
+    fn send_request(
+        runtime: &crate::runtime::Runtime,
+        grant_id: uuid::Uuid,
+        name: &str,
+        arguments: Value,
+    ) -> McpWorkerCallRequest {
+        McpWorkerCallRequest {
+            vault_id: runtime.vault_id().0,
+            device_id: runtime.device_id().0,
+            grant_id,
+            scopes: vec![
+                peppy_hosted_api::mcp::McpScope::MessagesSend,
+                peppy_hosted_api::mcp::McpScope::MediaSend,
+            ],
+            request: json!({"params":{"name":name,"arguments":arguments}}),
+        }
+    }
+
+    /// Runs one tool call the way the HTTP `tools/call` path does: the work guard
+    /// is held for the whole call.
+    async fn call_under_work_guard(
+        runtime: Arc<crate::runtime::Runtime>,
+        request: McpWorkerCallRequest,
+    ) -> Result<Value, ToolError> {
+        let _work = runtime.work_guard().await;
+        crate::tools::call_tool(&runtime, &request).await
+    }
+
+    async fn post_revoke_grant(
+        control: String,
+        token: String,
+        grant: RevokedGrant,
+    ) -> reqwest::StatusCode {
+        reqwest::Client::new()
+            .post(format!("{control}/internal/mcp/revoke-grant"))
+            .bearer_auth(token)
+            .json(&json!({"vault_id":grant.vault_id,"device_id":grant.device_id,"grant_id":grant.grant_id}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+    }
+
+    fn queued_message_id(result: &Value) -> Value {
+        assert_eq!(result["isError"], false, "{result}");
+        let payload: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["status"], "queued");
+        payload["message_id"].clone()
+    }
+
+    #[tokio::test]
+    async fn revoke_waits_for_a_send_routing_at_the_barrier_and_refuses_its_write() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        let root = tempfile::tempdir().unwrap();
+        let stack = route_stack(root.path()).await;
+        let grant = RevokedGrant {
+            vault_id: stack.runtime.vault_id().0,
+            device_id: stack.runtime.device_id().0,
+            grant_id: uuid::Uuid::new_v4(),
+        };
+        let arguments =
+            json!({"recipients":["15551234567"],"text":"held","idempotency_key":"held"});
+        stack.gate.armed.store(true, Ordering::SeqCst);
+        let call = tokio::spawn(call_under_work_guard(
+            stack.runtime.clone(),
+            send_request(&stack.runtime, grant.grant_id, "send_message", arguments),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), stack.gate.entered.notified())
+            .await
+            .expect("the send never reached route selection");
+
+        let revoke = tokio::spawn(post_revoke_grant(
+            stack.control.clone(),
+            stack.token.clone(),
+            grant,
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !stack.worker.runtimes.has_revoked_grant(grant).await {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the tombstone was not recorded");
+        assert!(
+            !revoke.is_finished(),
+            "revoke-grant was acknowledged while the send held the work guard"
+        );
+
+        stack.gate.armed.store(false, Ordering::SeqCst);
+        stack.gate.release.notify_one();
+        let refused = call.await.unwrap();
+        assert!(matches!(refused, Err(ToolError::Revoked)), "{refused:?}");
+        assert_eq!(revoke.await.unwrap(), StatusCode::NO_CONTENT);
+        assert_eq!(stack.runtime.client().pending_outbox_count().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn send_queued_before_revoke_replays_and_later_fresh_writes_are_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let stack = route_stack(root.path()).await;
+        let grant = RevokedGrant {
+            vault_id: stack.runtime.vault_id().0,
+            device_id: stack.runtime.device_id().0,
+            grant_id: uuid::Uuid::new_v4(),
+        };
+        let before =
+            |key: &str| json!({"recipients":["15551234567"],"text":"before","idempotency_key":key});
+        let queued = call_under_work_guard(
+            stack.runtime.clone(),
+            send_request(
+                &stack.runtime,
+                grant.grant_id,
+                "send_message",
+                before("before"),
+            ),
+        )
+        .await
+        .unwrap();
+        let message_id = queued_message_id(&queued);
+        assert_eq!(stack.runtime.client().pending_outbox_count().unwrap(), 1);
+
+        assert_eq!(
+            post_revoke_grant(stack.control.clone(), stack.token.clone(), grant).await,
+            StatusCode::NO_CONTENT
+        );
+
+        let replay = call_under_work_guard(
+            stack.runtime.clone(),
+            send_request(
+                &stack.runtime,
+                grant.grant_id,
+                "send_message",
+                before("before"),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(queued_message_id(&replay), message_id);
+
+        let fresh = call_under_work_guard(
+            stack.runtime.clone(),
+            send_request(
+                &stack.runtime,
+                grant.grant_id,
+                "send_message",
+                before("after"),
+            ),
+        )
+        .await;
+        assert!(matches!(fresh, Err(ToolError::Revoked)), "{fresh:?}");
+        assert_eq!(stack.runtime.client().pending_outbox_count().unwrap(), 1);
     }
 
     #[tokio::test]

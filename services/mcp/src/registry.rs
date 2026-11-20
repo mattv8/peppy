@@ -23,13 +23,15 @@ use uuid::Uuid;
 
 use crate::{
     config::WorkerConfig,
-    custody::Custody,
+    custody::{Custody, CustodyError},
     enrollment::{EnrollmentError, EnrollmentManager},
     runtime::{Runtime, RuntimeError},
 };
 
 const REGISTRY_RECORD: &str = "runtimes";
 const REGISTRY_AAD: &[u8] = b"peppy-mcp-runtime-registry-v1";
+const REVOKED_GRANTS_RECORD: &str = "revoked-grants";
+const REVOKED_GRANTS_AAD: &[u8] = b"peppy-mcp-revoked-grants-v1";
 
 /// Process-lifetime ownership of the complete persistent worker state. The
 /// lock is acquired before local state is opened or the private listener binds.
@@ -78,6 +80,15 @@ struct RevokedFence {
     device_id: Uuid,
 }
 
+/// A grant the host revoked. Its tombstone is durable, so writes stay refused
+/// across restarts, including when the vault has no runtime at all.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RevokedGrant {
+    pub vault_id: Uuid,
+    pub device_id: Uuid,
+    pub grant_id: Uuid,
+}
+
 #[derive(Deserialize, Serialize)]
 struct RegistryRecord {
     #[serde(default)]
@@ -107,6 +118,7 @@ struct RegistryContext {
     webhooks: Arc<crate::webhooks::engine::WebhookEngine>,
     identities: Arc<Mutex<HashMap<Uuid, RuntimeIdentity>>>,
     revoked_fences: Arc<Mutex<Vec<RevokedFence>>>,
+    revoked_grants: Arc<Mutex<Vec<RevokedGrant>>>,
     runtimes: Arc<Mutex<HashMap<Uuid, Arc<Runtime>>>>,
     tasks: Arc<Mutex<HashMap<Uuid, SyncTask>>>,
     cleanup_task: Arc<Mutex<Option<JoinHandle<()>>>>,
@@ -152,6 +164,7 @@ impl RuntimeRegistry {
                 identities: Vec::new(),
                 revoked_fences: Vec::new(),
             });
+        let revoked_grants = Arc::new(Mutex::new(load_revoked_grants(&custody)?));
         let mut runtimes = HashMap::new();
         let mut identity_map = HashMap::new();
         for identity in record.identities {
@@ -169,7 +182,8 @@ impl RuntimeRegistry {
                 vault_id,
                 device_id,
             ) {
-                Ok(runtime) => {
+                Ok(mut runtime) => {
+                    runtime.attach_grant_fence(revoked_grants.clone());
                     runtimes.insert(identity.vault_id, Arc::new(runtime));
                 }
                 Err(error) => log_failure(outcome_category(&error), identity.vault_id, &error),
@@ -188,6 +202,7 @@ impl RuntimeRegistry {
                 webhooks,
                 identities: Arc::new(Mutex::new(identity_map)),
                 revoked_fences: Arc::new(Mutex::new(record.revoked_fences)),
+                revoked_grants,
                 runtimes: Arc::new(Mutex::new(runtimes)),
                 tasks: Arc::new(Mutex::new(HashMap::new())),
                 cleanup_task: Arc::new(Mutex::new(None)),
@@ -295,6 +310,8 @@ impl RuntimeRegistry {
                 return Ok(());
             }
         }
+        let mut runtime = runtime;
+        runtime.attach_grant_fence(self.context.revoked_grants.clone());
         let runtime = Arc::new(runtime);
         let mut identities = self.context.identities.lock().await;
         let mut next = identities.clone();
@@ -356,6 +373,40 @@ impl RuntimeRegistry {
     /// has been removed, so a failed cleanup is retried after restart.
     pub async fn revoke(&self, vault_id: Uuid, device_id: Uuid) -> Result<(), RuntimeError> {
         revoke_registered(&self.context, vault_id, device_id).await
+    }
+
+    /// Durably refuses new writes for one grant. The tombstone is persisted
+    /// under the registry mutation lock even when no runtime exists. An
+    /// in-flight call holding the runtime's work guard then finishes before
+    /// this returns, so the acknowledgement follows any write it could make.
+    pub async fn revoke_grant(&self, grant: RevokedGrant) -> Result<(), RuntimeError> {
+        {
+            let _mutation = self.context.mutation.lock().await;
+            let mut grants = self.context.revoked_grants.lock().await;
+            if !grants.contains(&grant) {
+                let mut next = grants.clone();
+                next.push(grant);
+                if let Err(error) = persist_revoked_grants(&self.context.custody, &next) {
+                    tracing::warn!(
+                        category = "revoke_grant",
+                        vault = %short_vault_id(grant.vault_id),
+                        failure = persistence_category(&error),
+                        "mcp grant tombstone could not be persisted"
+                    );
+                    return Err(error);
+                }
+                *grants = next;
+            }
+        }
+        if let Some(runtime) = self.get(grant.vault_id).await {
+            drop(runtime.work_guard().await);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_revoked_grant(&self, grant: RevokedGrant) -> bool {
+        self.context.revoked_grants.lock().await.contains(&grant)
     }
 
     pub async fn shutdown(&self) {
@@ -621,6 +672,16 @@ fn log_failure(category: &'static str, vault_id: Uuid, error: &RuntimeError) {
     );
 }
 
+/// Names the failing storage step without the error text, which can carry paths.
+fn persistence_category(error: &RuntimeError) -> &'static str {
+    match error {
+        RuntimeError::Custody(CustodyError::Io(_)) => "custody_io",
+        RuntimeError::Custody(CustodyError::Invalid) => "custody_invalid",
+        RuntimeError::Custody(CustodyError::Crypto) => "custody_crypto",
+        _ => "persist",
+    }
+}
+
 fn outcome_category(error: &RuntimeError) -> &'static str {
     match error {
         RuntimeError::NeedsApproval => "needs_approval",
@@ -745,6 +806,23 @@ fn persist_identities(
     Ok(())
 }
 
+fn load_revoked_grants(custody: &Custody) -> Result<Vec<RevokedGrant>, RuntimeError> {
+    // A tombstone record that cannot be opened fails closed: the worker needs
+    // approval rather than starting with fewer refusals than the host sent.
+    custody
+        .load(REVOKED_GRANTS_RECORD, REVOKED_GRANTS_AAD)?
+        .map(|bytes| serde_json::from_slice::<Vec<RevokedGrant>>(&bytes))
+        .transpose()
+        .map(Option::unwrap_or_default)
+        .map_err(|_| RuntimeError::NeedsApproval)
+}
+
+fn persist_revoked_grants(custody: &Custody, grants: &[RevokedGrant]) -> Result<(), RuntimeError> {
+    let bytes = serde_json::to_vec(grants).map_err(|_| RuntimeError::Core)?;
+    custody.store(REVOKED_GRANTS_RECORD, REVOKED_GRANTS_AAD, &bytes)?;
+    Ok(())
+}
+
 pub fn vault_state_dir(state_dir: &Path, vault_id: Uuid) -> PathBuf {
     state_dir.join("vaults").join(vault_id.to_string())
 }
@@ -771,8 +849,9 @@ mod tests {
     };
 
     use super::{
-        RevokedFence, RuntimeIdentity, RuntimeRegistry, StateLock, await_webhook_work,
-        is_stop_requested, outcome_category, persist_identities, short_vault_id, vault_state_dir,
+        RevokedFence, RevokedGrant, RuntimeIdentity, RuntimeRegistry, StateLock,
+        await_webhook_work, is_stop_requested, outcome_category, persist_identities,
+        short_vault_id, vault_state_dir,
     };
     use crate::{
         config::WorkerConfig,
@@ -1262,6 +1341,69 @@ mod tests {
             vault_id,
             device_id: device_b
         }));
+    }
+
+    #[tokio::test]
+    async fn revoked_grant_tombstones_survive_restart_even_without_a_runtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config(&directory);
+        let registry = RuntimeRegistry::open(config.clone()).unwrap();
+        let grant = RevokedGrant {
+            vault_id: Uuid::new_v4(),
+            device_id: Uuid::new_v4(),
+            grant_id: Uuid::new_v4(),
+        };
+
+        registry.revoke_grant(grant).await.unwrap();
+        drop(registry);
+
+        let reopened = RuntimeRegistry::open(config).unwrap();
+        assert!(reopened.has_revoked_grant(grant).await);
+    }
+
+    #[tokio::test]
+    async fn revoke_grant_waits_for_in_flight_work_before_returning() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = RuntimeRegistry::open(config(&directory)).unwrap();
+        let runtime = Runtime::test_runtime_for_registry(
+            directory.path().join("runtime"),
+            "http://127.0.0.1:1".into(),
+        );
+        let grant = RevokedGrant {
+            vault_id: runtime.vault_id().0,
+            device_id: runtime.device_id().0,
+            grant_id: Uuid::new_v4(),
+        };
+        registry.insert(runtime).await.unwrap();
+        let runtime = registry.get(grant.vault_id).await.unwrap();
+        let in_flight = runtime.work_guard().await;
+
+        let mut revoke = Box::pin(registry.revoke_grant(grant));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut revoke)
+                .await
+                .is_err(),
+            "revoke-grant acknowledged while a call still held the work guard"
+        );
+        drop(in_flight);
+        revoke.await.unwrap();
+        assert!(registry.has_revoked_grant(grant).await);
+    }
+
+    #[tokio::test]
+    async fn revoke_grant_persistence_failure_is_not_acknowledged() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config(&directory);
+        let registry = RuntimeRegistry::open(config.clone()).unwrap();
+        fs::remove_dir_all(config.state_dir.join("registry-custody")).unwrap();
+        let grant = RevokedGrant {
+            vault_id: Uuid::new_v4(),
+            device_id: Uuid::new_v4(),
+            grant_id: Uuid::new_v4(),
+        };
+
+        assert!(registry.revoke_grant(grant).await.is_err());
+        assert!(!registry.has_revoked_grant(grant).await);
     }
 
     #[tokio::test]

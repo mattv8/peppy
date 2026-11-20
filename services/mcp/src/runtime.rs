@@ -8,7 +8,10 @@ use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::custody::{Custody, CustodyError};
+use crate::{
+    custody::{Custody, CustodyError},
+    registry::RevokedGrant,
+};
 
 const RECORD_NAME: &str = "runtime";
 const MAX_CONTROL_RESPONSE_BYTES: usize = 8 * 1024 * 1024 + 64 * 1024;
@@ -89,11 +92,29 @@ pub struct Runtime {
     last_synced_at: Arc<Mutex<Option<SystemTime>>>,
     work: Mutex<()>,
     sync_notify: Arc<Notify>,
+    /// Registry-owned tombstones. Shared, so a revoke-grant applies to every
+    /// runtime without taking the registry mutation lock on the write path.
+    grant_fence: Arc<Mutex<Vec<RevokedGrant>>>,
     #[cfg(test)]
     panic_next_sync: std::sync::atomic::AtomicBool,
 }
 
 impl Runtime {
+    pub(crate) fn attach_grant_fence(&mut self, grants: Arc<Mutex<Vec<RevokedGrant>>>) {
+        self.grant_fence = grants;
+    }
+
+    /// True once the host revoked this grant on this vault and device. Checked
+    /// under the work guard, immediately before each durable write.
+    pub(crate) async fn grant_revoked(&self, grant_id: Uuid) -> bool {
+        let grant = RevokedGrant {
+            vault_id: self.vault_id.0,
+            device_id: self.device_id.0,
+            grant_id,
+        };
+        self.grant_fence.lock().await.contains(&grant)
+    }
+
     #[cfg(test)]
     pub(crate) fn test_runtime_for_registry(path: PathBuf, origin: String) -> Self {
         let vault_id = VaultId(Uuid::new_v4());
@@ -123,6 +144,7 @@ impl Runtime {
             last_synced_at: Arc::new(Mutex::new(None)),
             work: Mutex::new(()),
             sync_notify: Arc::new(Notify::new()),
+            grant_fence: Arc::default(),
             #[cfg(test)]
             panic_next_sync: std::sync::atomic::AtomicBool::new(false),
         }
@@ -237,6 +259,7 @@ impl Runtime {
             last_synced_at: Arc::new(Mutex::new(None)),
             work: Mutex::new(()),
             sync_notify: Arc::new(Notify::new()),
+            grant_fence: Arc::default(),
             #[cfg(test)]
             panic_next_sync: std::sync::atomic::AtomicBool::new(false),
         })
@@ -1047,6 +1070,7 @@ mod tests {
             last_synced_at: Arc::new(Mutex::new(None)),
             work: Mutex::new(()),
             sync_notify: Arc::new(Notify::new()),
+            grant_fence: Arc::default(),
             panic_next_sync: std::sync::atomic::AtomicBool::new(false),
         }
     }

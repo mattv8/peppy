@@ -44,7 +44,14 @@ pub enum ToolError {
     Forbidden,
     #[error("runtime identity does not match request")]
     IdentityMismatch,
+    /// The host revoked this grant. Answered like a revoked device: forbidden.
+    #[error("grant has been revoked")]
+    Revoked,
 }
+
+/// Refusal for a new write under a revoked grant. Replays of an existing
+/// receipt are answered before this check, so they stay allowed.
+const REVOKED_GRANT: (&str, &str) = ("revoked_grant", "The grant has been revoked.");
 
 pub fn list_tools(scopes: &[McpScope]) -> Value {
     let mut tools = Vec::new();
@@ -130,6 +137,9 @@ pub async fn call_tool(
         "send_reaction_text" => send_reaction_text(runtime, request, &arguments).await,
         _ => Err(("unknown_tool", "Unknown tool.")),
     };
+    if matches!(&result, Err((code, _)) if *code == REVOKED_GRANT.0) {
+        return Err(ToolError::Revoked);
+    }
     Ok(match result {
         Ok(value) if value.get("content").is_some() => value,
         Ok(value) => success(value),
@@ -303,6 +313,7 @@ async fn send_image(
             json!({"message_id":queued.message_id,"command_id":queued.command_id,"conversation_id":queued.conversation_id,"attachment_ids":queued.attachment_ids,"status":"queued"}),
         );
     }
+    ensure_grant_writable(runtime, request).await?;
     let recipients = recipients(args)?;
     let conversation_id = conversation(args)?;
     let body = optional_text(args)?;
@@ -402,6 +413,18 @@ struct SendContent {
     attachment_ids: Vec<AttachmentId>,
 }
 
+/// Runs under the runtime's work guard, immediately before a durable command write.
+async fn ensure_grant_writable(
+    runtime: &Runtime,
+    request: &McpWorkerCallRequest,
+) -> Result<(), (&'static str, &'static str)> {
+    if runtime.grant_revoked(request.grant_id).await {
+        Err(REVOKED_GRANT)
+    } else {
+        Ok(())
+    }
+}
+
 async fn queue(
     runtime: &Runtime,
     request: &McpWorkerCallRequest,
@@ -467,6 +490,7 @@ async fn queue_with_conversation(
         Ok(route) => route,
         Err(result) => return Ok(result),
     };
+    ensure_grant_writable(runtime, request).await?;
     let queued = runtime
         .client()
         .queue_mcp_command(McpCommand {
@@ -1010,6 +1034,76 @@ mod tests {
         assert_eq!(tool_error_code(&repeated), "no_gateway");
         assert_eq!(file_inventory(directory.path()), before);
         assert_eq!(runtime.client().pending_outbox_count().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn revoked_grant_refuses_new_writes_and_replays_its_receipt() {
+        use peppy_client_core::Transport;
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime = Runtime::test_runtime_for_registry(
+            directory.path().to_owned(),
+            "http://127.0.0.1:1".into(),
+        );
+        let grants = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        runtime.attach_grant_fence(grants.clone());
+        let grant_id = Uuid::new_v4();
+        let request = |name, arguments| McpWorkerCallRequest {
+            vault_id: runtime.vault_id().0,
+            device_id: runtime.device_id().0,
+            grant_id,
+            scopes: vec![McpScope::MessagesSend, McpScope::MediaSend],
+            request: json!({"params":{"name":name,"arguments":arguments}}),
+        };
+        let arguments =
+            json!({"recipients":["15551234567"],"text":"hello","idempotency_key":"replay"});
+        let request_hash = canonical_request_hash("send_message", &arguments).unwrap();
+        let receipt = runtime
+            .client()
+            .queue_mcp_command(McpCommand {
+                grant_id,
+                tool: "send_message".into(),
+                idempotency_key: "replay".into(),
+                conversation_id: ConversationId::new(),
+                recipients: vec!["15551234567".into()],
+                body: "hello".into(),
+                attachment_ids: Vec::new(),
+                route: GatewayRoute::Carrier {
+                    gateway_device_id: peppy_client_core::DeviceId::new(),
+                    subscription_id: "sim-1".into(),
+                },
+                expected_transport: Transport::Sms,
+                request_hash,
+            })
+            .unwrap();
+        grants.lock().await.push(crate::registry::RevokedGrant {
+            vault_id: runtime.vault_id().0,
+            device_id: runtime.device_id().0,
+            grant_id,
+        });
+
+        let replay = call_tool(&runtime, &request("send_message", arguments))
+            .await
+            .unwrap();
+        let replayed: Value =
+            serde_json::from_str(replay["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(replayed["status"], "queued");
+        assert_eq!(replayed["message_id"], json!(receipt.message_id));
+
+        let outbox = runtime.client().pending_outbox_count().unwrap();
+        let before = file_inventory(directory.path());
+        let image = png(1, 1);
+        let refused = call_tool(
+            &runtime,
+            &request(
+                "send_image",
+                json!({"recipients":["15551234567"],"image":format!("data:image/png;base64,{}", STANDARD.encode(image)),"idempotency_key":"fresh"}),
+            ),
+        )
+        .await;
+        assert!(matches!(refused, Err(ToolError::Revoked)));
+        assert_eq!(file_inventory(directory.path()), before);
+        assert_eq!(runtime.client().pending_outbox_count().unwrap(), outbox);
     }
 
     fn tool_error_code(result: &Value) -> String {
