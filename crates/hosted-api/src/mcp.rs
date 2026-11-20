@@ -365,6 +365,15 @@ pub struct McpWorkerRevokeRequest {
     pub device_id: Uuid,
 }
 
+/// Host-to-worker fence for a revoked grant. The worker must durably refuse further writes for it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct McpWorkerRevokeGrantRequest {
+    pub vault_id: Uuid,
+    pub device_id: Uuid,
+    pub grant_id: Uuid,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpWorkerCallRequest {
@@ -403,9 +412,9 @@ pub struct McpWorkerWebhookRequest {
 #[cfg(test)]
 mod tests {
     use super::{
-        MCP_TOOL_SCOPES, McpDeviceState, McpDeviceStatus, McpScope, McpWorkerStatusRequest,
-        McpWorkerStatusResponse, McpWorkerWebhookRequest, WebhookEvent, WebhookFilterMode,
-        WebhookInput, mcp_scopes_allow, mcp_tool_scopes,
+        MCP_TOOL_SCOPES, McpDeviceState, McpDeviceStatus, McpScope, McpWorkerRevokeGrantRequest,
+        McpWorkerStatusRequest, McpWorkerStatusResponse, McpWorkerWebhookRequest, WebhookEvent,
+        WebhookFilterMode, WebhookInput, mcp_scopes_allow, mcp_tool_scopes,
     };
     use uuid::Uuid;
 
@@ -557,6 +566,38 @@ mod tests {
                 "state": "online",
                 "last_synced_at": null,
             })
+        );
+    }
+
+    #[test]
+    fn worker_revoke_grant_request_round_trips_and_rejects_unknown_fields() {
+        let request = McpWorkerRevokeGrantRequest {
+            vault_id: Uuid::nil(),
+            device_id: Uuid::from_u128(1),
+            grant_id: Uuid::from_u128(2),
+        };
+        let value = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "vault_id": Uuid::nil(),
+                "device_id": Uuid::from_u128(1),
+                "grant_id": Uuid::from_u128(2),
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<McpWorkerRevokeGrantRequest>(value).unwrap(),
+            request
+        );
+        assert!(
+            serde_json::from_value::<McpWorkerRevokeGrantRequest>(serde_json::json!({
+                "vault_id": Uuid::nil(),
+                "device_id": Uuid::from_u128(1),
+                "grant_id": Uuid::from_u128(2),
+                "unexpected": true,
+            }))
+            .is_err()
         );
     }
 }

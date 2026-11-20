@@ -34,6 +34,28 @@ struct WorkerState {
     block: Arc<std::sync::atomic::AtomicBool>,
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
+    fences: Arc<Mutex<Vec<peppy_hosted_api::mcp::McpWorkerRevokeGrantRequest>>>,
+    fence_status: Arc<std::sync::atomic::AtomicU16>,
+    fence_block: Arc<std::sync::atomic::AtomicBool>,
+    fence_block_id: Arc<Mutex<Option<Uuid>>>,
+    fence_entered: Arc<tokio::sync::Notify>,
+    fence_release: Arc<tokio::sync::Notify>,
+}
+
+async fn worker_revoke_grant(
+    State(state): State<WorkerState>,
+    Json(request): Json<peppy_hosted_api::mcp::McpWorkerRevokeGrantRequest>,
+) -> StatusCode {
+    let grant_id = request.grant_id;
+    state.fences.lock().unwrap().push(request);
+    if state.fence_block.load(std::sync::atomic::Ordering::SeqCst)
+        && *state.fence_block_id.lock().unwrap() == Some(grant_id)
+    {
+        state.fence_entered.notify_one();
+        state.fence_release.notified().await;
+    }
+    StatusCode::from_u16(state.fence_status.load(std::sync::atomic::Ordering::SeqCst))
+        .unwrap_or(StatusCode::NO_CONTENT)
 }
 
 async fn worker_call(
@@ -133,6 +155,8 @@ struct Fixture {
     other_device: Uuid,
     other_token: String,
     _control_token: NamedTempFile,
+    server: peppy_server::Server,
+    second_server: peppy_server::Server,
 }
 
 impl Fixture {
@@ -168,6 +192,7 @@ impl Fixture {
         let worker_addr = listener.local_addr().unwrap();
         let worker_router = Router::new()
             .route("/internal/mcp/call", post(worker_call))
+            .route("/internal/mcp/revoke-grant", post(worker_revoke_grant))
             .with_state(worker.clone());
         let worker_task = tokio::spawn(async move {
             axum::serve(listener, worker_router).await.unwrap();
@@ -193,12 +218,17 @@ impl Fixture {
             web_client: None,
             web_live_trusted_origin: None,
         };
-        let router = ServerBuilder::new(config, pool.clone())
+        let second_server = ServerBuilder::new(config.clone(), pool.clone())
+            .access_policy(policy.clone())
+            .build()
+            .await
+            .unwrap();
+        let server = ServerBuilder::new(config, pool.clone())
             .access_policy(policy)
             .build()
             .await
-            .unwrap()
-            .router();
+            .unwrap();
+        let router = server.router();
         Self {
             admin,
             pool,
@@ -213,6 +243,8 @@ impl Fixture {
             other_device,
             other_token,
             _control_token: control_token,
+            server,
+            second_server,
         }
     }
 
@@ -370,6 +402,212 @@ fn list() -> serde_json::Value {
 }
 fn call(name: &str) -> serde_json::Value {
     serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":{}}})
+}
+
+#[tokio::test]
+async fn sweep_skips_locked_head_and_concurrent_sweepers_do_not_duplicate_claim() {
+    let mut fixture = Fixture::new().await;
+    let device: Uuid = sqlx::query_scalar("SELECT device_id FROM mcp_grants WHERE id=$1")
+        .bind(fixture.grant)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    for _ in 0..32 {
+        sqlx::query("INSERT INTO mcp_grants(id,vault_id,device_id,client_name,scopes,revoked_at,fence_pending,fence_next_at) VALUES($1,$2,$3,'locked',ARRAY['conversations:read'],now(),true,now()-interval '2 minutes')")
+            .bind(Uuid::new_v4()).bind(fixture.vault).bind(device)
+            .execute(&fixture.pool).await.unwrap();
+    }
+    sqlx::query("UPDATE mcp_grants SET revoked_at=now(),fence_pending=true,fence_next_at=now()-interval '1 minute' WHERE id=$1")
+        .bind(fixture.grant).execute(&fixture.pool).await.unwrap();
+    let later_grant = Uuid::new_v4();
+    sqlx::query("INSERT INTO mcp_grants(id,vault_id,device_id,client_name,scopes,revoked_at,fence_pending,fence_next_at) VALUES($1,$2,$3,'later',ARRAY['conversations:read'],now(),true,now()-interval '30 seconds')")
+        .bind(later_grant).bind(fixture.vault).bind(device).execute(&fixture.pool).await.unwrap();
+    let mut lock = fixture.pool.begin().await.unwrap();
+    let locked: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM mcp_grants WHERE client_name='locked' FOR UPDATE")
+            .fetch_all(&mut *lock)
+            .await
+            .unwrap();
+    assert_eq!(locked.len(), 32);
+    fixture
+        .worker
+        .fence_block
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    *fixture.worker.fence_block_id.lock().unwrap() = Some(fixture.grant);
+    fixture.server.start_maintenance().unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture.worker.fence_entered.notified(),
+    )
+    .await
+    .expect("sweep must reach unlocked grant");
+    fixture.second_server.start_maintenance().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fixture
+                .worker
+                .fences
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|fence| fence.grant_id == later_grant)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("second sweeper must make progress while the first holds its claim");
+    assert_eq!(fixture.worker.fences.lock().unwrap().len(), 2);
+    assert_eq!(
+        fixture.worker.fences.lock().unwrap()[0].grant_id,
+        fixture.grant
+    );
+    fixture.worker.fence_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let pending: bool =
+                sqlx::query_scalar("SELECT fence_pending FROM mcp_grants WHERE id=$1")
+                    .bind(fixture.grant)
+                    .fetch_one(&fixture.pool)
+                    .await
+                    .unwrap();
+            if !pending {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    lock.rollback().await.unwrap();
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn instance_device_revoke_marks_grants_and_cleanup_pending() {
+    let fixture = Fixture::new().await;
+    let token = "d".repeat(96);
+    let device: Uuid = sqlx::query_scalar("SELECT device_id FROM mcp_grants WHERE id=$1")
+        .bind(fixture.grant)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO vault_owners(vault_id,username,password_hash,is_admin,operation_id,request_digest) VALUES($1,'owner','hash',TRUE,$2,$3)")
+        .bind(fixture.vault).bind(Uuid::new_v4()).bind(vec![1u8; 32]).execute(&fixture.pool).await.unwrap();
+    sqlx::query("INSERT INTO instance_sessions(token_digest,vault_id,expires_at) VALUES($1,$2,now()+interval '1 hour')")
+        .bind(Sha256::digest(token.as_bytes()).as_slice()).bind(fixture.vault).execute(&fixture.pool).await.unwrap();
+    fixture
+        .worker
+        .fence_status
+        .store(500, std::sync::atomic::Ordering::SeqCst);
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/instance/devices/{device}/revoke"))
+                .header("peppy-instance-session", token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let state: (bool, bool, bool) = sqlx::query_as("SELECT g.revoked_at IS NOT NULL,g.fence_pending,d.cleanup_pending FROM mcp_grants g JOIN mcp_devices d ON d.vault_id=g.vault_id AND d.device_id=g.device_id WHERE g.id=$1")
+        .bind(fixture.grant).fetch_one(&fixture.pool).await.unwrap();
+    assert_eq!(state, (true, true, true));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn revoked_grant_retries_failed_fence_and_sweep_clears_it() {
+    let mut fixture = Fixture::new().await;
+    let owner = Uuid::new_v4();
+    let token = "c".repeat(96);
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch,name,kind) VALUES($1,$2,'owner','{}',$3,1,'owner','desktop')")
+        .bind(fixture.vault).bind(owner).bind("11".repeat(32)).execute(&fixture.pool).await.unwrap();
+    sqlx::query("INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)")
+        .bind(Sha256::digest(token.as_bytes()).as_slice())
+        .bind(fixture.vault)
+        .bind(owner)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let device: Uuid = sqlx::query_scalar("SELECT device_id FROM mcp_grants WHERE id=$1")
+        .bind(fixture.grant)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    fixture
+        .worker
+        .fence_status
+        .store(404, std::sync::atomic::Ordering::SeqCst);
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/mcp/grants/{}/revoke", fixture.grant))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let state: (bool, i32) =
+                sqlx::query_as("SELECT fence_pending,fence_attempts FROM mcp_grants WHERE id=$1")
+                    .bind(fixture.grant)
+                    .fetch_one(&fixture.pool)
+                    .await
+                    .unwrap();
+            if state.1 == 1 {
+                assert!(state.0);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        fixture.worker.fences.lock().unwrap().as_slice(),
+        &[peppy_hosted_api::mcp::McpWorkerRevokeGrantRequest {
+            vault_id: fixture.vault,
+            device_id: device,
+            grant_id: fixture.grant,
+        }]
+    );
+    fixture
+        .worker
+        .fence_status
+        .store(204, std::sync::atomic::Ordering::SeqCst);
+    sqlx::query("UPDATE mcp_grants SET fence_next_at=now() WHERE id=$1")
+        .bind(fixture.grant)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    fixture.server.start_maintenance().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let pending: bool =
+                sqlx::query_scalar("SELECT fence_pending FROM mcp_grants WHERE id=$1")
+                    .bind(fixture.grant)
+                    .fetch_one(&fixture.pool)
+                    .await
+                    .unwrap();
+            if !pending {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fixture.worker.fences.lock().unwrap().len(), 2);
+    fixture.cleanup().await;
 }
 
 #[tokio::test]

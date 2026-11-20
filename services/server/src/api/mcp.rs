@@ -66,6 +66,17 @@ pub(super) async fn cleanup_pending_once(
     pool: &sqlx::PgPool,
     worker: &McpWorkerClient,
 ) -> Result<(), sqlx::Error> {
+    for _ in 0..32 {
+        let mut tx = pool.begin().await?;
+        let grant = sqlx::query("SELECT id,vault_id,device_id,fence_attempts FROM mcp_grants WHERE fence_pending AND fence_next_at <= now() ORDER BY fence_next_at LIMIT 1 FOR UPDATE SKIP LOCKED")
+            .fetch_optional(&mut *tx).await?;
+        let Some(grant) = grant else {
+            tx.commit().await?;
+            break;
+        };
+        send_grant_fence(&mut tx, worker, grant).await?;
+        tx.commit().await?;
+    }
     let candidates = sqlx::query(
         "SELECT id,vault_id FROM mcp_operations WHERE (state IN ('prepared','activated') AND expires_at <= clock_timestamp()) OR cleanup_pending",
     )
@@ -136,6 +147,92 @@ pub(super) async fn cleanup_pending_once(
         tx.commit().await?;
     }
     Ok(())
+}
+
+const FENCE_BACKOFF_INITIAL_SECONDS: i32 = 30;
+const FENCE_BACKOFF_MAX_SECONDS: i32 = 3600;
+
+async fn attempt_grant_fence(
+    pool: &sqlx::PgPool,
+    worker: &McpWorkerClient,
+    vault_id: Uuid,
+    grant_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut tx = scope::begin(pool, vault_id).await?;
+    let grant = sqlx::query("SELECT id,vault_id,device_id,fence_attempts FROM mcp_grants WHERE vault_id=$1 AND id=$2 AND fence_pending AND fence_next_at <= now() FOR UPDATE SKIP LOCKED")
+        .bind(vault_id).bind(grant_id).fetch_optional(&mut *tx).await?;
+    if let Some(grant) = grant {
+        send_grant_fence(&mut tx, worker, grant).await?;
+    }
+    tx.commit().await
+}
+
+async fn send_grant_fence(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    worker: &McpWorkerClient,
+    grant: sqlx::postgres::PgRow,
+) -> Result<(), sqlx::Error> {
+    let vault_id: Uuid = grant.get("vault_id");
+    let grant_id: Uuid = grant.get("id");
+    let body = serde_json::to_value(peppy_hosted_api::mcp::McpWorkerRevokeGrantRequest {
+        vault_id,
+        device_id: grant.get("device_id"),
+        grant_id,
+    })
+    .expect("DTO serializes");
+    match worker_request_with(worker, "/internal/mcp/revoke-grant", &body).await {
+        Ok(_) => {
+            sqlx::query("UPDATE mcp_grants SET fence_pending=FALSE,fence_next_at=NULL WHERE id=$1 AND vault_id=$2")
+                .bind(grant_id).bind(vault_id).execute(&mut **tx).await?;
+        }
+        Err(error) => {
+            let attempts: i32 = grant.get("fence_attempts");
+            let delay = FENCE_BACKOFF_INITIAL_SECONDS
+                .saturating_mul(1_i32 << attempts.clamp(0, 7))
+                .min(FENCE_BACKOFF_MAX_SECONDS);
+            sqlx::query("UPDATE mcp_grants SET fence_attempts=LEAST(fence_attempts, 2147483646)+1,fence_next_at=clock_timestamp()+($3 * interval '1 second') WHERE id=$1 AND vault_id=$2")
+                .bind(grant_id).bind(vault_id).bind(delay).execute(&mut **tx).await?;
+            tracing::warn!(
+                category = "mcp_cleanup",
+                code = error.1,
+                attempt = attempts.saturating_add(1),
+                retry_delay_seconds = delay,
+                "MCP grant fence will retry"
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn spawn_grant_fences(
+    state: &ApiState,
+    vault_id: Uuid,
+    device_id: Option<Uuid>,
+    grant_id: Option<Uuid>,
+) {
+    let Some(worker) = state.mcp_worker.clone() else {
+        return;
+    };
+    let pool = state.db.clone();
+    tokio::spawn(async move {
+        let result = async {
+            let mut tx = scope::begin(&pool, vault_id).await?;
+            let grants: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM mcp_grants WHERE vault_id=$1 AND fence_pending AND ($2::uuid IS NULL OR device_id=$2) AND ($3::uuid IS NULL OR id=$3)")
+                .bind(vault_id).bind(device_id).bind(grant_id).fetch_all(&mut *tx).await?;
+            tx.commit().await?;
+            for grant in grants {
+                attempt_grant_fence(&pool, &worker, vault_id, grant).await?;
+            }
+            Ok::<_, sqlx::Error>(())
+        }.await;
+        if result.is_err() {
+            tracing::warn!(
+                category = "mcp_cleanup",
+                code = "mcp_grant_fence_database",
+                "MCP grant fence will retry"
+            );
+        }
+    });
 }
 
 async fn cleanup_operation(
@@ -360,10 +457,11 @@ async fn revoke_grant(
     lock_vault_row(&mut tx, principal.vault, "mcp_grant_revoke_vault_lock").await?;
     require_current_owner(&mut tx, &principal).await?;
     let result = sqlx::query(
-        "UPDATE mcp_grants SET revoked_at=now() WHERE id=$1 AND vault_id=$2 AND revoked_at IS NULL",
+        "UPDATE mcp_grants SET revoked_at=now(),fence_pending=$3,fence_attempts=0,fence_next_at=CASE WHEN $3 THEN now() ELSE NULL END WHERE id=$1 AND vault_id=$2 AND revoked_at IS NULL",
     )
     .bind(grant_id)
     .bind(principal.vault)
+    .bind(state.mcp_worker.is_some())
     .execute(&mut *tx)
     .await
     .map_err(|error| database_unavailable(&error, "mcp_grant_revoke"))?;
@@ -373,6 +471,7 @@ async fn revoke_grant(
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "mcp_grant_revoke_commit"))?;
+    spawn_grant_fences(&state, principal.vault, None, Some(grant_id));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -976,6 +1075,9 @@ async fn worker_request_with_error_mapping(
             "mcp_worker_unavailable",
         ));
     }
+    if path == "/internal/mcp/revoke-grant" {
+        return Ok(serde_json::Value::Null);
+    }
     let response_limit = if webhook_errors {
         2 * 1024 * 1024
     } else {
@@ -1007,6 +1109,7 @@ fn worker_request_limit(path: &str) -> Option<usize> {
         | "/internal/mcp/complete"
         | "/internal/mcp/status"
         | "/internal/mcp/revoke"
+        | "/internal/mcp/revoke-grant"
         | "/internal/mcp/cancel"
         | "/internal/mcp/webhooks" => Some(64 * 1024),
         _ => None,
@@ -1022,6 +1125,7 @@ fn worker_request_timeout(path: &str) -> Option<Duration> {
         | "/internal/mcp/activate"
         | "/internal/mcp/status"
         | "/internal/mcp/revoke"
+        | "/internal/mcp/revoke-grant"
         | "/internal/mcp/cancel" => Some(Duration::from_secs(5)),
         _ => None,
     }
@@ -1203,6 +1307,14 @@ mod worker_wire_tests {
 
     #[test]
     fn worker_request_configuration_allows_webhooks_with_control_limits() {
+        assert_eq!(
+            worker_request_limit("/internal/mcp/revoke-grant"),
+            Some(64 * 1024)
+        );
+        assert_eq!(
+            worker_request_timeout("/internal/mcp/revoke-grant"),
+            Some(Duration::from_secs(5))
+        );
         assert_eq!(
             worker_request_limit("/internal/mcp/webhooks"),
             Some(64 * 1024)

@@ -1853,6 +1853,9 @@ pub(super) async fn instance_revoke_device(
         .execute(&mut *tx)
         .await
         .map_err(|error| database_unavailable(&error, "instance_revoke_device"))?;
+    revoke_mcp_device(&mut tx, vault_id, device_id, state.mcp_worker.is_some())
+        .await
+        .map_err(|error| database_unavailable(&error, "instance_revoke_mcp_device"))?;
     sqlx::query(
         "UPDATE device_credentials SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2",
     )
@@ -1870,6 +1873,7 @@ pub(super) async fn instance_revoke_device(
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "instance_revoke_commit"))?;
+    mcp::spawn_grant_fences(&state, vault_id, Some(device_id), None);
     crate::presence::revoke_best_effort(&state.db, vault_id, device_id).await;
     let _ = state.presence_changed.send(vault_id);
     Ok(StatusCode::NO_CONTENT)
@@ -2417,22 +2421,9 @@ async fn revoke_device(
         .execute(&mut *tx)
         .await
         .map_err(|error| database_unavailable(&error, "revoke_device"))?;
-    // MCP grants are fenced at the same roster-revocation linearization point.
-    // The worker cleanup is intentionally durable and retried out-of-process.
-    sqlx::query("UPDATE mcp_devices SET cleanup_pending=TRUE WHERE vault_id=$1 AND device_id=$2")
-        .bind(p.vault)
-        .bind(device_id)
-        .execute(&mut *tx)
+    revoke_mcp_device(&mut tx, p.vault, device_id, s.mcp_worker.is_some())
         .await
         .map_err(|error| database_unavailable(&error, "revoke_mcp_device"))?;
-    sqlx::query(
-        "UPDATE mcp_grants SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2 AND revoked_at IS NULL",
-    )
-    .bind(p.vault)
-    .bind(device_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| database_unavailable(&error, "revoke_mcp_grants"))?;
     sqlx::query(
         "UPDATE device_credentials SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2",
     )
@@ -2450,9 +2441,26 @@ async fn revoke_device(
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "revoke_commit"))?;
+    mcp::spawn_grant_fences(&s, p.vault, Some(device_id), None);
     crate::presence::revoke_best_effort(&s.db, p.vault, device_id).await;
     let _ = s.presence_changed.send(p.vault);
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn revoke_mcp_device(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    vault_id: Uuid,
+    device_id: Uuid,
+    has_worker: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE mcp_devices SET cleanup_pending=TRUE WHERE vault_id=$1 AND device_id=$2")
+        .bind(vault_id)
+        .bind(device_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("UPDATE mcp_grants SET revoked_at=now(),fence_pending=$3,fence_attempts=0,fence_next_at=CASE WHEN $3 THEN now() ELSE NULL END WHERE vault_id=$1 AND device_id=$2 AND revoked_at IS NULL")
+        .bind(vault_id).bind(device_id).bind(has_worker).execute(&mut **tx).await?;
+    Ok(())
 }
 
 #[derive(Deserialize)]
