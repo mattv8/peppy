@@ -2,7 +2,7 @@ import { useCallback, useRef, useState, type CSSProperties, type RefObject } fro
 import { Ellipsis, PhoneOff, Search, Smartphone } from "@peppy/desktop-ui";
 import type { ContactBookView } from "../bridge/bridge";
 import type { PostContactActionNotice } from "./contact-action-notice";
-import { bookLabels, bookStateText } from "./contact-labels";
+import { bookContactCountText, bookLabels, bookStateText, bookSummaryText } from "./contact-labels";
 import { BookRowMenu, underButtonPoint, type BookMenuItem, type BookMenuPoint } from "./BookRowMenu";
 import { bookUseSwitchId, useBookLookup, type BookLookup } from "./useBookLookup";
 import "./book-rail.css";
@@ -56,7 +56,6 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
 }) {
   const hintId = `contacts-book-use-hint-${item.id}`;
   const use = item.lookupExcluded ? "excluded" : "included";
-  const contactCount = `${item.contactCount} ${item.contactCount === 1 ? "contact" : "contacts"}`;
   const moreButton = useRef<HTMLButtonElement>(null);
   const [menuPoint, setMenuPoint] = useState<BookMenuPoint | null>(null);
   const closeMenu = useCallback(() => setMenuPoint(null), []);
@@ -68,6 +67,7 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
       data-book-row=""
       data-book-id={item.id}
       data-book-use={use}
+      data-selected={selected || undefined}
       onKeyDown={event => {
         if (lookup.confirmBookId === item.id && event.key === "Escape") { event.preventDefault(); lookup.cancelConfirm(); }
       }}
@@ -86,18 +86,15 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
         {item.sourceRevoked
           ? <PhoneOff aria-hidden="true" size={16} strokeWidth={1.75} />
           : <Smartphone aria-hidden="true" size={16} strokeWidth={1.75} />}
-        <span>
+        <span className="contacts-book-text">
           <b>{item.deviceName}</b>
           {suffix && <span className="contacts-book-id">{suffix}</span>}
           {item.lookupExcluded && <span className="contacts-book-hidden">Hidden from names</span>}
           {item.sourceRevoked ? <>
             <small className="contacts-book-removed-text" data-book-state={item.state}>{bookStateText(item)}</small>
-            <small>{contactCount}</small>
-          </> : <small data-book-state={item.state}>
-            {bookStateText(item)}
-            {item.state === "active" ? ` · ${item.contactCount}` : ""}
-            {item.defaultAccountLabel && ` · ${item.defaultAccountLabel}`}
-          </small>}
+            <small>{bookContactCountText(item.contactCount)}</small>
+          </> : <small data-book-state={item.state}>{bookSummaryText(item)}</small>}
+          {item.defaultAccountLabel && <small className="contacts-book-account">{item.defaultAccountLabel}</small>}
         </span>
       </button>
       {(showSwitch || item.sourceRevoked) && (

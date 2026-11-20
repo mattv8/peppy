@@ -193,6 +193,22 @@ describe("contact book rail", () => {
     expect(row.querySelector("svg.lucide-phone-off")).toBeInTheDocument();
     expect(row.querySelector(".contacts-book-removed-text")).toHaveTextContent("Phone removed");
   });
+
+  it("puts state and count on one line and the account on its own line", () => {
+    renderRail([mockContactBook, otherBook]);
+    const row = document.querySelector<HTMLButtonElement>('button[data-book-id="book-pixel8"]')!;
+    expect(row.querySelector("small[data-book-state]")).toHaveTextContent(/^Active, 2 contacts$/);
+    expect(row.querySelector(".contacts-book-account")).toHaveTextContent(/^Google$/);
+    expect(row.textContent).not.toContain("·");
+  });
+
+  it("covers the whole selected row with the highlight, not only the select button", () => {
+    renderRail([mockContactBook, otherBook]);
+    const selectedItem = document.querySelector<HTMLElement>('li[data-book-row][data-book-id="book-pixel8"]')!;
+    expect(selectedItem).toHaveAttribute("data-selected", "true");
+    expect(selectedItem.querySelector('.contacts-book-row[aria-current="location"]')).not.toBeNull();
+    expect(document.querySelector('li[data-book-row][data-book-id="book-other"]')).not.toHaveAttribute("data-selected");
+  });
 });
 
 describe("ContactsView book lookup", () => {

@@ -119,13 +119,34 @@
 #contacts-list-header progress { flex: 1 1 160px; min-width: 120px; height: 4px; accent-color: var(--peppy-accent); }
 
 #contacts-header-actions { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+/* Ghost icon buttons: no fill or border until hover, open, or focus. */
 #contacts-header-actions > button,
-.contacts-sort-control > button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; }
+.contacts-sort-control > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--peppy-text-secondary);
+}
+#contacts-header-actions > button:hover:not(:disabled),
+.contacts-sort-control > button:hover:not(:disabled) { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+#contacts-header-actions > button[aria-expanded="true"],
+.contacts-sort-control > button[aria-expanded="true"] { background: var(--peppy-surface-active); color: var(--peppy-text-primary); }
+#contacts-header-actions > button:focus-visible,
+.contacts-sort-control > button:focus-visible { outline: 2px solid var(--peppy-focus-ring); outline-offset: 1px; }
+#contacts-header-actions > button:disabled,
+.contacts-sort-control > button:disabled { opacity: .4; cursor: default; }
 .contacts-sort-control { position: relative; }
 #contacts-sort-menu { position: fixed; z-index: 10; width: 208px; padding: 8px; background: var(--peppy-surface-panel); border: 1px solid var(--peppy-border); box-shadow: var(--peppy-shadow-floating); }
 #contacts-sort-menu [role="group"] { display: grid; gap: 2px; padding: 4px 0; }
 #contacts-sort-menu [role="group"] + [role="group"] { border-top: 1px solid var(--peppy-border); margin-top: 4px; }
 #contacts-sort-menu [role="menuitemradio"] { display: grid; grid-template-columns: 14px 1fr; gap: 6px; align-items: center; min-height: 24px; padding: 3px 4px; border: 0; border-radius: 3px; background: transparent; color: var(--peppy-text-primary); text-align: left; font-size: 12px; cursor: pointer; }
+#contacts-sort-menu .contacts-sort-heading { padding: 0 4px; color: var(--peppy-text-secondary); font-size: 11px; }
 #contacts-sort-menu .contacts-sort-check { display: inline-flex; width: 14px; height: 14px; }
 #contacts-sort-menu .contacts-sort-label { display: grid; white-space: nowrap; }
 #contacts-sort-menu .contacts-sort-example { color: var(--peppy-text-secondary); font-size: 11px; }
@@ -170,6 +191,9 @@
   align-items: center;
   gap: 6px;
 }
+
+/* The toast message is one flex item so its text and bidi-isolated names don't split across the flex gap. */
+.contacts-action-notice-text { flex: 1 1 auto; min-width: 0; }
 
 #contacts-notice,
 #contacts-error,

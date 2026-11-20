@@ -218,31 +218,33 @@ export function ContactDetail({
             )}
           </div>
         ) : photoAvatar}
-        <div>
-          <h2>{name}</h2>
-          <small>{[contact.organization, contact.title].filter(Boolean).join(" · ")}</small>
-        </div>
-        {canWrite && (
-          <div id="contacts-detail-actions">
-            <button
-              data-action="edit-contact"
-              aria-label="Edit contact"
-              onClick={onEdit}
-            >
-              Edit
-            </button>
-            <button
-              data-action="delete-contact"
-              data-confirm-delete={confirm ? "pending" : undefined}
-              aria-label={confirm ? "Confirm delete" : "Delete contact"}
-              onKeyDown={e => { if (e.key === "Escape" && confirm) { e.preventDefault(); onCancelConfirm(); } }}
-              onBlur={confirm ? onCancelConfirm : undefined}
-              onClick={onDelete}
-            >
-              {confirm ? "Confirm delete" : "Delete"}
-            </button>
+        <div id="contacts-detail-identity">
+          <div id="contacts-detail-title">
+            <h2 title={name}>{name}</h2>
+            <small>{[contact.organization, contact.title].filter(Boolean).join(" · ")}</small>
           </div>
-        )}
+          {canWrite && (
+            <div id="contacts-detail-actions">
+              <button
+                data-action="edit-contact"
+                aria-label="Edit contact"
+                onClick={onEdit}
+              >
+                Edit
+              </button>
+              <button
+                data-action="delete-contact"
+                data-confirm-delete={confirm ? "pending" : undefined}
+                aria-label={confirm ? "Confirm delete" : "Delete contact"}
+                onKeyDown={e => { if (e.key === "Escape" && confirm) { e.preventDefault(); onCancelConfirm(); } }}
+                onBlur={confirm ? onCancelConfirm : undefined}
+                onClick={onDelete}
+              >
+                {confirm ? "Confirm delete" : "Delete"}
+              </button>
+            </div>
+          )}
+        </div>
         {!compactDetail && (
           <button
             id="contacts-detail-close"

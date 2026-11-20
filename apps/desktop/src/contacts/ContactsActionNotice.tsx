@@ -34,7 +34,7 @@ export function ContactsActionNotice({ notice, onDismiss }: Props): JSX.Element 
     onBlur={trackBlur}
   >
     {notice && <>
-      {notice.message}
+      <span className="contacts-action-notice-text">{notice.message}</span>
       {notice.retry && <button className="secondary-button" type="button" data-action="retry-book-use" onClick={retry}>Try again</button>}
       <button className="mark-all-read-toast-dismiss" type="button" aria-label="Dismiss notification" data-action="dismiss-notice" onClick={onDismiss}>
         <X size={14} strokeWidth={1.75} aria-hidden />

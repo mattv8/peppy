@@ -16,31 +16,44 @@
   flex: 1;
 }
 
+/* The row is one flex line: select button, then the lookup/⋯ controls. The confirm strip wraps below it. The row
+   background and accent sit on the li so the whole line is covered, not only the button. */
 #contacts-books > li {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   border-bottom: 1px solid var(--peppy-border);
+  border-left: 2px solid transparent;
+  transition: background-color var(--peppy-duration-base, 150ms) var(--peppy-ease-out, ease-out);
+}
+
+#contacts-books > li:hover {
+  background: var(--peppy-surface-hover);
+}
+
+#contacts-books > li[data-selected] {
+  background: var(--peppy-surface-active);
+  border-left-color: var(--peppy-accent);
+}
+
+@media (forced-colors: active) {
+  #contacts-books > li[data-selected] {
+    border-left-color: Highlight;
+  }
 }
 
 .contacts-book-row {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   display: flex;
   gap: 8px;
   align-items: center;
   text-align: left;
   border: 0;
-  border-left: 2px solid transparent;
   background: transparent;
   color: var(--peppy-text-primary);
   padding: 8px;
   cursor: pointer;
-  transition: background-color var(--peppy-duration-base, 150ms) var(--peppy-ease-out, ease-out);
-}
-
-.contacts-book-row:hover {
-  background: var(--peppy-surface-hover);
 }
 
 .contacts-book-row:focus-visible {
@@ -50,11 +63,22 @@
   outline-offset: -2px;
 }
 
-.contacts-book-row > span:last-child {
+.contacts-book-row > svg {
+  flex: 0 0 auto;
+}
+
+.contacts-book-text {
   flex: 1;
   min-width: 0;
   display: grid;
   gap: 2px;
+}
+
+.contacts-book-text > b,
+.contacts-book-text > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .contacts-book-row small {
@@ -66,21 +90,11 @@
   color: var(--peppy-warning-text);
 }
 
-.contacts-book-row[aria-current] {
-  background: var(--peppy-surface-active);
-  border-left-color: var(--peppy-accent);
-}
-
-@media (forced-colors: active) {
-  .contacts-book-row[aria-current] {
-    border-left-color: Highlight;
-  }
-}
-
 /* The lookup switch keeps its column in every row; it is invisible (still focusable) until the row is hovered,
    focused, selected, excluded, or touched on a coarse pointer. */
 .contacts-book-use {
   flex: 0 0 auto;
+  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -93,7 +107,7 @@
 
 #contacts-books > li:hover > .contacts-book-use,
 #contacts-books > li:focus-within > .contacts-book-use,
-#contacts-books > li:has(> .contacts-book-row[aria-current]) > .contacts-book-use,
+#contacts-books > li[data-selected] > .contacts-book-use,
 #contacts-books > li[data-book-use="excluded"] > .contacts-book-use {
   opacity: 1;
   pointer-events: auto;
@@ -170,6 +184,7 @@
 #contacts-book-use-hint, #contacts-book-use-confirm p { color: var(--peppy-text-secondary); font-size: 12px; margin: 4px 0; }
 #contacts-book-use-confirm { flex: 0 0 100%; padding: 8px; }
 .contacts-book-id, .contacts-book-hidden { display: block; color: var(--peppy-text-secondary); font-size: 12px; }
+.contacts-book-account { color: var(--peppy-text-secondary); }
 #contacts-book-use-title .contacts-book-id { display: inline; }
 
 :is(.contacts-book-use, #contacts-book-use) .settings-switch { position: relative; width: 32px; height: 18px; flex: 0 0 32px; }
@@ -202,6 +217,17 @@
 #contacts-book-removed .contacts-strip-text {
   flex: 1 1 260px;
   min-width: 0;
+  color: var(--peppy-text-primary);
+}
+
+#contacts-book-removed .contacts-strip-text strong {
+  display: block;
+  color: var(--peppy-warning-text);
+  font-weight: 600;
+}
+
+#contacts-book-removed .contacts-strip-text p {
+  margin: 2px 0 0;
 }
 
 #contacts-book-removed .contacts-strip-actions {
@@ -213,4 +239,13 @@
 
 #contacts-book-removed .contacts-strip-actions button {
   white-space: nowrap;
+}
+
+#contacts-book-removed .contacts-strip-actions .secondary-button {
+  height: 26px;
+  min-height: 26px;
+  line-height: 24px;
+  border-color: var(--peppy-border-strong);
+  background: var(--peppy-surface-input);
+  color: var(--peppy-text-primary);
 }

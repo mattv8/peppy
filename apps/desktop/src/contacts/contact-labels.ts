@@ -31,6 +31,11 @@ export const bookStateText = (book: ContactBookView) => book.sourceRevoked
         ? "Retired"
         : "Unavailable";
 
+export const bookContactCountText = (count: number) => `${count} ${count === 1 ? "contact" : "contacts"}`;
+
+/** First line of a book row: state and contact count, e.g. "Active, 430 contacts". */
+export const bookSummaryText = (book: ContactBookView) => `${bookStateText(book)}, ${bookContactCountText(book.contactCount)}`;
+
 export const contactErrorText = (error: unknown): string =>
   error instanceof Error
     ? error.message
