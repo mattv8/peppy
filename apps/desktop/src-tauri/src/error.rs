@@ -99,6 +99,10 @@ pub fn core_error(error: CoreError) -> BridgeError {
             "The server key profile does not match the profile pinned on this device.",
         ),
         CoreError::KeysUnavailable => BridgeError::new("locked", "Unlock sync before this operation."),
+        CoreError::RecoveryPending => BridgeError::new(
+            "update-in-progress",
+            "Peppy is updating your messages. Try again when it finishes.",
+        ),
         CoreError::SnapshotTooLarge => BridgeError::new(
             "snapshot-too-large",
             "This snapshot exceeds what this build can import.",
@@ -135,6 +139,12 @@ mod tests {
 
     #[test]
     fn core_errors_map_to_stable_codes() {
+        let recovery = core_error(CoreError::RecoveryPending);
+        assert_eq!(recovery.code, "update-in-progress");
+        assert_eq!(
+            recovery.message,
+            "Peppy is updating your messages. Try again when it finishes."
+        );
         assert_eq!(
             core_error(CoreError::StaleDraft {
                 current_revision: 4
