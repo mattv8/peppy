@@ -27,6 +27,11 @@ on:
         required: false
         type: boolean
         default: true
+      build_macos_x64:
+        description: Build the macOS Intel desktop bundle
+        required: false
+        type: boolean
+        default: true
       build_ios:
         description: Build iOS artifacts
         required: false
@@ -134,6 +139,11 @@ on:
         default: true
       build_desktop:
         description: Build desktop artifacts
+        required: false
+        type: boolean
+        default: true
+      build_macos_x64:
+        description: Build the macOS Intel desktop bundle
         required: false
         type: boolean
         default: true
@@ -361,7 +371,7 @@ jobs:
     environment: "${{ inputs.macos_distribution == 'app-store' && 'mac-app-store' || inputs.trusted_update_build && format('updates-{0}', inputs.update_channel) || 'development-artifacts' }}"
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(inputs.macos_distribution == 'app-store' && '{"include":[{"os":"macos-26","name":"macos","bundles":"app","posix_bundles":"macos","path":"apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.pkg\napps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.Info.plist"}]}' || '{"include":[{"os":"ubuntu-24.04","name":"linux","bundles":"appimage,deb,rpm","posix_bundles":"appimage deb rpm","path":"dist/desktop-linux-bundles.tar.gz"},{"os":"macos-26","name":"macos-arm64","bundles":"app,dmg","target":"aarch64-apple-darwin","posix_bundles":"macos","path":"apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz\napps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg\ndist/desktop-macos-arm64.app.tar.gz"},{"os":"macos-26","name":"macos-x64","bundles":"app,dmg","target":"x86_64-apple-darwin","posix_bundles":"macos","path":"apps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz\napps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg\ndist/desktop-macos-x64.app.tar.gz"},{"os":"windows-2025","name":"windows","bundles":"nsis,msi","path":"apps/desktop/src-tauri/target/release/bundle/nsis/**\napps/desktop/src-tauri/target/release/bundle/msi/**"}]}') }}
+      matrix: ${{ fromJSON(inputs.macos_distribution == 'app-store' && '{"include":[{"os":"macos-26","name":"macos","bundles":"app","posix_bundles":"macos","path":"apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.pkg\napps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.Info.plist"}]}' || inputs.build_macos_x64 == false && '{"include":[{"os":"ubuntu-24.04","name":"linux","bundles":"appimage,deb,rpm","posix_bundles":"appimage deb rpm","path":"dist/desktop-linux-bundles.tar.gz"},{"os":"macos-26","name":"macos-arm64","bundles":"app,dmg","target":"aarch64-apple-darwin","posix_bundles":"macos","path":"apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz\napps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg\ndist/desktop-macos-arm64.app.tar.gz"},{"os":"windows-2025","name":"windows","bundles":"nsis,msi","path":"apps/desktop/src-tauri/target/release/bundle/nsis/**\napps/desktop/src-tauri/target/release/bundle/msi/**"}]}' || '{"include":[{"os":"ubuntu-24.04","name":"linux","bundles":"appimage,deb,rpm","posix_bundles":"appimage deb rpm","path":"dist/desktop-linux-bundles.tar.gz"},{"os":"macos-26","name":"macos-arm64","bundles":"app,dmg","target":"aarch64-apple-darwin","posix_bundles":"macos","path":"apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz\napps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg\ndist/desktop-macos-arm64.app.tar.gz"},{"os":"macos-26","name":"macos-x64","bundles":"app,dmg","target":"x86_64-apple-darwin","posix_bundles":"macos","path":"apps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz\napps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg\ndist/desktop-macos-x64.app.tar.gz"},{"os":"windows-2025","name":"windows","bundles":"nsis,msi","path":"apps/desktop/src-tauri/target/release/bundle/nsis/**\napps/desktop/src-tauri/target/release/bundle/msi/**"}]}') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:

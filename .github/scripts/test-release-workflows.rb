@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require 'fileutils'
+require 'json'
 require 'open3'
 require 'shellwords'
 require 'tmpdir'
@@ -822,6 +823,24 @@ assert.call(
   desktop_matrix.include?('"path":"apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.pkg'),
   'macOS artifact matrix must retain one universal App Store entry and both direct architectures'
 )
+matrix_entries = desktop_matrix.scan(/'(\{"include":[^']*)'/).map { |(literal)| JSON.parse(literal).fetch('include') }
+assert.call(matrix_entries.length == 3, 'desktop artifact matrix must define the App Store, direct, and direct-without-Intel-macOS JSON literals')
+matrix_names = ->(entries) { entries.map { |entry| entry.fetch('name') } }
+app_store_matrix = matrix_entries.find { |entries| matrix_names.call(entries) == %w[macos] }
+direct_matrix = matrix_entries.find { |entries| matrix_names.call(entries).include?('macos-x64') }
+without_intel_matrix = matrix_entries.find { |entries| matrix_names.call(entries).include?('macos-arm64') && !matrix_names.call(entries).include?('macos-x64') }
+assert.call(!app_store_matrix.nil? && !direct_matrix.nil? && !without_intel_matrix.nil?, 'desktop artifact matrix must include App Store, default direct, and no-Intel direct variants')
+assert.call(matrix_names.call(direct_matrix) == %w[linux macos-arm64 macos-x64 windows], 'default desktop artifact matrix must build linux, macos-arm64, macos-x64, and windows')
+assert.call(matrix_names.call(without_intel_matrix) == %w[linux macos-arm64 windows] && without_intel_matrix == direct_matrix.reject { |entry| entry['name'] == 'macos-x64' }, 'no-Intel desktop artifact matrix must equal the default matrix minus exactly the macos-x64 entry')
+assert.call(matrix_names.call(app_store_matrix) == %w[macos], 'App Store desktop artifact matrix must keep its single universal macos entry')
+build_artifacts_triggers = load_workflow.call('build-artifacts.yml').fetch(true)
+%w[workflow_call workflow_dispatch].each do |event|
+  definition = build_artifacts_triggers.fetch(event).fetch('inputs').fetch('build_macos_x64')
+  assert.call(definition['type'] == 'boolean' && definition['default'] == true, "build-artifacts #{event} must declare build_macos_x64 as a boolean defaulting to true")
+end
+assert.call(ci_jobs.fetch('development-artifacts').fetch('with').fetch('build_macos_x64') == "${{ github.event_name != 'pull_request' }}", 'CI development artifacts must skip the Intel macOS bundle only for pull requests')
+build_artifact_calls = %w[release.yml testflight.yml].flat_map { |name| load_workflow.call(name).fetch('jobs').values.select { |job| job['uses'] == './.github/workflows/build-artifacts.yml' } }
+assert.call(build_artifact_calls.length == 2 && build_artifact_calls.none? { |job| job.fetch('with', {}).key?('build_macos_x64') }, 'release and TestFlight artifact builds must keep the default Intel macOS bundle without passing build_macos_x64')
 mode_validation = desktop_steps.find { |step| step['run'] == 'bash .github/scripts/release-signing-readiness.sh --validate-modes' }
 assert.call(!mode_validation.nil?, 'trusted builds must validate both signing modes before platform work')
 mode_env = mode_validation.fetch('env')
