@@ -1,4 +1,4 @@
-import ts from "typescript";
+import ts from "@peppy/typescript-ast";
 import { describe, expect, it } from "vitest";
 
 const UNSAFE_HTML_PROPERTIES = new Set(["innerHTML", "outerHTML"]);
@@ -40,8 +40,15 @@ function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
   return kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment;
 }
 
+function requireCleanParse(parsed: unknown, fileName: string): void {
+  if (typeof parsed !== "object" || parsed === null || !("parseDiagnostics" in parsed) || !Array.isArray(parsed.parseDiagnostics) || parsed.parseDiagnostics.length !== 0) {
+    throw new Error(`Could not parse source file: ${fileName}`);
+  }
+}
+
 function findUnsafeHtmlWrites(source: string, fileName: string): Violation[] {
-  const sourceFile = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const sourceFile = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  requireCleanParse(sourceFile, fileName);
   const violations: Violation[] = [];
 
   const visit = (node: ts.Node): void => {
@@ -95,7 +102,55 @@ function isProductionSourceFile(fileName: string): boolean {
   return !/\.(test|spec)\.tsx?$/.test(baseName) && !segments.some(segment => ["fixtures", "__fixtures__", "generated", "build", "node_modules"].includes(segment));
 }
 
+function readSourceFile(fileName: string): string {
+  const source = ts.sys.readFile(fileName);
+  if (source === undefined) {
+    throw new Error(`Could not read source file: ${fileName}`);
+  }
+  return source;
+}
+
 describe("unsafe HTML policy", () => {
+  it.each([null, {}, { parseDiagnostics: undefined }, { parseDiagnostics: "invalid" }, { parseDiagnostics: [{}] }])(
+    "rejects absent, malformed or nonempty parser diagnostics",
+    parsed => {
+      expect(() => requireCleanParse(parsed, "invalid.ts")).toThrow("invalid.ts");
+    },
+  );
+
+  it.each(["broken.ts", "broken.tsx"])("rejects malformed source in %s", fileName => {
+    expect(() => findUnsafeHtmlWrites("element.innerHTML = ;", fileName)).toThrow();
+  });
+
+  it("parses generic TypeScript and detects the sink with its line number", () => {
+    expect(findUnsafeHtmlWrites("const identity = <T>(value: T): T => value;\nelement.innerHTML = value;", "generic.ts")).toEqual([
+      { file: "generic.ts", line: 2, sink: "innerHTML" },
+    ]);
+  });
+
+  it("rejects a missing source file", () => {
+    expect(() => readSourceFile("/nonexistent-peppy-policy-source.ts")).toThrow();
+  });
+
+  it("detects assignment operators and document receiver forms", () => {
+    const operators = ["=", "+=", "-=", "*=", "/=", "%=", "**=", "<<=", ">>=", ">>>=", "&=", "|=", "^=", "&&=", "||=", "??="];
+    const source = [
+      ...operators.map(operator => `element["innerHTML"] ${operator} value;`),
+      "element.outerHTML += value;",
+      "window.document.write(value);",
+      'window["document"]["writeln"](value);',
+      "other.write(value);",
+      "element.innerHTML;",
+      "element.textContent = value;",
+    ].join("\n");
+    expect(findUnsafeHtmlWrites(source, "operators.ts").map(({ line, sink }) => ({ line, sink }))).toEqual([
+      ...operators.map((_, index) => ({ line: index + 1, sink: "innerHTML" })),
+      { line: 17, sink: "outerHTML" },
+      { line: 18, sink: "document.write" },
+      { line: 19, sink: "document.writeln" },
+    ]);
+  });
+
   it("detects direct and computed unsafe sinks without rejecting reads or textContent", () => {
     const source = `
       element.innerHTML;
@@ -126,7 +181,7 @@ describe("unsafe HTML policy", () => {
       ts.sys
         .readDirectory(`${root}/${sourceRoot}`, [".ts", ".tsx"])
         .filter(isProductionSourceFile)
-        .flatMap(fileName => findUnsafeHtmlWrites(ts.sys.readFile(fileName) ?? "", fileName.slice(root.length + 1))),
+        .flatMap(fileName => findUnsafeHtmlWrites(readSourceFile(fileName), fileName.slice(root.length + 1))),
     );
 
     expect(violations).toEqual([]);

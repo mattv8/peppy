@@ -55,6 +55,7 @@ desktop:
 
 web:
   - 'apps/web/**'
+  - 'packages/typescript-ast/**'
   - 'infra/build/build-browser-core.sh'
   - 'infra/build/build-web-client.sh'
   - 'apps/desktop/src/**'
@@ -130,6 +131,7 @@ unclassified:
   - '!packaging/windows/**'
   - '!packages/desktop-ui/**'
   - '!packages/browser-runtime/**'
+  - '!packages/typescript-ast/**'
   - '!packages/mobile-design/**'
   - '!package.json'
   - '!pnpm-lock.yaml'
