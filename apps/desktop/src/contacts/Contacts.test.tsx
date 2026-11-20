@@ -1264,9 +1264,25 @@ describe("ContactsView", () => {
     });
 
     it("shows contact projection failures without relabeling repair as sync", async () => {
-      render(<ContactsView sync={{ repairRequired: false, projection: { state: "failed", reason: "missing_record" } }} />);
-      expect(await screen.findByText(/Contacts may be out of date \(rebuild failed: missing record\)/)).toBeInTheDocument();
+      const { container, rerender } = render(<ContactsView sync={{ repairRequired: false, projection: { state: "failed", reason: "missing_record" } }} />);
+      expect(container.querySelector("#contacts-sync-status")).toHaveAttribute("data-sync-state", "failed");
+      expect(container.querySelector("#contacts-sync-status")).toHaveTextContent("Peppy couldn't finish updating them.");
+      expect(container).not.toHaveTextContent(/missing.record/);
+      rerender(<ContactsView sync={{ repairRequired: true, projection: { state: "failed", reason: "missing_record" } }} />);
+      expect(container.querySelector("#contacts-sync-status")).toHaveAttribute("data-sync-state", "repairWaiting");
+      expect(container.querySelector("#contacts-sync-status")).toHaveTextContent("A repair is waiting to run.");
+      expect(container).not.toHaveTextContent(/missing.record/);
       expect(screen.queryByRole("button", { name: "Repair contact cache" })).not.toBeInTheDocument();
+    });
+
+    it("explains an empty book differently for failed and repairing projections", async () => {
+      vi.mocked(bridge.list_contacts).mockResolvedValue([]);
+      const { rerender } = render(<ContactsView sync={{ repairRequired: false, projection: { state: "failed" } }} />);
+      expect(await screen.findByText("Contacts couldn't be loaded yet.")).toHaveAttribute("data-empty-reason", "failed");
+      rerender(<ContactsView sync={{ repairRequired: true }} />);
+      expect(await screen.findByText("No contacts in this book")).toHaveAttribute("data-empty-reason", "none");
+      expect(document.querySelector("#contacts-sync-status")).toHaveAttribute("data-sync-state", "needsRepair");
+      expect(document.querySelector("#contacts-sync-status")).toHaveTextContent("Contacts need a repair from the server.");
     });
 
     it.each([
@@ -1287,6 +1303,15 @@ describe("ContactsView", () => {
       render(<ContactsView sync={{ repairRequired: true, projection: { state: "rebuilding" } }} />);
       expect(await screen.findByText("The phone finished its scan. Contacts are still being repaired locally.")).toBeInTheDocument();
       expect(screen.queryByText("Scan completed.")).not.toBeInTheDocument();
+    });
+
+    it.each([
+      [true, "The phone finished its scan. A repair is waiting to run on this computer."],
+      [false, "The phone finished its scan. Peppy couldn't finish updating contacts on this computer."],
+    ])("reports completed phone scan with failed projection and repairRequired=%s", async (repairRequired, expected) => {
+      vi.mocked(bridge.get_contact_sync_request).mockResolvedValue({ requestId: "scan", bookId: "book-pixel8", state: "completed" });
+      render(<ContactsView sync={{ repairRequired, projection: { state: "failed" } }} />);
+      expect(await screen.findByText(expected)).toBeInTheDocument();
     });
 
     it("finds an off-page target even when the book count is stale, then focuses its row", async () => {

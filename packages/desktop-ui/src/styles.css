@@ -949,13 +949,14 @@ select:focus-visible {
   line-height: 16px;
   overflow-wrap: anywhere;
 }
-#sync-progress[data-sync-phase="waitingForKeys"] { color: var(--peppy-warning-text); }
+#sync-progress[data-sync-phase="waitingForKeys"], #sync-progress[data-sync-phase="blocked"] { color: var(--peppy-warning-text); }
 #sync-progress .sync-progress-icon { flex: 0 0 auto; }
 #sync-progress .sync-progress-main { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
 #sync-progress .sync-progress-title { margin: 0; color: var(--peppy-text-primary); font-weight: 600; }
 /* Own-import progress: a 4px accent bar and a tabular count, sized inside the banner row. */
 #sync-progress progress { flex: 1 1 160px; min-width: 120px; height: 4px; accent-color: var(--peppy-accent); }
 #sync-progress [data-sync-count] { margin: 0; font-variant-numeric: tabular-nums; }
+#sync-progress [data-sync-detail] { flex: 1 0 100%; margin: 0; color: var(--peppy-text-secondary); font-weight: 400; }
 /* History too large: a persistent warning strip in the same slot as #sync-progress. */
 #sync-too-large {
   display: flex;

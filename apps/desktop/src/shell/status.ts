@@ -51,8 +51,10 @@ export function syncStatusText(encryption: EncryptionState): string {
   return "Device sync not unlocked";
 }
 
-export function historyStatus(progress?: DesktopSnapshot["syncProgress"]): { phase: "receiving" | "applying"; value: string } | undefined {
+export function historyStatus(progress?: DesktopSnapshot["syncProgress"]): { phase: "receiving" | "applying" | "repairing" | "blocked"; value: string } | undefined {
   if (progress?.phase === "applying") return { phase: "applying", value: "Organizing" };
+  if (progress?.phase === "repairing") return { phase: "repairing", value: "History is incomplete; a repair is waiting to run" };
+  if (progress?.phase === "blocked") return { phase: "blocked", value: "Couldn't finish loading history" };
   if (progress?.phase !== "receiving") return undefined;
   const received = Number(progress.snapshotReceived);
   const expected = Number(progress.snapshotExpected);

@@ -101,6 +101,17 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   toneErrors?: Record<string, string>;
   onSelectTone?(seed: string, index: number | null): void;
 }) {
+  const contactsRepairState = sync?.projection?.state === "rebuilding" ? "rebuilding"
+    : sync?.projection?.state === "failed" ? (sync.repairRequired ? "repairWaiting" : "failed")
+    : sync?.repairRequired ? "needsRepair" : undefined;
+  const contactsSyncText = contactsRepairState === "rebuilding" ? "Rebuilding contacts from the server…"
+    : contactsRepairState === "repairWaiting" ? "Contacts may be out of date. A repair is waiting to run."
+    : contactsRepairState === "failed" ? "Contacts may be out of date. Peppy couldn't finish updating them."
+    : "Contacts need a repair from the server.";
+  const completedScanText = contactsRepairState === "rebuilding" ? "The phone finished its scan. Contacts are still being repaired locally."
+    : contactsRepairState === "repairWaiting" ? "The phone finished its scan. A repair is waiting to run on this computer."
+    : contactsRepairState === "failed" ? "The phone finished its scan. Peppy couldn't finish updating contacts on this computer."
+    : undefined;
   const [books, setBooks] = useState(initialBooks);
   const [booksLoaded, setBooksLoaded] = useState(initialBooks.length > 0);
   const [bookId, setBookId] = useState(initialBooks[0]?.id ?? "");
@@ -1041,13 +1052,9 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
             {!sync.readiness.server_active && " History retention is paused until every device is ready."}
           </p>
         )}
-        {(sync?.repairRequired || sync?.projection?.state === "failed" || sync?.projection?.state === "rebuilding") && (
-          <p id="contacts-sync-status" role="status" data-sync-state={sync.projection?.state ?? "repair"}>
-            {sync.projection?.state === "rebuilding"
-              ? "Rebuilding contacts from the server…"
-              : sync.projection?.state === "failed"
-                ? `Contacts may be out of date (rebuild failed${sync.projection.reason ? `: ${sync.projection.reason.replace(/_/g, " ")}` : ""}).`
-                : "Contacts need a repair from the server."}
+        {contactsRepairState && (
+          <p id="contacts-sync-status" role="status" data-sync-state={contactsRepairState}>
+            {contactsSyncText}
           </p>
         )}
         {!detailOverlay && !restore && noticeBanner}
@@ -1057,8 +1064,8 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
         {headerHost ? createPortal(headerActions, headerHost) : <header id="contacts-center-toolbar">{headerActions}</header>}
         {syncDisabledReason && <p id="contacts-sync-unavailable" role="status">{syncDisabledReason}</p>}
         {scanStatus && <p id="contacts-scan-status" role="status" data-scan-state={scanStatus.state}>
-          {scanStatus.state === "completed" && (sync?.repairRequired || sync?.projection?.state === "failed" || sync?.projection?.state === "rebuilding")
-            ? "The phone finished its scan. Contacts are still being repaired locally."
+          {scanStatus.state === "completed" && completedScanText
+            ? completedScanText
             : scanStatusText(scanStatus)}
         </p>}
 
@@ -1120,7 +1127,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
               </li>
             ))}
             {!loading && !contacts.length && (
-              <li id="contacts-empty-state">{offset ? "No more contacts" : "No contacts in this book"}</li>
+              <li id="contacts-empty-state" data-empty-reason={contactsRepairState === "failed" || contactsRepairState === "repairWaiting" ? "failed" : "none"}>{offset ? "No more contacts" : contactsRepairState === "failed" || contactsRepairState === "repairWaiting" ? "Contacts couldn't be loaded yet." : "No contacts in this book"}</li>
             )}
           </ul>
         )}
