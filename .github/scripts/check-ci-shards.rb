@@ -32,7 +32,7 @@ end
 workflow = YAML.safe_load(File.read(options[:workflow]), aliases: true)
 jobs = workflow.fetch('jobs')
 fail!('nightly schedule is missing') unless workflow.fetch(true).fetch('schedule').include?({ 'cron' => '17 9 * * *' })
-fail!('nightly concurrency must be separate') unless workflow.dig('concurrency', 'group') == "ci-${{ github.workflow }}-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}"
+fail!('nightly and dispatched runs must use their own concurrency groups, separate from branch pushes') unless workflow.dig('concurrency', 'group') == "ci-${{ github.workflow }}-${{ github.event_name == 'schedule' && 'nightly' || github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.ref) || github.ref }}"
 changes = jobs.fetch('changes')
 fail!('changes requires actions read') unless changes.dig('permissions', 'actions') == 'read'
 reuse = changes.fetch('steps').find { |step| step['id'] == 'reuse' }
