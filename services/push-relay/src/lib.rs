@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Executor, PgPool, Postgres, Transaction};
 use subtle::ConstantTimeEq;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 pub const CHALLENGE_TTL: Duration = Duration::from_secs(600);
@@ -45,6 +45,9 @@ const MAX_NONCE_BYTES: usize = 256;
 const SECRET_HEX_BYTES: usize = 64;
 const MAX_FORWARDED_HEADER_BYTES: usize = 8192;
 const MAX_FORWARDED_HOPS: usize = 16;
+/// Process-local caps on in-flight provider challenge sends. Each instance enforces its own limits.
+const CHALLENGE_SEND_GLOBAL_LIMIT: usize = 64;
+const CHALLENGE_SEND_PROVIDER_LIMIT: usize = 32;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -54,6 +57,9 @@ pub struct AppState {
     challenge_admissions: Arc<Mutex<HashMap<Vec<u8>, Admission>>>,
     wake_admissions: Arc<Mutex<HashMap<String, Admission>>>,
     management_admissions: Arc<Mutex<HashMap<String, Admission>>>,
+    global_challenge_sends: Arc<Semaphore>,
+    apns_challenge_sends: Arc<Semaphore>,
+    fcm_challenge_sends: Arc<Semaphore>,
     wake_admission_limit: u32,
     trusted_proxy_cidrs: Arc<Vec<IpNet>>,
     release_identity: Arc<String>,
@@ -279,6 +285,9 @@ impl AppState {
             challenge_admissions: Arc::new(Mutex::new(HashMap::new())),
             wake_admissions: Arc::new(Mutex::new(HashMap::new())),
             management_admissions: Arc::new(Mutex::new(HashMap::new())),
+            global_challenge_sends: Arc::new(Semaphore::new(CHALLENGE_SEND_GLOBAL_LIMIT)),
+            apns_challenge_sends: Arc::new(Semaphore::new(CHALLENGE_SEND_PROVIDER_LIMIT)),
+            fcm_challenge_sends: Arc::new(Semaphore::new(CHALLENGE_SEND_PROVIDER_LIMIT)),
             wake_admission_limit,
             trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs),
             release_identity: Arc::new(release_identity),
@@ -315,6 +324,24 @@ impl AppState {
         }
         entry.count += 1;
         Ok(())
+    }
+    /// Takes a non-waiting permit for one provider challenge send. Saturation is rejected
+    /// with the source throttle's response, so the provider is never called.
+    fn acquire_challenge_send(
+        &self,
+        provider: Provider,
+    ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), AdmissionError> {
+        let provider_sends = match provider {
+            Provider::Apns => &self.apns_challenge_sends,
+            Provider::Fcm => &self.fcm_challenge_sends,
+        };
+        let provider_permit = Arc::clone(provider_sends)
+            .try_acquire_owned()
+            .map_err(|_| AdmissionError::RateLimited)?;
+        let global_permit = Arc::clone(&self.global_challenge_sends)
+            .try_acquire_owned()
+            .map_err(|_| AdmissionError::RateLimited)?;
+        Ok((provider_permit, global_permit))
     }
     async fn admit_route_wake(
         &self,
@@ -649,6 +676,10 @@ async fn register(
     state
         .admit_challenge(request.provider, &request.device_token)
         .await
+        .map_err(admission_error)?;
+    // Held until this handler returns, so the permits release on both the 201 and the 503 paths.
+    let _challenge_send = state
+        .acquire_challenge_send(request.provider)
         .map_err(admission_error)?;
     let id = Uuid::new_v4();
     let challenge = secret();
@@ -1094,7 +1125,10 @@ mod tests {
         Connection, Executor,
         postgres::{PgConnection, PgPoolOptions},
     };
-    use std::sync::Mutex as StdMutex;
+    use std::sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tracing::{Event, Subscriber, field::Field};
     use tracing_subscriber::{
         Layer, Registry,
@@ -1145,6 +1179,26 @@ mod tests {
                     .push((provider, token.into(), nonce.into()));
                 Ok(())
             })
+        }
+    }
+
+    struct UnavailableChallengeProvider(AtomicUsize);
+    impl PushProvider for UnavailableChallengeProvider {
+        fn configured(&self) -> bool {
+            true
+        }
+        fn supports(&self, _: Provider) -> bool {
+            true
+        }
+        fn provider_name(&self) -> &'static str {
+            "unavailable-fake"
+        }
+        fn send_challenge<'a>(&'a self, _: Provider, _: &'a str, _: &'a str) -> ProviderFuture<'a> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(ProviderError::Unavailable) })
+        }
+        fn send_wake<'a>(&'a self, _: Provider, _: &'a str, _: &'a str) -> ProviderFuture<'a> {
+            Box::pin(async { Err(ProviderError::Unavailable) })
         }
     }
 
@@ -1255,6 +1309,119 @@ mod tests {
         assert_eq!(fake.challenges.lock().unwrap().len(), 4);
         task.abort();
         cleanup(pool, schema).await;
+    }
+
+    #[tokio::test]
+    async fn saturated_challenge_sends_are_rejected_before_provider_calls() {
+        let (pool, schema) = test_pool().await;
+        let fake = Arc::new(FakeProvider::default());
+        let state = AppState::with_provider(pool.clone(), fake.clone());
+        let fcm_permits = Arc::clone(&state.fcm_challenge_sends)
+            .try_acquire_many_owned(CHALLENGE_SEND_PROVIDER_LIMIT as u32)
+            .unwrap();
+        let (base, task) = serve(state.clone()).await;
+        let client = reqwest::Client::new();
+        let rejected = post(
+            &client,
+            &base,
+            "/v1/registrations",
+            serde_json::json!({"provider":"fcm","device_token":"saturated-fcm"}),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            rejected.json::<serde_json::Value>().await.unwrap()["code"],
+            "rate_limited"
+        );
+        assert!(fake.challenges.lock().unwrap().is_empty());
+        // Saturating one provider leaves the other provider's sends available.
+        assert_eq!(
+            post(
+                &client,
+                &base,
+                "/v1/registrations",
+                serde_json::json!({"provider":"apns","device_token":"unsaturated-apns"})
+            )
+            .await
+            .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(fake.challenges.lock().unwrap().len(), 1);
+        drop(fcm_permits);
+        let global_permits = Arc::clone(&state.global_challenge_sends)
+            .try_acquire_many_owned(CHALLENGE_SEND_GLOBAL_LIMIT as u32)
+            .unwrap();
+        assert_eq!(
+            post(
+                &client,
+                &base,
+                "/v1/registrations",
+                serde_json::json!({"provider":"apns","device_token":"saturated-global"})
+            )
+            .await
+            .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(fake.challenges.lock().unwrap().len(), 1);
+        drop(global_permits);
+        task.abort();
+        cleanup(pool, schema).await;
+    }
+
+    #[tokio::test]
+    async fn challenge_send_permits_are_released_after_success_and_failure() {
+        let (pool, schema) = test_pool().await;
+        let fake = Arc::new(FakeProvider::default());
+        let state = AppState::with_provider(pool.clone(), fake.clone());
+        let (base, task) = serve(state.clone()).await;
+        let client = reqwest::Client::new();
+        assert_eq!(
+            post(
+                &client,
+                &base,
+                "/v1/registrations",
+                serde_json::json!({"provider":"fcm","device_token":"permit-success"})
+            )
+            .await
+            .status(),
+            StatusCode::CREATED
+        );
+        assert_challenge_permits_released(&state);
+        task.abort();
+
+        let failing = Arc::new(UnavailableChallengeProvider(AtomicUsize::new(0)));
+        let state = AppState::with_provider(pool.clone(), failing.clone());
+        let (base, task) = serve(state.clone()).await;
+        assert_eq!(
+            post(
+                &client,
+                &base,
+                "/v1/registrations",
+                serde_json::json!({"provider":"apns","device_token":"permit-failure"})
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(failing.0.load(Ordering::SeqCst), 1);
+        assert_challenge_permits_released(&state);
+        task.abort();
+        cleanup(pool, schema).await;
+    }
+
+    fn assert_challenge_permits_released(state: &AppState) {
+        assert_eq!(
+            state.global_challenge_sends.available_permits(),
+            CHALLENGE_SEND_GLOBAL_LIMIT
+        );
+        assert_eq!(
+            state.apns_challenge_sends.available_permits(),
+            CHALLENGE_SEND_PROVIDER_LIMIT
+        );
+        assert_eq!(
+            state.fcm_challenge_sends.available_permits(),
+            CHALLENGE_SEND_PROVIDER_LIMIT
+        );
     }
 
     async fn test_pool() -> (PgPool, String) {
