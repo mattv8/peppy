@@ -3505,6 +3505,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     const navigation = await flushBeforeNavigation(failurePrefix);
     if (!navigation || !navigation.isCurrent()) return false;
     resetContactSearch();
+    resetConversationSearch();
     setActiveViewNow("contacts");
     setContactTarget(target);
     return true;
@@ -3849,10 +3850,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setNotificationAppFilter(null);
     resetNotificationSearch();
     resetContactSearch();
+    resetConversationSearch();
     setNotificationMuteNotice(undefined);
   }, [renderedSearchSessionKey, loading, appLock?.locked]);
   useEffect(() => {
     if (activeView !== "contacts") resetContactSearch();
+    if (activeView !== "conversations") resetConversationSearch();
   }, [activeView]);
   useEffect(() => {
     if (activeView === "notifications") return;
@@ -5480,8 +5483,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     label: "Contacts",
     placeholder: "Search contacts",
   });
+  const { scope: conversationSearchScope, resetSearch: resetConversationSearch } = useScopedSearch({
+    active: !revoked && activeView === "conversations",
+    locked: !snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked),
+    label: "Conversations",
+    placeholder: "Search conversations and messages",
+    mode: "results",
+  });
   // Only one tab is active, so at most one scope exists.
-  const titleSearchScope = notificationSearchScope ?? contactSearchScope;
+  const titleSearchScope = notificationSearchScope ?? contactSearchScope ?? conversationSearchScope;
 
   const accountIdentityKey = snapshot ? `${snapshot.connection.origin ?? ""}|${snapshot.sessionScopeId ?? ""}` : null;
   const accountNotice = useAccountNotice(accountIdentityKey);

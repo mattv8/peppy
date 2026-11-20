@@ -9,13 +9,14 @@ export type ScopedSearchOptions = {
   /** Chip text, e.g. "Notifications". */
   label: string;
   placeholder: string;
+  mode?: "filter" | "results";
 };
 
 /**
  * Query and removable title-bar scope of one tab. The chip starts armed; exiting it returns the search to
  * everything until `resetSearch` re-arms it (the caller calls it when the tab is left or re-entered).
  */
-export function useScopedSearch({ active, locked, label, placeholder }: ScopedSearchOptions) {
+export function useScopedSearch({ active, locked, label, placeholder, mode = "filter" }: ScopedSearchOptions) {
   const [query, setQuery] = useState("");
   const [scoped, setScoped] = useState(true);
   const resetSearch = () => {
@@ -27,14 +28,13 @@ export function useScopedSearch({ active, locked, label, placeholder }: ScopedSe
       ? {
         label,
         placeholder,
-        query,
-        onQueryChange: setQuery,
+        ...(mode === "results" ? { mode: "results" as const } : { query, onQueryChange: setQuery }),
         onExit: () => {
           setScoped(false);
           setQuery("");
         },
       }
       : undefined
-  ), [active, label, locked, placeholder, query, scoped]);
+  ), [active, label, locked, mode, placeholder, query, scoped]);
   return { query, setQuery, scope, resetSearch };
 }

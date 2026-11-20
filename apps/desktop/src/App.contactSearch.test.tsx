@@ -103,6 +103,30 @@ it("re-arms the chip on return after it was exited", async () => {
   expect(screen.getByRole("button", { name: CHIP })).toBeInTheDocument();
 });
 
+it("scopes Conversations results and re-arms after switching tabs", async () => {
+  vi.mocked(bridge.search_local).mockImplementation(async ({ query }) => ({
+    query,
+    items: [
+      { kind: "conversation", conversationId: "c1", title: "Found conversation", subtitle: "Recent" },
+      { kind: "contact", bookId: "book", contactId: "contact", title: "Hidden contact", subtitle: "", phones: [], phoneCount: 0 },
+    ],
+    hasMore: { conversation: false, message: false, contact: true },
+    indexState: "ready",
+  }));
+  render(<App />);
+  const chip = await screen.findByRole("button", { name: "Search everything, not just Conversations" });
+  const input = screen.getByRole("combobox", { name: "Search Peppy" });
+  expect(input).toHaveAttribute("placeholder", "Search conversations and messages");
+  fireEvent.change(input, { target: { value: "found" } });
+  expect(await screen.findByText("Found conversation")).toBeInTheDocument();
+  expect(screen.queryByText("Hidden contact")).not.toBeInTheDocument();
+  fireEvent.click(chip);
+  expect(await screen.findByText("Hidden contact")).toBeInTheDocument();
+  await openContacts();
+  fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+  expect(await screen.findByRole("button", { name: "Search everything, not just Conversations" })).toBeInTheDocument();
+});
+
 it("keeps the Notifications chip on the Notifications tab, not Contacts", async () => {
   render(<App />);
   fireEvent.click(screen.getByRole("button", { name: /^Notifications/ }));

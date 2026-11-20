@@ -3037,6 +3037,7 @@ describe("new-recipient drafts", () => {
     });
     render(<App />);
     const omni = await screen.findByRole("combobox", { name: "Search Peppy" });
+    fireEvent.click(await screen.findByRole("button", { name: "Search everything, not just Conversations" }));
     fireEvent.change(omni, { target: { value: "Ada" } });
     fireEvent.click(await screen.findByRole("option", { name: "Start conversation with Ada" }));
 
@@ -3051,6 +3052,7 @@ describe("new-recipient drafts", () => {
     });
     vi.spyOn(bridge, "list_contacts_page").mockResolvedValue({ contacts: [], total: 0, throughFound: false });
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Search everything, not just Conversations" }));
     fireEvent.change(await screen.findByRole("combobox", { name: "Search Peppy" }), { target: { value: "Missing" } });
     fireEvent.click(await screen.findByRole("option", { name: "Start conversation with Missing" }));
 

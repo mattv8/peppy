@@ -69,6 +69,57 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+it("scopes dropdown results to conversations and restores everything on exit", async () => {
+  vi.useFakeTimers();
+  const notificationResults: OmniNotificationResults = {
+    search: () => ({ hits: [{ key: "alert", appName: "Slack", title: [{ text: "Alert", match: false }], snippet: [] }], total: 1 }),
+    onActivate: vi.fn(),
+    onShowAll: vi.fn(),
+  };
+  const onSearch = vi.fn(async (request) => ({
+    ...page(request.query, [
+      { kind: "conversation", conversationId: "c1", title: "Aurora", subtitle: "Recent" },
+      { kind: "message", conversationId: "c1", messageId: "m1", title: "Found message", snippet: "Body", timestamp: "Now" },
+      contactHit(),
+    ]),
+    hasMore: { conversation: false, message: false, contact: true },
+  }));
+  const props = { sessionKey: "one", onActivate: vi.fn(), onSearch, notificationResults };
+  const scope = { mode: "results" as const, label: "Conversations", placeholder: "Search conversations and messages", onExit: vi.fn() };
+  const { rerender } = render(<OmniSearch {...props} scope={scope} />);
+  const input = screen.getByRole("combobox", { name: "Search Peppy" });
+  expect(screen.getByRole("button", { name: "Search everything, not just Conversations" })).toHaveAttribute("data-omni-scope");
+  fireEvent.change(input, { target: { value: "aurora" } });
+  await act(async () => { vi.advanceTimersByTime(100); });
+  expect(screen.getByText("Aurora")).toBeInTheDocument();
+  expect(screen.getByText("Found message")).toBeInTheDocument();
+  expect(screen.queryByText("Ada Lovelace")).not.toBeInTheDocument();
+  expect(screen.queryByRole("group", { name: "Contacts" })).not.toBeInTheDocument();
+  expect(screen.queryByText("Alert")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Search everything, not just Conversations" }));
+  expect(scope.onExit).toHaveBeenCalled();
+  rerender(<OmniSearch {...props} />);
+  await act(async () => { vi.advanceTimersByTime(100); });
+  expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
+  expect(screen.getByText("Alert")).toBeInTheDocument();
+});
+
+it("exits a results scope with Backspace on empty", () => {
+  const onExit = vi.fn();
+  render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async request => page(request.query)} scope={{ mode: "results", label: "Conversations", placeholder: "Search conversations and messages", onExit }} />);
+  fireEvent.keyDown(screen.getByRole("combobox"), { key: "Backspace" });
+  expect(onExit).toHaveBeenCalledOnce();
+});
+
+it("offers the number candidate and history search in results mode", async () => {
+  vi.useFakeTimers();
+  render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async request => page(request.query, [])} onStartConversation={async () => true} historySearch={history()} onSearchFurtherBack={async () => {}} scope={{ mode: "results", label: "Conversations", placeholder: "Search conversations and messages", onExit: () => {} }} />);
+  fireEvent.change(screen.getByRole("combobox"), { target: { value: "+12025550100" } });
+  await act(async () => { vi.advanceTimersByTime(100); });
+  expect(document.querySelector("[data-omni-number-candidate]")).toBeInTheDocument();
+  expect(screen.getByText("Search further back")).toBeInTheDocument();
+});
+
 describe("OmniSearch", () => {
   it("uses a controlled scoped query without a popover or async search", () => {
     const onSearch = vi.fn(async (request) => page(request.query));

@@ -13,10 +13,8 @@ export type OmniTextSegment = { text: string; match: boolean };
 export type OmniSearchScope = {
   label: string;
   placeholder: string;
-  query: string;
-  onQueryChange(query: string): void;
   onExit(): void;
-};
+} & ({ mode?: "filter"; query: string; onQueryChange(query: string): void } | { mode: "results" });
 export type OmniNotificationHit = {
   key: string;
   appName: string;
@@ -280,12 +278,15 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   const recipientSequenceRef = useRef(0);
   const recipientPendingRef = useRef(false);
   const chooserRef = useRef<OmniContactNumber[] | null>(null);
+  const filterScope = scope?.mode !== "results" ? scope : undefined;
+  const resultsScope = scope?.mode === "results";
   const wasScopedRef = useRef(Boolean(scope));
-  const lastScopedQueryRef = useRef(scope?.query ?? "");
+  const wasResultsScopeRef = useRef(resultsScope);
+  const lastScopedQueryRef = useRef(filterScope?.query ?? "");
   onSearchRef.current = onSearch;
   onActivateRef.current = onActivate;
   onOpenChangeRef.current = onOpenChange;
-  if (scope) lastScopedQueryRef.current = scope.query;
+  if (filterScope) lastScopedQueryRef.current = filterScope.query;
   const componentId = useId();
   const listId = `omni-search-results-${componentId}`;
   const [query, setQuery] = useState("");
@@ -309,7 +310,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   const [historyActionPending, setHistoryActionPending] = useState(false);
   const [startFailed, setStartFailed] = useState(false);
   const [failedNotificationIcons, setFailedNotificationIcons] = useState<ReadonlySet<string>>(() => new Set());
-  const searchQuery = scope ? scope.query : query;
+  const searchQuery = filterScope ? filterScope.query : query;
   const trimmedQuery = searchQuery.trim();
   const notificationSearch = useMemo(
     () => !scope && notificationResults && category === null && trimmedQuery && !disabled && !composing && !chooser
@@ -383,25 +384,29 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   }, []);
   useEffect(() => {
     reset(); setCategory(null); openerRef.current = null;
-    if (!scope) { setQuery(""); setOpen(false); }
+    if (!filterScope) { setQuery(""); setOpen(false); }
   }, [disabled, sessionKey]);
 
   useEffect(() => {
     const wasScoped = wasScopedRef.current;
+    const wasResultsScope = wasResultsScopeRef.current;
     wasScopedRef.current = Boolean(scope);
+    wasResultsScopeRef.current = resultsScope;
     if (scope) {
       reset();
       setCategory(null);
       setOpen(false);
+      if (resultsScope && !wasResultsScope) setQuery("");
       return;
     }
+    if (wasResultsScope) setCategory(null);
     if (wasScoped && document.activeElement === inputRef.current) {
-      setQuery(lastScopedQueryRef.current);
+      if (!wasResultsScope) setQuery(lastScopedQueryRef.current);
       setQueryRevision((value) => value + 1);
       setOpen(true);
     }
-    else if (wasScoped) setQuery("");
-  }, [Boolean(scope)]);
+    else if (wasScoped && !wasResultsScope) setQuery("");
+  }, [Boolean(scope), resultsScope]);
 
   useEffect(() => {
     setStartFailed(false);
@@ -414,7 +419,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   }, [open]);
 
   useEffect(() => {
-    if (scope || !open || disabled || composing || !trimmedQuery) { reset(); return; }
+    if (filterScope || !open || disabled || composing || !trimmedQuery) { reset(); return; }
     const sequence = ++requestSequenceRef.current;
     const backgroundRefresh = backgroundRefreshRef.current;
     backgroundRefreshRef.current = false;
@@ -438,7 +443,8 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
           cursor = next.nextCursor;
         } while (category && requestedPrefix > MAX_CATEGORY_PAGE_LIMIT && remaining > 0 && cursor);
         if (sequence !== requestSequenceRef.current) return;
-        const merged = category ? { ...next!, items: prefix } : next!;
+        const received = category ? { ...next!, items: prefix } : next!;
+        const merged = resultsScope ? { ...received, items: received.items.filter((hit) => hit.kind !== "contact"), hasMore: { ...received.hasMore, contact: false } } : received;
         completedPage = merged;
         rebaseAttemptsRef.current = 0;
         setPage(merged);
@@ -487,7 +493,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
     const indexVersionChanged = historyEnabled && historyIndexVersionRef.current !== historySearch?.indexVersion;
     historyIndexVersionRef.current = historySearch?.indexVersion;
     if (!refreshChanged && !indexVersionChanged) return;
-    if (scope || !open || disabled || composing || !trimmedQuery) return;
+    if (filterScope || !open || disabled || composing || !trimmedQuery) return;
     if (indexVersionChanged) {
       if (requestPendingRef.current) {
         pendingHistoryIndexRefreshRef.current = true;
@@ -521,7 +527,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
       event.preventDefault();
       const activeElement = document.activeElement;
       if (activeElement instanceof HTMLElement && activeElement !== inputRef.current) openerRef.current = activeElement;
-      inputRef.current?.focus(); inputRef.current?.select(); if (!scope) setOpen(true);
+      inputRef.current?.focus(); inputRef.current?.select(); if (!filterScope) setOpen(true);
     };
     document.addEventListener("keydown", shortcut);
     return () => document.removeEventListener("keydown", shortcut);
@@ -615,7 +621,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
     void onSearchRef.current({ query: trimmedQuery, kind: category, cursor: page.nextCursor, limit: INITIAL_GROUP_LIMIT }).then((next) => {
       completedPage = next;
       if (sequence !== requestSequenceRef.current || next.query !== trimmedQuery) return;
-      const mergedItems = appendUnique(page.items, next.items);
+      const mergedItems = appendUnique(page.items, resultsScope ? next.items.filter((hit) => hit.kind !== "contact") : next.items);
       requestedPrefixRef.current = Math.max(requestedPrefixRef.current, mergedItems.length);
       setPage({ ...next, items: mergedItems });
       if (next.indexState === "ready") {
@@ -720,14 +726,15 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   };
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || compositionRef.current) return;
-    if (scope) {
+    if (filterScope) {
       if (event.key === "Escape") {
-        if (scope.query) scope.onQueryChange("");
+        if (filterScope.query) filterScope.onQueryChange("");
         else openerRef.current?.focus();
       }
-      else if (event.key === "Backspace" && !scope.query && event.currentTarget.selectionStart === 0) scope.onExit();
+      else if (event.key === "Backspace" && !filterScope.query && event.currentTarget.selectionStart === 0) filterScope.onExit();
       return;
     }
+    if (resultsScope && event.key === "Backspace" && !query && event.currentTarget.selectionStart === 0) { scope.onExit(); return; }
     if (!open && (event.key === "Enter" || event.key === "ArrowDown")) { event.preventDefault(); setOpen(true); }
     else if (event.key === "ArrowDown" || event.key === "ArrowUp") { if (!items.length) return; event.preventDefault(); setActiveIndex((value) => Math.max(0, Math.min(items.length - 1, value + (event.key === "ArrowDown" ? 1 : -1)))); }
     else if (open && event.key === "Home") { event.preventDefault(); setActiveIndex(0); }
@@ -750,8 +757,8 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   const clearQuery = () => {
     compositionRef.current = false;
     setComposing(false);
-    if (scope) {
-      scope.onQueryChange("");
+    if (filterScope) {
+      filterScope.onQueryChange("");
       inputRef.current?.focus();
       return;
     }
@@ -759,8 +766,8 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   };
   const change = (event: ChangeEvent<HTMLInputElement>) => {
     const nextQuery = Array.from(event.target.value).slice(0, 128).join("");
-    if (scope) {
-      scope.onQueryChange(nextQuery);
+    if (filterScope) {
+      filterScope.onQueryChange(nextQuery);
       return;
     }
     reset(); setCategory(null); setQuery(nextQuery); setQueryRevision((value) => value + 1); setOpen(true);
@@ -782,7 +789,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
       if (document.activeElement !== inputRef.current) openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     }}
     onBlur={(event) => {
-      if (!scope && !(event.relatedTarget instanceof Node && rootRef.current?.contains(event.relatedTarget))) close();
+      if (!filterScope && !(event.relatedTarget instanceof Node && rootRef.current?.contains(event.relatedTarget))) close();
     }}
   >
     {scope && <button
@@ -798,12 +805,12 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
     >{scope.label}<X size={12} strokeWidth={1.75} aria-hidden /></button>}
     <input
       ref={inputRef}
-      role={scope ? "searchbox" : "combobox"}
+      role={filterScope ? "searchbox" : "combobox"}
       aria-label="Search Peppy"
-      aria-autocomplete={scope ? undefined : "list"}
-      aria-expanded={scope ? undefined : open}
-      aria-controls={scope ? undefined : listId}
-      aria-activedescendant={scope ? undefined : selectedId}
+      aria-autocomplete={filterScope ? undefined : "list"}
+      aria-expanded={filterScope ? undefined : open}
+      aria-controls={filterScope ? undefined : listId}
+      aria-activedescendant={filterScope ? undefined : selectedId}
       autoComplete="off"
       autoCorrect="off"
       spellCheck={false}
@@ -813,7 +820,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
       onChange={change}
       onFocus={(event) => {
         if (event.relatedTarget instanceof HTMLElement && !rootRef.current?.contains(event.relatedTarget)) openerRef.current = event.relatedTarget;
-        if (!scope) setOpen(true);
+        if (!filterScope) setOpen(true);
       }}
       onCompositionStart={() => {
         compositionRef.current = true;
@@ -834,13 +841,13 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
       onMouseDown={(event) => event.preventDefault()}
       onClick={clearQuery}
     ><X size={12} strokeWidth={1.75} aria-hidden /></button>}
-    {open && !scope && <div
+    {open && !filterScope && <div
       className="omni-search-results"
       data-omni-search-results
       style={popoverStyle}
       onMouseDown={(event) => event.preventDefault()}
     >
-      {!trimmedQuery && <p className="omni-search-hint">{notificationResults ? "Search locally synced conversations, messages, contacts, and notifications." : "Search locally synced conversations, messages, and contacts."}</p>}
+      {!trimmedQuery && <p className="omni-search-hint">{resultsScope ? "Search locally synced conversations and messages." : notificationResults ? "Search locally synced conversations, messages, contacts, and notifications." : "Search locally synced conversations, messages, and contacts."}</p>}
       {loading && <p>Searching…</p>}
       {recipientPending && <p role="status">Starting conversation…</p>}
       {recipientError && <p role="alert">{recipientError}</p>}

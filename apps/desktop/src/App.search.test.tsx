@@ -38,6 +38,10 @@ const pageFor = (query: string, items: LocalSearchHit[]) => ({
 
 async function activate(hit: LocalSearchHit) {
   vi.mocked(bridge.search_local).mockImplementation(async ({ query }) => pageFor(query, [hit]));
+  if (hit.kind === "contact") {
+    const scopeExit = screen.queryByRole("button", { name: "Search everything, not just Conversations" });
+    if (scopeExit) fireEvent.click(scopeExit);
+  }
   const input = screen.getByRole("combobox", { name: "Search Peppy" });
   fireEvent.change(input, { target: { value: hit.kind === "contact" ? "contact" : hit.kind === "message" ? hit.messageId : hit.conversationId } });
   await waitFor(() => expect(document.querySelector("[data-search-hit]")).not.toBeNull());
