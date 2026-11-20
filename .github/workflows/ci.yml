@@ -637,8 +637,7 @@ jobs:
           workspaces: apps/desktop/src-tauri -> target
           save-if: false
           cache-on-failure: true
-      # One compile covers what a separate cargo check would: --bins builds the
-      # non-test library and app binary, sharing dependencies with the test build.
+      - run: cargo check --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml
       - run: 'cargo test --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --bins updates::'
 
   google-messages-go:

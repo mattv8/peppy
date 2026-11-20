@@ -95,7 +95,10 @@ fail!('desktop and desktop-updater must share the desktop Rust cache key') unles
 fail!('desktop Rust caches must not set key alongside shared-key') if desktop_cache.key?('key') || updater_cache.key?('key')
 fail!('desktop-updater Rust cache must be restore-only') unless updater_cache['save-if'] == false
 updater_cargo_runs = updater.fetch('steps').map { |step| step['run'] }.compact.select { |run| run.include?('cargo ') }
-fail!('desktop-updater must compile once: one cargo test covering the library, binaries and updates:: tests') unless updater_cargo_runs == ['cargo test --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --bins updates::']
+fail!('desktop-updater must run cargo check before cargo test covering the library, binaries and updates:: tests') unless updater_cargo_runs == [
+  'cargo check --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml',
+  'cargo test --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --bins updates::'
+]
 fail!('desktop Rust cache must save only from production') unless desktop_cache['save-if'] == "${{ github.ref == 'refs/heads/production' }}"
 full_scope = scope_output(options[:scope], { 'FILTER_FORCE_FULL' => 'true' })
 linux_scope = scope_output(options[:scope], { 'FILTER_WEB' => 'true' })
