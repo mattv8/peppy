@@ -585,6 +585,8 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "hosted_open_billing",
         "hosted_provision",
         "hosted_delete_account",
+        "hosted_deletion_status",
+        "hosted_cancel_account_deletion",
         "purchase_options",
         "store_products",
         "store_purchase",
@@ -610,6 +612,9 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
             main.contains(&allow(command)),
             "main window cannot call {command}"
         );
+    }
+    for command in ["hosted_deletion_status", "hosted_cancel_account_deletion"] {
+        assert!(!media.contains(&allow(command)), "media can call {command}");
     }
     // Composer windows cannot minimize/maximize the main shell either.
     assert!(!composer.contains("core:window:allow-minimize"));

@@ -644,7 +644,7 @@ describe("setup landing routing", () => {
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     fireEvent.click(await screen.findByRole("button", { name: "Delete account" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "I understand this is permanent" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "I understand my account will be deleted in 7 days" }));
     fireEvent.click(document.getElementById("account-delete-submit")!);
     await screen.findByRole("heading", { name: "Account deleted" });
 
@@ -6209,22 +6209,41 @@ describe("host state display", () => {
     ["deleted", "stripe", "Account deleted"],
     ["deleted", "apple", "Account deleted"],
     ["deleted", "google_play", "Account deleted"],
-    ["pending", "none", "Deletion in progress"],
+    ["pending", "none", "Account deletion scheduled"],
+    ["pending", "apple", "Account deletion scheduled"],
+    ["pending", "google_play", "Account deletion scheduled"],
   ] as const)("shows the %s account-deletion result for %s", async (outcome, provider, title) => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue({ ...(await fixtureBridge.hosted_account()), signedIn: true });
     vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider, manageableIn: provider === "apple" ? "app_store" : provider === "google_play" ? "google_play" : "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
     vi.spyOn(bridge, "hosted_delete_account").mockResolvedValue(outcome);
+    vi.spyOn(bridge, "hosted_deletion_status").mockResolvedValueOnce({ executeAfter: null, cancellable: false }).mockResolvedValue({ executeAfter: "2026-11-26T18:00:00Z", cancellable: true });
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     fireEvent.click(await screen.findByRole("button", { name: "Delete account" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "I understand this is permanent" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "I understand my account will be deleted in 7 days" }));
     fireEvent.click(document.getElementById("account-delete-submit")!);
 
-    expect(await screen.findByRole("heading", { name: title })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: title, level: 2 })).toBeInTheDocument();
     expect(document.getElementById("account-deletion-result-dialog")).toBeInTheDocument();
     if (provider === "apple") expect(screen.getByRole("button", { name: "Manage App Store subscriptions" })).toBeInTheDocument();
     if (provider === "google_play") expect(screen.getByRole("button", { name: "Manage Google Play subscriptions" })).toBeInTheDocument();
+  });
+
+  it("shows processing without a cancellation promise after a non-cancellable 202", async () => {
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue({ ...(await fixtureBridge.hosted_account()), signedIn: true });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider: "none", manageableIn: "none", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+    vi.spyOn(bridge, "hosted_deletion_status").mockResolvedValueOnce({ executeAfter: null, cancellable: false }).mockResolvedValue({ executeAfter: "2026-11-26T18:00:00Z", cancellable: false });
+    vi.spyOn(bridge, "hosted_delete_account").mockResolvedValue("pending");
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete account" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "I understand my account will be deleted in 7 days" }));
+    fireEvent.click(document.getElementById("account-delete-submit")!);
+    expect(await screen.findByRole("heading", { name: "Account deletion in progress", level: 2 })).toBeInTheDocument();
+    expect(document.getElementById("account-deletion-result-body")).not.toHaveTextContent(/cancel/i);
+    expect(document.getElementById("hosted-account-delete")).toHaveAttribute("data-deletion-phase", "processing");
   });
 
   it("reports when the protected key remains unavailable after retrying", async () => {

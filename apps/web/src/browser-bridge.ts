@@ -841,6 +841,8 @@ export class BrowserBridge implements DesktopBridge {
   public hosted_sign_in(_provider: HostedSignInProvider): Promise<never> { return unsupported("Hosted sign-in"); }
   public hosted_sign_out(): Promise<void> { return unsupported("Hosted sign-out"); }
   public hosted_delete_account(): Promise<"deleted" | "pending"> { return unsupported("Account deletion"); }
+  public hosted_deletion_status(): Promise<{ executeAfter: string | null; cancellable: boolean }> { return unsupported("Account deletion"); }
+  public hosted_cancel_account_deletion(): Promise<void> { return unsupported("Account deletion"); }
   public hosted_open_billing(): Promise<void> {
     if (!this.accountUrl) return unsupported("Hosted billing");
     window.open(this.accountUrl, "_blank", "noopener,noreferrer");

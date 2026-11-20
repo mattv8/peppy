@@ -4,7 +4,9 @@ import { type RefObject, useEffect, useRef, useState } from "react";
 import { bridge, type BillingSummaryView } from "../bridge/bridge";
 import { peppyCopy } from "../generated/peppyCopy";
 
-export type AccountDeletionResult = { outcome: "deleted" | "pending"; provider: BillingProvider };
+export type AccountDeletionResult = { outcome: "deleted" | "pending"; provider: BillingProvider; executeAfter?: string | null; cancellable?: boolean };
+
+const DELETION_STATUS_TIMEOUT_MS = 5000;
 
 export function DeleteAccountDialog({ billing, opener, onDismiss, onDeleted }: { billing: BillingSummaryView; opener: RefObject<HTMLButtonElement | null>; onDismiss(): void; onDeleted(result: AccountDeletionResult): void }) {
   const [currentBilling, setCurrentBilling] = useState(billing);
@@ -21,7 +23,16 @@ export function DeleteAccountDialog({ billing, opener, onDismiss, onDeleted }: {
     setFailed(false);
     try {
       const outcome = await bridge.hosted_delete_account();
-      onDeleted({ outcome, provider: currentBilling.provider });
+      if (outcome === "pending") {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const status = await Promise.race([
+          bridge.hosted_deletion_status().catch(() => null),
+          new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), DELETION_STATUS_TIMEOUT_MS); }),
+        ]).finally(() => clearTimeout(timer));
+        onDeleted({ outcome, provider: currentBilling.provider, executeAfter: status?.executeAfter ?? null, ...(status ? { cancellable: status.cancellable } : {}) });
+      } else {
+        onDeleted({ outcome, provider: currentBilling.provider });
+      }
     } catch (error) {
       setFailureMessage(typeof error === "object" && error !== null && "code" in error && error.code === "hosted-session-required" && "message" in error && typeof error.message === "string" ? error.message : peppyCopy.account_delete_error);
       setFailed(true);

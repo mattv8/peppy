@@ -5,7 +5,7 @@ import type { AccountAccessResult, AccountNoticeDto, AccountNoticeKindDto, Billi
 import { bridge } from "../bridge/bridge";
 import { formatCopy, peppyCopy } from "../generated/peppyCopy";
 import { SystemRibbon, SystemRibbonAnnouncement, SystemRibbonStrip } from "./SystemRibbon";
-import { accountRibbonModel, formatAccountDeadline, openAccountManageUrl, resolveSystemRibbon, type RibbonActionContext } from "./systemRibbonModel";
+import { accountRibbonModel, formatAccountDeadline, formatDeletionDeadline, openAccountManageUrl, resolveSystemRibbon, type RibbonActionContext } from "./systemRibbonModel";
 import { isAccountNoticeSnoozed, useAccountNotice } from "./useAccountNotice";
 
 vi.mock("../bridge/bridge", { spy: true });
@@ -77,6 +77,14 @@ describe("resolveSystemRibbon", () => {
 });
 
 describe("accountRibbonModel", () => {
+  it("formats deletion deadlines with the local date and time", () => {
+    const expected = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(NOW));
+    expect(formatDeletionDeadline(NOW / 1000)).toBe(expected);
+  });
+  it("directs desktop users to Settings for scheduled deletion", () => {
+    const model = accountRibbonModel(notice({ kind: "read_only_account_deleting" }), NOW, websiteAllowed);
+    expect(model.body).toContain("Settings");
+  });
   it("uses the no-date body when a payment grace deadline is missing", () => {
     const model = accountRibbonModel(graceNotice({ deadline: null }), NOW, websiteAllowed);
     expect(model.body).toBe(peppyCopy.account_payment_failed_grace_body_nodate);

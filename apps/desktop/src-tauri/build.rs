@@ -126,6 +126,8 @@ const COMMANDS: &[&str] = &[
     "hosted_open_billing",
     "hosted_provision",
     "hosted_delete_account",
+    "hosted_deletion_status",
+    "hosted_cancel_account_deletion",
     "purchase_options",
     "store_products",
     "store_purchase",

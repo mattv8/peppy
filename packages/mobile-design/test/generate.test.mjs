@@ -428,7 +428,7 @@ test("Google Messages link device status help is generated for the Peppy table",
 test("store, account, startup, and re-enrol copy is desktop-only and generated", () => {
   const desktopOnlyPattern = /^(store_|attachment_storage_addon_|billing_elsewhere_|account_billing_intro_|account_portal_cta$|account_delete_|account_deleted_|startup_|reenrol_|updates_app_store_delivered$|hosted_sign_in_(group_label|waiting)$|hosted_session_recovery_body$)/;
   const keys = Object.keys(desktopOverrides).filter(key => desktopOnlyPattern.test(key));
-  assert.equal(keys.length, 75, "every key in the UX spec catalog section must be present");
+  assert.equal(keys.length, 86, "every key in the UX spec catalog section must be present");
   const desktop = readFileSync(path("apps/desktop/src/generated/peppyCopy.ts"), "utf8");
   const android = readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8");
   const ios = readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8");
@@ -444,6 +444,19 @@ test("store, account, startup, and re-enrol copy is desktop-only and generated",
 
   assert.equal(desktopOverrides.store_renewal_notice, "Payment is charged to your Apple Account when you confirm the purchase. Subscriptions renew automatically unless you cancel at least 24 hours before the end of the current period. You can manage or cancel your subscription in your Apple Account settings.");
   assert.equal(desktopOverrides.billing_elsewhere_other_body, "This subscription was started outside the App Store, so it can't be changed in this app.");
+  for (const key of ["account_delete_stripe_billing", "account_delete_scheduled_stripe"]) {
+    assert.match(desktopOverrides[key], /try(?:ing)? to stop website subscription renewal/);
+    assert.match(desktopOverrides[key], /can't confirm it here/);
+    assert.match(desktopOverrides[key], /Check your billing to confirm/);
+  }
+});
+
+test("deletion ribbon keeps native copy platform-neutral and desktop guidance desktop-only", () => {
+  assert.doesNotMatch(catalog.account_read_only_account_deleting_body, /in Settings/i);
+  assert.doesNotMatch(catalog.account_read_only_account_deleting_body_gateway, /in Settings/i);
+  assert.ok(desktopOnlyKeys.includes("account_read_only_account_deleting_desktop_body"));
+  assert.match(desktopOverrides.account_read_only_account_deleting_desktop_body, /in Settings/);
+  assert.ok(!("account_read_only_account_deleting_desktop_body" in nativeCatalog));
 });
 
 test("native copy is generated from the shared catalog only", () => {

@@ -47,6 +47,7 @@ struct FakeServerState {
     vault_id: Option<String>,
     grant_status: Option<u16>,
     delete_response: StatusCode,
+    deletion_status_body: String,
 }
 
 #[derive(Clone, Copy)]
@@ -107,6 +108,8 @@ impl Default for FakeServerState {
             vault_id: None,
             grant_status: None,
             delete_response: StatusCode::NO_CONTENT,
+            deletion_status_body: r#"{"execute_after":"2026-11-26T18:00:00Z","cancellable":true}"#
+                .into(),
         }
     }
 }
@@ -183,6 +186,18 @@ async fn fake_delete_account_handler(
     } else {
         status.into_response()
     }
+}
+
+async fn fake_deletion_status_handler(
+    axum::extract::State(state): axum::extract::State<Arc<Mutex<FakeServerState>>>,
+) -> impl IntoResponse {
+    state.lock().unwrap().deletion_status_body.clone()
+}
+
+async fn fake_cancel_deletion_handler(
+    axum::extract::State(state): axum::extract::State<Arc<Mutex<FakeServerState>>>,
+) -> impl IntoResponse {
+    state.lock().unwrap().delete_response
 }
 
 async fn fake_session_renew_handler(
@@ -355,6 +370,14 @@ async fn start_fake_server(
         .route(
             "/hosted/v1/account",
             get(fake_account_handler).delete(fake_delete_account_handler),
+        )
+        .route(
+            "/hosted/v1/account/deletion",
+            get(fake_deletion_status_handler),
+        )
+        .route(
+            "/hosted/v1/account/deletion/cancel",
+            post(fake_cancel_deletion_handler),
         )
         .route(
             "/hosted/v1/auth/session/renew",
@@ -1424,6 +1447,88 @@ async fn account_resumable_when_checkpoint_exists() {
 // ============================================================================
 // Account Deletion Tests
 // ============================================================================
+
+#[tokio::test]
+async fn deletion_status_null_malformed_and_offline() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState::default()));
+    let (base, handle) = start_fake_server(server.clone()).await;
+    hosted.base_override.lock().unwrap().replace(base);
+    let key = super::session_key(HTTPS_ORIGIN);
+    store
+        .set(
+            &key,
+            &encode_session(ACCOUNT, "bearer", super::now_unix() + 3600),
+        )
+        .unwrap();
+    server.lock().unwrap().deletion_status_body =
+        r#"{"execute_after":null,"cancellable":false}"#.into();
+    let status = super::deletion_status_core(&store, &hosted, HTTPS_ORIGIN)
+        .await
+        .unwrap();
+    assert!(status.execute_after.is_none());
+    assert!(!status.cancellable);
+    server.lock().unwrap().deletion_status_body = "{".into();
+    assert_eq!(
+        super::deletion_status_core(&store, &hosted, HTTPS_ORIGIN)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "account-deletion-failed"
+    );
+    handle.abort();
+    let _ = handle.await;
+    assert_eq!(
+        super::deletion_status_core(&store, &hosted, HTTPS_ORIGIN)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "offline"
+    );
+}
+
+#[tokio::test]
+async fn deletion_status_and_cancel_preserve_session() {
+    for (status, code) in [
+        (StatusCode::NO_CONTENT, None),
+        (StatusCode::CONFLICT, Some("deletion-already-started")),
+        (StatusCode::NOT_FOUND, Some("deletion-not-scheduled")),
+        (StatusCode::UNAUTHORIZED, Some("hosted-session-required")),
+    ] {
+        let store = MemoryStore::default();
+        let hosted = HostedState::default();
+        let server = Arc::new(Mutex::new(FakeServerState {
+            delete_response: status,
+            ..FakeServerState::default()
+        }));
+        let (base, _handle) = start_fake_server(server).await;
+        hosted.base_override.lock().unwrap().replace(base);
+        let key = super::session_key(HTTPS_ORIGIN);
+        store
+            .set(
+                &key,
+                &encode_session(ACCOUNT, "bearer", super::now_unix() + 3600),
+            )
+            .unwrap();
+        let view = super::deletion_status_core(&store, &hosted, HTTPS_ORIGIN)
+            .await
+            .unwrap();
+        assert_eq!(view.execute_after.as_deref(), Some("2026-11-26T18:00:00Z"));
+        assert!(view.cancellable);
+        let result = super::cancel_deletion_core(&store, &hosted, HTTPS_ORIGIN).await;
+        match code {
+            Some(code) => assert_eq!(result.unwrap_err().code, code),
+            None => assert!(result.is_ok()),
+        }
+        assert!(store
+            .get(&key)
+            .unwrap()
+            .is_some_and(|value| !value.is_empty()));
+    }
+}
 
 #[tokio::test]
 async fn delete_account_204_tombstones_the_observed_session() {

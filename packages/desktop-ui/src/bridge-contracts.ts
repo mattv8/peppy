@@ -374,6 +374,8 @@ export interface DesktopBridge {
   hosted_sign_in(provider: HostedSignInProvider): Promise<HostedAccountView>;
   hosted_sign_out(): Promise<void>;
   hosted_delete_account(): Promise<"deleted" | "pending">;
+  hosted_deletion_status(): Promise<{ executeAfter: string | null; cancellable: boolean }>;
+  hosted_cancel_account_deletion(): Promise<void>;
   hosted_open_billing(): Promise<void>;
   hosted_provision(): Promise<void>;
   billing_summary(): Promise<BillingSummaryView>;

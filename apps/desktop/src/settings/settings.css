@@ -407,6 +407,7 @@
 #hosted-account-delete { padding: 12px; border: 1px solid color-mix(in srgb, var(--peppy-error) 35%, var(--peppy-border)); border-radius: var(--peppy-radius-sm); }
 #hosted-account-delete-title { color: var(--peppy-text-strong); font-size: 13px; }
 #hosted-account-sign-out,
+#hosted-account-delete-cancel,
 #hosted-account-delete-open { flex: 0 0 auto; width: auto; min-height: 28px; padding: 4px 10px; font-size: 13px; line-height: 1.4; white-space: normal; }
 #hosted-account-delete-open:hover:not(:disabled) { background: color-mix(in srgb, var(--peppy-danger-hover) 85%, black); }
 #settings-account-portal-link { justify-self: start; }
@@ -479,6 +480,7 @@
 
 @media (pointer: coarse) {
   .provider-button,
+  #hosted-account-delete-cancel,
   #hosted-account-delete-open,
   #account-delete-cancel,
   #account-delete-submit {

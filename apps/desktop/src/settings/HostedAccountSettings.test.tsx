@@ -34,6 +34,146 @@ describe("HostedAccountSettings", () => {
     vi.mocked(bridge.hosted_account).mockResolvedValue(account());
     vi.mocked(bridge.hosted_sign_out).mockResolvedValue();
     vi.mocked(bridge.hosted_sign_in).mockResolvedValue(account({ signedIn: true }));
+    vi.mocked(bridge.billing_summary).mockResolvedValue({ provider: "none", manageableIn: "none", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+    vi.mocked(bridge.hosted_deletion_status).mockResolvedValue({ executeAfter: null, cancellable: false });
+    vi.mocked(bridge.hosted_cancel_account_deletion).mockResolvedValue();
+  });
+
+  it("allows canceling a scheduled deletion and returns focus to delete", async () => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true }));
+    vi.mocked(bridge.hosted_deletion_status)
+      .mockResolvedValueOnce({ executeAfter: "2026-11-26T18:00:00Z", cancellable: true })
+      .mockResolvedValue({ executeAfter: null, cancellable: false });
+    const onDeletionCanceled = vi.fn();
+    render(<HostedAccountSettings onDeletionCanceled={onDeletionCanceled} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel deletion" }));
+    await waitFor(() => expect(onDeletionCanceled).toHaveBeenCalledOnce());
+    await waitFor(() => expect(document.getElementById("hosted-account-delete-open")).toHaveFocus());
+  });
+
+  it("shows processing when cancellation loses the race", async () => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true }));
+    vi.mocked(bridge.hosted_deletion_status)
+      .mockResolvedValueOnce({ executeAfter: "2026-11-26T18:00:00Z", cancellable: true })
+      .mockResolvedValue({ executeAfter: "2026-11-26T18:00:00Z", cancellable: false });
+    vi.mocked(bridge.hosted_cancel_account_deletion).mockRejectedValue({ code: "deletion-already-started" });
+    render(<HostedAccountSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel deletion" }));
+    await waitFor(() => expect(document.getElementById("hosted-account-delete-cancel-error")).toHaveTextContent("Deletion has already started"));
+    expect(document.getElementById("hosted-account-delete-status")).toHaveFocus();
+  });
+
+  it("returns to the delete action when nothing is scheduled", async () => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true }));
+    vi.mocked(bridge.hosted_deletion_status).mockResolvedValueOnce({ executeAfter: "2026-11-26T18:00:00Z", cancellable: true }).mockResolvedValue({ executeAfter: null, cancellable: false });
+    vi.mocked(bridge.hosted_cancel_account_deletion).mockRejectedValue({ code: "deletion-not-scheduled" });
+    render(<HostedAccountSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel deletion" }));
+    await waitFor(() => expect(document.getElementById("hosted-account-delete-open")).toHaveFocus());
+    expect(document.getElementById("hosted-account-delete-announcer")).toHaveTextContent("Nothing is scheduled");
+  });
+
+  it("allows retry after a cancellation failure", async () => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true }));
+    vi.mocked(bridge.hosted_deletion_status).mockResolvedValueOnce({ executeAfter: "2026-11-26T18:00:00Z", cancellable: true }).mockResolvedValue({ executeAfter: null, cancellable: false });
+    vi.mocked(bridge.hosted_cancel_account_deletion).mockRejectedValueOnce(new Error("offline")).mockResolvedValue();
+    render(<HostedAccountSettings />);
+    const cancel = await screen.findByRole("button", { name: "Cancel deletion" });
+    cancel.focus();
+    fireEvent.click(cancel);
+    await waitFor(() => expect(document.getElementById("hosted-account-delete-cancel-error")).toHaveTextContent("Nothing was changed"));
+    expect(cancel).toBeEnabled();
+    expect(cancel).toHaveFocus();
+    fireEvent.click(cancel);
+    await waitFor(() => expect(bridge.hosted_cancel_account_deletion).toHaveBeenCalledTimes(2));
+  });
+
+  it("sends only one cancellation while it is pending", async () => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true }));
+    vi.mocked(bridge.hosted_deletion_status).mockResolvedValue({ executeAfter: "2026-11-26T18:00:00Z", cancellable: true });
+    const pending = deferred<void>();
+    vi.mocked(bridge.hosted_cancel_account_deletion).mockReturnValue(pending.promise);
+    render(<HostedAccountSettings />);
+    const cancel = await screen.findByRole("button", { name: "Cancel deletion" });
+    fireEvent.click(cancel);
+    fireEvent.click(cancel);
+    expect(cancel).toHaveAttribute("aria-disabled", "true");
+    expect(cancel).toHaveAttribute("aria-busy", "true");
+    expect(bridge.hosted_cancel_account_deletion).toHaveBeenCalledOnce();
+    await act(async () => pending.resolve());
+  });
+
+  it.each(["stripe", "apple", "google_play"] as const)("shows the %s subscription note while scheduled", async provider => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true }));
+    vi.mocked(bridge.billing_summary).mockResolvedValue({ provider, manageableIn: "none", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+    vi.mocked(bridge.hosted_deletion_status).mockResolvedValue({ executeAfter: "2026-11-26T18:00:00Z", cancellable: true });
+    render(<HostedAccountSettings />);
+    await screen.findByRole("button", { name: "Cancel deletion" });
+    expect(document.getElementById("hosted-account-delete-subscription-note")).toHaveTextContent(provider === "stripe" ? "we'll try to turn renewal back on" : provider === "apple" ? "App Store" : "Google Play");
+  });
+
+  it.each([false, true])("uses billing pending=%s when status cannot be fetched", async pending => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true }));
+    vi.mocked(bridge.billing_summary).mockResolvedValue({ provider: "none", manageableIn: "none", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: pending });
+    vi.mocked(bridge.hosted_deletion_status).mockRejectedValue(new Error("offline"));
+    render(<HostedAccountSettings />);
+    expect(await screen.findByRole("button", { name: pending ? "Cancel deletion" : "Delete account" })).toBeEnabled();
+    expect(document.getElementById("hosted-account-error")).not.toBeInTheDocument();
+  });
+
+  it("keeps the known scheduled state when a focus refresh fails", async () => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true }));
+    vi.mocked(bridge.hosted_deletion_status).mockResolvedValueOnce({ executeAfter: "2026-11-26T18:00:00Z", cancellable: true }).mockRejectedValue(new Error("offline"));
+    render(<HostedAccountSettings />);
+    await screen.findByRole("button", { name: "Cancel deletion" });
+    fireEvent.focus(window);
+    await waitFor(() => expect(bridge.hosted_deletion_status).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("button", { name: "Cancel deletion" })).toBeInTheDocument();
+  });
+
+  it("shows the local date and time of a scheduled deletion", async () => {
+    const executeAfter = "2026-11-26T18:00:00Z";
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true }));
+    vi.mocked(bridge.hosted_deletion_status).mockResolvedValue({ executeAfter, cancellable: true });
+    render(<HostedAccountSettings />);
+    await screen.findByRole("button", { name: "Cancel deletion" });
+    const expected = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(executeAfter));
+    expect(document.getElementById("hosted-account-delete-status")).toHaveTextContent(expected);
+  });
+
+  it("clears deletion status when the session scope changes", async () => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true }));
+    vi.mocked(bridge.hosted_deletion_status).mockResolvedValueOnce({ executeAfter: "2026-11-26T18:00:00Z", cancellable: true }).mockRejectedValue(new Error("offline"));
+    const view = render(<HostedAccountSettings sessionScopeId="first" />);
+    await screen.findByRole("button", { name: "Cancel deletion" });
+    view.rerender(<HostedAccountSettings sessionScopeId="second" />);
+    await screen.findByRole("button", { name: "Delete account" });
+    expect(screen.queryByRole("button", { name: "Cancel deletion" })).not.toBeInTheDocument();
+  });
+
+  it("shows a scheduled row immediately after a pending deletion", async () => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true }));
+    vi.mocked(bridge.billing_summary).mockResolvedValue({ provider: "none", manageableIn: "none", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+    vi.mocked(bridge.hosted_deletion_status).mockResolvedValueOnce({ executeAfter: null, cancellable: false }).mockResolvedValue({ executeAfter: "2026-11-26T18:00:00Z", cancellable: true });
+    vi.mocked(bridge.hosted_delete_account).mockResolvedValue("pending");
+    render(<HostedAccountSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Delete account" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "I understand my account will be deleted in 7 days" }));
+    fireEvent.click(document.getElementById("account-delete-submit")!);
+    await screen.findByRole("button", { name: "Cancel deletion" });
+    expect(document.getElementById("hosted-account-delete")).toHaveAttribute("data-deletion-phase", "scheduled");
+  });
+
+  it("shows processing after a 202 when status is not cancellable", async () => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true }));
+    vi.mocked(bridge.hosted_deletion_status).mockResolvedValueOnce({ executeAfter: null, cancellable: false }).mockResolvedValue({ executeAfter: "2026-11-26T18:00:00Z", cancellable: false });
+    vi.mocked(bridge.hosted_delete_account).mockResolvedValue("pending");
+    render(<HostedAccountSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Delete account" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "I understand my account will be deleted in 7 days" }));
+    fireEvent.click(document.getElementById("account-delete-submit")!);
+    await waitFor(() => expect(document.getElementById("hosted-account-delete")).toHaveAttribute("data-deletion-phase", "processing"));
+    expect(screen.queryByRole("button", { name: "Cancel deletion" })).not.toBeInTheDocument();
   });
 
   it("offers Peppy sign-out for a signed-in account without inventing a label", async () => {
@@ -92,7 +232,7 @@ describe("HostedAccountSettings", () => {
       await waitFor(() => expect(screen.getByRole("button", { name: "Sign out of Peppy" })).toBeDisabled());
 
       await act(async () => signOut.resolve());
-       expect(screen.queryByRole("status")).not.toBeInTheDocument();
+       expect(document.getElementById("hosted-account-loading")).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Continue with Google" })).not.toBeInTheDocument();
 
       await act(async () => refresh.resolve(account()));

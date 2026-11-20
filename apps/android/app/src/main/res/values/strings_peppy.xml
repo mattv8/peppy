@@ -403,9 +403,9 @@
     <string name="peppy_account_read_only_tester_ineligible_body">This account no longer qualifies for tester access, so sending is paused. You can still read, sync and export your messages, and your data is kept.</string>
     <string name="peppy_account_read_only_tester_ineligible_body_gateway">This phone can\'t send texts from your computer because tester access has ended. Messages already in Peppy stay available, and your data is kept. New texts you receive are saved on this phone and upload when access returns.</string>
     <string name="peppy_account_read_only_tester_ineligible_action">View account</string>
-    <string name="peppy_account_read_only_account_deleting_title">Account is being deleted</string>
-    <string name="peppy_account_read_only_account_deleting_body">Sending is off while deletion finishes. Export anything you want to keep before it completes.</string>
-    <string name="peppy_account_read_only_account_deleting_body_gateway">This phone isn\'t sending texts from your computer while the account is deleted. Export anything you want to keep before it completes.</string>
+    <string name="peppy_account_read_only_account_deleting_title">Account deletion scheduled</string>
+    <string name="peppy_account_read_only_account_deleting_body">Your account is scheduled for deletion and is read-only until then. You can cancel on the Peppy website before the deletion date.</string>
+    <string name="peppy_account_read_only_account_deleting_body_gateway">This phone isn\'t sending texts from your computer while your account is scheduled for deletion. You can cancel on the Peppy website before the deletion date.</string>
     <string name="peppy_account_read_only_account_deleting_action">View account</string>
     <string name="peppy_account_read_only_other_title">Sending paused</string>
     <string name="peppy_account_read_only_other_body">Your account is read-only. You can still read, sync and export your messages, and your data is kept.</string>

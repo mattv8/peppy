@@ -7342,6 +7342,8 @@ pub fn run() {
             hosted::hosted_open_billing,
             hosted::hosted_provision,
             hosted::hosted_delete_account,
+            hosted::hosted_deletion_status,
+            hosted::hosted_cancel_account_deletion,
             purchases::purchase_options,
             purchases::store_products,
             purchases::store_purchase,
