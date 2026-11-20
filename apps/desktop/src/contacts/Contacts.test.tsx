@@ -133,6 +133,8 @@ describe("ContactsView", () => {
     expect(screen.getByLabelText("Given name")).toHaveValue("Unsaved");
     expect(screen.getByLabelText("New contact")).toBeDisabled();
     expect(document.getElementById("contacts-update-paused")).toBeInTheDocument();
+    // A direct child of the row layout would become its own full-height column.
+    expect(document.getElementById("contacts-center-pane")).toContainElement(document.getElementById("contacts-update-paused"));
   });
 
   it("hides a book from lookup and offers undo", async () => {
