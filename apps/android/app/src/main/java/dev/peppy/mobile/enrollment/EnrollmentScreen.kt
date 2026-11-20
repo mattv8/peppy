@@ -47,6 +47,8 @@ import dev.peppy.mobile.enrollmentErrorMessage
 import dev.peppy.mobile.gateway.ImportResult
 import dev.peppy.mobile.importMessage
 import dev.peppy.mobile.security.CredentialParser
+import dev.peppy.mobile.security.SecureWindow
+import dev.peppy.mobile.security.rememberActivitySecureWindow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -193,6 +195,15 @@ internal fun GeneratedSecretControls(
     }
 }
 
+/** Sets FLAG_SECURE on the hosting window while [visible]; renders nothing. */
+@Composable
+internal fun SetupTokenSecureWindow(visible: Boolean, secureWindow: SecureWindow) {
+    DisposableEffect(visible, secureWindow) {
+        if (visible) secureWindow.setSecure(true)
+        onDispose { if (visible) secureWindow.setSecure(false) }
+    }
+}
+
 /** Native enrollment keeps passwords and the vault secret in Compose state only. */
 @Composable
 internal fun EnrollmentScreen(
@@ -205,6 +216,7 @@ internal fun EnrollmentScreen(
     scanner: @Composable (Modifier, (String) -> Unit, () -> Unit) -> Unit = { modifier, onCode, onUnavailable ->
         QRScanner(modifier, onCode, onUnavailable)
     },
+    secureWindow: SecureWindow = rememberActivitySecureWindow(),
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -326,6 +338,7 @@ internal fun EnrollmentScreen(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
+    SetupTokenSecureWindow(visible = stage == EnrollmentStage.OWNER && setupCodeRequired, secureWindow = secureWindow)
 
     Column(
         Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp).testTag("native-enrollment-screen"),
