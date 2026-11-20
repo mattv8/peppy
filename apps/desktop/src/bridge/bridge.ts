@@ -283,7 +283,6 @@ const fixtureDevices: ManagedDeviceView[] = [
   { id: "device-old-iphone", name: "Old iPhone", kind: "ios", role: "owner", revoked: true },
 ];
 const fixtureScanStatuses = new Map<string, ContactScanStatus>();
-const fixtureContactBooks: ContactBookView[] = [{ id: "book-pixel8", deviceName: "Pixel 8", state: "active", capabilities: { canWrite: true, canDelete: true, canRestore: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true, canSync: true }, ownerDeviceId: "device-pixel8", contactCount: 3, defaultAccountLabel: "Google · aurora@example.com", lastSyncAt: "Just now", pendingEditCount: 1 }, { id: "book-iphone-retired", deviceName: "iPhone", state: "retired", capabilities: { canWrite: false, canDelete: false, supportsNotes: false, supportsPhoto: true, canSync: false }, sourceRevoked: true, ownerDeviceId: "device-old-iphone", contactCount: 0, lastSyncAt: "3 days ago", pendingEditCount: 0 }];
 const fixtureLookupExcludedBookIds = new Set<string>();
 const fixtureNameCandidates: Array<ContactNameCandidate & { address: string }> = [
   { address: "+12025550123", bookId: "book-pixel8", contactId: "contact-aurora", displayName: "Aurora Chen" },
@@ -362,7 +361,54 @@ const fixtureWebhookSecrets = new Map(fixtureWebhooks.map((webhook) => [webhook.
 const fixtureWebhook = (input: WebhookInput, id: string): WebhookView => ({ id, name: input.name?.trim() || new URL(input.url).hostname.replace(/^www\./, ""), nameIsDerived: !input.name?.trim(), url: input.url, events: [...input.events], filterMode: input.filterMode, filter: input.filter.map(entry => ({ ...entry })), paused: input.paused, createdAt: "2026-11-07T12:00:00Z", lastDeliveryState: "never", lastDeliveryAt: null, lastStatusCode: null, lastError: null, pendingDeliveries: 0 });
 const fixtureError = (code: string, message: string): BridgeError => ({ code, message });
 const FIXTURE_CONTACT_PAGE_SIZE = 200;
-const fixtureContactRows = (bookId: string): ContactView[] => [{ id: "contact-aurora", bookId, revision: "1", displayName: "Aurora Chen", givenName: "Aurora", familyName: "Chen", phones: [{ label: "mobile", number: "+12025550123" }], emails: [{ label: "work", address: "aurora@example.com" }], addresses: [], organization: "Northstar", title: "Director", notes: "Prefers SMS", pendingEditId: "edit-aurora", pendingEditState: "pending", pendingEditSummary: "Phone number update" }, { id: "contact-river", bookId, revision: "1", displayName: "River Park", givenName: "River", familyName: "Park", phones: [{ label: "mobile", number: "+12025550124" }], emails: [], addresses: [] }, { id: "contact-mina", bookId, revision: "1", displayName: "Mina Torres", givenName: "Mina", familyName: "Torres", phones: [{ label: "work", number: "+12025550125" }], emails: [], addresses: [] }];
+const FIXTURE_CONTACT_THROUGH_MAX = 2_000;
+/** Browser-only pause so contact loading states show in screenshots; tests stay fast. */
+const fixtureContactLatency = async () => {
+  if (import.meta.env.MODE !== "test") await new Promise(resolve => setTimeout(resolve, 600));
+};
+const fixtureNamedContacts = (bookId: string): ContactView[] => [{ id: "contact-aurora", bookId, revision: "1", displayName: "Aurora Chen", givenName: "Aurora", familyName: "Chen", phones: [{ label: "mobile", number: "+12025550123" }], emails: [{ label: "work", address: "aurora@example.com" }], addresses: [], organization: "Northstar", title: "Director", notes: "Prefers SMS", pendingEditId: "edit-aurora", pendingEditState: "pending", pendingEditSummary: "Phone number update" }, { id: "contact-river", bookId, revision: "1", displayName: "River Park", givenName: "River", familyName: "Park", phones: [{ label: "mobile", number: "+12025550124" }], emails: [], addresses: [] }, { id: "contact-mina", bookId, revision: "1", displayName: "Mina Torres", givenName: "Mina", familyName: "Torres", phones: [{ label: "work", number: "+12025550125" }], emails: [], addresses: [] }];
+const fixtureFirstNames = ["Ava", "Benjamin", "Chloe", "Diego", "Elena", "Farid", "Grace", "Hiroshi", "Isla", "Jamal", "Keiko", "Liam", "Maya", "Noah", "Olivia", "Priya", "Quentin", "Rosa", "Samir", "Tessa", "Uma", "Victor", "Wren", "Ximena", "Yusuf", "Zoe", "Émile", "Ingrid", "Mateo", "Ngozi"];
+const fixtureLastNames = ["Abbott", "Bianchi", "Carver", "Delgado", "Eriksen", "Fontaine", "Gallagher", "Haddad", "Ishikawa", "Jensen", "Kowalski", "Lindqvist", "Moreau", "Nakamura", "Okafor", "Patel", "Quinn", "Rossi", "Schmidt", "Tanaka", "Underwood", "Vasquez", "Whitfield", "Yamamoto", "Zimmer", "Ångström", "Brandt", "Costa", "Dubois", "Fernandes"];
+const fixtureNicknames = ["Coach", "Bean", "Sparky", "Mags", "Doc", "Juno"];
+const fixtureOrganizations = ["Brightline Dental", "Northwind Plumbing", "Juniper Bakery", "Halcyon Gym", "Summit Auto Care", "Pinecrest Vet"];
+const fixturePhotoColors = ["#4f7cff", "#e4572e", "#29a19c", "#f3a712", "#8e5ea2", "#17bebb"];
+/** A tiny inline person silhouette on a coloured tile; `<img>` renders SVG data URLs. */
+const fixturePhotoDataUrl = (index: number) => `data:image/svg+xml;utf8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="${fixturePhotoColors[index % fixturePhotoColors.length]}"/><circle cx="32" cy="25" r="11" fill="#fff" fill-opacity=".9"/><path d="M12 60c3-13 13-19 20-19s17 6 20 19z" fill="#fff" fill-opacity=".9"/></svg>`)}`;
+const fixtureAsciiSlug = (value: string) => value.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
+/**
+ * Deterministic generated contact `index` of a fixture book. Names are a pair walk over the two name arrays, so
+ * every name pair is distinct; a few index classes become organization, nickname, team, or given-name-only contacts.
+ */
+const fixtureGeneratedContact = (bookId: string, index: number, phonePrefix: string): ContactView => {
+  const id = `contact-${bookId.replace("book-", "")}-${String(index).padStart(3, "0")}`;
+  const given = fixtureFirstNames[index % fixtureFirstNames.length];
+  const family = fixtureLastNames[(index * 7 + Math.floor(index / fixtureFirstNames.length)) % fixtureLastNames.length];
+  const phoneCount = [1, 1, 2, 1, 3, 1, 2, 1, 1, 4][index % 10];
+  const phones = Array.from({ length: phoneCount }, (_, slot) => ({ label: ["mobile", "work", "home", "other"][slot], number: `${phonePrefix}${(slot + 1) * 1000 + index}` }));
+  const shared: ContactView = { id, bookId, revision: "1", displayName: given, phones, emails: [], addresses: [], ...(index % 6 === 0 ? { photoDataUrl: fixturePhotoDataUrl(index) } : {}) };
+  if (index % 17 === 4) {
+    const organization = fixtureOrganizations[index % fixtureOrganizations.length];
+    return { ...shared, displayName: organization, organization };
+  }
+  if (index % 19 === 6) {
+    const nickname = fixtureNicknames[index % fixtureNicknames.length];
+    return { ...shared, displayName: nickname, nickname };
+  }
+  if (index % 31 === 9) {
+    const organization = fixtureOrganizations[(index + 1) % fixtureOrganizations.length];
+    return { ...shared, displayName: `${organization} (Team)`, organization };
+  }
+  if (index % 11 === 3) return { ...shared, displayName: given, givenName: given };
+  const organization = index % 6 === 1 ? fixtureOrganizations[index % fixtureOrganizations.length] : undefined;
+  const emails = index % 5 === 0 ? [{ label: "work", address: `${fixtureAsciiSlug(given)}.${fixtureAsciiSlug(family)}@example.com` }] : [];
+  return { ...shared, displayName: `${given} ${family}`, givenName: given, familyName: family, emails, ...(organization ? { organization } : {}) };
+};
+const fixtureContactRowsByBook = new Map<string, ContactView[]>([
+  ["book-pixel8", [...fixtureNamedContacts("book-pixel8"), ...Array.from({ length: 427 }, (_, index) => fixtureGeneratedContact("book-pixel8", index, "+1801555"))]],
+  ["book-phone-retired", Array.from({ length: 25 }, (_, index) => fixtureGeneratedContact("book-phone-retired", index, "+1206555"))],
+]);
+const fixtureContactRows = (bookId: string): ContactView[] => fixtureContactRowsByBook.get(bookId) ?? [];
+const fixtureContactBooks: ContactBookView[] = [{ id: "book-pixel8", deviceName: "Android phone", state: "active", capabilities: { canWrite: true, canDelete: true, canRestore: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true, canSync: true }, ownerDeviceId: "device-pixel8", contactCount: fixtureContactRows("book-pixel8").length, defaultAccountLabel: "Google, aurora@example.com", lastSyncAt: "Just now", pendingEditCount: 1 }, { id: "book-phone-retired", deviceName: "Phone", state: "retired", capabilities: { canWrite: false, canDelete: false, supportsNotes: false, supportsPhoto: true, canSync: false }, sourceRevoked: true, ownerDeviceId: "device-old-iphone", contactCount: fixtureContactRows("book-phone-retired").length, lastSyncAt: "3 days ago", pendingEditCount: 0 }];
 /** The fixture book's contacts in the requested order; `list_contacts` and `list_contacts_page` share it. */
 const sortedFixtureContacts = (bookId: string, query: string, sort: ContactSort): ContactView[] => {
   const contacts = fixtureContactRows(bookId);
@@ -391,12 +437,9 @@ const decodeFixtureContactCursor = (cursor: string | undefined): number => {
   if (!match) throw fixtureError("invalid-cursor", "The contact page cursor is invalid.");
   return Number(match[1]);
 };
-const fixtureSearchContacts = [
-  { id: "contact-aurora", bookId: "book-pixel8", title: "Aurora Chen", phones: ["+12025550123"], organization: "Northstar" },
-  { id: "contact-river", bookId: "book-pixel8", title: "River Park", phones: ["+12025550124"] },
-  { id: "contact-mina", bookId: "book-pixel8", title: "Mina Torres", phones: ["+12025550125"] },
-];
-const fixtureSearchContactHit = (contact: (typeof fixtureSearchContacts)[number], query: string): LocalSearchHit & { kind: "contact" } => {
+/** Every live fixture contact, for local contact search. */
+const fixtureSearchContacts = () => [...fixtureContactRowsByBook].flatMap(([bookId, rows]) => rows.map(row => ({ id: row.id, bookId, title: row.displayName, phones: row.phones.map(phone => phone.number), organization: row.organization })));
+const fixtureSearchContactHit = (contact: ReturnType<typeof fixtureSearchContacts>[number], query: string): LocalSearchHit & { kind: "contact" } => {
   const bookLabel = fixtureContactBooks.find(book => book.id === contact.bookId)?.deviceName;
   const matchSnippet = contact.phones.find(phone => phone.toLowerCase().includes(query));
   const phoneMatch = !contact.title.toLowerCase().includes(query) && matchSnippet !== undefined ? { matchField: "Phone", matchSnippet } : {};
@@ -420,7 +463,7 @@ const fixtureSearch = (input: LocalSearchRequest): LocalSearchPage => {
   const accepts = (kind: "conversation" | "message" | "contact") => !input.kind || input.kind === "all" || input.kind === kind;
   const conversations = fixtureSnapshot.conversations.filter(item => `${item.name} ${item.participants?.join(" ") ?? ""}`.toLocaleLowerCase().includes(query)).map(item => ({ kind: "conversation" as const, conversationId: item.id, title: item.name, subtitle: item.preview })).slice(0, limit);
   const messages = fixtureSnapshot.conversations.flatMap(conversation => conversation.messages.filter(message => `${message.body} ${message.subject ?? ""}`.toLocaleLowerCase().includes(query)).map(message => ({ kind: "message" as const, conversationId: conversation.id, messageId: message.id, title: conversation.name, snippet: message.body, timestamp: message.timestamp }))).slice(0, limit);
-  const contacts = fixtureSearchContacts.filter(contact => `${contact.title} ${contact.phones.join(" ")}`.toLocaleLowerCase().includes(query)).map(contact => fixtureSearchContactHit(contact, query)).slice(0, limit);
+  const contacts = fixtureSearchContacts().filter(contact => `${contact.title} ${contact.phones.join(" ")}`.toLocaleLowerCase().includes(query)).map(contact => fixtureSearchContactHit(contact, query)).slice(0, limit);
   const items = [...(accepts("conversation") ? conversations : []), ...(accepts("message") ? messages : []), ...(accepts("contact") ? contacts : [])];
   return { query: input.query, items, indexState: "ready", hasMore: { conversation: false, message: false, contact: false } };
 };
@@ -794,7 +837,13 @@ export const fixtureBridge: DesktopBridge = {
   mcp_approve_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },
   mcp_deny_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },
   list_contact_books: async () => fixtureContactBooks.map(book => ({ ...book, lookupExcluded: fixtureLookupExcludedBookIds.has(book.id) })),
-  forget_contact_book: async () => undefined,
+  forget_contact_book: async bookId => {
+    const index = fixtureContactBooks.findIndex(book => book.id === bookId);
+    if (index < 0) throw fixtureError("not-found", "Contact book not found.");
+    fixtureContactBooks.splice(index, 1);
+    fixtureContactRowsByBook.delete(bookId);
+    fixtureLookupExcludedBookIds.delete(bookId);
+  },
   set_contact_book_lookup: async (bookId, enabled) => {
     if (!fixtureContactBooks.some(book => book.id === bookId)) throw fixtureError("not-found", "Contact book not found.");
     if (enabled) fixtureLookupExcludedBookIds.delete(bookId);
@@ -811,18 +860,24 @@ export const fixtureBridge: DesktopBridge = {
     fixtureNamePins.set(address, { bookId, contactId });
   },
   clear_contact_name_pin: async address => { fixtureNamePins.delete(address); },
-  list_contacts: async (bookId, query = "", offset = 0, sort = { key: "family" as const, direction: "asc" as const }) => sortedFixtureContacts(bookId, query, sort).slice(offset, offset + FIXTURE_CONTACT_PAGE_SIZE),
+  list_contacts: async (bookId, query = "", offset = 0, sort = { key: "family" as const, direction: "asc" as const }) => {
+    await fixtureContactLatency();
+    return sortedFixtureContacts(bookId, query, sort).slice(offset, offset + FIXTURE_CONTACT_PAGE_SIZE);
+  },
   list_contacts_page: async (bookId, request) => {
+    await fixtureContactLatency();
     const sorted = sortedFixtureContacts(bookId, "", request.sort ?? { key: "family", direction: "asc" });
     const start = decodeFixtureContactCursor(request.cursor);
+    // Mirrors core: `through` extends the page to include the target, at most 2,000 rows from the start.
     const throughIndex = request.through === undefined ? -1 : sorted.findIndex(contact => contact.id === request.through);
-    const end = throughIndex >= 0 ? throughIndex + 1 : sorted.length;
-    const pageEnd = Math.min(end, start + FIXTURE_CONTACT_PAGE_SIZE);
+    const found = throughIndex >= start && throughIndex - start < FIXTURE_CONTACT_THROUGH_MAX;
+    const count = found ? Math.max(FIXTURE_CONTACT_PAGE_SIZE, throughIndex - start + 1) : FIXTURE_CONTACT_PAGE_SIZE;
+    const pageEnd = Math.min(sorted.length, start + count);
     return {
       contacts: sorted.slice(start, pageEnd),
       total: sorted.length,
-      ...(pageEnd < end ? { nextCursor: encodeFixtureContactCursor(pageEnd) } : {}),
-      ...(request.through === undefined ? {} : { throughFound: throughIndex >= 0 }),
+      ...(pageEnd < sorted.length ? { nextCursor: encodeFixtureContactCursor(pageEnd) } : {}),
+      ...(request.through === undefined ? {} : { throughFound: found }),
     };
   },
   submit_contact_edit: async () => ({ state: "pending", requestId: `fixture-${Date.now()}` }),
