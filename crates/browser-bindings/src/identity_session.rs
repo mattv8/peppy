@@ -327,6 +327,7 @@ impl BrowserCore {
         device_id: uuid::Uuid,
         credential: Zeroizing<String>,
         passphrase: SecretString,
+        anchor: Option<&peppy_hosted_client::device_credentials::EpochAnchor>,
     ) -> Result<Value, Failure> {
         let origin = self.trusted_origin.as_deref().ok_or_else(invalid)?;
         if self.client.is_some()
@@ -348,14 +349,17 @@ impl BrowserCore {
             header,
         };
         local_identity::validate_metadata(&metadata).map_err(identity_failure)?;
-        self.install_identity(metadata, credential, &passphrase.0)
+        self.install_identity(metadata, credential, &passphrase.0, anchor)
     }
 
+    /// Seals a new identity. A v2 epoch anchor is persisted in the new database before the first
+    /// unlock, so a stale profile is refused there; a refused anchor leaves no identity behind.
     fn install_identity(
         &mut self,
         metadata: IdentityMetadata,
         mut credential: Zeroizing<String>,
         passphrase: &str,
+        anchor: Option<&peppy_hosted_client::device_credentials::EpochAnchor>,
     ) -> Result<Value, Failure> {
         let mut database_key = Zeroizing::new([0_u8; 32]);
         libsodium_rs::ensure_init()
@@ -367,9 +371,15 @@ impl BrowserCore {
             .map_err(identity_failure)?;
         let serialized = serialize_wrapped(&wrapped)?;
         let client = open_client(&self.root, &metadata, &secrets)?;
-        if client
-            .unlock(&metadata.profile, &metadata.header, passphrase)
-            .is_err()
+        let anchored = anchor.is_none_or(|anchor| {
+            client
+                .set_epoch_anchor(anchor.epoch_floor, &anchor.profile_fingerprint)
+                .is_ok()
+        });
+        if !anchored
+            || client
+                .unlock(&metadata.profile, &metadata.header, passphrase)
+                .is_err()
         {
             drop(client);
             discard_new_identity_database(&self.root);
@@ -645,6 +655,52 @@ mod tests {
                 "expectedRevision": "0"
             }),
         )
+    }
+
+    #[test]
+    fn hosted_owner_import_sets_its_epoch_anchor_before_unlock() {
+        let metadata = metadata(Uuid::new_v4());
+        let fingerprint = profile_and_header().0.fingerprint().unwrap();
+        let install =
+            |core: &mut BrowserCore,
+             anchor: Option<&peppy_hosted_client::device_credentials::EpochAnchor>| {
+                core.install_hosted_owner_identity(
+                    metadata.profile.clone(),
+                    metadata.header.clone(),
+                    metadata.device_id,
+                    Zeroizing::new(TOKEN.to_owned()),
+                    SecretString(Zeroizing::new(PHRASE.to_owned())),
+                    anchor,
+                )
+            };
+        let fresh = |root: &tempfile::TempDir| {
+            let mut core = BrowserCore::new(root.path().to_owned());
+            initialize(&mut core);
+            core
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            install(&mut fresh(&root), None).is_ok(),
+            "control: no anchor"
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let current = peppy_hosted_client::device_credentials::EpochAnchor {
+            epoch_floor: metadata.profile.key_epoch,
+            profile_fingerprint: fingerprint,
+        };
+        assert!(install(&mut fresh(&root), Some(&current)).is_ok());
+
+        let root = tempfile::tempdir().unwrap();
+        let mut stale_core = fresh(&root);
+        let stale = peppy_hosted_client::device_credentials::EpochAnchor {
+            epoch_floor: metadata.profile.key_epoch + 1,
+            profile_fingerprint: "a".repeat(64),
+        };
+        assert!(install(&mut stale_core, Some(&stale)).is_err());
+        assert!(stale_core.client.is_none());
+        assert!(!root.path().join("client.db").exists());
     }
 
     #[test]

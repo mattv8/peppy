@@ -1168,6 +1168,13 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func setConversationPinned(conversationId: String, pinned: Bool) throws 
     
+    /**
+     * Records the shared profile's epoch floor and fingerprint from a v2 credential. Native hosts
+     * call this on credential import before the first unlock. The floor only moves up, and at the
+     * same floor the fingerprint must not change.
+     */
+    func setEpochAnchor(floor: UInt32, fingerprint: String) throws 
+    
     func setGatewaySettings(settings: NativeGatewaySettings) throws 
     
     func setMmsAcquisitionPart(id: String, providerPartId: String, attachmentId: String) throws 
@@ -3413,6 +3420,21 @@ open func setConversationPinned(conversationId: String, pinned: Bool)throws   {t
             self.uniffiCloneHandle(),
         FfiConverterString.lower(conversationId),
         FfiConverterBool.lower(pinned),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Records the shared profile's epoch floor and fingerprint from a v2 credential. Native hosts
+     * call this on credential import before the first unlock. The floor only moves up, and at the
+     * same floor the fingerprint must not change.
+     */
+open func setEpochAnchor(floor: UInt32, fingerprint: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_epoch_anchor(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(floor),
+        FfiConverterString.lower(fingerprint),uniffiCallStatus
     )
 }
 }
@@ -21446,6 +21468,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_conversation_pinned() != 5079) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_epoch_anchor() != 5054) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_gateway_settings() != 40564) {

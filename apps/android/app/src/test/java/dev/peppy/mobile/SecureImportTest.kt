@@ -13,9 +13,15 @@ import dev.peppy.mobile.gateway.SyncPhase
 import dev.peppy.mobile.gateway.TEST_PASSPHRASE
 import dev.peppy.mobile.gateway.TEST_TOKEN
 import dev.peppy.mobile.gateway.UnlockResult
+import dev.peppy.mobile.gateway.credentialJson
+import dev.peppy.mobile.security.CredentialParser
+import dev.peppy.mobile.security.DeviceCredential
 import dev.peppy.mobile.security.VaultMaterial
 import dev.peppy.mobile.telephony.SimRoutes
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -26,6 +32,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeIncomingSms
 
 
@@ -43,6 +50,133 @@ class SecureImportTest : GatewayTestBase() {
         assertFalse(NativeGateway.status(context).enrolled)
     }
 
+
+    private fun parsedV2(floor: Int, fingerprint: String): DeviceCredential = checkNotNull(
+        CredentialParser.parse(
+            credentialJson(vaultId = vaultId, deviceId = deviceId)
+                .replace("\"version\":1", "\"version\":2")
+                .replace("}", ",\"epochFloor\":$floor,\"profileFingerprint\":\"$fingerprint\"}")
+                .toByteArray(),
+            allowDebugLoopback = false,
+        ),
+    )
+
+    @Test
+    fun v2ImportSetsTheEpochAnchorBeforeAnyUnlock() {
+        val fingerprint = "aa".repeat(32)
+        assertEquals(ImportResult.IMPORTED, NativeGateway.persistVerified(context, parsedV2(1, fingerprint), vaultMaterial()))
+
+        val opened = checkNotNull(NativeGateway.open(context))
+        // The anchor pins the fingerprint at its floor: a different one at the same floor is refused.
+        assertThrows(MobileBindingsException.InvalidProfile::class.java) { opened.setEpochAnchor(1u, "bb".repeat(32)) }
+        opened.setEpochAnchor(1u, fingerprint)
+    }
+
+    @Test
+    fun v2ImportRefusesAStaleProfileBelowTheAnchorFloor() {
+        assertEquals(ImportResult.SERVER_REJECTED, NativeGateway.persistVerified(context, parsedV2(2, "aa".repeat(32)), vaultMaterial()))
+
+        assertTrue(secure().all.isEmpty())
+        assertFalse(NativeGateway.databaseFile(context).exists())
+        assertFalse(NativeGateway.status(context).enrolled)
+    }
+
+    @Test
+    fun savedAnchorSurvivesReopenAndLegacyRefreshWithoutWeakening() {
+        val fingerprint = "aa".repeat(32)
+        assertEquals(ImportResult.IMPORTED, NativeGateway.persistVerified(context, parsedV2(1, fingerprint), vaultMaterial()))
+        NativeGateway.closeForTest()
+        assertEquals(ImportResult.UPDATED, NativeGateway.persistVerified(context, parsed(), vaultMaterial()))
+        assertEquals("1", secure().getString("epoch-anchor-floor.v1", null))
+        assertEquals(fingerprint, secure().getString("epoch-anchor-fingerprint.v1", null))
+        NativeGateway.closeForTest()
+        val opened = checkNotNull(NativeGateway.open(context))
+        assertThrows(MobileBindingsException.InvalidProfile::class.java) { opened.setEpochAnchor(1u, "bb".repeat(32)) }
+        val saved = secure().all
+        assertEquals(ImportResult.SERVER_REJECTED, NativeGateway.persistVerified(context, parsedV2(1, "bb".repeat(32)), vaultMaterial()))
+        assertEquals(saved, secure().all)
+    }
+
+    @Test
+    fun lowerFloorImportCannotWeakenPersistedAnchor() {
+        val newer = VaultMaterial(material.profileJson.replace("\"key_epoch\":1", "\"key_epoch\":2"), material.headerJson)
+        assertEquals(ImportResult.IMPORTED, NativeGateway.persistVerified(context, parsedV2(2, "aa".repeat(32)), newer))
+        val saved = secure().all
+        assertEquals(ImportResult.SERVER_REJECTED, NativeGateway.persistVerified(context, parsedV2(1, "bb".repeat(32)), vaultMaterial()))
+        assertEquals(saved, secure().all)
+    }
+
+    @Test
+    fun interruptedAnchorInstallCannotRestorePreviouslyCachedKeys() {
+        enrollAndUnlock()
+        assertTrue(secure().contains("key-cache.v1"))
+        NativeGateway.persistenceDecisionHook = {
+            assertEquals("aa".repeat(32), secure().getString("epoch-anchor-fingerprint.v1", null))
+            assertNull(NativeGateway.open(context)) // retirement still fences public admission
+            throw IllegalStateException("injected interruption after preference commit")
+        }
+        try {
+            assertEquals(ImportResult.STORAGE_ERROR, NativeGateway.persistVerified(context, parsedV2(1, "aa".repeat(32)), vaultMaterial()))
+        } finally {
+            NativeGateway.persistenceDecisionHook = null
+        }
+        NativeGateway.closeForTest()
+        val opened = checkNotNull(NativeGateway.open(context))
+        assertFalse(NativeGateway.status(context).sharedKeysReady)
+        assertNull(NativeGateway.session(context))
+        assertThrows(MobileBindingsException.InvalidProfile::class.java) {
+            opened.unlock(material.profileJson, material.headerJson, TEST_PASSPHRASE)
+        }
+    }
+
+    @Test
+    fun concurrentOpenIsFencedUntilAnchorCommitAndThenRejectsStaleCache() {
+        enrollAndUnlock()
+        val revoking = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val result = AtomicReference<ImportResult>()
+        val failure = AtomicReference<Throwable>()
+        val lease = checkNotNull(NativeGateway.acquireRcsSendLease(context, "anchor-import") {
+            revoking.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+        })
+        val importer = Thread {
+            runCatching { NativeGateway.persistVerified(context, parsedV2(1, "aa".repeat(32)), vaultMaterial()) }
+                .onSuccess(result::set).onFailure(failure::set)
+        }
+        try {
+            importer.start()
+            assertTrue(revoking.await(5, TimeUnit.SECONDS))
+            assertNull(NativeGateway.open(context))
+            assertNull(NativeGateway.session(context))
+            release.countDown()
+            importer.join(5_000)
+            assertFalse(importer.isAlive)
+            assertNull(failure.get())
+            assertEquals(ImportResult.UPDATED, result.get())
+            assertNotNull(NativeGateway.open(context))
+            assertFalse(NativeGateway.status(context).sharedKeysReady)
+            assertNull(NativeGateway.session(context))
+        } finally {
+            release.countDown()
+            importer.join(5_000)
+            lease.close()
+        }
+    }
+
+    @Test
+    fun malformedOrPartialPersistedAnchorRefusesOpen() {
+        assertEquals(ImportResult.IMPORTED, enroll())
+        for ((floor, fingerprint) in listOf(
+            "1" to null, null to "aa".repeat(32), "0" to "aa".repeat(32),
+            "4294967296" to "aa".repeat(32), "1" to "AA".repeat(32),
+        )) {
+            NativeGateway.closeForTest()
+            secure().edit().putString("epoch-anchor-floor.v1", floor)
+                .putString("epoch-anchor-fingerprint.v1", fingerprint).commit()
+            assertNull(NativeGateway.open(context))
+        }
+    }
 
     @Test
     fun producerAccessRequiresNegotiationForEachOpenGeneration() {

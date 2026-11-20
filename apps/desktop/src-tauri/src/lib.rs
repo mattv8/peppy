@@ -93,8 +93,8 @@ mod window_placement;
 mod windows;
 
 use credentials::{
-    check_origin_binding, ensure_database_key, load_config, parse_credential, save_config,
-    store_credential, HostConfig,
+    apply_epoch_anchor, check_origin_binding, ensure_database_key, load_config,
+    parse_anchored_import, save_config, store_import, HostConfig,
 };
 use dto::{
     DraftView, Head, HistoryPage, PublicCopyView, SendCancellationView, SendResultView, Snapshot,
@@ -1868,7 +1868,8 @@ async fn activate_native_credential(
     operation: &update_safety::OperationGuard,
     bytes: zeroize::Zeroizing<Vec<u8>>,
 ) -> BridgeResult<()> {
-    let credential = Arc::new(parse_credential(&bytes)?);
+    let (credential, anchor) = parse_anchored_import(&bytes)?;
+    let credential = Arc::new(credential);
     drop(bytes);
     let _import = state.import_lock.lock().await;
     let previous = state.config()?;
@@ -1880,7 +1881,7 @@ async fn activate_native_credential(
     let result = async {
         state.update_config(|config| config.select_origin(&credential.origin))?;
         verify_import(state, &credential, None).await?;
-        activate_import_locked(state, credential.clone(), Some(operation), None).await
+        activate_anchored_locked(state, credential.clone(), anchor, Some(operation), None).await
     }
     .await;
     if let Err(error) = result {
@@ -1947,12 +1948,25 @@ async fn activate_import(
     credential: Arc<credentials::ImportedCredential>,
 ) -> BridgeResult<()> {
     let _import = state.import_lock.lock().await;
-    activate_import_locked(state, credential, None, None).await
+    activate_anchored_locked(state, credential, None, None, None).await
 }
 
-async fn activate_import_locked(
+/// Test-only: activates an import that may carry a v2 epoch anchor.
+#[cfg(test)]
+async fn activate_anchored_import(
     state: &AppState,
     credential: Arc<credentials::ImportedCredential>,
+    anchor: Option<credentials::EpochAnchorImport>,
+) -> BridgeResult<()> {
+    let _import = state.import_lock.lock().await;
+    activate_anchored_locked(state, credential, anchor, None, None).await
+}
+
+/// Activates an import. A v2 anchor is persisted in the local database before the first unlock.
+async fn activate_anchored_locked(
+    state: &AppState,
+    credential: Arc<credentials::ImportedCredential>,
+    anchor: Option<credentials::EpochAnchorImport>,
     operation: Option<&update_safety::OperationGuard>,
     computer_attempt: Option<uuid::Uuid>,
 ) -> BridgeResult<()> {
@@ -1970,8 +1984,12 @@ async fn activate_import_locked(
     );
     blocking(move || {
         check_origin_binding(&*store, &stored)?;
-        ensure_database_key(&*store, &keyed, &keyed.database_path(&root))?;
-        store_credential(&*store, &stored)
+        let database = keyed.database_path(&root);
+        let key = ensure_database_key(&*store, &keyed, &database)?;
+        if let Some(anchor) = &anchor {
+            apply_epoch_anchor(&keyed, &database, &key, anchor)?;
+        }
+        store_import(&*store, &stored, anchor.as_ref())
     })
     .await?;
     state.update_config(|config| {
@@ -2318,7 +2336,9 @@ async fn unlock_with(
     let (s, store) = (session.clone(), state.store.clone());
     blocking(move || {
         match s.client.unlock(&profile, &header, &passphrase) {
-            Err(peppy_client_core::Error::InvalidProfile) => {
+            Err(
+                peppy_client_core::Error::InvalidProfile | peppy_client_core::Error::StaleKeyEpoch,
+            ) => {
                 s.set_mismatch(true);
                 return Err(core_error(peppy_client_core::Error::InvalidProfile));
             }

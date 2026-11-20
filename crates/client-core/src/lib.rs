@@ -387,6 +387,8 @@ pub enum Error {
     InvalidPassphrase,
     #[error("key profile is not the pinned profile for this vault and epoch")]
     InvalidProfile,
+    #[error("key profile is older than or inconsistent with the epoch anchor")]
+    StaleKeyEpoch,
     #[error("cryptographic operation failed")]
     Crypto,
     #[error("invalid request: {0}")]
@@ -1637,6 +1639,37 @@ pub enum ContactBookSelection {
     Mint,
 }
 
+fn read_epoch_anchor(conn: &Connection) -> Result<Option<(u32, String)>, Error> {
+    get_meta(conn, "epoch_anchor")?
+        .map(|value| decode(value.as_bytes()))
+        .transpose()
+}
+
+fn enforce_epoch_anchor(conn: &Connection, profile: &KeyProfile) -> Result<(), Error> {
+    if let Some((floor, fingerprint)) = read_epoch_anchor(conn)?
+        && (profile.key_epoch < floor
+            || (profile.key_epoch == floor
+                && profile.fingerprint().map_err(|_| Error::Crypto)? != fingerprint))
+    {
+        return Err(Error::StaleKeyEpoch);
+    }
+    Ok(())
+}
+
+fn enforce_installed_profile(
+    conn: &Connection,
+    active: Option<u32>,
+    profile: &KeyProfile,
+) -> Result<(), Error> {
+    if let Some((floor, _)) = read_epoch_anchor(conn)?
+        && profile.key_epoch < floor
+        && active.is_some_and(|epoch| epoch != profile.key_epoch)
+    {
+        return Ok(());
+    }
+    enforce_epoch_anchor(conn, profile)
+}
+
 impl Client {
     pub fn device_id(&self) -> Result<DeviceId, Error> {
         Ok(self.lock()?.config.device_id)
@@ -2866,6 +2899,43 @@ impl Client {
         contact_queries::restore_contact(conn, &ctx, input)
     }
 
+    /// Persists a monotonic lower bound and the fingerprint at that epoch.
+    pub fn set_epoch_anchor(&self, floor: u32, fingerprint: &str) -> Result<(), Error> {
+        if floor == 0
+            || fingerprint.len() != 64
+            || !fingerprint
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(Error::InvalidProfile);
+        }
+        let mut s = self.lock()?;
+        let tx = s
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some((old_floor, old_fingerprint)) = read_epoch_anchor(&tx)?
+            && (floor < old_floor || (floor == old_floor && fingerprint != old_fingerprint))
+        {
+            return Err(Error::StaleKeyEpoch);
+        }
+        set_meta(&tx, "epoch_anchor", &json(&(floor, fingerprint))?)?;
+        tx.commit()?;
+        if let Some(epoch) = s.active_epoch {
+            let stale = epoch < floor
+                || (epoch == floor
+                    && s.keys
+                        .get(&epoch)
+                        .is_some_and(|keys| keys.fingerprint != fingerprint));
+            if stale {
+                s.keys.remove(&epoch);
+                s.identity_recovery_keys.remove(&epoch);
+                s.identity_bootstrap_epochs.remove(&epoch);
+                s.ephemeral.clear();
+            }
+        }
+        Ok(())
+    }
+
     /// Verifies the passphrase against the authenticated vault header, pins the profile for its
     /// epoch on first use, and seals any outbox rows queued while locked. The KDF runs outside
     /// the database lock.
@@ -2919,6 +2989,7 @@ impl Client {
         let tx = s
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        enforce_installed_profile(&tx, s.active_epoch, profile)?;
         match pinned_profile(&tx, profile.key_epoch)? {
             Some(pinned) if pinned != *profile => return Err(Error::InvalidProfile),
             Some(_) => {}
@@ -3034,6 +3105,7 @@ impl Client {
         let tx = s
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        enforce_installed_profile(&tx, s.active_epoch, &profile)?;
         match pinned_profile(&tx, profile.key_epoch)? {
             Some(pinned) if pinned != profile => return Err(Error::InvalidProfile),
             Some(_) => {}
@@ -3082,6 +3154,7 @@ impl Client {
         if !s.keys.contains_key(&epoch) || s.active_epoch.is_some_and(|old| epoch <= old) {
             return Err(Error::InvalidProfile);
         }
+        enforce_epoch_anchor(&s.conn, &s.keys[&epoch].profile)?;
         let ctx = Ctx {
             vault_id: s.config.vault_id,
             device_id: s.config.device_id,
@@ -3121,6 +3194,16 @@ impl Client {
             keys.local_identity_seal = None;
         }
         Ok(())
+    }
+
+    /// Confirms that the active, unlocked epoch still satisfies the persisted anchor.
+    pub fn confirm_active_epoch(&self, epoch: u32) -> Result<(), Error> {
+        let s = self.lock()?;
+        if s.active_epoch != Some(epoch) {
+            return Err(Error::InvalidProfile);
+        }
+        let keys = s.keys.get(&epoch).ok_or(Error::InvalidProfile)?;
+        enforce_epoch_anchor(&s.conn, &keys.profile)
     }
 
     /// Gateway side: retires commands that a snapshot imported as history and that this device never
@@ -3415,6 +3498,7 @@ impl Client {
             return Err(Error::IdentityMismatch);
         }
         let profile = pinned_profile(&s.conn, epoch)?.ok_or(Error::InvalidProfile)?;
+        enforce_installed_profile(&s.conn, s.active_epoch, &profile)?;
         if profile.fingerprint().map_err(|_| Error::Crypto)? != fingerprint {
             return Err(Error::InvalidProfile);
         }

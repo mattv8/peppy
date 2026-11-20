@@ -4,6 +4,58 @@ import Testing
 
 @Suite("Native enrollment installation")
 struct EnrollmentInstallIntegrationTests {
+    @Test(arguments: [false, true], [1, 2])
+    func pendingImportPinFencesVerifiedPhoneInstallation(sharedSecret: Bool, floor: Int) async throws {
+        let fixture = try EnrollmentInstallFixture()
+        let phone = try fixture.phoneInvitation(method: sharedSecret ? .sharedSecret : .transfer)
+        let secure = InMemorySecureStore()
+        let directory = temporaryDirectory()
+        let session = NativeSession(secureStore: secure, transport: InstallTransport(fixture: fixture, phone: phone), databaseDirectory: directory, allowLoopbackHTTP: false)
+        _ = try await session.beginPhoneEnrollment(qrPayload: phone.qrPayload, deviceName: "pending anchor")
+        try phone.approve()
+        let admission = try EnrollmentInstallFixture.object(phone.admissionComplete())
+        let identity = EnrollmentIdentity(
+            origin: EnrollmentInstallFixture.origin,
+            vaultId: try EnrollmentInstallFixture.requiredString(admission, "vault_id"),
+            deviceId: try EnrollmentInstallFixture.requiredString(admission, "device_id")
+        )
+        var header = try EnrollmentInstallFixture.requiredString(fixture.material, "check_header")
+            .replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        header += String(repeating: "=", count: (4 - header.count % 4) % 4)
+        let vault: [String: Any] = [
+            "vault_id": identity.vaultId, "device_id": identity.deviceId, "role": "gateway",
+            "key_epoch": floor, "public_key_profile": fixture.material["profile"]!,
+            "encrypted_vault_check_header": header,
+        ]
+        let credential: [String: Any] = [
+            "version": 2, "origin": identity.origin, "vaultId": identity.vaultId, "deviceId": identity.deviceId,
+            "deviceToken": String(repeating: "ab", count: 48), "epochFloor": floor,
+            "profileFingerprint": String(repeating: "aa", count: 32),
+        ]
+        // Fail database creation AFTER activating the imported secure record.
+        let blockedDirectory = temporaryDirectory().appendingPathComponent("file-not-directory")
+        try Data([0]).write(to: blockedDirectory)
+        let interrupted = NativeSession(
+            secureStore: secure, transport: PendingImportVaultTransport(body: try JSONSerialization.data(withJSONObject: vault)),
+            databaseDirectory: blockedDirectory, allowLoopbackHTTP: false
+        )
+        await #expect(throws: Error.self) { try await interrupted.importCredential(JSONSerialization.data(withJSONObject: credential)) }
+        let pending = try EnrollmentStore(secure: secure).record(identity)
+        #expect(pending.epochFloor == UInt32(floor))
+        #expect(secure.value(identity.account("database-created")) == nil)
+
+        // The handoff binding intentionally maps activation errors to Crypto; phrase
+        // unlock preserves the more specific InvalidProfile mapping.
+        let expectedError = ClientError.core(sharedSecret ? .InvalidProfile : .Crypto)
+        await #expect(throws: expectedError) {
+            try await session.confirmPhoneEnrollment(sharedSecret: sharedSecret ? EnrollmentInstallFixture.phrase : nil)
+        }
+        #expect(try EnrollmentStore(secure: secure).record(identity) == pending)
+        #expect(secure.value(identity.account("key-cache-1")) == nil)
+        await #expect(throws: ClientError.notEnrolled) { try await session.conversations() }
+        await session.close()
+    }
+
     @Test func ownerClaimInstallsVerifiedPhraseAndReopensWithTheNativeCache() async throws {
         let fixture = try EnrollmentInstallFixture()
         let transport = InstallTransport(fixture: fixture)
@@ -150,6 +202,16 @@ struct EnrollmentInstallIntegrationTests {
         #expect(status.databaseOpen == (failure == "key-cache-"))
         #expect(!status.keysUnlocked)
         await reopened.close()
+    }
+}
+
+private struct PendingImportVaultTransport: HTTPTransport {
+    let body: Data
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        guard request.method == "GET", request.url.path == "/v1/vault" else {
+            throw ClientError.invalidResponse("unexpected pending-import request")
+        }
+        return HTTPResponse(status: 200, url: request.url, body: body)
     }
 }
 

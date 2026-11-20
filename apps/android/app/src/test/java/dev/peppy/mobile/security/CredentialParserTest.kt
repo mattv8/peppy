@@ -52,6 +52,43 @@ class CredentialParserTest {
         rejected.forEach { assertNull(it.take(120), parse(it)) }
     }
 
+    private val fingerprint = "a".repeat(64)
+
+    private fun v2(floor: String = "2", fingerprint: String = this.fingerprint, extra: String = "") = credentialJson(
+        vaultId = vault,
+        deviceId = device,
+        extra = ",\"epochFloor\":$floor,\"profileFingerprint\":\"$fingerprint\"$extra",
+    ).replace("\"version\":1", "\"version\":2")
+
+    @Test
+    fun acceptsStrictV2AnchorAndKeepsV1Unanchored() {
+        val anchored = parse(v2())
+        assertNotNull(anchored)
+        assertEquals(2u, anchored!!.anchor?.epochFloor)
+        assertEquals(fingerprint, anchored.anchor?.profileFingerprint)
+        assertNull(parse(credentialJson(vaultId = vault, deviceId = device))!!.anchor)
+    }
+
+    @Test
+    fun rejectsMalformedV2Anchors() {
+        val rejected = listOf(
+            // Version 2 needs both anchor fields, and version 1 must not carry them.
+            credentialJson(vaultId = vault, deviceId = device).replace("\"version\":1", "\"version\":2"),
+            credentialJson(vaultId = vault, deviceId = device, extra = ",\"epochFloor\":2,\"profileFingerprint\":\"$fingerprint\""),
+            v2(floor = "0"),
+            v2(floor = "\"2\""),
+            v2(floor = "2.0"),
+            v2(floor = "-1"),
+            v2(floor = "4294967296"),
+            v2(fingerprint = "A".repeat(64)),
+            v2(fingerprint = "a".repeat(63)),
+            v2(fingerprint = "g".repeat(64)),
+            v2(extra = ",\"extra\":\"x\""),
+        )
+        rejected.forEach { assertNull(it.take(160), parse(it)) }
+        assertNotNull(parse(v2(floor = "4294967295")))
+    }
+
     @Test
     fun cleartextOnlyForDebugLoopback() {
         assertNull(parse(credentialJson(origin = "http://10.0.2.2:8080", vaultId = vault, deviceId = device), debug = false))

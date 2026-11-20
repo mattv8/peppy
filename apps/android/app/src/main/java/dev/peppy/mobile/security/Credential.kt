@@ -10,9 +10,17 @@ import java.net.URISyntaxException
 import java.util.Locale
 import java.util.UUID
 
+/** Local rollback floor for the shared vault profile, carried by a v2 credential. */
+internal class EpochAnchor(
+    val epochFloor: UInt,
+    /** Lowercase hex fingerprint of the profile at [epochFloor]. */
+    val profileFingerprint: String,
+)
+
 /**
- * A v1 paired-device credential file, the same strict format the desktop imports. It identifies an
- * existing vault device; it never contains or creates a vault passphrase.
+ * A paired-device credential file, the same strict format the desktop imports. It identifies an
+ * existing vault device; it never contains or creates a vault passphrase. Version 2 adds the
+ * profile epoch anchor; version 1 carries none.
  */
 class DeviceCredential internal constructor(
     val origin: String,
@@ -20,18 +28,23 @@ class DeviceCredential internal constructor(
     val deviceId: String,
     /** Bearer token. Never logged or shown. */
     internal val deviceToken: String,
+    internal val anchor: EpochAnchor? = null,
 ) {
     override fun toString() = "DeviceCredential(origin=$origin, vaultId=$vaultId, deviceId=$deviceId)"
 }
 
 object CredentialParser {
     const val MAX_BYTES = 16 * 1024
-    private val FIELDS = setOf("version", "origin", "vaultId", "deviceId", "deviceToken")
+    private val V1_FIELDS = setOf("version", "origin", "vaultId", "deviceId", "deviceToken")
+    private val V2_FIELDS = setOf("epochFloor", "profileFingerprint")
     private const val TOKEN_HEX_CHARS = 96
+    private const val FINGERPRINT_HEX_CHARS = 64
 
     /**
-     * Bounded, strict parse. Rejects duplicate or unknown members, non-string values, any version
-     * other than the JSON integer literal `1`, and trailing content. Never echoes the input.
+     * Bounded, strict parse. Rejects duplicate or unknown members, non-string values (except the
+     * integer `version` and, in v2, the integer `epochFloor`), any version other than the JSON
+     * integer literal `1` or `2`, a v2 file without both anchor fields, a v1 file with them, and
+     * trailing content. Never echoes the input.
      */
     fun parse(bytes: ByteArray, allowDebugLoopback: Boolean = BuildConfig.DEBUG): DeviceCredential? {
         if (bytes.size > MAX_BYTES) return null
@@ -42,8 +55,8 @@ object CredentialParser {
                 reader.beginObject()
                 while (reader.hasNext()) {
                     val name = reader.nextName()
-                    if (name !in FIELDS || name in values) return null
-                    val expected = if (name == "version") JsonToken.NUMBER else JsonToken.STRING
+                    if (name !in V1_FIELDS && name !in V2_FIELDS || name in values) return null
+                    val expected = if (name == "version" || name == "epochFloor") JsonToken.NUMBER else JsonToken.STRING
                     if (reader.peek() != expected) return null
                     values[name] = reader.nextString()
                 }
@@ -57,7 +70,11 @@ object CredentialParser {
         } catch (_: NumberFormatException) {
             return null
         }
-        if (values.keys != FIELDS || values["version"] != "1") return null
+        val anchor = when {
+            values.keys == V1_FIELDS && values["version"] == "1" -> null
+            values.keys == V1_FIELDS + V2_FIELDS && values["version"] == "2" -> parseAnchor(values) ?: return null
+            else -> return null
+        }
         val token = values.getValue("deviceToken")
         if (token.length != TOKEN_HEX_CHARS || !token.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) return null
         return DeviceCredential(
@@ -65,7 +82,19 @@ object CredentialParser {
             vaultId = canonicalUuid(values.getValue("vaultId")) ?: return null,
             deviceId = canonicalUuid(values.getValue("deviceId")) ?: return null,
             deviceToken = token,
+            anchor = anchor,
         )
+    }
+
+    /** Floor is a positive JSON integer that fits in u32; fingerprint is 64 lowercase hex characters. */
+    private fun parseAnchor(values: Map<String, String>): EpochAnchor? {
+        val floor = values.getValue("epochFloor").takeIf { raw -> raw.isNotEmpty() && raw.all { it in '0'..'9' } }
+            ?.toUIntOrNull()
+            ?.takeIf { it > 0u }
+            ?: return null
+        val fingerprint = values.getValue("profileFingerprint")
+        if (fingerprint.length != FINGERPRINT_HEX_CHARS || !fingerprint.all { it in '0'..'9' || it in 'a'..'f' }) return null
+        return EpochAnchor(floor, fingerprint)
     }
 
     /**

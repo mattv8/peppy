@@ -8,6 +8,50 @@ struct EnrollmentRecord: Codable, Equatable, Sendable {
     var keyEpoch: UInt32
     var profileJson: String
     var headerJson: String
+    var epochFloor: UInt32? = nil
+    var profileFingerprint: String? = nil
+
+    var epochAnchor: EpochAnchor? {
+        guard let epochFloor, let profileFingerprint else { return nil }
+        return EpochAnchor(epochFloor: epochFloor, profileFingerprint: profileFingerprint)
+    }
+
+    init(identity: EnrollmentIdentity, role: String, keyEpoch: UInt32, profileJson: String, headerJson: String, epochFloor: UInt32? = nil, profileFingerprint: String? = nil) {
+        self.identity = identity
+        self.role = role
+        self.keyEpoch = keyEpoch
+        self.profileJson = profileJson
+        self.headerJson = headerJson
+        self.epochFloor = epochFloor
+        self.profileFingerprint = profileFingerprint
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case identity, role, keyEpoch, profileJson, headerJson, epochFloor, profileFingerprint
+    }
+
+    init(from decoder: any Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        identity = try fields.decode(EnrollmentIdentity.self, forKey: .identity)
+        role = try fields.decode(String.self, forKey: .role)
+        keyEpoch = try fields.decode(UInt32.self, forKey: .keyEpoch)
+        profileJson = try fields.decode(String.self, forKey: .profileJson)
+        headerJson = try fields.decode(String.self, forKey: .headerJson)
+        if fields.contains(.epochFloor) || fields.contains(.profileFingerprint) {
+            epochFloor = try fields.decode(UInt32.self, forKey: .epochFloor)
+            profileFingerprint = try fields.decode(String.self, forKey: .profileFingerprint)
+            try validateEpochAnchor()
+        }
+    }
+
+    func validateEpochAnchor() throws(ClientError) {
+        guard epochFloor != nil || profileFingerprint != nil else { return }
+        guard let epochFloor, let profileFingerprint else { throw .invalidCredential("epoch anchor") }
+        _ = try DeviceCredential.parseAnchor([
+            "epochFloor": NSNumber(value: epochFloor),
+            "profileFingerprint": profileFingerprint,
+        ])
+    }
 }
 
 /// Keychain layout. Every item is bound to origin, vault and device in its account name:
@@ -32,7 +76,12 @@ struct EnrollmentStore: Sendable {
     }
 
     func record(_ identity: EnrollmentIdentity) throws(ClientError) -> EnrollmentRecord {
-        guard let data = try secure.read(identity.account("enrollment")) else { throw .missingSecret("enrollment record") }
+        guard let record = try recordIfPresent(identity) else { throw .missingSecret("enrollment record") }
+        return record
+    }
+
+    func recordIfPresent(_ identity: EnrollmentIdentity) throws(ClientError) -> EnrollmentRecord? {
+        guard let data = try secure.read(identity.account("enrollment")) else { return nil }
         let record = try decode(EnrollmentRecord.self, data, "enrollment record")
         guard record.identity == identity else { throw .identityMismatch }
         return record
@@ -53,6 +102,21 @@ struct EnrollmentStore: Sendable {
     }
 
     func saveRecord(_ record: EnrollmentRecord) throws(ClientError) {
+        var record = record
+        try record.validateEpochAnchor()
+        // A server refresh (or v1 re-import) cannot erase a previously imported floor.
+        if let data = try secure.read(record.identity.account("enrollment")) {
+            let prior = try decode(EnrollmentRecord.self, data, "enrollment record")
+            guard prior.identity == record.identity else { throw .identityMismatch }
+            if record.epochAnchor == nil {
+                record.epochFloor = prior.epochFloor
+                record.profileFingerprint = prior.profileFingerprint
+            } else if let incoming = record.epochAnchor, let existing = prior.epochAnchor {
+                guard incoming.epochFloor >= existing.epochFloor,
+                      incoming.epochFloor != existing.epochFloor || incoming.profileFingerprint == existing.profileFingerprint
+                else { throw .core(.InvalidProfile) }
+            }
+        }
         try secure.upsert(record.identity.account("enrollment"), encode(record))
     }
 
@@ -147,6 +211,13 @@ struct EnrollmentStore: Sendable {
     }
 
     private func decode<T: Decodable>(_ type: T.Type, _ data: Data, _ what: String) throws(ClientError) -> T {
-        do { return try JSONDecoder().decode(type, from: data) } catch { throw .missingSecret(what) }
+        do {
+            if type == EnrollmentRecord.self,
+               let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               fields.keys.contains("epochFloor") || fields.keys.contains("profileFingerprint") {
+                _ = try DeviceCredential.parseAnchor(fields)
+            }
+            return try JSONDecoder().decode(type, from: data)
+        } catch { throw .missingSecret(what) }
     }
 }

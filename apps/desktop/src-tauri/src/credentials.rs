@@ -5,12 +5,14 @@
 //! The stored credential carries its origin; one vault/device can only ever be bound to that
 //! origin. A database key is generated exactly once per binding and is never replaced.
 use crate::{
-    error::{BridgeError, BridgeResult},
+    error::{core_error, BridgeError, BridgeResult},
     origin::shared_origin_error,
     secure_store::SecretStore,
 };
+use peppy_client_core::{Client, ClientConfig, DatabaseKey, DeviceId, Error as CoreError, VaultId};
 use peppy_hosted_client::device_credentials::{
-    parse_portable_credential, serialize_portable_credential, PortableCredentialError,
+    parse_portable_credential, serialize_portable_credential, serialize_portable_credential_v2,
+    PortableCredentialError,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -58,14 +60,72 @@ fn import_error(message: &'static str) -> BridgeError {
 
 /// Strict, bounded parser. Errors are fixed strings and never echo the input.
 pub fn parse_credential(bytes: &[u8]) -> BridgeResult<ImportedCredential> {
-    let credential = parse_portable_credential(bytes).map_err(portable_import_error)?;
-    Ok(ImportedCredential {
+    Ok(parse_anchored_import(bytes)?.0)
+}
+
+/// The v2 epoch anchor an import carries. `wire` is the v2 serialization that keeps it when stored.
+#[derive(Clone)]
+pub struct EpochAnchorImport {
+    pub epoch_floor: u32,
+    pub profile_fingerprint: String,
+    wire: Zeroizing<Vec<u8>>,
+}
+
+/// Parses an import and keeps its v2 epoch anchor, if any. v1 imports carry no anchor.
+pub fn parse_anchored_import(
+    bytes: &[u8],
+) -> BridgeResult<(ImportedCredential, Option<EpochAnchorImport>)> {
+    let portable = parse_portable_credential(bytes).map_err(portable_import_error)?;
+    let credential = ImportedCredential {
         version: 1,
-        origin: credential.origin().to_owned(),
-        vault_id: credential.vault_id().to_owned(),
-        device_id: credential.device_id().to_owned(),
-        device_token: credential.device_token().to_owned(),
-    })
+        origin: portable.origin().to_owned(),
+        vault_id: portable.vault_id().to_owned(),
+        device_id: portable.device_id().to_owned(),
+        device_token: portable.device_token().to_owned(),
+    };
+    let anchor = match portable.anchor() {
+        Some(anchor) => Some(EpochAnchorImport {
+            epoch_floor: anchor.epoch_floor,
+            profile_fingerprint: anchor.profile_fingerprint.clone(),
+            wire: serialize_portable_credential_v2(&portable).map_err(portable_import_error)?,
+        }),
+        None => None,
+    };
+    Ok((credential, anchor))
+}
+
+/// Persists a v2 epoch anchor in the binding's local database. It must run before the first unlock.
+/// A stale or malformed anchor is reported like a server profile mismatch.
+pub fn apply_epoch_anchor(
+    binding: &Binding,
+    database: &Path,
+    key: &[u8],
+    anchor: &EpochAnchorImport,
+) -> BridgeResult<()> {
+    let config = ClientConfig {
+        database_path: database.to_path_buf(),
+        vault_id: binding
+            .vault_id
+            .parse::<VaultId>()
+            .map_err(|_| BridgeError::host_state())?,
+        device_id: binding
+            .device_id
+            .parse::<DeviceId>()
+            .map_err(|_| BridgeError::host_state())?,
+    };
+    let client =
+        Client::open(config, DatabaseKey::new(key).map_err(core_error)?).map_err(core_error)?;
+    client
+        .set_epoch_anchor(anchor.epoch_floor, &anchor.profile_fingerprint)
+        .map_err(stale_profile_error)
+}
+
+/// Maps a stale epoch anchor to the same profile-mismatch error a server profile conflict uses.
+pub fn stale_profile_error(error: CoreError) -> BridgeError {
+    match error {
+        CoreError::StaleKeyEpoch => core_error(CoreError::InvalidProfile),
+        other => core_error(other),
+    }
 }
 
 fn portable_import_error(error: PortableCredentialError) -> BridgeError {
@@ -413,6 +473,18 @@ pub fn store_credential(
     store.set(&credential.binding().credential_account(), &bytes)
 }
 
+/// Stores an import. An anchored (v2) import keeps its anchor in the v2 form.
+pub fn store_import(
+    store: &dyn SecretStore,
+    credential: &ImportedCredential,
+    anchor: Option<&EpochAnchorImport>,
+) -> BridgeResult<()> {
+    match anchor {
+        Some(anchor) => store.set(&credential.binding().credential_account(), &anchor.wire),
+        None => store_credential(store, credential),
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -491,6 +563,69 @@ pub mod tests {
                 "deviceId": device,
                 "deviceToken": token,
             })
+        );
+    }
+
+    fn v2_credential_json(
+        origin: &str,
+        vault: &str,
+        device: &str,
+        floor: u32,
+        fingerprint: &str,
+    ) -> Vec<u8> {
+        serde_json::json!({"version":2,"origin":origin,"vaultId":vault,"deviceId":device,"deviceToken":TOKEN,"epochFloor":floor,"profileFingerprint":fingerprint}).to_string().into_bytes()
+    }
+
+    #[test]
+    fn v2_import_keeps_its_anchor_when_stored() {
+        let vault = uuid::Uuid::new_v4().to_string();
+        let device = uuid::Uuid::new_v4().to_string();
+        let fingerprint = "b".repeat(64);
+        let (credential, anchor) = parse_anchored_import(&v2_credential_json(
+            "https://a.test",
+            &vault,
+            &device,
+            2,
+            &fingerprint,
+        ))
+        .unwrap();
+        let anchor = anchor.expect("a v2 import carries its anchor");
+        assert_eq!(anchor.epoch_floor, 2);
+        assert_eq!(anchor.profile_fingerprint, fingerprint);
+        let store = MemoryStore::default();
+        store_import(&store, &credential, Some(&anchor)).unwrap();
+        let stored = store
+            .get(&credential.binding().credential_account())
+            .unwrap()
+            .unwrap();
+        let (_, restored) = parse_anchored_import(&stored).unwrap();
+        assert_eq!(restored.unwrap().epoch_floor, 2);
+        assert_eq!(
+            stored_credential(&store, &credential.binding())
+                .unwrap()
+                .unwrap()
+                .device_token,
+            TOKEN
+        );
+        let (_, v1_anchor) =
+            parse_anchored_import(&credential_json("https://a.test", &vault, &device, TOKEN))
+                .unwrap();
+        assert!(v1_anchor.is_none());
+    }
+
+    #[test]
+    fn stale_anchor_maps_to_the_profile_mismatch_error() {
+        assert_eq!(
+            stale_profile_error(CoreError::StaleKeyEpoch).code,
+            "profile-mismatch"
+        );
+        assert_eq!(
+            stale_profile_error(CoreError::InvalidProfile).code,
+            "profile-mismatch"
+        );
+        assert_ne!(
+            stale_profile_error(CoreError::WrongPassphrase).code,
+            "profile-mismatch"
         );
     }
 
