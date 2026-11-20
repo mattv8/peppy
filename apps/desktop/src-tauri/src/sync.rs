@@ -848,6 +848,10 @@ fn settle_repair_attempt(session: &Session, result: &BridgeResult<()>) {
         session
             .repair_attempted
             .store(false, std::sync::atomic::Ordering::SeqCst);
+    } else {
+        session
+            .repair_finished
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -2724,7 +2728,16 @@ pub(crate) async fn repair_if_required(session: &Arc<Session>) -> BridgeResult<(
     if window_open
         || session
             .repair_attempted
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
+            .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Ok(());
+    }
+    session
+        .repair_finished
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    if session
+        .repair_attempted
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
     {
         return Ok(());
     }
@@ -4676,6 +4689,36 @@ mod snapshot_too_large_gate_tests {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         settle_repair_attempt(&session, &Ok(()));
         assert!(session
+            .repair_attempted
+            .load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn failed_repair_attempt_is_spent_until_rearmed() {
+        let session = too_large_session();
+        session
+            .repair_attempted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        settle_repair_attempt(&session, &Err(BridgeError::new("offline", "offline")));
+        assert!(session.repair_exhausted());
+        session
+            .repair_attempted
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(!session.repair_exhausted());
+    }
+
+    #[test]
+    fn refused_repair_remains_retryable() {
+        let session = too_large_session();
+        session
+            .repair_attempted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        settle_repair_attempt(
+            &session,
+            &Err(BridgeError::new(SNAPSHOT_TOO_LARGE_CODE, "too large")),
+        );
+        assert!(!session.repair_exhausted());
+        assert!(!session
             .repair_attempted
             .load(std::sync::atomic::Ordering::SeqCst));
     }

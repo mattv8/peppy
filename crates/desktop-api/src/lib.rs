@@ -120,6 +120,8 @@ pub struct SyncProgress {
     pub snapshot_expected: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_remaining: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_total: Option<String>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -128,7 +130,55 @@ pub enum SyncProgressPhase {
     Receiving,
     Applying,
     WaitingForKeys,
+    Repairing,
+    Blocked,
     Current,
+}
+
+#[cfg(test)]
+mod sync_progress_shape_tests {
+    use super::*;
+
+    #[test]
+    fn sync_progress_serializes_snapshot_total_as_decimal_string() {
+        let progress = SyncProgress {
+            phase: SyncProgressPhase::Applying,
+            received_through: "9".into(),
+            processed_through: "8".into(),
+            target_high_water: None,
+            snapshot_received: None,
+            snapshot_expected: None,
+            snapshot_remaining: Some("4".into()),
+            snapshot_total: Some("10".into()),
+        };
+        let value = serde_json::to_value(progress).unwrap();
+        assert_eq!(value["snapshotRemaining"], "4");
+        assert_eq!(value["snapshotTotal"], "10");
+        let progress = SyncProgress {
+            phase: SyncProgressPhase::Current,
+            received_through: "0".into(),
+            processed_through: "0".into(),
+            target_high_water: None,
+            snapshot_received: None,
+            snapshot_expected: None,
+            snapshot_remaining: None,
+            snapshot_total: None,
+        };
+        assert!(
+            serde_json::to_value(progress)
+                .unwrap()
+                .get("snapshotTotal")
+                .is_none()
+        );
+        assert_eq!(
+            serde_json::to_value(SyncProgressPhase::Repairing).unwrap(),
+            "repairing"
+        );
+        assert_eq!(
+            serde_json::to_value(SyncProgressPhase::Blocked).unwrap(),
+            "blocked"
+        );
+    }
 }
 
 #[derive(Clone, Serialize)]

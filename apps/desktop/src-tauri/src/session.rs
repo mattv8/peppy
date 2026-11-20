@@ -15,8 +15,8 @@ use crate::{
 };
 use peppy_client_core::{
     AttachmentId, AttachmentInfo, Client, ClientConfig, ConversationFolder, ConversationId, Cursor,
-    DatabaseKey, DeviceId, DraftId, GatewayRoute, MediaCursor, MediaMetadata, Message, MessageId,
-    NativeKeyCache, ReplayProgress, VaultId,
+    DatabaseKey, DeviceId, DraftId, GatewayRoute, HistoryBlock, MediaCursor, MediaMetadata,
+    Message, MessageId, NativeKeyCache, ReplayProgress, VaultId,
 };
 use peppy_desktop_api::compose::{self, ComposeError};
 use std::{
@@ -48,6 +48,21 @@ fn resolve_requested_conversation(
 
 fn replay_is_behind(progress: &ReplayProgress, target: Option<Cursor>) -> bool {
     target.is_some_and(|target| progress.received_through < target)
+}
+
+fn history_block_fallback(
+    progress: &ReplayProgress,
+    target: Option<Cursor>,
+    staging: Option<(u64, u64)>,
+    apply_remaining: u64,
+    bootstrap: bool,
+) -> bool {
+    staging.is_none()
+        && progress.waiting_for_keys == 0
+        && apply_remaining == 0
+        && !bootstrap
+        && !replay_is_behind(progress, target)
+        && progress.processed_through < progress.received_through
 }
 
 const INITIAL_HISTORY_MESSAGES: usize = 50;
@@ -137,6 +152,7 @@ enum MirrorPhase {
 struct ProgressMirror {
     staging: Option<(u64, u64)>,
     apply_remaining: u64,
+    apply_total: Option<u64>,
     bootstrap: bool,
     last_phase: MirrorPhase,
     last_notify: Option<std::time::Instant>,
@@ -147,6 +163,7 @@ impl Default for ProgressMirror {
         Self {
             staging: None,
             apply_remaining: 0,
+            apply_total: None,
             bootstrap: false,
             last_phase: MirrorPhase::None,
             last_notify: Some(std::time::Instant::now()),
@@ -155,6 +172,22 @@ impl Default for ProgressMirror {
 }
 
 impl ProgressMirror {
+    fn set_apply_remaining(&mut self, remaining: u64) {
+        self.apply_remaining = remaining;
+        self.apply_total = if remaining == 0 {
+            None
+        } else {
+            Some(self.apply_total.unwrap_or(0).max(remaining))
+        };
+    }
+
+    fn set_staging(&mut self, staging: Option<(u64, u64)>) {
+        if staging.is_some() && self.staging.is_none() {
+            self.apply_total = None;
+        }
+        self.staging = staging;
+    }
+
     fn phase(&self) -> MirrorPhase {
         if self.staging.is_some() {
             MirrorPhase::Staging
@@ -174,28 +207,205 @@ mod sync_progress_mirror_tests {
     use std::sync::atomic::AtomicUsize;
 
     #[test]
+    fn drain_reports_peak_total() {
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        session.set_apply_remaining(10);
+        session.set_apply_remaining(4);
+        let progress = ReplayProgress {
+            received_through: Cursor(0),
+            processed_through: Cursor(0),
+            waiting_for_keys: 0,
+        };
+        let mirror = session.progress_mirror.lock().unwrap();
+        let view = Session::sync_progress_view(
+            progress,
+            None,
+            None,
+            mirror.apply_remaining,
+            mirror.apply_total,
+            false,
+            (None, false),
+        );
+        assert_eq!(serde_json::to_value(view).unwrap()["snapshotTotal"], "10");
+    }
+
+    #[test]
+    fn peak_lifecycle_resets_on_completion_and_staging() {
+        let mut mirror = ProgressMirror::default();
+        mirror.set_apply_remaining(10);
+        mirror.set_apply_remaining(4);
+        assert_eq!(mirror.apply_total, Some(10));
+        mirror.set_apply_remaining(12);
+        assert_eq!(mirror.apply_total, Some(12));
+        mirror.set_apply_remaining(0);
+        assert_eq!(mirror.apply_total, None);
+        mirror.set_apply_remaining(3);
+        mirror.set_staging(Some((0, 5)));
+        assert_eq!(mirror.apply_total, None);
+        mirror.set_staging(None);
+        mirror.set_apply_remaining(2);
+        assert_eq!(mirror.apply_total, Some(2));
+    }
+
+    #[test]
+    fn blocked_frontier_and_precedence() {
+        let progress = || ReplayProgress {
+            received_through: Cursor(9),
+            processed_through: Cursor(8),
+            waiting_for_keys: 0,
+        };
+        for (block, expected) in [
+            (Some(HistoryBlock::Repairing), "repairing"),
+            (Some(HistoryBlock::Failed), "blocked"),
+            (Some(HistoryBlock::Withheld), "current"),
+            (None, "applying"),
+        ] {
+            let view =
+                Session::sync_progress_view(progress(), None, None, 0, None, false, (block, false));
+            let json = serde_json::to_value(view).unwrap();
+            assert_eq!(json["phase"], expected);
+            assert!(json.get("snapshotTotal").is_none());
+        }
+        let spent = Session::sync_progress_view(
+            progress(),
+            None,
+            None,
+            0,
+            None,
+            false,
+            (Some(HistoryBlock::Repairing), true),
+        );
+        assert!(matches!(spent.phase, dto::SyncProgressPhase::Blocked));
+        let phase = |progress, target, staging, remaining, bootstrap| {
+            serde_json::to_value(Session::sync_progress_view(
+                progress,
+                target,
+                staging,
+                remaining,
+                Some(10),
+                bootstrap,
+                (Some(HistoryBlock::Failed), true),
+            ))
+            .unwrap()["phase"]
+                .clone()
+        };
+        assert_eq!(phase(progress(), None, Some((2, 5)), 4, true), "receiving");
+        assert_eq!(
+            phase(
+                ReplayProgress {
+                    waiting_for_keys: 1,
+                    ..progress()
+                },
+                None,
+                None,
+                4,
+                true
+            ),
+            "waitingForKeys"
+        );
+        assert_eq!(phase(progress(), None, None, 4, true), "applying");
+        assert_eq!(phase(progress(), None, None, 0, true), "receiving");
+        assert_eq!(
+            phase(progress(), Some(Cursor(10)), None, 0, false),
+            "receiving"
+        );
+        let unknown =
+            Session::sync_progress_view(progress(), None, None, 4, None, false, (None, false));
+        assert!(unknown.snapshot_total.is_none());
+        let clamped =
+            Session::sync_progress_view(progress(), None, None, 4, Some(2), false, (None, false));
+        assert_eq!(clamped.snapshot_total.as_deref(), Some("4"));
+    }
+
+    #[test]
+    fn history_block_probe_only_runs_for_the_fallback() {
+        let progress = ReplayProgress {
+            received_through: Cursor(9),
+            processed_through: Cursor(8),
+            waiting_for_keys: 0,
+        };
+        assert!(history_block_fallback(&progress, None, None, 0, false));
+        assert!(!history_block_fallback(
+            &progress,
+            None,
+            Some((0, 1)),
+            0,
+            false
+        ));
+        assert!(!history_block_fallback(&progress, None, None, 1, false));
+        assert!(!history_block_fallback(&progress, None, None, 0, true));
+        assert!(!history_block_fallback(
+            &progress,
+            Some(Cursor(10)),
+            None,
+            0,
+            false
+        ));
+        assert!(!history_block_fallback(
+            &ReplayProgress {
+                waiting_for_keys: 1,
+                ..progress
+            },
+            None,
+            None,
+            0,
+            false
+        ));
+        assert!(!history_block_fallback(
+            &ReplayProgress {
+                processed_through: Cursor(9),
+                ..progress
+            },
+            None,
+            None,
+            0,
+            false
+        ));
+    }
+
+    #[test]
     fn precedence_and_clearing() {
         let progress = || ReplayProgress {
             received_through: Cursor(0),
             processed_through: Cursor(0),
             waiting_for_keys: 1,
         };
-        let view = Session::sync_progress_view(progress(), None, Some((2, 5)), 4, true);
+        let view = Session::sync_progress_view(
+            progress(),
+            None,
+            Some((2, 5)),
+            4,
+            Some(4),
+            true,
+            (None, false),
+        );
         assert!(matches!(view.phase, dto::SyncProgressPhase::Receiving));
         assert_eq!(view.snapshot_remaining.as_deref(), Some("3"));
-        let view = Session::sync_progress_view(progress(), None, None, 4, true);
+        let view =
+            Session::sync_progress_view(progress(), None, None, 4, Some(4), true, (None, false));
         assert!(matches!(view.phase, dto::SyncProgressPhase::WaitingForKeys));
         let unlocked = || ReplayProgress {
             waiting_for_keys: 0,
             ..progress()
         };
-        let view = Session::sync_progress_view(unlocked(), None, None, 4, true);
+        let view =
+            Session::sync_progress_view(unlocked(), None, None, 4, Some(4), true, (None, false));
         assert!(matches!(view.phase, dto::SyncProgressPhase::Applying));
         assert_eq!(view.snapshot_remaining.as_deref(), Some("4"));
-        let view = Session::sync_progress_view(unlocked(), None, None, 0, true);
+        let view =
+            Session::sync_progress_view(unlocked(), None, None, 0, None, true, (None, false));
         assert!(matches!(view.phase, dto::SyncProgressPhase::Receiving));
         assert!(view.snapshot_remaining.is_none());
-        let view = Session::sync_progress_view(unlocked(), None, None, 0, false);
+        let view =
+            Session::sync_progress_view(unlocked(), None, None, 0, None, false, (None, false));
         assert!(matches!(view.phase, dto::SyncProgressPhase::Current));
     }
 
@@ -278,6 +488,8 @@ pub struct Session {
     pub repair_wake: Notify,
     /// One fenced repair snapshot per session (or per manual request) while the latch is set.
     pub repair_attempted: AtomicBool,
+    /// A finished attempt has no automatic retry until rearmed by the existing gate.
+    pub(crate) repair_finished: AtomicBool,
     /// Test-only: forces the named snapshot append to be refused as too large.
     #[cfg(test)]
     pub(crate) refuse_snapshot_append: Mutex<Option<crate::sync::AppendKind>>,
@@ -725,6 +937,7 @@ pub(crate) fn open_session_with_progress(
         replay_page_in_flight: AtomicBool::new(false),
         repair_wake: Notify::new(),
         repair_attempted: AtomicBool::new(false),
+        repair_finished: AtomicBool::new(false),
         snapshot_too_large: Mutex::new(crate::sync::SnapshotTooLargeGate::default()),
         #[cfg(test)]
         refuse_snapshot_append: Mutex::new(None),
@@ -1000,11 +1213,15 @@ impl Session {
         (self.notifier)();
     }
 
+    pub(crate) fn repair_exhausted(&self) -> bool {
+        self.repair_attempted.load(Ordering::SeqCst) && self.repair_finished.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn set_staging_progress(&self, staging: Option<(u64, u64)>, force: bool) {
         self.progress_mirror
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .staging = staging;
+            .set_staging(staging);
         self.notify_progress(force);
     }
 
@@ -1012,7 +1229,7 @@ impl Session {
         self.progress_mirror
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .apply_remaining = remaining;
+            .set_apply_remaining(remaining);
     }
 
     pub(crate) fn set_bootstrap(&self, bootstrap: bool, force: bool) {
@@ -1099,19 +1316,37 @@ impl Session {
     fn sync_progress(&self) -> BridgeResult<dto::SyncProgress> {
         let progress = self.replay_progress()?;
         let target_high_water = self.replay_target_high_water();
-        let (staging, apply_remaining, bootstrap) = {
+        let (staging, apply_remaining, apply_total, bootstrap) = {
             let mirror = self
                 .progress_mirror
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
-            (mirror.staging, mirror.apply_remaining, mirror.bootstrap)
+            (
+                mirror.staging,
+                mirror.apply_remaining,
+                mirror.apply_total,
+                mirror.bootstrap,
+            )
+        };
+        let history_block = if history_block_fallback(
+            &progress,
+            target_high_water,
+            staging,
+            apply_remaining,
+            bootstrap,
+        ) {
+            self.client.history_block().ok().flatten()
+        } else {
+            None
         };
         Ok(Self::sync_progress_view(
             progress,
             target_high_water,
             staging,
             apply_remaining,
+            apply_total,
             bootstrap,
+            (history_block, self.repair_exhausted()),
         ))
     }
 
@@ -1120,7 +1355,9 @@ impl Session {
         target_high_water: Option<Cursor>,
         staging: Option<(u64, u64)>,
         apply_remaining: u64,
+        apply_total: Option<u64>,
         bootstrap: bool,
+        (history_block, repair_exhausted): (Option<HistoryBlock>, bool),
     ) -> dto::SyncProgress {
         let phase = if staging.is_some() {
             dto::SyncProgressPhase::Receiving
@@ -1130,8 +1367,22 @@ impl Session {
             dto::SyncProgressPhase::Applying
         } else if bootstrap || replay_is_behind(&progress, target_high_water) {
             dto::SyncProgressPhase::Receiving
-        } else if progress.processed_through < progress.received_through {
-            dto::SyncProgressPhase::Applying
+        } else if history_block_fallback(
+            &progress,
+            target_high_water,
+            staging,
+            apply_remaining,
+            bootstrap,
+        ) {
+            match history_block {
+                Some(HistoryBlock::Repairing) if repair_exhausted => {
+                    dto::SyncProgressPhase::Blocked
+                }
+                Some(HistoryBlock::Repairing) => dto::SyncProgressPhase::Repairing,
+                Some(HistoryBlock::Failed) => dto::SyncProgressPhase::Blocked,
+                Some(HistoryBlock::Withheld) => dto::SyncProgressPhase::Current,
+                None => dto::SyncProgressPhase::Applying,
+            }
         } else {
             dto::SyncProgressPhase::Current
         };
@@ -1148,6 +1399,12 @@ impl Session {
                     (progress.waiting_for_keys == 0 && apply_remaining > 0)
                         .then(|| apply_remaining.to_string())
                 }),
+            snapshot_total: (staging.is_none()
+                && progress.waiting_for_keys == 0
+                && apply_remaining > 0)
+                .then_some(apply_total)
+                .flatten()
+                .map(|total| total.max(apply_remaining).to_string()),
         }
     }
 

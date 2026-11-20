@@ -771,6 +771,7 @@ impl BrowserCore {
                 snapshot_received: None,
                 snapshot_expected: None,
                 snapshot_remaining: None,
+                snapshot_total: None,
             }),
             rcs_status,
         })
