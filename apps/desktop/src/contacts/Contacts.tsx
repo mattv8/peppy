@@ -716,21 +716,21 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     });
   };
 
-  // Reloading drops the removed book and selects the first remaining one; focus then moves to that book's row.
+  // Reloading drops the removed book and selects the first remaining one; focus then moves to that book's list entry.
   const handleBookRemoved = (removedId: string) => {
     removedBookIdRef.current = removedId;
     loadBooks();
   };
   // One removal dialog for the whole view, so it survives the status slot changing and focus returns to its opener.
   const requestRemoveBook = (book: ContactBookView, opener: RefObject<HTMLElement | null>) => setBookRemoval({ book, opener });
+  // The request stays armed until the removed book is actually gone, so an earlier books refresh cannot consume it.
   useEffect(() => {
     const removedId = removedBookIdRef.current;
-    if (!removedId) return;
+    if (!removedId || books.some(item => item.id === removedId)) return;
     removedBookIdRef.current = null;
-    if (books.some(item => item.id === removedId)) return;
     const focusTarget = railVisible
       ? document.querySelector<HTMLElement>("#contacts-books .contacts-book-row[aria-current]")
-      : document.getElementById("contacts-book-selector");
+      : document.getElementById("contacts-book-selector") ?? document.getElementById("contacts-list-title") ?? document.getElementById("contacts-list");
     focusTarget?.focus();
   }, [books, railVisible]);
 
@@ -884,7 +884,8 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const sizeBook = (width: number) => {
     if (width < BOOK_COLLAPSE_BELOW) {
       bookRawWidth.current = width;
-      changeBookCollapsed(true);
+      // Every drag frame below the threshold lands here; only the first one changes (and persists) the state.
+      if (!bookCollapsed) changeBookCollapsed(true);
       return;
     }
     const capped = Math.min(width, BOOK_MAX_WIDTH);
@@ -1060,6 +1061,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
             loadingMore={pages.loadingMore}
             loadMoreError={pages.loadMoreError}
             hasMore={pages.hasMore}
+            loadFailed={pages.loadFailed}
             contactCount={pages.total ?? book?.contactCount}
             deviceName={book?.deviceName}
             canWrite={Boolean(book?.capabilities.canWrite)}
@@ -1069,6 +1071,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
             onSelect={handleSelectContact}
             onLoadMore={pages.loadMore}
             onRetryLoadMore={pages.retryLoadMore}
+            onRetryFirstPage={pages.retryFirstPage}
           />
         )}
       </section>
@@ -1115,6 +1118,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
                   book={books.find(candidate => candidate.id === selected.bookId)}
                   photoLocked={toneDisabled || sync?.readiness?.state === "needs_unlock"}
                   onPhotoSubmitted={() => pages.refresh()}
+                  busy={busy}
                   confirm={confirmDelete}
                   onEdit={() => handleEditStart(selected)}
                   onDelete={handleDelete}

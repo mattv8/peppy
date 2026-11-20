@@ -10,7 +10,7 @@ import {
 import { StrictMode, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ContactsView, type ContactTarget } from "./Contacts";
-import { PhotoCropDialog } from "./ContactForm";
+import { PhotoCropDialog } from "./useContactPhotoChange";
 import {
   bridge,
   type ContactBookView,

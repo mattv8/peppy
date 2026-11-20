@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { ContactsView } from "./Contacts";
 import { ContactDetail } from "./ContactDetail";
 import { bridge, type ContactBookView, type ContactView } from "../bridge/bridge";
-import { contactPage, DeferredCropImage, mockContactAurora, mockContactBook, mockContactRiver, resetContactBridgeMocks, restoreContactDomGlobals } from "./contacts-test-utils";
+import { contactPage, deferred, DeferredCropImage, mockContactAurora, mockContactBook, mockContactRiver, resetContactBridgeMocks, restoreContactDomGlobals } from "./contacts-test-utils";
 
 vi.mock("../bridge/bridge", { spy: true });
 
@@ -360,5 +360,60 @@ describe("ContactDetail photo pencil", () => {
     expect(button).toHaveAttribute("title", "Unlock sync to change photos.");
     fireEvent.click(button);
     expect(bridge.pick_contact_photo).not.toHaveBeenCalled();
+  });
+});
+
+describe("ContactDetail photo while an edit is in flight", () => {
+  beforeEach(() => {
+    resetContactBridgeMocks();
+    DeferredCropImage.instances = [];
+    vi.stubGlobal("Image", DeferredCropImage);
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ fillStyle: "", fillRect: vi.fn(), drawImage: vi.fn() } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue(croppedDataUrl);
+    vi.mocked(bridge.pick_contact_photo).mockResolvedValue(picked);
+    vi.mocked(bridge.submit_contact_edit).mockResolvedValue({ state: "pending", requestId: "request-photo" });
+  });
+
+  afterEach(() => {
+    restoreContactDomGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("does not start a second pick or submit from the photo button while one is in flight", async () => {
+    const submit = deferred<{ state: "pending"; requestId: string }>();
+    vi.mocked(bridge.submit_contact_edit).mockReturnValue(submit.promise);
+    const { container, onPhotoSubmitted } = renderPhoto();
+    fireEvent.click(photoButton(container));
+    await waitFor(() => expect(bridge.pick_contact_photo).toHaveBeenCalledTimes(1));
+    await confirmCrop();
+    await waitFor(() => expect(bridge.submit_contact_edit).toHaveBeenCalledTimes(1));
+    expect(photoButton(container)).toHaveAttribute("aria-disabled", "true");
+    expect(photoButton(container)).toHaveAttribute("aria-busy", "true");
+
+    fireEvent.click(photoButton(container));
+
+    expect(bridge.pick_contact_photo).toHaveBeenCalledTimes(1);
+    expect(bridge.submit_contact_edit).toHaveBeenCalledTimes(1);
+    await act(async () => submit.resolve({ state: "pending", requestId: "request-photo" }));
+    await waitFor(() => expect(onPhotoSubmitted).toHaveBeenCalledTimes(1));
+    expect(photoButton(container)).not.toHaveAttribute("aria-busy");
+  });
+
+  it("returns focus to the photo button after Remove photo", async () => {
+    const { container } = renderPhoto({ contact: withStoredPhoto });
+    fireEvent.click(photoButton(container));
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Remove photo" }));
+
+    expect(photoButton(container)).toHaveFocus();
+    await waitFor(() => expect(bridge.submit_contact_edit).toHaveBeenCalledWith(expect.objectContaining({ photo: { kind: "remove" } })));
+  });
+
+  it("disables Close while a save is in flight, like Back", () => {
+    render(
+      <ContactDetail contact={adaLovelace} canWrite={false} confirm={false} nameFormat="first-last" busy onEdit={vi.fn()} onDelete={vi.fn()} onCancelConfirm={vi.fn()} onClose={vi.fn()} />,
+    );
+
+    expect(screen.getByRole("button", { name: "Close contact" })).toBeDisabled();
   });
 });

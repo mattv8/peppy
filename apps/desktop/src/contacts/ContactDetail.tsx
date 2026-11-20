@@ -40,6 +40,8 @@ export type ContactDetailProps = {
   onClose(): void;
   /** Called after the photo edit was accepted by the phone's queue; the caller reloads the list. */
   onPhotoSubmitted?(): void;
+  /** A save or delete is in flight: Close waits like Back does. */
+  busy?: boolean;
 };
 
 export function ContactDetail({
@@ -54,6 +56,7 @@ export function ContactDetail({
   onCancelConfirm,
   onClose,
   onPhotoSubmitted,
+  busy = false,
 }: ContactDetailProps) {
   const compactDetail = useMediaMatch(COMPACT_DETAIL_QUERY);
   const photoButtonRef = useRef<HTMLButtonElement>(null);
@@ -69,6 +72,7 @@ export function ContactDetail({
   const name = formatContactName(contact, nameFormat);
 
   const sendPhoto = async (photo: PhotoChange) => {
+    if (submitting) return;
     setSubmitting(true);
     setPhotoError("");
     try {
@@ -102,6 +106,7 @@ export function ContactDetail({
   const photoPending = isPendingEdit(contact.pendingEditState);
   const photoFailed = isFailedEdit(contact.pendingEditState) && photoSent !== null;
   const photoDisabledReason = photoPending ? PHOTO_PENDING_REASON : photoLocked ? PHOTO_LOCKED_REASON : undefined;
+  const photoBusy = submitting || picking;
   const photoState = photoFailed ? "error" : photoPending ? "pending" : "idle";
   const hasPhoto = Boolean(contact.photoDataUrl);
   const shownPhoto = photoPending && photoSent ? photoSent.preview : contact.photoDataUrl;
@@ -142,12 +147,13 @@ export function ContactDetail({
   };
 
   const startPick = () => {
+    if (photoBusy) return;
     setPhotoError("");
     void choosePhoto(photoButtonRef.current);
   };
 
   const onPhotoButtonClick = () => {
-    if (photoDisabledReason) return;
+    if (photoDisabledReason || photoBusy) return;
     if (hasPhoto) {
       setMenuOpen(open => !open);
       return;
@@ -196,8 +202,8 @@ export function ContactDetail({
               aria-label={`Change photo for ${name}`}
               title={photoDisabledReason ?? "Change photo"}
               aria-describedby={photoDisabledReason ? "contacts-detail-photo-reason" : undefined}
-              aria-disabled={photoDisabledReason ? "true" : undefined}
-              aria-busy={submitting || picking || undefined}
+              aria-disabled={photoDisabledReason || photoBusy ? "true" : undefined}
+              aria-busy={photoBusy || undefined}
               aria-haspopup={hasPhoto ? "menu" : undefined}
               aria-expanded={hasPhoto ? menuOpen : undefined}
               onClick={onPhotoButtonClick}
@@ -211,7 +217,7 @@ export function ContactDetail({
                 <button type="button" role="menuitem" data-action="change-photo" onClick={() => { closeMenu(); startPick(); }}>
                   Choose photo…
                 </button>
-                <button type="button" role="menuitem" data-action="remove-photo" onClick={() => { closeMenu(); void sendPhoto({ kind: "remove" }); }}>
+                <button type="button" role="menuitem" data-action="remove-photo" onClick={() => { closeMenu(true); void sendPhoto({ kind: "remove" }); }}>
                   Remove photo
                 </button>
               </div>
@@ -252,6 +258,7 @@ export function ContactDetail({
             data-action="close-detail"
             aria-label="Close contact"
             title="Close"
+            disabled={busy}
             onClick={onClose}
           >
             <X size={16} aria-hidden />

@@ -22,6 +22,10 @@ export function useBookLookup({ books, bookId, onBooksChanged, onNotice }: {
   const [confirmBookId, setConfirmBookId] = useState<string | null>(null);
   const focusSwitchAfterSave = useRef<string | null>(null);
   const mountedRef = useRef(true);
+  // Latest parent callbacks, read when a save completes: a save may finish after this strip unmounted (the rail
+  // swaps with the compact strip), and its result still belongs to the book list.
+  const callbacks = useRef({ onBooksChanged, onNotice });
+  callbacks.current = { onBooksChanged, onNotice };
   const { label } = bookLabels(books);
 
   useEffect(() => {
@@ -45,21 +49,21 @@ export function useBookLookup({ books, bookId, onBooksChanged, onNotice }: {
     setBusy(true);
     try {
       await bridge.set_contact_book_lookup(item.id, enabled);
-      if (!mountedRef.current) return;
-      if (!enabled && confirmBookId === item.id) focusSwitchAfterSave.current = item.id;
-      setConfirmBookId(null);
-      onBooksChanged();
+      if (mountedRef.current) {
+        if (!enabled && confirmBookId === item.id) focusSwitchAfterSave.current = item.id;
+        setConfirmBookId(null);
+      }
+      const { onBooksChanged: booksChanged, onNotice: notify } = callbacks.current;
+      booksChanged();
       const name = <IsolatedText text={label(item)} />;
-      onNotice({
+      notify({
         kind: "success",
         message: enabled
           ? <>{name} is used again for names and recipient search.</>
           : <>Names and recipient search no longer use {name}. Its contacts are unchanged.</>,
       });
     } catch {
-      if (mountedRef.current) {
-        onNotice({ kind: "error", message: "Couldn't save this change. Try again.", retry: () => void saveLookup(item, enabled) });
-      }
+      callbacks.current.onNotice({ kind: "error", message: "Couldn't save this change. Try again.", retry: () => void saveLookup(item, enabled) });
     } finally {
       if (mountedRef.current) setBusy(false);
     }

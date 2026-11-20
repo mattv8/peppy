@@ -60,7 +60,7 @@ export function ContactListHeader({ books, bookId, booksLoaded, railVisible, loa
             ))}
           </select>
         ) : (
-          <h2 id="contacts-list-title">{book ? label(book) : "Contact book"}</h2>
+          <h2 id="contacts-list-title" tabIndex={-1}>{book ? label(book) : "Contact book"}</h2>
         )}
         <span id="contacts-count" data-count-state={progressTotal !== undefined ? "progress" : booksLoaded ? "known" : "loading"}>
           {progressTotal !== undefined ? (

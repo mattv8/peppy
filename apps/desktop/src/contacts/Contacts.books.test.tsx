@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { useState } from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { bridge, type ContactBookView } from "../bridge/bridge";
@@ -514,5 +515,90 @@ describe("removed book row menu", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(document.getElementById("contacts-book-remove-dialog")).not.toBeInTheDocument();
     await waitFor(() => expect(more).toHaveFocus());
+  });
+});
+
+describe("contact book drag collapse and focus after removal", () => {
+  beforeEach(() => resetContactBridgeMocks());
+  afterEach(() => restoreContactDomGlobals());
+
+  it("reports the collapse once while the sash keeps moving below the collapse threshold", async () => {
+    const onChange = vi.fn();
+    function Controlled() {
+      const [collapsed, setCollapsed] = useState(false);
+      return <ContactsView bookCollapsed={collapsed} onBookCollapsedChange={value => { onChange(value); setCollapsed(value); }} />;
+    }
+    // A real drag: pointer moves queue one animation frame each, and the test runs those frames by hand.
+    const pointer = { setPointerCapture: vi.fn(), releasePointerCapture: vi.fn(), hasPointerCapture: vi.fn(() => true) };
+    Object.assign(HTMLElement.prototype, pointer);
+    const frames: FrameRequestCallback[] = [];
+    const frameSpy = vi.spyOn(window, "requestAnimationFrame").mockImplementation(callback => { frames.push(callback); return frames.length; });
+    try {
+      render(<Controlled />);
+      await screen.findByRole("button", { name: /Pixel 8/ });
+
+      fireEvent.pointerDown(railHandle(), { pointerId: 1, clientX: 220 });
+      for (let step = 1; step <= 20; step += 1) {
+        fireEvent.pointerMove(railHandle(), { pointerId: 1, clientX: 220 - step * 8 });
+        act(() => frames.splice(0).forEach(callback => callback(0)));
+      }
+      fireEvent.pointerUp(railHandle(), { pointerId: 1, clientX: 60 });
+
+      expect(onChange).toHaveBeenCalledTimes(1);
+      expect(onChange).toHaveBeenCalledWith(true);
+      expect(document.getElementById("contacts-book-list")).not.toBeInTheDocument();
+    } finally {
+      frameSpy.mockRestore();
+      for (const key of Object.keys(pointer)) delete (HTMLElement.prototype as unknown as Record<string, unknown>)[key];
+    }
+  });
+
+  it("keeps the focus request until the removed book is gone, past a books refresh that started earlier", async () => {
+    let hint: (() => void) | undefined;
+    vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
+    const responses: Array<ReturnType<typeof deferred<ContactBookView[]>>> = [];
+    vi.mocked(bridge.list_contact_books).mockImplementation(() => {
+      const response = deferred<ContactBookView[]>();
+      responses.push(response);
+      return response.promise;
+    });
+    render(<ContactsView />);
+    await waitFor(() => expect(responses).toHaveLength(1));
+    await act(async () => responses[0].resolve([removedBook, mockContactBook]));
+    fireEvent.click(await screen.findByRole("button", { name: "Remove from this computer" }));
+
+    act(() => hint?.());
+    await waitFor(() => expect(responses).toHaveLength(2));
+    fireEvent.click(screen.getByRole("dialog").querySelector<HTMLButtonElement>(".destructive-button")!);
+    await waitFor(() => expect(responses).toHaveLength(3));
+
+    // The earlier refresh still lists the removed book; it must not consume the focus request.
+    await act(async () => responses[1].resolve([removedBook, mockContactBook]));
+    expect(document.querySelector('#contacts-books button[data-book-id="book-pixel8"]')).not.toHaveFocus();
+
+    await act(async () => responses[2].resolve([mockContactBook]));
+    await waitFor(() => expect(document.querySelector("#contacts-books .contacts-book-row[aria-current]")).toHaveFocus());
+  });
+});
+
+describe("book lookup save that finishes after its strip unmounted", () => {
+  beforeEach(() => resetContactBridgeMocks());
+  afterEach(() => restoreContactDomGlobals());
+
+  it("still reports the result and refreshes the books when the rail swaps out mid-save", async () => {
+    const save = deferred<void>();
+    vi.mocked(bridge.set_contact_book_lookup).mockReturnValue(save.promise);
+    const onNotice = vi.fn();
+    const onBooksChanged = vi.fn();
+    const rail = render(<BookRail books={[mockContactBook, otherBook]} bookId={mockContactBook.id} width={220} panelRef={{ current: null }} onSelect={vi.fn()} onBooksChanged={onBooksChanged} onRemoveRequest={vi.fn()} onNotice={onNotice} />);
+    fireEvent.click(rowSwitch("book-pixel8"));
+    await waitFor(() => expect(bridge.set_contact_book_lookup).toHaveBeenCalledWith("book-pixel8", false));
+
+    rail.unmount();
+    await act(async () => save.resolve());
+
+    expect(onBooksChanged).toHaveBeenCalledTimes(1);
+    expect(onNotice).toHaveBeenCalledTimes(1);
+    expect(onNotice.mock.lastCall?.[0]).toMatchObject({ kind: "success" });
   });
 });

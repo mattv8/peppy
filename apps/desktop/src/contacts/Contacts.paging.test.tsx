@@ -41,16 +41,22 @@ function rows(): HTMLButtonElement[] {
 
 type ObserverRecord = { callback: IntersectionObserverCallback; options?: IntersectionObserverInit };
 let liveObservers: ObserverRecord[] = [];
+/** Whether the sentinel is in view. Like a browser, a new observer reports a visible sentinel as soon as it observes it. */
+let sentinelVisible = false;
 
 /** Replaces IntersectionObserver with a stub; `revealSentinel` plays the role of the browser scrolling the sentinel in. */
 function stubIntersectionObserver() {
   liveObservers = [];
+  sentinelVisible = false;
   class SentinelObserver {
     private readonly record: ObserverRecord;
     constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
       this.record = { callback, options };
     }
-    observe() { liveObservers.push(this.record); }
+    observe() {
+      liveObservers.push(this.record);
+      if (sentinelVisible) this.record.callback([{ isIntersecting: true } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+    }
     disconnect() { liveObservers = liveObservers.filter(record => record !== this.record); }
   }
   vi.stubGlobal("IntersectionObserver", SentinelObserver);
@@ -61,6 +67,21 @@ async function revealSentinel() {
   await act(async () => undefined);
   const record = liveObservers[liveObservers.length - 1];
   act(() => record?.callback([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
+}
+
+/** Two-page book (400 contacts). The second refresh-time first page waits on `gate`, so a refresh can be held open. */
+function gatedRefresh() {
+  const gate = deferred<ContactPage>();
+  let firstPageCalls = 0;
+  vi.mocked(bridge.list_contacts_page).mockImplementation((_book, { cursor }) => {
+    if (cursor === undefined) {
+      firstPageCalls += 1;
+      if (firstPageCalls === 2) return gate.promise;
+      return Promise.resolve({ contacts: contactsFrom(0, PAGE_SIZE), total: 400, nextCursor: "200" });
+    }
+    return Promise.resolve({ contacts: contactsFrom(Number(cursor), 200), total: 400 });
+  });
+  return { gate, firstPageCalls: () => firstPageCalls };
 }
 
 describe("ContactsView paging", () => {
@@ -289,5 +310,60 @@ describe("ContactsView paging", () => {
     await revealSentinel();
     expect(await screen.findByText("Person 401")).toBeInTheDocument();
     expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-pixel8", { cursor: "after-target", sort: SORT });
+  });
+
+  it("runs a page requested during a refresh once the refresh lands, then keeps paging", async () => {
+    let hint: (() => void) | undefined;
+    vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
+    vi.mocked(bridge.list_contact_books).mockResolvedValue(bookWithCount(400));
+    const refresh = gatedRefresh();
+    render(<ContactsView />);
+    await screen.findByText("Person 0");
+    act(() => hint?.());
+    await waitFor(() => expect(refresh.firstPageCalls()).toBe(2));
+
+    await revealSentinel();
+    expect(bridge.list_contacts_page).not.toHaveBeenCalledWith("book-pixel8", { cursor: "200", sort: SORT });
+
+    await act(async () => refresh.gate.resolve({ contacts: contactsFrom(0, PAGE_SIZE), total: 400, nextCursor: "200" }));
+    expect(await screen.findByText("Person 399")).toBeInTheDocument();
+    expect(bridge.list_contacts_page).toHaveBeenCalledWith("book-pixel8", { cursor: "200", sort: SORT });
+    expect(rows()).toHaveLength(400);
+  });
+
+  it("requests the next page when a refresh lands with the sentinel still in view", async () => {
+    let hint: (() => void) | undefined;
+    vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
+    vi.mocked(bridge.list_contact_books).mockResolvedValue(bookWithCount(400));
+    const refresh = gatedRefresh();
+    render(<ContactsView />);
+    await screen.findByText("Person 0");
+    sentinelVisible = true;
+
+    act(() => hint?.());
+    await waitFor(() => expect(refresh.firstPageCalls()).toBe(2));
+    await act(async () => refresh.gate.resolve({ contacts: contactsFrom(0, PAGE_SIZE), total: 400, nextCursor: "200" }));
+
+    expect(await screen.findByText("Person 399")).toBeInTheDocument();
+    expect(bridge.list_contacts_page).toHaveBeenCalledWith("book-pixel8", { cursor: "200", sort: SORT });
+  });
+
+  it("shows a load failure with a retry instead of the empty message, and reloads the first page on Try again", async () => {
+    let attempts = 0;
+    vi.mocked(bridge.list_contacts_page).mockImplementation(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("boom");
+      return { contacts: contactsFrom(0, 3), total: 3 };
+    });
+    const { container } = render(<ContactsView />);
+
+    await waitFor(() => expect(container.querySelector("#contacts-empty-state")).toHaveAttribute("data-empty-reason", "load-failed"));
+    expect(container.querySelector("#contacts-empty-state")).toHaveTextContent("Couldn't load contacts.");
+    expect(container).not.toHaveTextContent("No contacts in");
+    fireEvent.click(container.querySelector<HTMLButtonElement>('[data-action="retry-first-page"]')!);
+
+    expect(await screen.findByText("Person 0")).toBeInTheDocument();
+    expect(container.querySelector("#contacts-empty-state")).toBeNull();
+    expect(attempts).toBe(2);
   });
 });

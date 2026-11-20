@@ -85,4 +85,47 @@ describe("useContactPages", () => {
     expect(result.current.contacts.map(contact => contact.id)).toEqual(["new-0", "rest-0", "rest-1"]);
     expect(result.current.hasMore).toBe(false);
   });
+
+  it("coalesces refreshes requested during a refresh into one more refresh after it", async () => {
+    const pending = deferred<{ contacts: ContactView[]; total: number }>();
+    vi.mocked(bridge.list_contacts_page)
+      .mockResolvedValueOnce({ contacts: contactsFrom("old", 3), total: 3 })
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce({ contacts: contactsFrom("new", 3), total: 3 });
+    const { result } = renderPages({ bookId: "book-pixel8" });
+    await waitFor(() => expect(result.current.contacts).toHaveLength(3));
+
+    act(() => result.current.refresh());
+    act(() => result.current.refresh());
+    act(() => result.current.refresh());
+    expect(bridge.list_contacts_page).toHaveBeenCalledTimes(2);
+
+    await act(async () => pending.resolve({ contacts: contactsFrom("first", 3), total: 3 }));
+    await waitFor(() => expect(result.current.contacts.map(contact => contact.id)).toEqual(["new-0", "new-1", "new-2"]));
+    expect(bridge.list_contacts_page).toHaveBeenCalledTimes(3);
+  });
+
+  it("re-fetches only the capped pages and keeps the rows loaded beyond the cap after the refreshed ones", async () => {
+    const { result } = renderPages({ bookId: "book-pixel8" });
+    // The mount fetch is superseded by the restored range below, so its response is never shown.
+    vi.mocked(bridge.list_contacts_page).mockImplementation(async (_book, { cursor }) => {
+      const index = cursor === undefined ? 0 : Number(cursor.slice(1));
+      return { contacts: contactsFrom(`p${index}`, 200), total: 3000, nextCursor: `c${index + 1}` };
+    });
+    act(() => result.current.resetTo({ contacts: contactsFrom("old", 2200), total: 3000, nextCursor: "c-old" }, { bookId: "book-pixel8", sort: SORT }));
+    vi.mocked(bridge.list_contacts_page).mockClear();
+
+    act(() => result.current.refresh());
+
+    await waitFor(() => expect(result.current.contacts[0]?.id).toBe("p0-0"));
+    expect(bridge.list_contacts_page).toHaveBeenCalledTimes(10);
+    expect(result.current.contacts).toHaveLength(2200);
+    expect(result.current.contacts[1999]?.id).toBe("p9-199");
+    expect(result.current.contacts[2000]?.id).toBe("old-2000");
+    expect(result.current.contacts[2199]?.id).toBe("old-2199");
+    expect(result.current.hasMore).toBe(true);
+
+    act(() => result.current.loadMore());
+    await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-pixel8", { cursor: "c10", sort: SORT }));
+  });
 });
