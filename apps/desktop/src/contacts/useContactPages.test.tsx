@@ -13,7 +13,7 @@ function contactsFrom(prefix: string, count: number): ContactView[] {
   return Array.from({ length: count }, (_, index) => ({ ...mockContactRiver, id: `${prefix}-${index}`, bookId: "book-pixel8" }));
 }
 
-function renderPages(initial: { bookId: string; sort?: typeof SORT }) {
+function renderPages(initial: { bookId: string; sort?: typeof SORT; query?: string }) {
   const onError = vi.fn();
   const view = renderHook((props: typeof initial) => useContactPages({ ...props, sort: props.sort ?? SORT, onError }), { initialProps: initial });
   return { ...view, onError };
@@ -127,5 +127,47 @@ describe("useContactPages", () => {
 
     act(() => result.current.loadMore());
     await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-pixel8", { cursor: "c10", sort: SORT }));
+  });
+
+  describe("search", () => {
+    it("searches the server with the trimmed query once it settles, starting from the first page", async () => {
+      vi.mocked(bridge.list_contacts_page).mockResolvedValueOnce({ contacts: contactsFrom("all", 3), total: 3, nextCursor: "next" });
+      const { result, rerender } = renderPages({ bookId: "book-pixel8" });
+      await waitFor(() => expect(result.current.contacts).toHaveLength(3));
+
+      vi.mocked(bridge.list_contacts_page).mockResolvedValueOnce({ contacts: contactsFrom("hit", 1), total: 1 });
+      rerender({ bookId: "book-pixel8", query: "  river " });
+      expect(result.current.query).toBe("");
+
+      await waitFor(() => expect(result.current.query).toBe("river"));
+      await waitFor(() => expect(result.current.contacts.map(contact => contact.id)).toEqual(["hit-0"]));
+      expect(result.current.total).toBe(1);
+      expect(result.current.hasMore).toBe(false);
+      expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-pixel8", { sort: SORT, query: "river" });
+    });
+
+    it("clears the search at once and returns to the unfiltered list", async () => {
+      const { result, rerender } = renderPages({ bookId: "book-pixel8", query: "river" });
+      await waitFor(() => expect(result.current.query).toBe("river"));
+
+      rerender({ bookId: "book-pixel8", query: "" });
+
+      expect(result.current.query).toBe("");
+      await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-pixel8", { sort: SORT }));
+    });
+
+    it("discards a response for a superseded search", async () => {
+      const oldSearch = deferred<{ contacts: ContactView[]; total: number }>();
+      vi.mocked(bridge.list_contacts_page).mockReturnValueOnce(oldSearch.promise).mockResolvedValueOnce({ contacts: contactsFrom("ada", 1), total: 1 });
+      const { result, rerender } = renderPages({ bookId: "book-pixel8", query: "old" });
+      await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenCalledTimes(1));
+
+      rerender({ bookId: "book-pixel8", query: "ada" });
+
+      await waitFor(() => expect(result.current.contacts.map(contact => contact.id)).toEqual(["ada-0"]));
+      await act(async () => oldSearch.resolve({ contacts: contactsFrom("old", 5), total: 5 }));
+      expect(result.current.contacts.map(contact => contact.id)).toEqual(["ada-0"]);
+      expect(result.current.total).toBe(1);
+    });
   });
 });

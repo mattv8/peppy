@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from
 import { ContactAvatar, Loader2, contactSeed, formatPhoneNumber } from "@peppy/desktop-ui";
 import type { ContactView } from "../bridge/bridge";
 import { editStateLabel } from "./contact-labels";
+import { SearchNoMatch } from "../search/SearchNoMatch";
 import { formatContactName, type ContactNameFormat } from "./contact-name-format";
 
 const SKELETON_ROWS = 10;
@@ -27,10 +28,13 @@ export type ContactListProps = {
   emptyFailed: boolean;
   nameFormat: ContactNameFormat;
   selectedId?: string;
+  /** The search text the rows answer; an empty list under a search says nothing matched. */
+  query: string;
   onSelect(contact: ContactView): void;
   onLoadMore(): void;
   onRetryLoadMore(): void;
   onRetryFirstPage(): void;
+  onClearQuery(): void;
 };
 
 function rowButtons(list: HTMLElement | null): HTMLButtonElement[] {
@@ -90,7 +94,7 @@ function ContactSkeleton() {
  */
 export function ContactList({
   contacts, loading, loadingMore, loadMoreError, hasMore, loadFailed, contactCount, deviceName, canWrite, emptyFailed,
-  nameFormat, selectedId, onSelect, onLoadMore, onRetryLoadMore, onRetryFirstPage,
+  nameFormat, selectedId, query, onSelect, onLoadMore, onRetryLoadMore, onRetryFirstPage, onClearQuery,
 }: ContactListProps) {
   const listRef = useRef<HTMLUListElement>(null);
   const sentinelRef = useRef<HTMLLIElement>(null);
@@ -207,7 +211,7 @@ export function ContactList({
             <span>Couldn't load contacts.</span>
             <button type="button" data-action="retry-first-page" onClick={onRetryFirstPage}>Try again</button>
           </li>
-        ) : (
+        ) : query ? null : (
           <li id="contacts-empty-state" data-empty-reason={emptyFailed ? "failed" : "none"}>
             {emptyCopy({ emptyFailed, deviceName, canWrite })}
           </li>
@@ -226,6 +230,9 @@ export function ContactList({
         )}
         <li id="contacts-list-sentinel" ref={sentinelRef} aria-hidden="true" />
       </ul>
+      {!loading && contacts.length === 0 && !loadFailed && query && (
+        <SearchNoMatch id="contacts-no-match" noun="contacts" query={query} hint="Search covers names, phone numbers, email addresses and organizations." onClearQuery={onClearQuery} />
+      )}
       <p id="contacts-announcer" className="visually-hidden" role="status" aria-live="polite">{announcement}</p>
     </>
   );

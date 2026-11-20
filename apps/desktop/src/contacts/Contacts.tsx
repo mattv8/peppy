@@ -58,12 +58,15 @@ function isCreateEditing(editing: ContactView | null | CreateContactEditing): ed
   return editing === "create" || (editing !== null && "createPrefill" in editing);
 }
 
-export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard, target, onTargetConsumed, toneOverrides = {}, toneDisabled = false, pendingToneSeeds = {}, toneErrors = {}, onSelectTone, bookCollapsed: bookCollapsedProp, onBookCollapsedChange }: {
+export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard, target, onTargetConsumed, toneOverrides = {}, toneDisabled = false, pendingToneSeeds = {}, toneErrors = {}, onSelectTone, bookCollapsed: bookCollapsedProp, onBookCollapsedChange, query = "", onClearQuery }: {
   books?: ContactBookView[];
   sync?: ContactSyncStatus;
   onNavigationGuard?(guard: ContactNavigationGuard | null): void;
   target?: ContactTarget | null;
   onTargetConsumed?(requestId: number): void;
+  /** The title-bar search text that filters the list; empty shows every contact. */
+  query?: string;
+  onClearQuery?(): void;
   toneOverrides?: Record<string, number>;
   toneDisabled?: boolean;
   pendingToneSeeds?: Record<string, true>;
@@ -104,7 +107,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const [notice, setNotice] = useState<ReactNode>("");
   const [actionNotice, setActionNotice] = useState<ContactActionNotice>();
   const [bookRemoval, setBookRemoval] = useState<{ book: ContactBookView; opener: RefObject<HTMLElement | null> }>();
-  const pages = useContactPages({ bookId, sort, onError: setLoadError });
+  const pages = useContactPages({ bookId, sort, query, onError: setLoadError });
   const { contacts } = pages;
   useEffect(() => {
     setSelected(current => (current ? contacts.find(item => item.id === current.id) ?? current : current));
@@ -171,6 +174,8 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   targetRef.current = target;
   sortRef.current = sort;
   onTargetConsumedRef.current = onTargetConsumed;
+  const onClearQueryRef = useRef(onClearQuery);
+  onClearQueryRef.current = onClearQuery;
   pendingNavigationRef.current = pendingNavigation;
 
   const replacePendingNavigation = (next: typeof pendingNavigation) => {
@@ -539,6 +544,8 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     if (!requestedTarget || requestedTarget.kind === "create" || !booksLoaded || targetKey(requestedTarget) !== activeTargetKey) return;
     if (completedTargetRef.current === activeTargetKey) return;
     setTargetError("");
+    // A deep link opens the contact in the full list, so a title-bar search does not narrow the lookup.
+    onClearQueryRef.current?.();
     const sequence = ++targetLookupRef.current;
     const isCurrent = () => mountedRef.current
       && sequence === targetLookupRef.current
@@ -1017,7 +1024,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
 
       <section id="contacts-center-pane" {...(detailOverlay ? { inert: true } : {})}>
         <ContactsActionNotice notice={actionNotice} onDismiss={() => setActionNotice(undefined)} />
-        <ContactListHeader books={books.map(item => item.id === bookId ? { ...item, contactCount: pages.total ?? item.contactCount } : item)} bookId={bookId} booksLoaded={booksLoaded} railVisible={railVisible} loaded={contacts.length} loadingMore={pages.loadingMore} onSelectBook={handleSelectBook}>
+        <ContactListHeader books={books.map(item => item.id === bookId ? { ...item, contactCount: pages.total ?? item.contactCount } : item)} bookId={bookId} booksLoaded={booksLoaded} railVisible={railVisible} loaded={contacts.length} loadingMore={pages.loadingMore} query={pages.query} matchCount={pages.query ? pages.total : undefined} onSelectBook={handleSelectBook}>
           {headerActions}
         </ContactListHeader>
         {!railVisible && book && (books.length >= 2 || book.lookupExcluded) && (
@@ -1068,10 +1075,12 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
             emptyFailed={contactsRepairState === "failed" || contactsRepairState === "repairWaiting"}
             nameFormat={nameFormat}
             selectedId={selected?.id}
+            query={pages.query}
             onSelect={handleSelectContact}
             onLoadMore={pages.loadMore}
             onRetryLoadMore={pages.retryLoadMore}
             onRetryFirstPage={pages.retryFirstPage}
+            onClearQuery={() => onClearQuery?.()}
           />
         )}
       </section>

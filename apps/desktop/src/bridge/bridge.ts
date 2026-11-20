@@ -866,7 +866,7 @@ export const fixtureBridge: DesktopBridge = {
   },
   list_contacts_page: async (bookId, request) => {
     await fixtureContactLatency();
-    const sorted = sortedFixtureContacts(bookId, "", request.sort ?? { key: "family", direction: "asc" });
+    const sorted = sortedFixtureContacts(bookId, request.query?.trim() ?? "", request.sort ?? { key: "family", direction: "asc" });
     const start = decodeFixtureContactCursor(request.cursor);
     // Mirrors core: `through` extends the page to include the target, at most 2,000 rows from the start.
     const throughIndex = request.through === undefined ? -1 : sorted.findIndex(contact => contact.id === request.through);

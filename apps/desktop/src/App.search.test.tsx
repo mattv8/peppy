@@ -345,6 +345,7 @@ describe("App search navigation", () => {
     render(<App hostKind="browser" />);
     await screen.findAllByText("Can you send over the estimate?");
     fireEvent.click(screen.getByRole("button", { name: /^Contacts/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Search everything, not just Contacts" }));
     fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
     fireEvent.click(screen.getByLabelText("Edit contact"));
     fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Unsaved" } });

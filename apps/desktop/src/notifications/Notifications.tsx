@@ -5,7 +5,8 @@ import { notificationMuteKey, notificationTuple } from "./notificationIdentity";
 import { notificationKey, stackNotifications } from "./notificationSections";
 import { searchNotifications } from "./notificationSearch";
 import { useNotificationArrangement } from "./notificationViewPreference";
-import { NotificationEmptyState, NotificationLockedState, NotificationNoMatch } from "./NotificationEmptyState";
+import { SearchNoMatch } from "../search/SearchNoMatch";
+import { NotificationEmptyState, NotificationLockedState } from "./NotificationEmptyState";
 import { NotificationFilterBar, notificationFilterChips } from "./NotificationFilterBar";
 import { NotificationSections, NotificationStacks } from "./NotificationStack";
 import type { NotificationLabels } from "./NotificationRow";
@@ -230,7 +231,7 @@ export function NotificationsView({
       {query ? `${shown.length} notifications match “${query}”` : appFilter ? `Showing ${shown.length} ${chips.find(chip => chip.packageName === appFilter)?.name ?? "app"} notifications` : ""}
     </div>
     {!shown.length ? (query
-      ? <NotificationNoMatch query={query} onClearQuery={onClearQuery} />
+      ? <SearchNoMatch id="notifications-no-match" noun="notifications" query={query} hint="Search covers the app name, phone, title and text." onClearQuery={onClearQuery} />
       : <NotificationEmptyState filters={filters} hasNotifications={notifications.length > 0} onSettings={onSettings} onManageApps={onManageApps} />
     ) : <div id="notifications-feed" ref={feedRef} aria-label="Notification feed">
       {arrangement === "time"

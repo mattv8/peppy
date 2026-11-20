@@ -2994,6 +2994,7 @@ describe("new-recipient drafts", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Contacts" }));
     await screen.findByRole("region", { name: "Contacts browser" });
+    fireEvent.click(screen.getByRole("button", { name: "Search everything, not just Contacts" }));
     const newContact = await screen.findByLabelText("New contact");
     await waitFor(() => expect(newContact).toBeEnabled());
     fireEvent.click(newContact);
@@ -3096,6 +3097,7 @@ describe("new-recipient drafts", () => {
     type("pending flush");
     await waitFor(() => expect(bridge.save_draft).toHaveBeenCalledOnce());
     fireEvent.click(await screen.findByRole("button", { name: "Contacts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Search everything, not just Contacts" }));
     const omni = screen.getByRole("combobox", { name: "Search Peppy" });
     fireEvent.change(omni, { target: { value: "+1 202 555 0100" } });
     fireEvent.click(await screen.findByText("Start conversation with (202) 555-0100"));
@@ -3121,6 +3123,7 @@ describe("new-recipient drafts", () => {
     type("will fail");
     await waitFor(() => expect(bridge.save_draft).toHaveBeenCalledOnce());
     fireEvent.click(await screen.findByRole("button", { name: "Contacts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Search everything, not just Contacts" }));
     const omni = screen.getByRole("combobox", { name: "Search Peppy" });
     fireEvent.change(omni, { target: { value: "+1 202 555 0100" } });
     fireEvent.click(await screen.findByText("Start conversation with (202) 555-0100"));

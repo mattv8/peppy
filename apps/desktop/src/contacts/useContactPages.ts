@@ -4,18 +4,37 @@ import { contactErrorText } from "./contact-labels";
 
 /** A live refresh re-fetches at most this many pages of the loaded range, then swaps the range in at once. */
 const REFRESH_MAX_PAGES = 10;
+/** A typed search waits this long for the next keystroke before it reaches the list. */
+export const SEARCH_DEBOUNCE_MS = 150;
 const NO_CONTACTS: ContactView[] = [];
 
-export type PageScope = { bookId: string; sort: ContactSort };
+export type PageScope = { bookId: string; sort: ContactSort; query?: string };
 
-/** Identity of one list. A different book or sort starts again from the first page. */
-export function pageScopeKey({ bookId, sort }: PageScope): string {
-  return `${bookId}\u0000${sort.key}\u0000${sort.direction}`;
+/** Identity of one list. A different book, sort or search starts again from the first page. */
+export function pageScopeKey({ bookId, sort, query = "" }: PageScope): string {
+  return `${bookId}\u0000${sort.key}\u0000${sort.direction}\u0000${query}`;
+}
+
+/** `value` once it has stayed unchanged for `delayMs`. Clearing is immediate, so a cleared search never waits. */
+function useSettledQuery(value: string, delayMs: number): string {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    if (!value) {
+      setSettled("");
+      return;
+    }
+    const timer = window.setTimeout(() => setSettled(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [value, delayMs]);
+  return value ? settled : "";
 }
 
 export type ContactPages = {
   contacts: ContactView[];
+  /** Rows in the list: the book's count, or the match count while `query` is set. */
   total: number | undefined;
+  /** The search text the rows answer; empty when the list is unfiltered. */
+  query: string;
   /** The first page of the current list is in flight. */
   loading: boolean;
   loadingMore: boolean;
@@ -42,6 +61,8 @@ type Options = PageScope & {
   onError(message: string): void;
 };
 
+type PageRequest = { bookId: string; sort: ContactSort; query: string };
+
 type Operation = "first" | "more" | "refresh";
 
 type PageView = {
@@ -55,8 +76,8 @@ type PageView = {
   loadFailed: boolean;
 };
 
-function fetchPage(bookId: string, sort: ContactSort, cursor?: string) {
-  return bridge.list_contacts_page(bookId, { cursor, sort });
+function fetchPage({ bookId, sort, query }: PageRequest, cursor?: string) {
+  return bridge.list_contacts_page(bookId, { cursor, sort, query: query || undefined });
 }
 
 /**
@@ -64,12 +85,12 @@ function fetchPage(bookId: string, sort: ContactSort, cursor?: string) {
  * When the cap stops the walk early, the loaded rows past the refreshed ones stay after them and the cap's cursor
  * continues the list, so no loaded row disappears; the rows past the cap are only replaced when the user pages.
  */
-async function fetchLoadedRange(bookId: string, sort: ContactSort, loaded: ContactView[], stillCurrent: () => boolean) {
+async function fetchLoadedRange(request: PageRequest, loaded: ContactView[], stillCurrent: () => boolean) {
   const rows: ContactView[] = [];
   let cursor: string | undefined;
   let total = 0;
   for (let page = 0; page < REFRESH_MAX_PAGES; page += 1) {
-    const batch = await fetchPage(bookId, sort, cursor);
+    const batch = await fetchPage(request, cursor);
     if (!stillCurrent()) break;
     rows.push(...batch.contacts);
     cursor = batch.nextCursor;
@@ -100,12 +121,13 @@ function hasMoreRows(view: PageView): boolean {
  * Pages of the contact list for one book and sort. Rows load on demand through `loadMore`; a refresh or a
  * target lookup never clears rows already shown. Responses from superseded requests are discarded.
  */
-export function useContactPages({ bookId, sort, onError }: Options): ContactPages {
-  const scope = pageScopeKey({ bookId, sort });
+export function useContactPages({ bookId, sort, query: typedQuery = "", onError }: Options): ContactPages {
+  const query = useSettledQuery(typedQuery.trim(), SEARCH_DEBOUNCE_MS);
+  const scope = pageScopeKey({ bookId, sort, query });
   const [state, setState] = useState<PageView>(() => idleView(scope, Boolean(bookId)));
   const viewRef = useRef(state);
-  const paramsRef = useRef({ bookId, sort, scope });
-  paramsRef.current = { bookId, sort, scope };
+  const paramsRef = useRef({ bookId, sort, query, scope });
+  paramsRef.current = { bookId, sort, query, scope };
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
   const sequenceRef = useRef(0);
@@ -136,7 +158,7 @@ export function useContactPages({ bookId, sort, onError }: Options): ContactPage
   }, []);
 
   const loadFirst = useCallback(() => {
-    const { bookId, sort, scope } = paramsRef.current;
+    const { bookId, sort, query, scope } = paramsRef.current;
     dropQueued();
     if (!bookId) {
       sequenceRef.current += 1;
@@ -148,7 +170,7 @@ export function useContactPages({ bookId, sort, onError }: Options): ContactPage
     commit(idleView(scope, true));
     const list = document.getElementById("contacts-list");
     if (list) list.scrollTop = 0;
-    fetchPage(bookId, sort)
+    fetchPage({ bookId, sort, query })
       .then(page => {
         if (sequence !== sequenceRef.current) return;
         commit(loadedView(scope, page));
@@ -175,7 +197,7 @@ export function useContactPages({ bookId, sort, onError }: Options): ContactPage
   }, []);
 
   const loadMore = useCallback(() => {
-    const { bookId, sort, scope } = paramsRef.current;
+    const { bookId, sort, query, scope } = paramsRef.current;
     const current = viewRef.current;
     if (current.scope !== scope || current.loadMoreError || !hasMoreRows(current)) return;
     if (operationRef.current === "refresh") {
@@ -185,7 +207,7 @@ export function useContactPages({ bookId, sort, onError }: Options): ContactPage
     if (operationRef.current) return;
     const sequence = begin("more");
     commit({ ...current, loadingMore: true });
-    fetchPage(bookId, sort, current.nextCursor)
+    fetchPage({ bookId, sort, query }, current.nextCursor)
       .then(page => {
         if (sequence !== sequenceRef.current) return;
         const latest = viewRef.current;
@@ -210,7 +232,7 @@ export function useContactPages({ bookId, sort, onError }: Options): ContactPage
   }, [commit, loadMore]);
 
   const refresh = useCallback(() => {
-    const { bookId, sort, scope } = paramsRef.current;
+    const { bookId, sort, query, scope } = paramsRef.current;
     const current = viewRef.current;
     if (!bookId || current.scope !== scope || current.loading) return;
     if (operationRef.current === "refresh") {
@@ -219,7 +241,7 @@ export function useContactPages({ bookId, sort, onError }: Options): ContactPage
     }
     const sequence = begin("refresh");
     commit({ ...current, loadingMore: false });
-    fetchLoadedRange(bookId, sort, current.contacts, () => sequence === sequenceRef.current)
+    fetchLoadedRange({ bookId, sort, query }, current.contacts, () => sequence === sequenceRef.current)
       .then(page => {
         if (sequence !== sequenceRef.current) return;
         commit({ ...loadedView(scope, page), loadMoreError: viewRef.current.loadMoreError });
@@ -259,6 +281,7 @@ export function useContactPages({ bookId, sort, onError }: Options): ContactPage
   return {
     contacts: view.contacts,
     total: view.total,
+    query,
     loading: view.loading,
     loadingMore: view.loadingMore,
     loadMoreError: view.loadMoreError,

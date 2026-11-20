@@ -165,7 +165,7 @@ export type ContactAddress = { id?: string; label: string; displayLabel?: string
 export type ContactBirthday = { year?: number; month?: number; day?: number };
 export type ContactSort = { key: "given" | "family"; direction: "asc" | "desc" };
 /** `cursor` is opaque: pass the previous `nextCursor` back unchanged. `through` asks for rows up to and including that contact. */
-export type ContactPageRequest = { cursor?: string; through?: string; sort?: ContactSort };
+export type ContactPageRequest = { cursor?: string; through?: string; sort?: ContactSort; /** Trimmed search text; empty or absent lists every contact. */ query?: string };
 export type ContactPage = { contacts: ContactView[]; total: number; nextCursor?: string; throughFound?: boolean };
 export type ContactView = { id: string; bookId: string; revision?: string; displayName: string; givenName?: string; familyName?: string; nickname?: string; phones: ContactPhone[]; emails: ContactEmail[]; addresses: ContactAddress[]; organization?: string; title?: string; birthday?: ContactBirthday; notes?: string; photoDataUrl?: string; photoPending?: boolean; pendingEditId?: string; pendingEditState?: "pending" | "awaiting-approval" | "outcome-unknown" | "conflict" | "rejected" | "failed" | "expired"; pendingEditSummary?: string; deletedAt?: string };
 export type ContactEditRequestInput = { targetBookId: string; kind: "create" | "update" | "delete"; contactId?: string; baseRevision?: string; patches: unknown[]; photo: { kind: "keep" } | { kind: "remove" } | { kind: "set"; croppedDataUrl: string } };

@@ -1,0 +1,2 @@
+.search-no-match { display: grid; height: 100%; place-content: center; justify-items: center; gap: 12px; padding: 32px; color: var(--peppy-text-secondary); text-align: center; }
+.search-no-match p { margin: 0; color: var(--peppy-text-muted); font-size: 12px; }
