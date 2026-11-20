@@ -4209,6 +4209,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let (fixture, session, conversation) = real_supervisor_session(&origin);
+        // Pin before admission so slow setup cannot put the display deadline beyond 60_000.
+        session.live_typing.override_mono(Some(0));
         session.live_typing.set_suspend_ticks_enabled(false);
         let (conv_a, conv_b) = (ConversationId::new(), ConversationId::new());
         let gateway: DeviceId = fixture.binding.device_id.parse().unwrap();
