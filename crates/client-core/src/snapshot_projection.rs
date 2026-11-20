@@ -354,6 +354,28 @@ pub(crate) fn record_snapshot_import_origin(
     Ok(())
 }
 
+/// Requeue the ordinary folder event and request a fresh projection atomically.
+pub(crate) fn recover_folder_event(conn: &Connection, cursor: i64) -> Result<(), Error> {
+    conn.execute_batch("SAVEPOINT recover_folder_event")?;
+    let result = (|| -> Result<(), Error> {
+        conn.execute(
+            "UPDATE journal SET status='pending',reason=NULL,historical=1 WHERE cursor=? AND status='quarantined' AND reason='invalid_payload'",
+            [cursor],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO metadata(k,v) SELECT ?,'upgrade' WHERE EXISTS (SELECT 1 FROM (SELECT high_water,progress,state,reason FROM projection_generations WHERE state!='superseded' ORDER BY generation DESC LIMIT 1) WHERE state='failed' AND reason='invalid_payload' AND progress<? AND high_water>=?)",
+            params![REPAIR_LATCH, cursor, cursor],
+        )?;
+        Ok(())
+    })();
+    if result.is_err() {
+        conn.execute_batch("ROLLBACK TO recover_folder_event; RELEASE recover_folder_event")?;
+    } else {
+        conn.execute_batch("RELEASE recover_folder_event")?;
+    }
+    result
+}
+
 /// A recovered legacy record is not proof of a snapshot's retained membership.
 pub(crate) fn recover_legacy_rcs_status(conn: &Connection, cursor: i64) -> Result<(), Error> {
     let latest: Option<(i64, i64, i64, String, Option<String>)> = conn

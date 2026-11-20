@@ -168,7 +168,7 @@ fn assert_negative_only_recovery(cases: &[&str]) {
         get_meta(&store.conn, "decoder_revision:1")
             .unwrap()
             .as_deref(),
-        Some("14")
+        Some(DECODER_REVISION)
     );
 }
 
@@ -250,7 +250,7 @@ fn later_epoch_unlock_recovers_its_own_authenticated_legacy_status() {
             get_meta(&store.conn, "decoder_revision:1")
                 .unwrap()
                 .as_deref(),
-            Some("14")
+            Some(DECODER_REVISION)
         );
         assert_eq!(
             get_meta(&store.conn, "decoder_revision:2")
@@ -285,7 +285,7 @@ fn later_epoch_unlock_recovers_its_own_authenticated_legacy_status() {
             get_meta(&store.conn, "decoder_revision:2")
                 .unwrap()
                 .as_deref(),
-            Some("14")
+            Some(DECODER_REVISION)
         );
         assert_eq!(
             get_meta(&store.conn, "contact_repair_required")
@@ -321,7 +321,7 @@ fn later_epoch_unlock_recovers_its_own_authenticated_legacy_status() {
         get_meta(&store.conn, "decoder_revision:2")
             .unwrap()
             .as_deref(),
-        Some("14")
+        Some(DECODER_REVISION)
     );
     assert_eq!(
         get_meta(&store.conn, "contact_repair_required")

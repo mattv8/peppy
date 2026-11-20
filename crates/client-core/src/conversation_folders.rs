@@ -49,7 +49,7 @@ pub(super) fn valid_event(
         && writer == producer
         && logical_revision != 0
         && logical_revision < i64::MAX as u64
-        && (archived_through_ms.is_some() == (folder == ConversationFolder::Archived))
+        && (archived_through_ms.is_none() || folder == ConversationFolder::Archived)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -157,7 +157,7 @@ mod tests {
     use peppy_crypto::{create_vault_check_header, derive_root_key};
 
     #[test]
-    fn archived_events_require_a_watermark() {
+    fn only_archived_events_allow_a_watermark() {
         let id = ConversationId::new();
         let writer = DeviceId::new().to_string();
         assert!(valid_event(
@@ -168,7 +168,7 @@ mod tests {
             &writer,
             &writer
         ));
-        assert!(!valid_event(
+        assert!(valid_event(
             id,
             ConversationFolder::Archived,
             None,
@@ -315,12 +315,6 @@ mod tests {
                 producer_writer.clone(),
             ),
             folder_event(
-                ConversationFolder::Archived,
-                None,
-                1,
-                producer_writer.clone(),
-            ),
-            folder_event(
                 ConversationFolder::Inbox,
                 Some(1),
                 1,
@@ -348,13 +342,13 @@ mod tests {
         });
         client
             .ingest(
-                &seal_plain(serde_json::to_vec(&malformed_shape).unwrap(), 7),
-                Cursor(7),
+                &seal_plain(serde_json::to_vec(&malformed_shape).unwrap(), 6),
+                Cursor(6),
             )
             .unwrap();
 
         let report = client.apply_pending(20).unwrap();
-        assert_eq!((report.applied, report.quarantined), (0, 7));
+        assert_eq!((report.applied, report.quarantined), (0, 6));
         assert!(
             client
                 .quarantined()
@@ -370,6 +364,735 @@ mod tests {
             })
             .unwrap();
         assert_eq!(folders, 0);
+    }
+
+    #[test]
+    fn authenticated_archive_without_cutoff_is_accepted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let event_key = derive_purpose_key(&root, &profile, KeyPurpose::Event).unwrap();
+        let producer = DeviceId::new();
+        let client = Client::open(
+            ClientConfig {
+                database_path: dir.path().join("empty-archive.db"),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[10; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let mut envelope = Envelope {
+            protocol_version: PROTOCOL_VERSION,
+            envelope_id: EnvelopeId::new(),
+            command_id: None,
+            vault_id,
+            producer_device_id: producer,
+            producer_sequence: SourceSequence(1),
+            key_epoch: 1,
+            crypto_suite: profile.crypto_suite,
+            profile_fingerprint: profile.fingerprint().unwrap(),
+            purpose: EnvelopePurpose::Event,
+            route: None,
+            compaction: None,
+            origin_tag: None,
+            ciphertext: Vec::new(),
+        };
+        let conversation = ConversationId::new();
+        let plain = serde_json::to_vec(&serde_json::json!({
+            "kind": "conversation_folder",
+            "conversation_id": conversation.to_string(),
+            "folder": "archived",
+            "logical_revision": 1,
+            "writer_device_id": producer.to_string(),
+        }))
+        .unwrap();
+        envelope.ciphertext =
+            seal_frame(&encrypt(&event_key, &envelope.aad_bytes().unwrap(), &plain).unwrap());
+        client.ingest(&envelope, Cursor(1)).unwrap();
+        let report = client.apply_pending(10).unwrap();
+        assert_eq!((report.applied, report.quarantined), (1, 0));
+        let store = client.lock().unwrap();
+        for latest in [None, Some(123_i64)] {
+            let folder: String = store
+                .conn
+                .query_row(
+                    &format!(
+                        "SELECT {} FROM conversation_folders f WHERE f.conversation_id=?1",
+                        effective_folder_sql("?2")
+                    ),
+                    params![conversation.to_string(), latest],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(folder, "inbox");
+        }
+        drop(store);
+        client
+            .capture_incoming(IncomingSms {
+                conversation_id: Some(conversation),
+                sender_address: "+15555550100".into(),
+                body: "later".into(),
+                provider_message_id: Some("later".into()),
+                imported: false,
+            })
+            .unwrap();
+        let store = client.lock().unwrap();
+        let folder: String = store
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM conversation_folders f WHERE f.conversation_id=?1",
+                    effective_folder_sql(
+                        "(SELECT MAX(sort_at_ms) FROM messages WHERE effective_conversation_id=?1)"
+                    )
+                ),
+                [conversation.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(folder, "inbox");
+    }
+
+    #[test]
+    fn decoder_upgrade_failed_folder_projection_requests_authenticated_repair() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let event_key = derive_purpose_key(&root, &profile, KeyPurpose::Event).unwrap();
+        let producer = DeviceId::new();
+        let client = Client::open(
+            ClientConfig {
+                database_path: dir.path().join("recovery.db"),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[10; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let mut envelope = Envelope {
+            protocol_version: PROTOCOL_VERSION,
+            envelope_id: EnvelopeId::new(),
+            command_id: None,
+            vault_id,
+            producer_device_id: producer,
+            producer_sequence: SourceSequence(1),
+            key_epoch: 1,
+            crypto_suite: profile.crypto_suite,
+            profile_fingerprint: profile.fingerprint().unwrap(),
+            purpose: EnvelopePurpose::Event,
+            route: None,
+            compaction: None,
+            origin_tag: None,
+            ciphertext: Vec::new(),
+        };
+        let plain = serde_json::to_vec(&serde_json::json!({
+            "kind": "conversation_folder", "conversation_id": ConversationId::new().to_string(),
+            "folder": "archived", "logical_revision": 1, "writer_device_id": producer.to_string(),
+        }))
+        .unwrap();
+        envelope.ciphertext =
+            seal_frame(&encrypt(&event_key, &envelope.aad_bytes().unwrap(), &plain).unwrap());
+        client.ingest(&envelope, Cursor(1)).unwrap();
+        {
+            let mut store = client.lock().unwrap();
+            let (conn, ctx) = store.parts();
+            conn.execute(
+                "UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=1",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO projection_generations(generation,high_water,state,progress,reason) VALUES(99,1,'failed',0,'invalid_payload')", []).unwrap();
+            conn.execute("DELETE FROM metadata WHERE k='contact_repair_required'", [])
+                .unwrap();
+            set_meta(conn, "decoder_revision:1", "14").unwrap();
+            conn.execute_batch("CREATE TRIGGER reject_repair BEFORE INSERT ON metadata WHEN NEW.k='contact_repair_required' BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
+            assert!(recover_decoder_revision(conn, &ctx, 1, &mut |_| {}).is_err());
+            let unchanged: (String, Option<String>, bool) = conn
+                .query_row(
+                    "SELECT status,reason,historical FROM journal WHERE cursor=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                unchanged,
+                ("quarantined".into(), Some("invalid_payload".into()), false)
+            );
+            assert!(get_meta(conn, "contact_repair_required").unwrap().is_none());
+            conn.execute_batch("DROP TRIGGER reject_repair").unwrap();
+            recover_decoder_revision(conn, &ctx, 1, &mut |_| {}).unwrap();
+            let row: (String, Option<String>, bool) = conn
+                .query_row(
+                    "SELECT status,reason,historical FROM journal WHERE cursor=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(row, ("pending".into(), None, true));
+            assert!(get_meta(conn, "contact_repair_required").unwrap().is_some());
+            recover_decoder_revision(conn, &ctx, 1, &mut |_| {}).unwrap();
+            assert!(get_meta(conn, "contact_repair_required").unwrap().is_some());
+            for (state, reason, progress, high_water) in [
+                ("promoted", "invalid_payload", 0, 1),
+                ("staging", "invalid_payload", 0, 1),
+                ("failed", "authentication_failed", 0, 1),
+                ("failed", "invalid_payload", 1, 1),
+                ("failed", "invalid_payload", 0, 0),
+            ] {
+                conn.execute(
+                    "UPDATE projection_generations SET state=?,reason=?,progress=?,high_water=? WHERE generation=99",
+                    params![state, reason, progress, high_water],
+                )
+                .unwrap();
+                conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload',historical=0 WHERE cursor=1", []).unwrap();
+                conn.execute("DELETE FROM metadata WHERE k='contact_repair_required'", [])
+                    .unwrap();
+                set_meta(conn, "decoder_revision:1", "14").unwrap();
+                recover_decoder_revision(conn, &ctx, 1, &mut |_| {}).unwrap();
+                let status: String = conn
+                    .query_row("SELECT status FROM journal WHERE cursor=1", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(status, "pending");
+                assert!(get_meta(conn, "contact_repair_required").unwrap().is_none());
+            }
+            conn.execute("UPDATE projection_generations SET state='failed',reason='invalid_payload',progress=0,high_water=1 WHERE generation=99", []).unwrap();
+            conn.execute(
+                "UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=1",
+                [],
+            )
+            .unwrap();
+            set_meta(conn, "contact_repair_required", "requested").unwrap();
+            set_meta(conn, "decoder_revision:1", "14").unwrap();
+            recover_decoder_revision(conn, &ctx, 1, &mut |_| {}).unwrap();
+            assert_eq!(
+                get_meta(conn, "contact_repair_required")
+                    .unwrap()
+                    .as_deref(),
+                Some("requested")
+            );
+        }
+    }
+
+    #[test]
+    fn recovered_folder_requires_fresh_snapshot_without_releasing_omitted_rcs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let key = derive_purpose_key(&root, &profile, KeyPurpose::Event).unwrap();
+        let producer = DeviceId::new();
+        let config = ClientConfig {
+            database_path: dir.path().join("repaired-snapshot.db"),
+            vault_id,
+            device_id: DeviceId::new(),
+        };
+        let client = Client::open(config.clone(), DatabaseKey::new(&[10; 32]).unwrap()).unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let book = serde_json::json!({"id":"book1","owner_device_id":producer.to_string(),"generation":"1","state":"active"});
+        let contact =
+            serde_json::json!({"id":"c1","book_id":"book1","revision":"1","display_name":"Ada"});
+        let conversation = ConversationId::new();
+        let bodies = [
+            serde_json::json!({"kind":"conversation_folder","conversation_id":conversation.to_string(),"folder":"archived","logical_revision":1,"writer_device_id":producer.to_string()}),
+            serde_json::json!({"kind":"contact_upserted","book":book,"contact":contact}),
+            serde_json::json!({"kind":"rcs_message_status","message_id":MessageId::new(),"status":"read","rcs_reported":true}),
+        ];
+        let mut envelopes = Vec::new();
+        for (index, mut body) in bodies.into_iter().enumerate() {
+            let mut envelope = Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                envelope_id: EnvelopeId::new(),
+                command_id: None,
+                vault_id,
+                producer_device_id: producer,
+                producer_sequence: SourceSequence(index as u64 + 1),
+                key_epoch: 1,
+                crypto_suite: profile.crypto_suite,
+                profile_fingerprint: profile.fingerprint().unwrap(),
+                purpose: EnvelopePurpose::Event,
+                route: None,
+                compaction: Some(CompactionMetadata {
+                    key: vec![index as u8 + 1; 32],
+                    terminal: false,
+                    supersedes: vec![],
+                    checkpoint: false,
+                }),
+                origin_tag: None,
+                ciphertext: Vec::new(),
+            };
+            body["compaction"] = serde_json::to_value(&envelope.compaction).unwrap();
+            envelope.ciphertext = seal_frame(
+                &encrypt(
+                    &key,
+                    &envelope.aad_bytes().unwrap(),
+                    &serde_json::to_vec(&body).unwrap(),
+                )
+                .unwrap(),
+            );
+            client.ingest(&envelope, Cursor(index as u64 + 1)).unwrap();
+            envelopes.push(envelope);
+        }
+        {
+            let mut store = client.lock().unwrap();
+            let (conn, ctx) = store.parts();
+            conn.execute(
+                "UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=1",
+                [],
+            )
+            .unwrap();
+            conn.execute("UPDATE journal SET reason='snapshot_rcs_isolated',historical=1 WHERE cursor IN (2,3)", []).unwrap();
+            conn.execute("INSERT INTO projection_generations(generation,high_water,state,progress,reason) VALUES(1,3,'failed',0,'invalid_payload')", []).unwrap();
+            set_meta(conn, "snapshot_generation", "1").unwrap();
+            set_meta(conn, "snapshot_import_origin:2", "1").unwrap();
+            set_meta(conn, "snapshot_import_origin:3", "1").unwrap();
+            set_meta(conn, "decoder_revision:1", "14").unwrap();
+            conn.execute("DELETE FROM metadata WHERE k='contact_repair_required'", [])
+                .unwrap();
+            recover_decoder_revision(conn, &ctx, 1, &mut |_| {}).unwrap();
+            for cursor in [2, 3] {
+                let reason: String = conn
+                    .query_row("SELECT reason FROM journal WHERE cursor=?", [cursor], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(reason, "snapshot_rcs_isolated");
+            }
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM contacts", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+        assert!(client.contact_repair_required().unwrap());
+        drop(client);
+        let client = Client::open(config, DatabaseKey::new(&[10; 32]).unwrap()).unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        assert!(client.contact_repair_required().unwrap());
+        client
+            .capture_incoming(IncomingSms {
+                conversation_id: Some(conversation),
+                sender_address: "+15555550100".into(),
+                body: "local".into(),
+                provider_message_id: Some("recovery-lww".into()),
+                imported: false,
+            })
+            .unwrap();
+        {
+            let store = client.lock().unwrap();
+            set_meta(&store.conn, CLOCK, "1").unwrap();
+        }
+        client
+            .set_conversation_folder(conversation, ConversationFolder::Inbox)
+            .unwrap();
+        client.apply_pending(20).unwrap();
+        {
+            let store = client.lock().unwrap();
+            let status: String = store
+                .conn
+                .query_row("SELECT status FROM journal WHERE cursor=1", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(status, "applied");
+            let row: (String, i64) = store.conn.query_row(
+                "SELECT folder,logical_revision FROM conversation_folders WHERE conversation_id=?",
+                [conversation.to_string()], |row| Ok((row.get(0)?,row.get(1)?)),
+            ).unwrap();
+            assert_eq!(row, ("inbox".into(), 2));
+        }
+        let session = client
+            .begin_snapshot_with_compaction(Cursor(3), 2, SnapshotPurpose::Resync, Some(2))
+            .unwrap();
+        client
+            .append_snapshot_page(
+                session.generation,
+                &[
+                    SnapshotRecord {
+                        cursor: Cursor(1),
+                        envelope: envelopes[0].clone(),
+                    },
+                    SnapshotRecord {
+                        cursor: Cursor(2),
+                        envelope: envelopes[1].clone(),
+                    },
+                ],
+            )
+            .unwrap();
+        client.finish_snapshot(session.generation).unwrap();
+        for _ in 0..5 {
+            client.apply_pending(20).unwrap();
+        }
+        assert_eq!(
+            client.snapshot_projection_status().unwrap().unwrap().state,
+            SnapshotProjectionState::Promoted
+        );
+        assert!(!client.contact_repair_required().unwrap());
+        let view: serde_json::Value = serde_json::from_str(
+            &client
+                .contact_book_view(
+                    &serde_json::json!({"schema_version":1,"book_id":"book1","limit":20})
+                        .to_string(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(view["contacts"].as_array().unwrap().len(), 1);
+        let store = client.lock().unwrap();
+        let folder: (String, i64) = store
+            .conn
+            .query_row(
+                "SELECT folder,logical_revision FROM conversation_folders WHERE conversation_id=?",
+                [conversation.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(folder, ("inbox".into(), 2));
+        let isolated: (String, String) = store
+            .conn
+            .query_row(
+                "SELECT status,reason FROM journal WHERE cursor=3",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(isolated, ("pending".into(), "snapshot_rcs_isolated".into()));
+    }
+
+    #[test]
+    fn history_block_reports_only_an_isolated_blocked_frontier() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: dir.path().join("history.db"),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[10; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        {
+            let store = client.lock().unwrap();
+            set_meta(&store.conn, "receive_cursor", "1").unwrap();
+            set_meta(&store.conn, "processed_cursor", "0").unwrap();
+            store.conn.execute("INSERT INTO journal(cursor,wire,status,reason,historical) VALUES(1,X'00','pending','snapshot_rcs_isolated',1)", []).unwrap();
+        }
+        assert_eq!(
+            client.history_block().unwrap(),
+            Some(HistoryBlock::Withheld)
+        );
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute("INSERT INTO projection_generations(generation,high_water,state,progress,reason) VALUES(1,1,'failed',0,'invalid_payload')", []).unwrap();
+        }
+        assert_eq!(client.history_block().unwrap(), Some(HistoryBlock::Failed));
+        client.request_contact_repair().unwrap();
+        assert_eq!(
+            client.history_block().unwrap(),
+            Some(HistoryBlock::Repairing)
+        );
+        {
+            let store = client.lock().unwrap();
+            set_meta(&store.conn, "processed_cursor", "1").unwrap();
+        }
+        assert_eq!(client.history_block().unwrap(), None);
+        {
+            let store = client.lock().unwrap();
+            set_meta(&store.conn, "processed_cursor", "0").unwrap();
+            set_meta(&store.conn, "receive_cursor", "2").unwrap();
+            store.conn.execute("INSERT INTO journal(cursor,wire,status,historical) VALUES(2,X'00','pending',1)", []).unwrap();
+        }
+        assert_eq!(client.history_block().unwrap(), None);
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute("DELETE FROM journal WHERE cursor=2", [])
+                .unwrap();
+            set_meta(&store.conn, "receive_cursor", "1").unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE journal SET reason=NULL,key_epoch=1 WHERE cursor=1",
+                    [],
+                )
+                .unwrap();
+        }
+        assert_eq!(client.history_block().unwrap(), None);
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE journal SET reason='snapshot_rcs_isolated' WHERE cursor=1",
+                    [],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE projection_generations SET state='draining' WHERE generation=1",
+                    [],
+                )
+                .unwrap();
+        }
+        assert_eq!(client.history_block().unwrap(), None);
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE journal SET reason='snapshot_rcs_isolated' WHERE cursor=1",
+                    [],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE projection_generations SET state='staging' WHERE generation=1",
+                    [],
+                )
+                .unwrap();
+        }
+        assert_eq!(client.history_block().unwrap(), None);
+    }
+
+    #[test]
+    fn decoder_revision_declares_scan_scope() {
+        assert!(decoder_revision_needs_applied(DECODER_REVISION.parse().unwrap()).is_some());
+    }
+
+    #[test]
+    fn decoder_upgrade_scans_only_required_statuses() {
+        for (marker, expected_total, applied_status) in [
+            (Some("14"), 1, "applied"),
+            (Some("13"), 1, "applied"),
+            (Some("12"), 2, "quarantined"),
+            (None, 2, "quarantined"),
+            (Some("garbage"), 2, "quarantined"),
+        ] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let vault_id = VaultId::new();
+            let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+            let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+            let header = create_vault_check_header(&root, profile.clone()).unwrap();
+            let event_key = derive_purpose_key(&root, &profile, KeyPurpose::Event).unwrap();
+            let producer = DeviceId::new();
+            let client = Client::open(
+                ClientConfig {
+                    database_path: dir.path().join("scope.db"),
+                    vault_id,
+                    device_id: DeviceId::new(),
+                },
+                DatabaseKey::new(&[10; 32]).unwrap(),
+            )
+            .unwrap();
+            client
+                .unlock(&profile, &header, "correct horse battery staple")
+                .unwrap();
+            for sequence in 1..=2 {
+                let mut envelope = Envelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    envelope_id: EnvelopeId::new(),
+                    command_id: None,
+                    vault_id,
+                    producer_device_id: producer,
+                    producer_sequence: SourceSequence(sequence),
+                    key_epoch: 1,
+                    crypto_suite: profile.crypto_suite,
+                    profile_fingerprint: profile.fingerprint().unwrap(),
+                    purpose: EnvelopePurpose::Event,
+                    route: None,
+                    compaction: None,
+                    origin_tag: None,
+                    ciphertext: Vec::new(),
+                };
+                let plain = br#"{"kind":"conversation_folder","conversation_id":"bad"}"#;
+                envelope.ciphertext = seal_frame(
+                    &encrypt(&event_key, &envelope.aad_bytes().unwrap(), plain).unwrap(),
+                );
+                client.ingest(&envelope, Cursor(sequence)).unwrap();
+            }
+            let mut store = client.lock().unwrap();
+            let (conn, ctx) = store.parts();
+            conn.execute("UPDATE journal SET status='applied' WHERE cursor=1", [])
+                .unwrap();
+            conn.execute(
+                "UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=2",
+                [],
+            )
+            .unwrap();
+            if let Some(marker) = marker {
+                set_meta(conn, "decoder_revision:1", marker).unwrap();
+            } else {
+                conn.execute("DELETE FROM metadata WHERE k='decoder_revision:1'", [])
+                    .unwrap();
+            }
+            let mut progress = Vec::new();
+            recover_decoder_revision(conn, &ctx, 1, &mut |value| progress.push(value)).unwrap();
+            let status: String = conn
+                .query_row("SELECT status FROM journal WHERE cursor=1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(status, applied_status, "marker {marker:?}");
+            assert_eq!(
+                progress.last().unwrap().total,
+                expected_total,
+                "marker {marker:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decoder_upgrade_rejects_invalid_folder_recovery() {
+        for case in [
+            "vault",
+            "authentication",
+            "compaction",
+            "writer",
+            "revision",
+            "cutoff",
+            "sequence",
+            "reference_overflow",
+            "profile",
+        ] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let vault_id = VaultId::new();
+            let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+            let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+            let header = create_vault_check_header(&root, profile.clone()).unwrap();
+            let event_key = derive_purpose_key(&root, &profile, KeyPurpose::Event).unwrap();
+            let producer = DeviceId::new();
+            let client = Client::open(
+                ClientConfig {
+                    database_path: dir.path().join("negative.db"),
+                    vault_id,
+                    device_id: DeviceId::new(),
+                },
+                DatabaseKey::new(&[10; 32]).unwrap(),
+            )
+            .unwrap();
+            client
+                .unlock(&profile, &header, "correct horse battery staple")
+                .unwrap();
+            let mut envelope = Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                envelope_id: EnvelopeId::new(),
+                command_id: None,
+                vault_id: if case == "vault" {
+                    VaultId::new()
+                } else {
+                    vault_id
+                },
+                producer_device_id: producer,
+                producer_sequence: SourceSequence(if case == "sequence" {
+                    i64::MAX as u64 + 1
+                } else {
+                    1
+                }),
+                key_epoch: 1,
+                crypto_suite: profile.crypto_suite,
+                profile_fingerprint: if case == "profile" {
+                    "0".repeat(64)
+                } else {
+                    profile.fingerprint().unwrap()
+                },
+                purpose: EnvelopePurpose::Event,
+                route: None,
+                compaction: None,
+                origin_tag: None,
+                ciphertext: Vec::new(),
+            };
+            let mut plain = serde_json::json!({
+                "kind": "conversation_folder", "conversation_id": ConversationId::new().to_string(),
+                "folder": "archived", "logical_revision": 1, "writer_device_id": producer.to_string(),
+            });
+            match case {
+                "writer" => {
+                    plain["writer_device_id"] = serde_json::json!(DeviceId::new().to_string())
+                }
+                "revision" => plain["logical_revision"] = serde_json::json!(0),
+                "cutoff" => {
+                    plain["folder"] = serde_json::json!("inbox");
+                    plain["archived_through_ms"] = serde_json::json!(123);
+                }
+                _ => {}
+            }
+            if case == "reference_overflow" {
+                envelope.compaction = Some(CompactionMetadata {
+                    key: vec![1; 32],
+                    terminal: false,
+                    supersedes: vec![CompactionReference {
+                        producer_device_id: DeviceId::new(),
+                        producer_sequence: SourceSequence(i64::MAX as u64 + 1),
+                    }],
+                    checkpoint: false,
+                });
+                plain["compaction"] = serde_json::to_value(&envelope.compaction).unwrap();
+            }
+            envelope.ciphertext = seal_frame(
+                &encrypt(
+                    &event_key,
+                    &envelope.aad_bytes().unwrap(),
+                    &serde_json::to_vec(&plain).unwrap(),
+                )
+                .unwrap(),
+            );
+            if case == "authentication" {
+                *envelope.ciphertext.last_mut().unwrap() ^= 1;
+            }
+            if case == "compaction" {
+                envelope.compaction = Some(CompactionMetadata {
+                    key: vec![1; 32],
+                    terminal: false,
+                    supersedes: vec![],
+                    checkpoint: false,
+                });
+            }
+            let wire = typed_wire(&envelope).unwrap();
+            let mut store = client.lock().unwrap();
+            let (conn, ctx) = store.parts();
+            conn.execute("INSERT INTO journal(cursor,key_epoch,wire,status,reason,historical) VALUES(1,1,?,'quarantined','invalid_payload',0)", [wire]).unwrap();
+            conn.execute("INSERT INTO projection_generations(generation,high_water,state,progress,reason) VALUES(99,1,'failed',0,'invalid_payload')", []).unwrap();
+            conn.execute("DELETE FROM metadata WHERE k='contact_repair_required'", [])
+                .unwrap();
+            set_meta(conn, "decoder_revision:1", "14").unwrap();
+            recover_decoder_revision(conn, &ctx, 1, &mut |_| {}).unwrap();
+            let status: String = conn
+                .query_row("SELECT status FROM journal WHERE cursor=1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(status, "quarantined", "{case}");
+            assert!(
+                get_meta(conn, "contact_repair_required").unwrap().is_none(),
+                "{case}"
+            );
+        }
     }
 
     #[test]
