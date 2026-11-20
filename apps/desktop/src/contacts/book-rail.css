@@ -1,0 +1,216 @@
+#contacts-book-list {
+  width: var(--contacts-book-width, 220px);
+  flex: 0 0 var(--contacts-book-width, 220px);
+  background: var(--peppy-surface-panel);
+  border-right: 1px solid var(--peppy-border);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+#contacts-books {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  overflow: auto;
+  flex: 1;
+}
+
+#contacts-books > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  border-bottom: 1px solid var(--peppy-border);
+}
+
+.contacts-book-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  text-align: left;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: transparent;
+  color: var(--peppy-text-primary);
+  padding: 8px;
+  cursor: pointer;
+  transition: background-color var(--peppy-duration-base, 150ms) var(--peppy-ease-out, ease-out);
+}
+
+.contacts-book-row:hover {
+  background: var(--peppy-surface-hover);
+}
+
+.contacts-book-row:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--peppy-focus-ring);
+  outline-offset: -2px;
+}
+
+.contacts-book-row > span:last-child {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.contacts-book-row small {
+  color: var(--peppy-text-secondary);
+  font-size: 11px;
+}
+
+.contacts-book-row small.contacts-book-removed-text {
+  color: var(--peppy-warning-text);
+}
+
+.contacts-book-row[aria-current] {
+  background: var(--peppy-surface-active);
+  border-left-color: var(--peppy-accent);
+}
+
+@media (forced-colors: active) {
+  .contacts-book-row[aria-current] {
+    border-left-color: Highlight;
+  }
+}
+
+/* The lookup switch keeps its column in every row; it is invisible (still focusable) until the row is hovered,
+   focused, selected, excluded, or touched on a coarse pointer. */
+.contacts-book-use {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 8px;
+  color: var(--peppy-text-secondary);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--peppy-duration-base, 150ms) var(--peppy-ease-out, ease-out);
+}
+
+#contacts-books > li:hover > .contacts-book-use,
+#contacts-books > li:focus-within > .contacts-book-use,
+#contacts-books > li:has(> .contacts-book-row[aria-current]) > .contacts-book-use,
+#contacts-books > li[data-book-use="excluded"] > .contacts-book-use {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .contacts-book-use {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.contacts-book-more {
+  display: inline-flex;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--peppy-text-secondary);
+  cursor: pointer;
+}
+
+.contacts-book-more:hover,
+.contacts-book-more[aria-expanded="true"] {
+  background: var(--peppy-surface-hover);
+  color: var(--peppy-text-primary);
+}
+
+.contacts-book-more:focus-visible {
+  outline: 2px solid var(--peppy-focus-ring);
+  outline-offset: 1px;
+}
+
+#contacts-book-menu {
+  position: fixed;
+  z-index: 10;
+  width: 220px;
+  padding: 8px;
+  background: var(--peppy-surface-panel);
+  border: 1px solid var(--peppy-border);
+  box-shadow: var(--peppy-shadow-floating);
+}
+
+#contacts-book-menu .contacts-book-menu-item {
+  display: block;
+  width: 100%;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--peppy-text-primary);
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#contacts-book-menu .contacts-book-menu-item:hover,
+#contacts-book-menu .contacts-book-menu-item:focus-visible {
+  background: var(--peppy-surface-hover);
+  outline: none;
+}
+
+#contacts-book-use { padding: 8px; border-bottom: 1px solid var(--peppy-border); }
+#contacts-book-use-title, .contacts-book-use-row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+#contacts-book-use-title { justify-content: flex-start; gap: 6px; }
+.contacts-book-use-row { cursor: pointer; }
+#contacts-book-use-hint, #contacts-book-use-confirm p { color: var(--peppy-text-secondary); font-size: 12px; margin: 4px 0; }
+#contacts-book-use-confirm { flex: 0 0 100%; padding: 8px; }
+.contacts-book-id, .contacts-book-hidden { display: block; color: var(--peppy-text-secondary); font-size: 12px; }
+#contacts-book-use-title .contacts-book-id { display: inline; }
+
+:is(.contacts-book-use, #contacts-book-use) .settings-switch { position: relative; width: 32px; height: 18px; flex: 0 0 32px; }
+:is(.contacts-book-use, #contacts-book-use) .settings-switch input { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+:is(.contacts-book-use, #contacts-book-use) .settings-switch > span { position: absolute; inset: 0; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-radius-pill); background: var(--peppy-surface-active); }
+:is(.contacts-book-use, #contacts-book-use) .settings-switch > span::before { display: block; width: 12px; height: 12px; margin: 2px; border-radius: 50%; background: var(--peppy-text-primary); content: ""; }
+:is(.contacts-book-use, #contacts-book-use) .settings-switch input:checked + span { border-color: var(--peppy-accent); background: var(--peppy-accent); }
+:is(.contacts-book-use, #contacts-book-use) .settings-switch input:checked + span::before { background: var(--peppy-accent-text); transform: translateX(14px); }
+:is(.contacts-book-use, #contacts-book-use) .settings-switch input:focus-visible + span { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
+:is(.contacts-book-use, #contacts-book-use) .settings-switch input:disabled + span { opacity: .55; }
+@media (forced-colors: active) {
+  .contacts-book-use { opacity: 1; pointer-events: auto; }
+  :is(.contacts-book-use, #contacts-book-use) .settings-switch input { opacity: 1; appearance: auto; }
+  :is(.contacts-book-use, #contacts-book-use) .settings-switch > span { display: none; }
+}
+
+#contacts-book-removed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 0;
+  padding: 8px;
+  border-bottom: 1px solid var(--peppy-border);
+  font-size: 12px;
+  background: var(--peppy-warning-surface);
+  color: var(--peppy-warning-text);
+}
+
+#contacts-book-removed .contacts-strip-text {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+#contacts-book-removed .contacts-strip-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+#contacts-book-removed .contacts-strip-actions button {
+  white-space: nowrap;
+}

@@ -1,64 +1,51 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { Check, ContactAvatar, Clock, ListFilter, ResizeHandle, RotateCw, Smartphone, UserPlus, X, contactSeed, formatPhoneNumber, seedKey } from "@peppy/desktop-ui";
+import { Check, Clock, ListFilter, ResizeHandle, RotateCw, UserPlus, X, contactSeed, seedKey } from "@peppy/desktop-ui";
 import { bridge, type ContactBookView, type ContactScanStatus, type ContactSort, type ContactSyncStatus, type ContactView, type RestorableContact } from "../bridge/bridge";
 import { ContactForm, type ContactEditDraft } from "./ContactForm";
-import { CONTACTS_PAGE_SIZE, findContactTarget } from "./contact-target";
+import { findContactTarget } from "./contact-target";
+import { ContactList } from "./ContactList";
+import { useContactPages } from "./useContactPages";
 import { canCreateContactInBook } from "./conversation-contact";
-import { persistLayoutPatch, readContactsDetailWidth } from "../shell/layout-persistence";
+import { contactErrorText, scanStatusText } from "./contact-labels";
+import type { ContactActionNotice } from "./contact-action-notice";
+import { BookLookupStrip, BookRail } from "./BookRail";
+import { ContactListHeader } from "./ContactListHeader";
+import { RemoveBookDialog, RemovedBookStrip } from "./RemovedBookStrip";
+import { ContactsActionNotice } from "./ContactsActionNotice";
+import { ContactsStatus, SyncStatusStrip, activeContactsStatus, type ContactsStatusStrip } from "./ContactsStatus";
+import { persistSortPreference, readSortPreference } from "./contact-sort";
+import { persistNameFormat, readNameFormat, type ContactNameFormat } from "./contact-name-format";
+import { COMPACT_BOOK_LIST_QUERY, COMPACT_DETAIL_QUERY, useMediaMatch } from "./useMediaMatch";
+import { persistLayoutPatch, readContactsBookCollapsed, readContactsBookWidth, readContactsDetailWidth } from "../shell/layout-persistence";
 import { IsolatedText } from "../notices/IsolatedText";
+import { ContactDetail } from "./ContactDetail";
+import { RestorePanel } from "./RestorePanel";
 import "./contacts.css";
 
 /** Core returns at most this many contacts per page (search runs before paging). */
 export { CONTACTS_PAGE_SIZE } from "./contact-target";
 
-const EDIT_STATE_LABELS: Record<string, string> = {
-  pending: "Waiting for the phone",
-  "awaiting-approval": "Waiting for approval on the phone",
-  "outcome-unknown": "Outcome unknown — check the phone",
-  conflict: "Conflict — changed on the phone",
-  rejected: "Rejected by the phone",
-  failed: "Failed on the phone",
-  expired: "Expired before the phone applied it",
-};
-export const editStateLabel = (state: string) => EDIT_STATE_LABELS[state] ?? state;
-const bookStateText = (book: ContactBookView) => book.sourceRevoked
-  ? "Source device removed"
-  : book.state === "active"
-    ? "Active"
-    : book.state === "limited"
-      ? "Limited access"
-      : book.state === "retired"
-        ? "Retired"
-        : "Unavailable";
-const SORT_STORAGE_KEY = "peppy.contacts.sort.v1";
-const DEFAULT_SORT: ContactSort = { key: "family", direction: "asc" };
 const DETAIL_DEFAULT_WIDTH = 320;
 const DETAIL_MIN_WIDTH = 280;
+const BOOK_DEFAULT_WIDTH = 220;
+const BOOK_MIN_WIDTH = 180;
+const BOOK_MAX_WIDTH = 320;
+/** A rail dragged narrower than this collapses instead of shrinking to its minimum. */
+const BOOK_COLLAPSE_BELOW = 120;
+// A double-click right after a click-restore must not collapse the rail again.
+const BOOK_RESTORE_GUARD_MS = 500;
+/** Visible width of the rail's resize handle when expanded. */
+const BOOK_RESIZE_HANDLE_WIDTH = 1;
+/** The center pane keeps at least this much room; below it the rail collapses for space (not persisted). */
+const CONTACTS_CENTER_MIN_WIDTH = 240;
+
+function clampBookWidth(width: number) {
+  return Math.min(BOOK_MAX_WIDTH, Math.max(BOOK_MIN_WIDTH, width));
+}
 const DETAIL_MAX_WIDTH = 480;
 const CONTACTS_LIST_MIN_WIDTH = 240;
 const DETAIL_RESIZE_HANDLE_WIDTH = 1;
-
-function readSortPreference(): ContactSort {
-  try {
-    const value: unknown = JSON.parse(localStorage.getItem(SORT_STORAGE_KEY) ?? "null");
-    return typeof value === "object" && value !== null && (value as ContactSort).key !== undefined && (value as ContactSort).direction !== undefined
-      && ["given", "family"].includes((value as ContactSort).key) && ["asc", "desc"].includes((value as ContactSort).direction)
-      ? { key: (value as ContactSort).key, direction: (value as ContactSort).direction } : DEFAULT_SORT;
-  } catch { return DEFAULT_SORT; }
-}
-
-const contactErrorText = (error: unknown): string =>
-  error instanceof Error
-    ? error.message
-    : typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
-      ? error.message
-      : String(error);
-
-const scanReasonText = (reason?: string) => ({ permission_denied: "The phone has not allowed contact access.", limited_access: "The phone has limited contact access.", sync_disabled: "Contact sync is disabled on the phone.", source_revoked: "The source device was removed.", source_retired: "This book is retired.", needs_unlock: "Unlock sync before requesting a scan.", stale_epoch: "The phone's contact context changed before the scan. Use Sync now to request a fresh scan.", superseded_generation: "A newer contact book version replaced this scan. Use Sync now to request a fresh scan.", incomplete_scan: "The phone's scan did not finish. Use Sync now to try again.", cancelled: "The phone cancelled this scan. Use Sync now to try again." }[reason ?? ""] ?? "The phone could not complete this scan.");
-const scanStatusText = (status: ContactScanStatus) => ({
-  queued: "Scan request queued locally.", waiting: "Waiting for the phone to scan contacts.", scanning: "The phone is scanning contacts.", completed: "Scan completed.", blocked: `Scan blocked. ${scanReasonText(status.reason)}`, failed: `Scan failed. ${scanReasonText(status.reason)}`, expired: "Scan request expired. Request another scan.",
-}[status.state]);
 
 export type ContactNavigationGuard = (navigate: () => void, onCancel?: () => void) => boolean | void;
 export type ContactTarget =
@@ -71,35 +58,20 @@ function isCreateEditing(editing: ContactView | null | CreateContactEditing): ed
   return editing === "create" || (editing !== null && "createPrefill" in editing);
 }
 
-// Same cutoffs as contacts.css: the book rail hides at 700px and the detail overlays the list at 560px.
-const COMPACT_BOOK_LIST_QUERY = "(max-width: 700px)";
-const COMPACT_DETAIL_QUERY = "(max-width: 560px)";
-
-function useMediaMatch(query: string) {
-  const [matches, setMatches] = useState(() => window.matchMedia?.(query)?.matches ?? false);
-  useEffect(() => {
-    const media = window.matchMedia?.(query);
-    if (!media) return;
-    const update = () => setMatches(media.matches);
-    update();
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
-  }, [query]);
-  return matches;
-}
-
-export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard, target, onTargetConsumed, headerHost, toneOverrides = {}, toneDisabled = false, pendingToneSeeds = {}, toneErrors = {}, onSelectTone }: {
+export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard, target, onTargetConsumed, toneOverrides = {}, toneDisabled = false, pendingToneSeeds = {}, toneErrors = {}, onSelectTone, bookCollapsed: bookCollapsedProp, onBookCollapsedChange }: {
   books?: ContactBookView[];
   sync?: ContactSyncStatus;
   onNavigationGuard?(guard: ContactNavigationGuard | null): void;
   target?: ContactTarget | null;
   onTargetConsumed?(requestId: number): void;
-  headerHost?: Element | null;
   toneOverrides?: Record<string, number>;
   toneDisabled?: boolean;
   pendingToneSeeds?: Record<string, true>;
   toneErrors?: Record<string, string>;
   onSelectTone?(seed: string, index: number | null): void;
+  /** Controlled collapse of the book rail (App owns and persists it). Uncontrolled when absent. */
+  bookCollapsed?: boolean;
+  onBookCollapsedChange?(collapsed: boolean): void;
 }) {
   const contactsRepairState = sync?.projection?.state === "rebuilding" ? "rebuilding"
     : sync?.projection?.state === "failed" ? (sync.repairRequired ? "repairWaiting" : "failed")
@@ -115,11 +87,10 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const [books, setBooks] = useState(initialBooks);
   const [booksLoaded, setBooksLoaded] = useState(initialBooks.length > 0);
   const [bookId, setBookId] = useState(initialBooks[0]?.id ?? "");
-  const [contacts, setContacts] = useState<ContactView[]>([]);
   const [selected, setSelected] = useState<ContactView | null>(null);
   const [sort, setSort] = useState<ContactSort>(readSortPreference);
+  const [nameFormat, setNameFormat] = useState(readNameFormat);
   const [sortOpen, setSortOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
   const [restore, setRestore] = useState<{ bookId: string; items: RestorableContact[] } | null>(null);
   const [editing, setEditing] = useState<ContactView | null | CreateContactEditing>(null);
   const [editorBookId, setEditorBookId] = useState<string | null>(null);
@@ -131,12 +102,13 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   useEffect(() => { deleteInFlight.current = false; }, [selected?.bookId, selected?.id]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<ReactNode>("");
-  const [bookUseBusy, setBookUseBusy] = useState(false);
-  const [confirmBookUse, setConfirmBookUse] = useState(false);
-  const bookUseSwitchRef = useRef<HTMLInputElement>(null);
-  const bookUseCancelRef = useRef<HTMLButtonElement>(null);
-  const focusBookUseAfterSave = useRef(false);
-  const [offset, setOffset] = useState(0);
+  const [actionNotice, setActionNotice] = useState<ContactActionNotice>();
+  const [bookRemoval, setBookRemoval] = useState<{ book: ContactBookView; opener: RefObject<HTMLElement | null> }>();
+  const pages = useContactPages({ bookId, sort, onError: setLoadError });
+  const { contacts } = pages;
+  useEffect(() => {
+    setSelected(current => (current ? contacts.find(item => item.id === current.id) ?? current : current));
+  }, [contacts]);
   const [scanStatus, setScanStatus] = useState<ContactScanStatus | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -151,14 +123,24 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const detailDragActive = useRef(false);
   const contactsViewRef = useRef<HTMLElement>(null);
   const booksPanelRef = useRef<HTMLElement>(null);
+  const compactBookList = useMediaMatch(COMPACT_BOOK_LIST_QUERY);
+  const [localBookCollapsed, setLocalBookCollapsed] = useState(readContactsBookCollapsed);
+  const bookCollapsed = bookCollapsedProp ?? localBookCollapsed;
+  const [bookWidth, setBookWidth] = useState(() => clampBookWidth(readContactsBookWidth() ?? BOOK_DEFAULT_WIDTH));
+  // Latest width the user chose (≥ min) and the unclamped sash position while a resize gesture runs.
+  const bookWidthRef = useRef(bookWidth);
+  const bookRawWidth = useRef(bookWidth);
+  const bookRestoredAt = useRef(0);
+  const spaceCollapsed = contactsLayout.viewWidth > 0 && contactsLayout.viewWidth - bookWidth - BOOK_RESIZE_HANDLE_WIDTH < CONTACTS_CENTER_MIN_WIDTH;
+  const railVisible = !compactBookList && !bookCollapsed && !spaceCollapsed;
+  const collapsedReason = compactBookList || railVisible ? undefined : bookCollapsed ? "user" : "space";
+  const removedBookIdRef = useRef<string | null>(null);
   const sortButtonRef = useRef<HTMLButtonElement>(null);
   const sortMenuRef = useRef<HTMLDivElement>(null);
   const [sortMenuPosition, setSortMenuPosition] = useState<CSSProperties>();
   const restoreTriggerRef = useRef<HTMLButtonElement>(null);
   const newContactTriggerRef = useRef<HTMLButtonElement>(null);
   const detailBackRef = useRef<HTMLButtonElement>(null);
-  // Only the newest list request may apply its result (book/search/page changes and live hints).
-  const pageRequestRef = useRef(0);
   const scanStatusRequestRef = useRef(0);
   const syncActionRef = useRef(0);
   const currentBookRef = useRef(bookId);
@@ -243,13 +225,9 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
         const fallbackBookId = next[0]?.id ?? "";
         if (fallbackBookId === currentBookId) return;
         currentBookRef.current = fallbackBookId;
-        // An in-flight list for the vanished book must not apply after this fallback.
-        ++pageRequestRef.current;
-        setOffset(0);
         setBookId(fallbackBookId);
         setRestore(null);
         if (!editingRef.current || !dirtyRef.current) {
-          setContacts([]);
           setSelected(null);
           setConfirmDelete(false);
         }
@@ -273,32 +251,6 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       });
   }, []);
 
-  const loadPage = useCallback((showLoading: boolean) => {
-    if (!bookId) {
-      // Invalidate any in-flight list for a book that no longer exists.
-      ++pageRequestRef.current;
-      setLoading(false);
-      return;
-    }
-    const request = ++pageRequestRef.current;
-    if (showLoading) setLoading(true);
-    void bridge
-      .list_contacts(bookId, "", offset, sort)
-      .then(results => {
-        if (!mountedRef.current || request !== pageRequestRef.current) return;
-        setContacts(results);
-        setLoadError("");
-        // Keep the open detail current; an open editor keeps its unsaved draft untouched.
-        setSelected(current => (current ? results.find(item => item.id === current.id) ?? current : current));
-      })
-      .catch(e => {
-        if (mountedRef.current && request === pageRequestRef.current) setLoadError(contactErrorText(e));
-      })
-      .finally(() => {
-        if (mountedRef.current && request === pageRequestRef.current) setLoading(false);
-      });
-  }, [bookId, offset, sort]);
-
   useEffect(() => {
     if (!sortOpen) return;
     const dismiss = (event: MouseEvent) => {
@@ -315,20 +267,20 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   useLayoutEffect(() => {
     const view = contactsViewRef.current;
     const booksPanel = booksPanelRef.current;
-    if (!view || !booksPanel) return;
-    const measure = () => setContactsLayout({ viewWidth: view.clientWidth || window.innerWidth, bookWidth: booksPanel.offsetWidth });
+    if (!view) return;
+    const measure = () => setContactsLayout({ viewWidth: view.clientWidth || window.innerWidth, bookWidth: booksPanel?.offsetWidth ?? 0 });
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
     observer.observe(view);
-    observer.observe(booksPanel);
+    if (booksPanel) observer.observe(booksPanel);
     return () => observer.disconnect();
-  }, []);
+  }, [railVisible]);
   useLayoutEffect(() => {
     if (!sortOpen || !sortButtonRef.current) return;
     const positionMenu = () => {
       const rect = sortButtonRef.current!.getBoundingClientRect();
-      const menuWidth = 172;
+      const menuWidth = 208;
       const margin = 8;
       setSortMenuPosition({
         position: "fixed",
@@ -350,50 +302,12 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       setTargetLookupRestart(current => current + 1);
     }
     setSort(next);
-    setOffset(0);
-    try { localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(next)); } catch { /* Preferences are optional. */ }
+    persistSortPreference(next);
   };
 
   useEffect(loadBooks, [loadBooks]);
-  useEffect(() => loadPage(true), [loadPage]);
 
   const book = books.find(item => item.id === bookId);
-  const bookNameCounts = new Map<string, number>();
-  for (const item of books) bookNameCounts.set(item.deviceName, (bookNameCounts.get(item.deviceName) ?? 0) + 1);
-  const bookSuffix = (item: ContactBookView) => (bookNameCounts.get(item.deviceName) ?? 0) > 1 ? `ID ${item.id.slice(-4)}` : "";
-  const bookLabel = (item: ContactBookView) => [item.deviceName, bookSuffix(item)].filter(Boolean).join(", ");
-  useEffect(() => { setConfirmBookUse(false); }, [bookId]);
-  useEffect(() => { if (confirmBookUse) bookUseCancelRef.current?.focus(); }, [confirmBookUse]);
-  useLayoutEffect(() => {
-    if (!bookUseBusy && focusBookUseAfterSave.current) {
-      focusBookUseAfterSave.current = false;
-      bookUseSwitchRef.current?.focus();
-    }
-  });
-  const cancelBookUse = () => {
-    setConfirmBookUse(false);
-    bookUseSwitchRef.current?.focus();
-  };
-  const saveBookUse = async (item: ContactBookView, enabled: boolean) => {
-    setBookUseBusy(true);
-    setError("");
-    try {
-      await bridge.set_contact_book_lookup(item.id, enabled);
-      if (!mountedRef.current) return;
-      if (!enabled && confirmBookUse && currentBookRef.current === item.id) focusBookUseAfterSave.current = true;
-      setConfirmBookUse(false);
-      loadBooks();
-      const label = bookLabel(item);
-      setNotice(enabled
-        ? `${label} is used again for names and recipient search.`
-        : <span>Names and recipient search no longer use {label}. Its contacts are unchanged. <button type="button" data-action="undo-book-use" onClick={() => void saveBookUse(item, true)}>Undo</button></span>);
-    } catch {
-      if (mountedRef.current) setError("Couldn't save this change. Try again.");
-    } finally {
-      if (mountedRef.current) setBookUseBusy(false);
-    }
-  };
-  const compactBookList = useMediaMatch(COMPACT_BOOK_LIST_QUERY);
   const compactDetail = useMediaMatch(COMPACT_DETAIL_QUERY);
   const detailOverlay = compactDetail && Boolean(selected || editing);
 
@@ -424,10 +338,10 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     let timer: ReturnType<typeof setTimeout> | undefined;
     const dispose = bridge.subscribe(() => {
       clearTimeout(timer);
-      timer = setTimeout(() => { loadBooks(); loadPage(false); refreshScanStatus(); }, 150);
+      timer = setTimeout(() => { loadBooks(); pages.refresh(); refreshScanStatus(); }, 150);
     });
     return () => { clearTimeout(timer); dispose(); };
-  }, [loadBooks, loadPage, refreshScanStatus]);
+  }, [loadBooks, pages.refresh, refreshScanStatus]);
 
   const handleSave = async (draft: ContactEditDraft) => {
     const editorBook = booksRef.current.find(candidate => candidate.id === editorBookIdRef.current);
@@ -539,7 +453,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       setError("");
       setValidationError("");
       setNotice(outcome.state === "pending" ? <span>Sent to <IsolatedText text={editorBook.deviceName} />. Waiting for the phone to apply it.</span> : "");
-      loadPage(false);
+      pages.refresh();
       const pending = pendingNavigationRef.current;
       if (pending) {
         pendingNavigationRef.current = null;
@@ -592,7 +506,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       setConfirmDelete(false);
       setError("");
       setNotice(outcome.state === "pending" ? <span>Delete sent to <IsolatedText text={book.deviceName} />. Waiting for the phone.</span> : "");
-      loadPage(false);
+      pages.refresh();
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
     } finally {
@@ -664,10 +578,8 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
           return;
         }
         if (result.state === "found") {
-          const { contact, offset: pageOffset, page: results } = result;
+          const { contact, contacts: results } = result;
           setTargetError("");
-          ++pageRequestRef.current;
-          setLoading(false);
           if (currentBookRef.current !== requestedTarget.bookId) {
             ++scanStatusRequestRef.current;
             ++syncActionRef.current;
@@ -676,8 +588,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
           }
           currentBookRef.current = requestedTarget.bookId;
           setBookId(requestedTarget.bookId);
-          setOffset(pageOffset);
-          setContacts(results);
+          pages.resetTo(results, { bookId: requestedTarget.bookId, sort: sortRef.current });
           setRestore(null);
           setSelected(contact);
           setEditing(null);
@@ -727,14 +638,11 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       const pinnedBookId = targetBook.id;
       if (currentBookRef.current !== pinnedBookId) {
         currentBookRef.current = pinnedBookId;
-        ++pageRequestRef.current;
         ++scanStatusRequestRef.current;
         ++syncActionRef.current;
         setBookId(pinnedBookId);
-        setOffset(0);
         setScanStatus(null);
         setSyncing(false);
-        setContacts([]);
         setSelected(null);
         setRestore(null);
       }
@@ -766,7 +674,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     const frame = requestAnimationFrame(() => {
       const row = Array.from(document.querySelectorAll<HTMLButtonElement>("button[data-contact-id]"))
         .find(node => node.dataset.contactId === focusTargetId);
-      row?.scrollIntoView({ block: "nearest" });
+      row?.scrollIntoView({ block: "center" });
       row?.focus();
       setFocusTargetId(null);
     });
@@ -796,7 +704,6 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       ++scanStatusRequestRef.current;
       ++syncActionRef.current;
       setBookId(id);
-      setOffset(0);
       setScanStatus(null);
       setSyncing(false);
       setSelected(null);
@@ -808,6 +715,24 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       setError("");
     });
   };
+
+  // Reloading drops the removed book and selects the first remaining one; focus then moves to that book's row.
+  const handleBookRemoved = (removedId: string) => {
+    removedBookIdRef.current = removedId;
+    loadBooks();
+  };
+  // One removal dialog for the whole view, so it survives the status slot changing and focus returns to its opener.
+  const requestRemoveBook = (book: ContactBookView, opener: RefObject<HTMLElement | null>) => setBookRemoval({ book, opener });
+  useEffect(() => {
+    const removedId = removedBookIdRef.current;
+    if (!removedId) return;
+    removedBookIdRef.current = null;
+    if (books.some(item => item.id === removedId)) return;
+    const focusTarget = railVisible
+      ? document.querySelector<HTMLElement>("#contacts-books .contacts-book-row[aria-current]")
+      : document.getElementById("contacts-book-selector");
+    focusTarget?.focus();
+  }, [books, railVisible]);
 
   const handleCancelConfirm = () => setConfirmDelete(false);
 
@@ -897,7 +822,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       })
       .catch(error => setError(contactErrorText(error)));
   };
-  const sortLabel = `Sort: ${sort.key === "family" ? "Last name" : "First name"}, ${sort.direction === "asc" ? "ascending" : "descending"}`;
+  const viewLabel = `View options. Sorted by ${sort.key === "family" ? "last name" : "first name"}, ${sort.direction === "asc" ? "ascending" : "descending"}. Names shown as ${nameFormat === "last-first" ? "last name, first name" : "first name then last name"}.`;
   const closeSortMenu = (returnFocus = false) => {
     setSortOpen(false);
     if (returnFocus) requestAnimationFrame(() => sortButtonRef.current?.focus());
@@ -921,25 +846,24 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     changeSort(next);
     closeSortMenu(true);
   };
+  const selectNameFormat = (next: ContactNameFormat) => {
+    persistNameFormat(next);
+    setNameFormat(next);
+    closeSortMenu(true);
+  };
   const sortMenu = sortOpen && (
     <div ref={sortMenuRef} id="contacts-sort-menu" role="menu" aria-label="Sort contacts" style={sortMenuPosition} onKeyDown={handleSortMenuKeyDown}>
       <div role="group" aria-label="Sort by">{(["family", "given"] as const).map(key => <button id={`contacts-sort-key-${key}`} type="button" role="menuitemradio" aria-checked={sort.key === key} key={key} onClick={() => selectSort({ ...sort, key })}><span className="contacts-sort-check" aria-hidden="true">{sort.key === key && <Check size={14} aria-hidden />}</span><span className="contacts-sort-label">{key === "family" ? "Last name" : "First name"}</span></button>)}</div>
       <div role="group" aria-label="Direction">{(["asc", "desc"] as const).map(direction => <button id={`contacts-sort-direction-${direction}`} type="button" role="menuitemradio" aria-checked={sort.direction === direction} key={direction} onClick={() => selectSort({ ...sort, direction })}><span className="contacts-sort-check" aria-hidden="true">{sort.direction === direction && <Check size={14} aria-hidden />}</span><span className="contacts-sort-label">{direction === "asc" ? "Ascending" : "Descending"}</span></button>)}</div>
+      <div role="group" aria-label="Show names as">
+        <button id="contacts-name-format-first-last" type="button" role="menuitemradio" aria-checked={nameFormat === "first-last"} onClick={() => selectNameFormat("first-last")}><span className="contacts-sort-check" aria-hidden="true">{nameFormat === "first-last" && <Check size={14} aria-hidden />}</span><span className="contacts-sort-label">First Last<small className="contacts-sort-example">Ada Lovelace</small></span></button>
+        <button id="contacts-name-format-last-first" type="button" role="menuitemradio" aria-checked={nameFormat === "last-first"} onClick={() => selectNameFormat("last-first")}><span className="contacts-sort-check" aria-hidden="true">{nameFormat === "last-first" && <Check size={14} aria-hidden />}</span><span className="contacts-sort-label">Last, First<small className="contacts-sort-example">Lovelace, Ada</small></span></button>
+      </div>
     </div>
   );
-  const sortPortalHost = headerHost?.closest<HTMLElement>("#desktop-shell, #composer-shell") ?? (typeof document === "undefined" ? null : document.body);
+  const sortPortalHost = contactsViewRef.current?.closest<HTMLElement>("#desktop-shell, #composer-shell") ?? document.body;
   const selectBookTitle = "Select a contact book first.";
   const closeDetailTitle = "Close the contact detail first.";
-  const headerActions = (
-    <div id="contacts-header-actions" role="toolbar" aria-label="Contact actions">
-      <div className="contacts-sort-control">
-        <button ref={sortButtonRef} type="button" aria-label={sortLabel} title={sortLabel} aria-haspopup="menu" aria-expanded={sortOpen} aria-controls="contacts-sort-menu" onClick={() => setSortOpen(open => !open)} onKeyDown={event => { if (event.key === "ArrowDown") { event.preventDefault(); setSortOpen(true); } }}><ListFilter size={16} aria-hidden /></button>
-      </div>
-      <button ref={restoreTriggerRef} type="button" aria-label="Recently deleted contacts" title={!book ? selectBookTitle : detailOverlay || editing ? closeDetailTitle : "Recently deleted"} disabled={!book || detailOverlay || Boolean(editing)} onClick={openRecentlyDeleted}><Clock size={16} aria-hidden /></button>
-      <button id="contacts-sync-now" type="button" aria-label={syncing ? "Requesting…" : "Sync now"} title={syncDisabledReason ?? "Sync now"} aria-busy={syncing} aria-describedby={syncDisabledReason ? "contacts-sync-unavailable" : undefined} disabled={Boolean(syncDisabledReason) || syncing} onClick={requestSync}><RotateCw className={syncing ? "contacts-sync-icon" : undefined} size={16} aria-hidden /></button>
-      <button ref={newContactTriggerRef} type="button" data-action="create-contact" aria-label="New contact" title={book ? "New contact" : selectBookTitle} disabled={!book} onClick={() => handleEditStart()}><UserPlus size={16} strokeWidth={1.75} aria-hidden /></button>
-    </div>
-  );
   const availableDetailWidth = contactsLayout.viewWidth - contactsLayout.bookWidth - CONTACTS_LIST_MIN_WIDTH - DETAIL_RESIZE_HANDLE_WIDTH;
   const detailMaxWidth = Math.min(DETAIL_MAX_WIDTH, Math.max(0, availableDetailWidth));
   const detailMinWidth = Math.min(DETAIL_MIN_WIDTH, detailMaxWidth);
@@ -951,6 +875,43 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   };
   const resizeDetail = (delta: number) => setDetailSize((detailDragActive.current ? detailDragWidth.current : renderedDetailWidth) - delta);
   const resetDetailWidth = () => { detailDragActive.current = false; setDetailWidth(DETAIL_DEFAULT_WIDTH); detailDragWidth.current = DETAIL_DEFAULT_WIDTH; persistLayoutPatch({ contactsDetailWidth: DETAIL_DEFAULT_WIDTH }); };
+  const changeBookCollapsed = (collapsed: boolean) => {
+    if (onBookCollapsedChange) onBookCollapsedChange(collapsed);
+    else setLocalBookCollapsed(collapsed);
+  };
+  // A sash dragged narrower than BOOK_COLLAPSE_BELOW collapses; wider values are kept between min and max.
+  const sizeBook = (width: number) => {
+    if (width < BOOK_COLLAPSE_BELOW) {
+      bookRawWidth.current = width;
+      changeBookCollapsed(true);
+      return;
+    }
+    const capped = Math.min(width, BOOK_MAX_WIDTH);
+    bookRawWidth.current = capped;
+    const next = clampBookWidth(capped);
+    bookWidthRef.current = next;
+    setBookWidth(next);
+    if (bookCollapsed) {
+      bookRestoredAt.current = Date.now();
+      changeBookCollapsed(false);
+    }
+  };
+  const startBookResize = (position: number) => {
+    const viewLeft = contactsViewRef.current?.getBoundingClientRect().left ?? 0;
+    bookRawWidth.current = bookCollapsed ? position - viewLeft : bookWidthRef.current;
+  };
+  const resizeBook = (delta: number) => {
+    bookRawWidth.current += delta;
+    sizeBook(bookRawWidth.current);
+  };
+  const endBookResize = () => {
+    bookRawWidth.current = bookWidthRef.current;
+    persistLayoutPatch({ contactsBookWidth: bookWidthRef.current });
+  };
+  const toggleBookCollapsed = () => {
+    if (Date.now() - bookRestoredAt.current < BOOK_RESTORE_GUARD_MS) return;
+    changeBookCollapsed(!bookCollapsed);
+  };
   // At ≤560px the detail panel overlays the center pane, so banners that concern it must render inside the panel.
   const unsavedBanner = pendingNavigation && (
     <p id="contacts-unsaved-changes" role="status" data-banner-state="unsaved-changes">
@@ -976,101 +937,97 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     </p>
   );
 
+  // Priority order: the first present strip is the only one the status slot shows.
+  const statusStrips: Array<ContactsStatusStrip | false | null | undefined> = [
+    !detailOverlay && unsavedBanner ? { kind: "unsaved", node: unsavedBanner } : null,
+    !detailOverlay && !restore && errorBanner ? { kind: "error", node: errorBanner } : null,
+    book?.sourceRevoked ? { kind: "removed", node: <RemovedBookStrip book={book} onRemoveRequest={requestRemoveBook} /> } : null,
+    // The sync strip carries the completed-scan wording too, so a finished scan is not hidden behind the repair state.
+    contactsRepairState ? { kind: "sync", node: <SyncStatusStrip state={contactsRepairState} text={scanStatus?.state === "completed" && completedScanText ? completedScanText : contactsSyncText} /> } : null,
+    sync?.readiness && (sync.readiness.state !== "ready" || !sync.readiness.server_active) ? { kind: "readiness", node: (
+      <p id="contacts-readiness-status" role="status" data-banner-state={sync.readiness.state}>
+        {sync.readiness.state === "server_unsupported" ? "Contact changes need a server that supports contact sync." : sync.readiness.state === "needs_unlock" ? "Contact changes are paused until all required keys are unlocked." : sync.readiness.state === "backfill_pending" ? "Contact changes are preparing historical records." : "Contact sync is ready."}
+        {sync.readiness.backfill_unreadable > 0 && " Some historical records remain unreadable."}
+        {!sync.readiness.server_active && " History retention is paused until every device is ready."}
+      </p>
+    ) } : null,
+    scanStatus ? { kind: "scan", node: (
+      <p id="contacts-scan-status" role="status" data-scan-state={scanStatus.state}>
+        {scanStatusText(scanStatus)}
+      </p>
+    ) } : null,
+    syncDisabledReason && !book?.sourceRevoked ? { kind: "unavailable", node: <p id="contacts-sync-unavailable" role="status">{syncDisabledReason}</p> } : null,
+  ];
+
+  const activeStatus = activeContactsStatus(statusStrips);
+  const headerActions = (
+    <div id="contacts-header-actions" role="toolbar" aria-label="Contact actions">
+      <div className="contacts-sort-control">
+        <button ref={sortButtonRef} type="button" aria-label={viewLabel} title="View options" aria-haspopup="menu" aria-expanded={sortOpen} aria-controls="contacts-sort-menu" onClick={() => setSortOpen(open => !open)} onKeyDown={event => { if (event.key === "ArrowDown") { event.preventDefault(); setSortOpen(true); } }}><ListFilter size={16} aria-hidden /></button>
+      </div>
+      <button ref={restoreTriggerRef} type="button" aria-label="Recently deleted contacts" title={!book ? selectBookTitle : detailOverlay || editing ? closeDetailTitle : "Recently deleted"} disabled={!book || detailOverlay || Boolean(editing)} onClick={openRecentlyDeleted}><Clock size={16} aria-hidden /></button>
+      <button id="contacts-sync-now" type="button" aria-label={syncing ? "Requesting…" : "Sync now"} title={syncDisabledReason ?? "Sync now"} aria-busy={syncing} aria-describedby={activeStatus?.kind === "unavailable" ? "contacts-sync-unavailable" : undefined} disabled={Boolean(syncDisabledReason) || syncing} onClick={requestSync}><RotateCw className={syncing ? "contacts-sync-icon" : undefined} size={16} aria-hidden /></button>
+      <button ref={newContactTriggerRef} type="button" data-action="create-contact" aria-label="New contact" title={book ? "New contact" : selectBookTitle} disabled={!book} onClick={() => handleEditStart()}><UserPlus size={16} strokeWidth={1.75} aria-hidden /></button>
+    </div>
+  );
+
   const editorToneSeed = editing && !isCreateEditing(editing)
     ? (() => { const identity = contactSeed(editing.phones, editing.id); return identity.startsWith("contact:") ? undefined : identity; })()
     : undefined;
 
   return (
-    <section ref={contactsViewRef} id="contacts-view" role="region" aria-label="Contacts browser">
+    <section ref={contactsViewRef} id="contacts-view" role="region" aria-label="Contacts browser" data-collapsed-reason={collapsedReason}>
+      <h1 className="visually-hidden">Contacts</h1>
       {sortMenu && (sortPortalHost ? createPortal(sortMenu, sortPortalHost) : sortMenu)}
-      <aside ref={booksPanelRef} id="contacts-book-list" aria-label="Contact books">
-        <ul id="contacts-books">
-          {books.map(item => (
-            <li key={item.id}>
-              <button
-                data-book-id={item.id}
-                data-book-use={item.lookupExcluded ? "excluded" : "included"}
-                className="contacts-book-row"
-                aria-current={item.id === bookId ? "location" : undefined}
-                onClick={() => handleSelectBook(item.id)}
-              >
-                  <Smartphone aria-hidden="true" size={16} strokeWidth={1.75} />
-                <span>
-                  <b>{item.deviceName}</b>
-                  {bookSuffix(item) && <span className="contacts-book-id">{bookSuffix(item)}</span>}
-                  {item.lookupExcluded && <span className="contacts-book-hidden">Hidden from names</span>}
-                  <small data-book-state={item.state}>
-                    {bookStateText(item)}
-                    {item.state === "active" ? ` · ${item.contactCount}` : ""}
-                    {item.defaultAccountLabel && ` · ${item.defaultAccountLabel}`}
-                  </small>
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </aside>
+      {bookRemoval && (
+        <RemoveBookDialog book={bookRemoval.book} opener={bookRemoval.opener} onDismiss={() => setBookRemoval(undefined)} onRemoved={handleBookRemoved} onNotice={setActionNotice} />
+      )}
+      {railVisible && (
+        <BookRail
+          books={books}
+          bookId={bookId}
+          width={bookWidth}
+          panelRef={booksPanelRef}
+          onSelect={handleSelectBook}
+          onBooksChanged={loadBooks}
+          onRemoveRequest={requestRemoveBook}
+          onNotice={setActionNotice}
+        />
+      )}
+      {!compactBookList && (
+        <ResizeHandle
+          id="contacts-book-resize"
+          direction="horizontal"
+          ariaLabel="Resize contact books"
+          value={bookWidth}
+          min={BOOK_MIN_WIDTH}
+          max={BOOK_MAX_WIDTH}
+          valueUnit="pixels"
+          onResizeStart={startBookResize}
+          onResize={resizeBook}
+          onResizeTo={sizeBook}
+          onResizeEnd={endBookResize}
+          onDoubleClick={toggleBookCollapsed}
+          collapsed={railVisible ? undefined : "before"}
+          collapsible={{ side: "before", restoreValue: bookWidth }}
+        />
+      )}
 
       <section id="contacts-center-pane" {...(detailOverlay ? { inert: true } : {})}>
-        {compactBookList && books.length > 0 && (
-          <select
-            id="contacts-mobile-book-selector"
-            aria-label="Contact book"
-            value={bookId}
-            onChange={e => handleSelectBook(e.target.value)}
-          >
-            {books.map(item => (
-              <option key={item.id} value={item.id}>{`${bookLabel(item)}, ${bookStateText(item)}${item.lookupExcluded ? ", hidden from names" : ""}`}</option>
-            ))}
-          </select>
-        )}
-        {book && (books.length >= 2 || book.lookupExcluded) && (
-          <section id="contacts-book-use" aria-label="Contact book use" aria-busy={bookUseBusy} onKeyDown={event => {
-            if (confirmBookUse && event.key === "Escape") { event.preventDefault(); cancelBookUse(); }
-          }}>
-            <div id="contacts-book-use-title"><span>{book.deviceName}</span>{bookSuffix(book) && <span className="contacts-book-id">{bookSuffix(book)}</span>}</div>
-            <label className="contacts-book-use-row" htmlFor="contacts-book-use-switch">
-              <span>Use for names and recipient search</span>
-              <span className="settings-switch"><input ref={bookUseSwitchRef} id="contacts-book-use-switch" data-action="toggle-book-use" type="checkbox" role="switch" aria-describedby="contacts-book-use-hint" checked={!book.lookupExcluded} disabled={bookUseBusy} onChange={event => {
-                if (!event.target.checked && books.filter(item => !item.lookupExcluded).length === 1) setConfirmBookUse(true);
-                else void saveBookUse(book, event.target.checked);
-              }} /><span aria-hidden="true" /></span>
-            </label>
-            <p id="contacts-book-use-hint">This computer only. Contacts stay here to browse.</p>
-            {confirmBookUse && <div id="contacts-book-use-confirm" role="group" aria-label="Confirm turning off the last contact book">
-              <p>No contact book will be used for names or recipient search. Conversations will show phone numbers.</p>
-              <button type="button" disabled={bookUseBusy} onClick={() => void saveBookUse(book, false)}>Turn off</button>
-              <button ref={bookUseCancelRef} type="button" disabled={bookUseBusy} onClick={cancelBookUse}>Cancel</button>
-            </div>}
-          </section>
-        )}
-        {!detailOverlay && unsavedBanner}
-        {sync?.readiness && (sync.readiness.state !== "ready" || !sync.readiness.server_active) && (
-          <p id="contacts-readiness-status" role="status" data-banner-state={sync.readiness.state}>
-            {sync.readiness.state === "server_unsupported" ? "Contact changes need a server that supports contact sync." : sync.readiness.state === "needs_unlock" ? "Contact changes are paused until all required keys are unlocked." : sync.readiness.state === "backfill_pending" ? "Contact changes are preparing historical records." : "Contact sync is ready."}
-            {sync.readiness.backfill_unreadable > 0 && " Some historical records remain unreadable."}
-            {!sync.readiness.server_active && " History retention is paused until every device is ready."}
-          </p>
-        )}
-        {contactsRepairState && (
-          <p id="contacts-sync-status" role="status" data-sync-state={contactsRepairState}>
-            {contactsSyncText}
-          </p>
+        <ContactsActionNotice notice={actionNotice} onDismiss={() => setActionNotice(undefined)} />
+        <ContactListHeader books={books} bookId={bookId} booksLoaded={booksLoaded} railVisible={railVisible} loaded={contacts.length} loadingMore={pages.loadingMore} onSelectBook={handleSelectBook}>
+          {headerActions}
+        </ContactListHeader>
+        {!railVisible && book && (books.length >= 2 || book.lookupExcluded) && (
+          <BookLookupStrip book={book} books={books} onBooksChanged={loadBooks} onNotice={setActionNotice} />
         )}
         {!detailOverlay && !restore && noticeBanner}
-        {!detailOverlay && !restore && errorBanner}
         {!detailOverlay && targetStatus}
         {!detailOverlay && targetLoadingStatus}
-        {headerHost ? createPortal(headerActions, headerHost) : <header id="contacts-center-toolbar">{headerActions}</header>}
-        {syncDisabledReason && <p id="contacts-sync-unavailable" role="status">{syncDisabledReason}</p>}
-        {scanStatus && <p id="contacts-scan-status" role="status" data-scan-state={scanStatus.state}>
-          {scanStatus.state === "completed" && completedScanText
-            ? completedScanText
-            : scanStatusText(scanStatus)}
-        </p>}
+        <ContactsStatus strips={statusStrips} />
 
         {restore ? (
-          <Restore
+          <RestorePanel
             list={restore.items}
             canRestore={Boolean(books.find(candidate => candidate.id === restore.bookId)?.capabilities.canRestore)}
             notice={noticeBanner}
@@ -1088,7 +1045,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
                 } else {
                   setRestore(current => current ? { ...current, items: current.items.filter(item => item.id !== value.id) } : null);
                   if (outcome.state === "pending") setNotice(<span>Restore of <IsolatedText text={value.displayName} /> sent. Waiting for the phone.</span>);
-                  loadPage(false);
+                  pages.refresh();
                 }
               } catch (e) {
                 setError(contactErrorText(e));
@@ -1096,59 +1053,22 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
             }}
           />
         ) : (
-          <ul id="contacts-list" aria-busy={loading}>
-            {contacts.map(contact => (
-              <li key={contact.id}>
-                <button
-                  data-contact-id={contact.id}
-                  className="contacts-row"
-                  aria-label={[contact.displayName, contact.phones[0]?.number && formatPhoneNumber(contact.phones[0].number), contact.pendingEditState && editStateLabel(contact.pendingEditState)].filter(Boolean).join(", ")}
-                  aria-current={selected?.id === contact.id ? "location" : undefined}
-                  onClick={() => handleSelectContact(contact)}
-                >
-                  <ContactAvatar
-                    seed={contactSeed(contact.phones, contact.id)}
-                    name={contact.displayName}
-                    photoDataUrl={contact.photoDataUrl}
-                  />
-                  <span className="contacts-row-copy">
-                    <b>{contact.displayName}</b>
-                    <small>{contact.phones[0]?.number ? formatPhoneNumber(contact.phones[0].number) : ""}</small>
-                  </span>
-                  {contact.pendingEditState && (
-                    <span
-                      className="contacts-row-state-badge"
-                      data-state={contact.pendingEditState}
-                    >
-                      <span className="sr-only">{editStateLabel(contact.pendingEditState)}</span>
-                    </span>
-                  )}
-                </button>
-              </li>
-            ))}
-            {!loading && !contacts.length && (
-              <li id="contacts-empty-state" data-empty-reason={contactsRepairState === "failed" || contactsRepairState === "repairWaiting" ? "failed" : "none"}>{offset ? "No more contacts" : contactsRepairState === "failed" || contactsRepairState === "repairWaiting" ? "Contacts couldn't be loaded yet." : "No contacts in this book"}</li>
-            )}
-          </ul>
-        )}
-        {!restore && (offset > 0 || contacts.length >= CONTACTS_PAGE_SIZE) && (
-          <nav id="contacts-pager" aria-label="Contact pages">
-            <button
-              data-action="contacts-previous-page"
-              disabled={offset === 0 || loading}
-              onClick={() => { cancelTargetLookup(); setOffset(current => Math.max(0, current - CONTACTS_PAGE_SIZE)); }}
-            >
-              Previous
-            </button>
-            <span>{`${offset + 1}–${offset + contacts.length}`}</span>
-            <button
-              data-action="contacts-next-page"
-              disabled={contacts.length < CONTACTS_PAGE_SIZE || loading}
-              onClick={() => { cancelTargetLookup(); setOffset(current => current + CONTACTS_PAGE_SIZE); }}
-            >
-              Next
-            </button>
-          </nav>
+          <ContactList
+            contacts={contacts}
+            loading={pages.loading || !booksLoaded}
+            loadingMore={pages.loadingMore}
+            loadMoreError={pages.loadMoreError}
+            hasMore={pages.hasMore}
+            contactCount={book?.contactCount}
+            deviceName={book?.deviceName}
+            canWrite={Boolean(book?.capabilities.canWrite)}
+            emptyFailed={contactsRepairState === "failed" || contactsRepairState === "repairWaiting"}
+            nameFormat={nameFormat}
+            selectedId={selected?.id}
+            onSelect={handleSelectContact}
+            onLoadMore={pages.loadMore}
+            onRetryLoadMore={pages.retryLoadMore}
+          />
         )}
       </section>
 
@@ -1186,222 +1106,24 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
               />
             ) : (
               selected && (
-                <Detail
+                <ContactDetail
+                  key={selected.id}
                   contact={selected}
                   canWrite={Boolean(book?.capabilities.canWrite)}
+                  nameFormat={nameFormat}
+                  book={books.find(candidate => candidate.id === selected.bookId)}
+                  photoLocked={toneDisabled || sync?.readiness?.state === "needs_unlock"}
+                  onPhotoSubmitted={() => pages.refresh()}
                   confirm={confirmDelete}
                   onEdit={() => handleEditStart(selected)}
                   onDelete={handleDelete}
                   onCancelConfirm={handleCancelConfirm}
+                  onClose={handleDetailBack}
                 />
               )
             )}
           </aside>
         </>
-      )}
-    </section>
-  );
-}
-
-function Detail({
-  contact,
-  canWrite,
-  confirm,
-  onEdit,
-  onDelete,
-  onCancelConfirm,
-}: {
-  contact: ContactView;
-  canWrite: boolean;
-  confirm: boolean;
-  onEdit(): void;
-  onDelete(): void;
-  onCancelConfirm(): void;
-}) {
-  const stableKeys = <T extends { id?: string }>(items: T[], fallback: (item: T) => string) => {
-    const occurrences = new Map<string, number>();
-    return items.map(item => {
-      if (item.id) return item.id;
-      const base = fallback(item);
-      const occurrence = occurrences.get(base) ?? 0;
-      occurrences.set(base, occurrence + 1);
-      return `${base}:duplicate-${occurrence}`;
-    });
-  };
-  const phoneKeys = stableKeys(contact.phones, phone => `${phone.label}-${phone.number}`);
-  const emailKeys = stableKeys(contact.emails, email => email.address);
-  const addressKeys = stableKeys(contact.addresses, address => `${address.label ?? ""}-${address.street ?? ""}-${address.city ?? ""}`);
-  return (
-    <>
-      {contact.pendingEditState && (
-        <section data-contact-banner={contact.pendingEditState} role="status">
-          {contact.pendingEditSummary ?? "Change"} — {editStateLabel(contact.pendingEditState)}
-        </section>
-      )}
-      <header id="contacts-detail-header">
-        <ContactAvatar
-          seed={contactSeed(contact.phones, contact.id)}
-          name={contact.displayName}
-          photoDataUrl={contact.photoDataUrl}
-          size={64}
-        />
-        <div>
-          <h1>{contact.displayName}</h1>
-          <small>{[contact.organization, contact.title].filter(Boolean).join(" · ")}</small>
-        </div>
-        {canWrite && (
-          <div>
-            <button
-              data-action="edit-contact"
-              aria-label="Edit contact"
-              onClick={onEdit}
-            >
-              Edit
-            </button>
-            <button
-              data-action="delete-contact"
-              data-confirm-delete={confirm ? "pending" : undefined}
-              aria-label={confirm ? "Confirm delete" : "Delete contact"}
-              onKeyDown={e => { if (e.key === "Escape" && confirm) { e.preventDefault(); onCancelConfirm(); } }}
-              onBlur={confirm ? onCancelConfirm : undefined}
-              onClick={onDelete}
-            >
-              {confirm ? "Confirm delete" : "Delete"}
-            </button>
-          </div>
-        )}
-      </header>
-      {contact.phones.length > 0 && (
-        <section data-contact-section="phones">
-          <h3>Phone numbers</h3>
-          {contact.phones.map((phone, position) => (
-            <p key={phoneKeys[position]}>
-              {phone.displayLabel ?? phone.label} · {formatPhoneNumber(phone.number)}
-            </p>
-          ))}
-        </section>
-      )}
-      {contact.emails.length > 0 && (
-        <section data-contact-section="emails">
-          <h3>Email</h3>
-          {contact.emails.map((email, position) => (
-            <p key={emailKeys[position]}>
-              {email.displayLabel ?? email.label} · {email.address}
-            </p>
-          ))}
-        </section>
-      )}
-      {contact.addresses.length > 0 && (
-        <section data-contact-section="addresses">
-          <h3>Addresses</h3>
-          {contact.addresses.map((addr, position) => (
-            <p key={addressKeys[position]}>
-              {addr.displayLabel ?? addr.label} · {[addr.street, addr.city, addr.state, addr.postalCode, addr.country]
-                .filter(Boolean)
-                .join(", ")}
-            </p>
-          ))}
-        </section>
-      )}
-      {contact.organization && (
-        <section data-contact-section="organization">
-          <h3>Organization</h3>
-          <p>{contact.organization}</p>
-        </section>
-      )}
-      {contact.title && (
-        <section data-contact-section="title">
-          <h3>Title</h3>
-          <p>{contact.title}</p>
-        </section>
-      )}
-      {contact.birthday && (
-        <section data-contact-section="birthday">
-          <h3>Birthday</h3>
-          <p>
-            {contact.birthday.month}/{contact.birthday.day}
-            {contact.birthday.year && `/${contact.birthday.year}`}
-          </p>
-        </section>
-      )}
-      {contact.notes && (
-        <section data-contact-section="notes">
-          <h3>Notes</h3>
-          <p>{contact.notes}</p>
-        </section>
-      )}
-    </>
-  );
-}
-
-function Restore({
-  list,
-  canRestore,
-  notice,
-  error,
-  onClose,
-  onRestore,
-}: {
-  list: RestorableContact[];
-  onClose(): void;
-  canRestore: boolean;
-  notice: ReactNode;
-  error: ReactNode;
-  onRestore(item: RestorableContact): void;
-}) {
-  const closeRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => { closeRef.current?.focus(); }, []);
-
-  return (
-    <section
-      id="contacts-restore-panel"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Recently deleted contacts"
-    >
-      <header>
-        <button
-          ref={closeRef}
-          data-action="close-restore"
-          aria-label="Close recently deleted"
-          onClick={onClose}
-        >
-          ←
-        </button>
-        <h2>Recently deleted</h2>
-      </header>
-      {notice}
-      {error}
-      {list.length ? (
-        <ul id="contacts-restore-list">
-          {list.map(item => (
-            <li key={item.id} data-contact-id={item.id}>
-              <ContactAvatar
-                seed={contactSeed(undefined, item.id)}
-                name={item.displayName}
-                photoDataUrl={item.photoDataUrl}
-              />
-              <span>
-                {item.displayName}
-                <small>Deleted {item.deletedAt}</small>
-              </span>
-              {canRestore && (
-                <button
-                  data-action="restore-contact"
-                  aria-label={`Restore ${item.displayName}`}
-                  onClick={() => onRestore(item)}
-                >
-                  Restore
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p id="contacts-restore-empty">No contacts deleted in the past 90 days.</p>
-      )}
-      {list.length > 0 && !canRestore && (
-        <p id="contacts-restore-owner-only">This book doesn't accept changes from this computer, so deleted contacts can't be restored from here.</p>
       )}
     </section>
   );

@@ -1,0 +1,224 @@
+/* Contact detail panel: aside, header row with the close button, and the compact (<=560px) overlay. */
+#contacts-detail-panel {
+  width: var(--contacts-detail-width, 320px);
+  flex: 0 0 var(--contacts-detail-width, 320px);
+  overflow: auto;
+  background: var(--peppy-surface-panel);
+  display: flex;
+  flex-direction: column;
+}
+
+#contacts-detail-resize { flex: 0 0 auto; }
+#contacts-detail-resize::after { opacity: 1; background: var(--peppy-border); }
+#contacts-detail-resize:hover::after,
+#contacts-detail-resize:active::after,
+#contacts-detail-resize:focus-visible::after { background: var(--peppy-accent); }
+
+#contacts-detail-header {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 12px;
+  background: var(--peppy-surface-panel);
+  border-bottom: 1px solid var(--peppy-border);
+  flex-shrink: 0;
+}
+
+#contacts-detail-header > div:nth-child(2) {
+  flex: 1;
+}
+
+#contacts-detail-header h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+#contacts-detail-header small {
+  display: block;
+  font-size: 11px;
+  color: var(--peppy-text-secondary);
+  margin-top: 2px;
+}
+
+#contacts-detail-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+#contacts-detail-header button {
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid var(--peppy-border);
+  border-radius: 4px;
+  background: var(--peppy-surface-input);
+  color: var(--peppy-text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#contacts-detail-header button:hover {
+  background: var(--peppy-surface-hover);
+}
+
+#contacts-detail-header button[data-action="delete-contact"][data-confirm-delete] {
+  background: var(--peppy-error-surface);
+  color: var(--peppy-error-text);
+  border-color: var(--peppy-error);
+}
+
+#contacts-detail-header > #contacts-detail-close {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#contacts-detail-back {
+  display: none;
+}
+
+@media (max-width: 560px) {
+  #contacts-detail-resize { display: none; }
+  #contacts-detail-panel {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    width: 100%;
+    flex-basis: 100%;
+  }
+  #contacts-detail-back {
+    display: inline-block;
+    align-self: flex-start;
+    margin: 8px 12px 0;
+    padding: 4px 8px;
+    font-size: 12px;
+    border: 1px solid var(--peppy-border);
+    border-radius: 4px;
+    background: var(--peppy-surface-input);
+    color: var(--peppy-text-primary);
+    cursor: pointer;
+  }
+}
+
+/* Photo pencil: the 64px avatar is a button with a 20px badge. Its outline mirrors the photo edit state. */
+.contacts-detail-photo {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+#contacts-detail-header #contacts-detail-photo {
+  position: relative;
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+  white-space: normal;
+}
+
+#contacts-detail-header #contacts-detail-photo:hover {
+  background: transparent;
+  box-shadow: 0 0 0 2px var(--peppy-focus-ring-alpha);
+}
+
+#contacts-detail-header #contacts-detail-photo:focus-visible {
+  outline-offset: 2px;
+}
+
+#contacts-detail-header #contacts-detail-photo[aria-disabled="true"] {
+  cursor: default;
+}
+
+#contacts-detail-header #contacts-detail-photo[aria-busy="true"] {
+  cursor: progress;
+}
+
+#contacts-detail-header #contacts-detail-photo[data-photo-state="pending"] {
+  outline: 2px dashed var(--peppy-warning-text);
+  outline-offset: 2px;
+}
+
+#contacts-detail-header #contacts-detail-photo[data-photo-state="error"] {
+  outline: 2px solid var(--peppy-error-text);
+  outline-offset: 2px;
+}
+
+.contacts-detail-photo-badge {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--peppy-surface-widget);
+  border: 1px solid var(--peppy-border-strong);
+  color: var(--peppy-text-secondary);
+  pointer-events: none;
+}
+
+#contacts-detail-photo[data-photo-state="pending"] .contacts-detail-photo-badge {
+  color: var(--peppy-warning-text);
+}
+
+#contacts-detail-photo[data-photo-state="error"] .contacts-detail-photo-badge {
+  color: var(--peppy-error-text);
+}
+
+#contacts-detail-header #contacts-detail-photo-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 4;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  padding: 4px;
+  background: var(--peppy-surface-widget);
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: 6px;
+}
+
+#contacts-detail-header #contacts-detail-photo-menu [role="menuitem"] {
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--peppy-text-primary);
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#contacts-detail-header #contacts-detail-photo-menu [role="menuitem"]:hover,
+#contacts-detail-header #contacts-detail-photo-menu [role="menuitem"]:focus-visible {
+  background: var(--peppy-surface-hover);
+}
+
+#contacts-detail-photo-error {
+  margin: 8px 12px 0;
+  font-size: 12px;
+  color: var(--peppy-error-text);
+}
+
+[data-contact-banner] button {
+  margin-left: 8px;
+  padding: 2px 8px;
+  font-size: 12px;
+  border: 1px solid var(--peppy-border);
+  border-radius: 4px;
+  background: var(--peppy-surface-input);
+  color: var(--peppy-text-primary);
+  cursor: pointer;
+}

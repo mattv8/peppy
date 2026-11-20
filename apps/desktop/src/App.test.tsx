@@ -4874,6 +4874,33 @@ describe("composer window", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
     expect(screen.queryByRole("tablist", { name: "Conversation views" })).not.toBeInTheDocument();
+    expect(document.getElementById("thread-pane-header")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
+  });
+
+  it("toggles and persists contact books from the titlebar", async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Contacts" }));
+    expect(document.getElementById("thread-pane-header")).not.toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: "Toggle contact books" });
+    expect(toggle).toHaveAttribute("aria-controls", "contacts-book-list");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(document.getElementById("contacts-book-list")).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(document.getElementById("contacts-book-list")).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!)).toMatchObject({ contactsBookCollapsed: true });
+  });
+
+  it("keeps the conversation toggle on compact contacts", async () => {
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+      matches: query === "(max-width: 700px)",
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Contacts" }));
+    expect(screen.getByRole("button", { name: "Toggle conversation list" })).toHaveAttribute("aria-controls", "thread-list");
   });
 
   it("omits conversation tabs when no conversation is open", async () => {

@@ -161,7 +161,7 @@ import { DETACHED_HISTORY_LIMIT, boundedAroundMessages, mergeDetachedMessages, s
 
 import { GatewayPicker } from "./setup/GatewayPicker";
 import { installHostedSessionRenewal } from "./bridge/hostedSessionRenewal";
-import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readComposerAttachmentLayout, readGroupSenderAvatars, readShareTyping } from "./shell/layout-persistence";
+import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps, readComposerAttachmentLayout, readContactsBookCollapsed, readGroupSenderAvatars, readShareTyping } from "./shell/layout-persistence";
 import { MmsGroupBadge, RcsBadge } from "./rcs/RcsBadge";
 import { ConversationRcsNotice } from "./rcs/ConversationRcsNotice";
 import { RcsMessageMeta } from "./rcs/RcsMessageMeta";
@@ -1933,6 +1933,7 @@ function SettingsView({
 
   return (
     <section id="settings-view" aria-label="Settings" role="region">
+      <h1 className="visually-hidden">Settings</h1>
       <div id="settings-layout">
       <nav id="settings-navigation" aria-label="Settings categories">
         <label className="settings-category-selector">
@@ -2518,7 +2519,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     "conversations",
   );
   const [contactTarget, setContactTarget] = useState<(ContactTarget & { requestId: number })>();
-  const [contactsHeaderHost, setContactsHeaderHost] = useState<HTMLDivElement | null>(null);
+  const [contactsBookCollapsed, setContactsBookCollapsed] = useState(readContactsBookCollapsed);
+  const [compactContacts, setCompactContacts] = useState(() => window.matchMedia?.("(max-width: 700px)").matches ?? false);
+  useEffect(() => {
+    const media = window.matchMedia?.("(max-width: 700px)");
+    if (!media) return;
+    const update = () => setCompactContacts(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
   const contactTargetRequestId = useRef(0);
   const contactNavigation = useRef<ContactNavigationGuard | null>(null);
   const notificationNavigationEpoch = useRef(0);
@@ -6386,9 +6396,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         platform={platform}
         nativeWindowControls={!browserHost && platform === "macos"}
         search={<OmniSearch onSearch={searchLocal} onActivate={activateSearchHit} resolveContactNumbers={resolveOmniContactNumbers} onStartConversation={startOmniConversation} sessionKey={searchSessionKey} disabled={searchDisabled} refreshKey={mediaStateHint} historySearch={historyControls.historySearch} onSearchFurtherBack={historyControls.onSearchFurtherBack} onCancelHistorySearch={historyControls.onCancelHistorySearch} onOpenChange={setHistorySearchVisible} scope={notificationSearchScope} notificationResults={notificationSearchScope ? undefined : notificationResults} />}
-        onToggleSidebar={toggleConversationList}
-        sidebarExpanded={narrowConversationListMode ? showingMobileConversationList : activeView === "conversations" && !listCollapsed}
-        sidebarControls="thread-list"
+        onToggleSidebar={activeView === "contacts" && !compactContacts ? () => {
+          const collapsed = !contactsBookCollapsed;
+          setContactsBookCollapsed(collapsed);
+          persistLayoutPatch({ contactsBookCollapsed: collapsed });
+        } : toggleConversationList}
+        sidebarExpanded={activeView === "contacts" && !compactContacts ? !contactsBookCollapsed : narrowConversationListMode ? showingMobileConversationList : activeView === "conversations" && !listCollapsed}
+        sidebarControls={activeView === "contacts" && !compactContacts ? "contacts-book-list" : "thread-list"}
+        sidebarLabel={activeView === "contacts" && !compactContacts ? "Toggle contact books" : undefined}
         onNewMessage={startTitlebarMessage}
         newMessageDisabled={loading || snapshot?.encryption.state !== "unlocked" || Boolean(appLock?.locked)}
         actions={snapshot && enrolled && !showSetup ? <>
@@ -6565,26 +6580,19 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           data-mobile-list={showingMobileConversationList || undefined}
           ref={paneRef}
         >
-          {!notificationsOpen && <header id="thread-pane-header">
-            {!settingsOpen && !contactsOpen && activeDisplay && (
+          {activeView === "conversations" && <header id="thread-pane-header">
+            {activeDisplay && (
               <TonePicker id="thread-tone-picker" seed={activeDisplay.avatar.seed} value={toneOverrides[activeDisplay.avatar.seed]} automaticIndex={paletteIndex(activeDisplay.avatar.seed)} disabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pending={Boolean(pendingToneSeeds[activeDisplay.avatar.seed])} error={toneErrors[activeDisplay.avatar.seed]} onSelect={(index) => { void saveTone(activeDisplay.avatar.seed, index); }} renderTrigger={(props) => <button {...props} id="thread-contact-avatar" aria-label="Change conversation color"><ContactAvatar {...activeDisplay.avatar} toneOverrides={toneOverrides} size={36} /></button>} />
             )}
             <div className="header-copy">
-              {settingsOpen ? (
-                <h1 data-header-title>Settings</h1>
-              ) : contactsOpen ? (
-                <h1 data-header-title>Contacts</h1>
-              ) : (
-                <div className="header-copy-details">
-                  <div data-header-title-row><b data-header-title title={title}>{revoked ? "Set up Peppy" : title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>{!revoked && !headPanel && rcsRoute.current && <RcsBadge encryptionReported={active?.rcsEncryption === true} paused={active?.group?.state === "paused"} />}{!revoked && !headPanel && active?.group && !rcsRoute.current && active.group.state !== "withdrawn" && <MmsGroupBadge />}</div>
-                  {active?.group
-                    ? <small data-conversation-participants>{groupSubtitle({ name: active.group.name, memberNames: groupMembers(active).map((part) => displayAddressName(part, resolution)) })}</small>
-                    : participantsLine && participantsLine !== title && <small data-conversation-participants>{participantsLine}</small>}
-                </div>
-              )}
+              <div className="header-copy-details">
+                <div data-header-title-row><b data-header-title title={title}>{revoked ? "Set up Peppy" : title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>{!revoked && !headPanel && rcsRoute.current && <RcsBadge encryptionReported={active?.rcsEncryption === true} paused={active?.group?.state === "paused"} />}{!revoked && !headPanel && active?.group && !rcsRoute.current && active.group.state !== "withdrawn" && <MmsGroupBadge />}</div>
+                {active?.group
+                  ? <small data-conversation-participants>{groupSubtitle({ name: active.group.name, memberNames: groupMembers(active).map((part) => displayAddressName(part, resolution)) })}</small>
+                  : participantsLine && participantsLine !== title && <small data-conversation-participants>{participantsLine}</small>}
+              </div>
             </div>
-            {contactsOpen && <div id="contacts-header-slot" className="header-actions" ref={setContactsHeaderHost} />}
-            <div className="header-actions" hidden={revoked || settingsOpen || contactsOpen}>
+            <div className="header-actions" hidden={revoked}>
               {isGroup && active?.group && !headPanel && <button
                 id="header-group-details"
                 ref={groupDetailsButtonRef}
@@ -6801,7 +6809,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onAppFilter={setNotificationAppFilter}
             />
           ) : contactsOpen ? (
-            <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} toneOverrides={toneOverrides} toneDisabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pendingToneSeeds={pendingToneSeeds} toneErrors={toneErrors} onSelectTone={(seed, index) => { void saveTone(seed, index); }} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} headerHost={contactsHeaderHost} />
+            <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} toneOverrides={toneOverrides} toneDisabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pendingToneSeeds={pendingToneSeeds} toneErrors={toneErrors} onSelectTone={(seed, index) => { void saveTone(seed, index); }} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} bookCollapsed={contactsBookCollapsed} onBookCollapsedChange={(collapsed) => { setContactsBookCollapsed(collapsed); persistLayoutPatch({ contactsBookCollapsed: collapsed }); }} />
           ) : (
             <>
               {reenrolRequired && !revoked ? (

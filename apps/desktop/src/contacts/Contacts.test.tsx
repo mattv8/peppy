@@ -1,7 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import {
   act,
-  cleanup,
   fireEvent,
   render,
   screen,
@@ -17,182 +16,25 @@ import {
   type ContactView,
   type ContactEditRequestInput,
 } from "../bridge/bridge";
+import {
+  DeferredCropImage,
+  deferred,
+  mockContactAurora,
+  mockContactBook,
+  mockContactRiver,
+  resetContactBridgeMocks,
+  restoreContactDomGlobals,
+} from "./contacts-test-utils";
 
 vi.mock("../bridge/bridge", { spy: true });
 
-const mockContactBook: ContactBookView = {
-  id: "book-pixel8",
-  deviceName: "Pixel 8",
-  state: "active",
-  capabilities: {
-    canWrite: true,
-    canDelete: true,
-    supportsNotes: true,
-    supportsPhoto: true,
-    supportsBirthday: true,
-  },
-  contactCount: 2,
-  defaultAccountLabel: "Google",
-  lastSyncAt: "Just now",
-  pendingEditCount: 0,
-};
-
-const mockContactAurora: ContactView = {
-  id: "contact-aurora",
-  bookId: "book-pixel8",
-  revision: "1",
-  displayName: "Aurora Chen",
-  givenName: "Aurora",
-  familyName: "Chen",
-  phones: [{ label: "mobile", number: "+12025550123" }],
-  emails: [{ label: "work", address: "aurora@example.com" }],
-  addresses: [],
-  organization: "Northstar",
-  title: "Director",
-};
-
-const mockContactRiver: ContactView = {
-  id: "contact-river",
-  bookId: "book-pixel8",
-  revision: "1",
-  displayName: "River Park",
-  givenName: "River",
-  familyName: "Park",
-  phones: [{ label: "mobile", number: "+12025550124" }],
-  emails: [],
-  addresses: [],
-};
-
-const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
-const storedPreferences = new Map<string, string>();
-const preferenceStorage = {
-  getItem: (key: string) => storedPreferences.get(key) ?? null,
-  setItem: (key: string, value: string) => storedPreferences.set(key, value),
-  removeItem: (key: string) => storedPreferences.delete(key),
-};
-
-const deferred = <T,>() => {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>(resolvePromise => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-};
-
-class DeferredCropImage {
-  static instances: DeferredCropImage[] = [];
-  public onload: (() => void) | null = null;
-  public onerror: (() => void) | null = null;
-  public set src(_value: string) { DeferredCropImage.instances.push(this); }
-}
-
 describe("ContactsView", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-    vi.stubGlobal("localStorage", preferenceStorage);
-    storedPreferences.clear();
-    localStorage.removeItem("peppy.contacts.sort.v1");
-    localStorage.removeItem("peppy.layout.v1");
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: vi.fn(),
-    });
-    vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook]);
-    vi.mocked(bridge.list_contacts).mockResolvedValue([
-      mockContactAurora,
-      mockContactRiver,
-    ]);
-    vi.mocked(bridge.forget_contact_book).mockResolvedValue(undefined);
-    vi.mocked(bridge.list_restorable_contacts).mockResolvedValue([]);
+    resetContactBridgeMocks();
   });
 
   afterEach(() => {
-    cleanup();
-    vi.unstubAllGlobals();
-    if (originalScrollIntoView) {
-      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScrollIntoView);
-    } else {
-      delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
-    }
-  });
-
-  it("hides the book-use strip for one included book", async () => {
-    render(<ContactsView />);
-    await screen.findByRole("button", { name: /Pixel 8/ });
-    expect(document.getElementById("contacts-book-use")).not.toBeInTheDocument();
-  });
-
-  it("hides a book from lookup and offers undo", async () => {
-    let books = [mockContactBook, { ...mockContactBook, id: "book-other", deviceName: "Other" }];
-    vi.mocked(bridge.list_contact_books).mockImplementation(async () => books);
-    vi.mocked(bridge.set_contact_book_lookup).mockImplementation(async (id, enabled) => {
-      books = books.map(item => item.id === id ? { ...item, lookupExcluded: !enabled } : item);
-    });
-    render(<ContactsView />);
-    fireEvent.click(await screen.findByRole("switch", { name: "Use for names and recipient search" }));
-    await waitFor(() => expect(bridge.set_contact_book_lookup).toHaveBeenCalledWith("book-pixel8", false));
-    expect(await screen.findByText(/Names and recipient search no longer use/)).toBeInTheDocument();
-    await waitFor(() => expect(document.querySelector('[data-book-id="book-pixel8"]')).toHaveAttribute("data-book-use", "excluded"));
-    expect(screen.getByText("Hidden from names")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
-    await waitFor(() => expect(bridge.set_contact_book_lookup).toHaveBeenCalledWith("book-pixel8", true));
-  });
-
-  it("confirms before hiding the last included book and restores focus on cancel or Escape", async () => {
-    vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, { ...mockContactBook, id: "book-other", deviceName: "Other", lookupExcluded: true }]);
-    render(<ContactsView />);
-    const toggle = () => screen.getByRole("switch");
-    await screen.findByRole("switch");
-    await screen.findByText("Aurora Chen");
-    toggle().focus();
-    expect(toggle()).toHaveFocus();
-    fireEvent.click(toggle());
-    expect(bridge.set_contact_book_lookup).not.toHaveBeenCalled();
-    expect(screen.getByRole("group", { name: "Confirm turning off the last contact book" })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus());
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(toggle()).toBeChecked();
-    await waitFor(() => expect(toggle()).toHaveFocus());
-    fireEvent.click(toggle());
-    await waitFor(() => expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus());
-    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
-    await waitFor(() => expect(toggle()).toHaveFocus());
-    expect(document.getElementById("contacts-book-use-confirm")).not.toBeInTheDocument();
-    expect(bridge.set_contact_book_lookup).not.toHaveBeenCalled();
-    fireEvent.click(toggle());
-    vi.mocked(bridge.set_contact_book_lookup).mockResolvedValue(undefined);
-    fireEvent.click(screen.getByRole("button", { name: "Turn off" }));
-    await waitFor(() => expect(bridge.set_contact_book_lookup).toHaveBeenCalledWith("book-pixel8", false));
-    await waitFor(() => expect(toggle()).toHaveFocus());
-  });
-
-  it("reports a lookup save failure without changing the switch", async () => {
-    vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, { ...mockContactBook, id: "book-other", deviceName: "Other" }]);
-    vi.mocked(bridge.set_contact_book_lookup).mockRejectedValueOnce(new Error("failed"));
-    render(<ContactsView />);
-    const toggle = await screen.findByRole("switch");
-    fireEvent.click(toggle);
-    expect(await screen.findByText("Couldn't save this change. Try again.")).toBeInTheDocument();
-    expect(toggle).toBeChecked();
-  });
-
-  it("distinguishes books with duplicate device names", async () => {
-    vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, { ...mockContactBook, id: "book-1234" }]);
-    render(<ContactsView />);
-    await screen.findByRole("switch");
-    expect(document.querySelector('[data-book-id="book-pixel8"]')).toHaveTextContent("ID xel8");
-    expect(document.querySelector('[data-book-id="book-1234"]')).toHaveTextContent("ID 1234");
-    expect(document.getElementById("contacts-book-use-title")).toHaveTextContent("ID xel8");
-  });
-
-  it("labels hidden books in the compact selector", async () => {
-    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
-      matches: query === "(max-width: 700px)", media: query,
-      addEventListener: vi.fn(), removeEventListener: vi.fn(),
-    })));
-    vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, { ...mockContactBook, id: "book-1234", lookupExcluded: true }]);
-    render(<ContactsView />);
-    expect(await screen.findByRole("option", { name: "Pixel 8, ID 1234, Active, hidden from names" })).toBeInTheDocument();
+    restoreContactDomGlobals();
   });
 
   it("requests a fresh scan for the selected capable book", async () => {
@@ -287,7 +129,7 @@ describe("ContactsView", () => {
   it("explains why limited and unready books cannot request a scan", async () => {
     let resolveBooks!: (books: ContactBookView[]) => void;
     vi.mocked(bridge.list_contact_books).mockImplementation(() => new Promise(resolve => { resolveBooks = resolve; }));
-    render(<ContactsView sync={{ repairRequired: false, readiness: { state: "backfill_pending", contacts_ready: false, server_active: true, backfill_unreadable: 0 } }} />);
+    render(<ContactsView />);
     const syncButton = await screen.findByRole("button", { name: "Sync now" });
     resolveBooks([{ ...mockContactBook, state: "limited", capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
     expect(await screen.findByText("This phone has limited contact access and cannot complete an authoritative scan.")).toBeInTheDocument();
@@ -320,7 +162,7 @@ describe("ContactsView", () => {
   it("shows retention paused even while contact production is ready", async () => {
     const readiness = { state: "ready" as const, contacts_ready: true, server_active: false, backfill_unreadable: 0 };
     const { container, rerender } = render(<ContactsView sync={{ repairRequired: false, readiness }} />);
-    await screen.findByText("Pixel 8");
+    await screen.findAllByText("Pixel 8");
     expect(container.querySelector("#contacts-readiness-status")).toHaveAttribute("role", "status");
     rerender(<ContactsView sync={{ repairRequired: false, readiness: { ...readiness, server_active: true } }} />);
     expect(container.querySelector("#contacts-readiness-status")).toBeNull();
@@ -375,7 +217,7 @@ describe("ContactsView", () => {
       fireEvent.click(screen.getByRole("button", { name: "Back" }));
       fireEvent.click(screen.getByRole("button", { name: "Discard" }));
       expect(container.querySelector("#contacts-detail-panel")).toBeNull();
-      await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: /Aurora Chen/ })));
+      await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: /^Aurora Chen,/ })));
     } finally {
       window.matchMedia = originalMatchMedia;
     }
@@ -464,7 +306,7 @@ describe("ContactsView", () => {
       render(<ContactsView />);
 
       await waitFor(() => {
-        expect(screen.getByText("Pixel 8")).toBeInTheDocument();
+        expect(screen.getByRole("heading", { level: 2, name: "Pixel 8" })).toBeInTheDocument();
       });
     });
 
@@ -494,7 +336,7 @@ describe("ContactsView", () => {
         expect(screen.getByText("Aurora Chen")).toBeInTheDocument();
       });
 
-      const auroraButton = screen.getByRole("button", { name: /Aurora Chen/ });
+      const auroraButton = screen.getByRole("button", { name: /^Aurora Chen,/ });
       fireEvent.click(auroraButton);
 
       await waitFor(() => {
@@ -587,7 +429,7 @@ describe("ContactsView", () => {
 
     it("calls submit_contact_edit with create kind", async () => {
       render(<ContactsView />);
-      await screen.findByText("Pixel 8");
+      await screen.findAllByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -610,7 +452,7 @@ describe("ContactsView", () => {
 
     it("includes changed fields in patches", async () => {
       render(<ContactsView />);
-      await screen.findByText("Pixel 8");
+      await screen.findAllByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -633,7 +475,7 @@ describe("ContactsView", () => {
 
     it("disables save when name is empty", async () => {
       render(<ContactsView />);
-      await screen.findByText("Pixel 8");
+      await screen.findAllByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -654,7 +496,7 @@ describe("ContactsView", () => {
         expect(screen.getByText("Aurora Chen")).toBeInTheDocument();
       });
 
-      const auroraButton = screen.getByRole("button", { name: /Aurora Chen/ });
+      const auroraButton = screen.getByRole("button", { name: /^Aurora Chen,/ });
       fireEvent.click(auroraButton);
 
       fireEvent.click(screen.getByLabelText("Edit contact"));
@@ -671,7 +513,7 @@ describe("ContactsView", () => {
         expect(screen.getByText("Aurora Chen")).toBeInTheDocument();
       });
 
-      const auroraButton = screen.getByRole("button", { name: /Aurora Chen/ });
+      const auroraButton = screen.getByRole("button", { name: /^Aurora Chen,/ });
       fireEvent.click(auroraButton);
 
       fireEvent.click(screen.getByLabelText("Edit contact"));
@@ -698,7 +540,7 @@ describe("ContactsView", () => {
         expect(screen.getByText("Aurora Chen")).toBeInTheDocument();
       });
 
-      const auroraButton = screen.getByRole("button", { name: /Aurora Chen/ });
+      const auroraButton = screen.getByRole("button", { name: /^Aurora Chen,/ });
       fireEvent.click(auroraButton);
 
       fireEvent.click(screen.getByLabelText("Edit contact"));
@@ -725,7 +567,7 @@ describe("ContactsView", () => {
       render(<ContactsView />);
 
       await waitFor(() => {
-        const auroraButton = screen.getByRole("button", { name: /Aurora Chen/ });
+        const auroraButton = screen.getByRole("button", { name: /^Aurora Chen,/ });
         fireEvent.click(auroraButton);
       });
 
@@ -754,7 +596,7 @@ describe("ContactsView", () => {
         expect(screen.getByText("Aurora Chen")).toBeInTheDocument();
       });
 
-      const auroraButton = screen.getByRole("button", { name: /Aurora Chen/ });
+      const auroraButton = screen.getByRole("button", { name: /^Aurora Chen,/ });
       fireEvent.click(auroraButton);
 
       const deleteButton = screen.getByLabelText("Delete contact");
@@ -798,7 +640,7 @@ describe("ContactsView", () => {
         expect(screen.getByText("Aurora Chen")).toBeInTheDocument();
       });
 
-      const auroraButton = screen.getByRole("button", { name: /Aurora Chen/ });
+      const auroraButton = screen.getByRole("button", { name: /^Aurora Chen,/ });
       fireEvent.click(auroraButton);
 
       const deleteButton = screen.getByLabelText("Delete contact");
@@ -815,7 +657,7 @@ describe("ContactsView", () => {
   describe("phone management", () => {
     it("adds phone numbers in create form", async () => {
       render(<ContactsView />);
-      await screen.findByText("Pixel 8");
+      await screen.findAllByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -835,7 +677,7 @@ describe("ContactsView", () => {
 
     it("removes phone numbers", async () => {
       render(<ContactsView />);
-      await screen.findByText("Pixel 8");
+      await screen.findAllByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -871,7 +713,7 @@ describe("ContactsView", () => {
       render(<ContactsView />);
 
       // Wait for books to load so book is set before handleSave runs
-      await screen.findByText("Pixel 8", {}, { timeout: 3000 });
+      await screen.findAllByText("Pixel 8", {}, { timeout: 3000 });
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -896,7 +738,7 @@ describe("ContactsView", () => {
       render(<ContactsView />);
 
       // Wait for books to load so book is set before handleSave runs
-      await screen.findByText("Pixel 8", {}, { timeout: 3000 });
+      await screen.findAllByText("Pixel 8", {}, { timeout: 3000 });
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -916,7 +758,7 @@ describe("ContactsView", () => {
   describe("state management", () => {
     it("closes editor on cancel", async () => {
       render(<ContactsView />);
-      await screen.findByText("Pixel 8");
+      await screen.findAllByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -937,7 +779,7 @@ describe("ContactsView", () => {
       vi.mocked(bridge.submit_contact_edit).mockResolvedValue({ state: "pending", requestId: "new-contact" });
 
       render(<ContactsView />);
-      await screen.findByText("Pixel 8");
+      await screen.findAllByText("Pixel 8");
       expect(bridge.list_contacts).toHaveBeenCalledTimes(1);
 
       fireEvent.click(screen.getByLabelText("New contact"));
@@ -957,13 +799,13 @@ describe("ContactsView", () => {
   describe("accessibility behaviors", () => {
     it("supports menu radio keyboard navigation, selection, and dismissal", async () => {
       render(<ContactsView />);
-      const trigger = await screen.findByRole("button", { name: /Sort:/ });
+      const trigger = await screen.findByRole("button", { name: /^View options/ });
       fireEvent.keyDown(trigger, { key: "ArrowDown" });
       const menu = await screen.findByRole("menu", { name: "Sort contacts" });
       const lastName = screen.getByRole("menuitemradio", { name: "Last name" });
       await waitFor(() => expect(document.activeElement).toBe(lastName));
       fireEvent.keyDown(menu, { key: "End" });
-      expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Descending" }));
+      expect(document.activeElement).toBe(document.getElementById("contacts-name-format-last-first"));
       fireEvent.keyDown(menu, { key: "Home" });
       expect(document.activeElement).toBe(lastName);
       fireEvent.keyDown(menu, { key: "ArrowDown" });
@@ -972,7 +814,8 @@ describe("ContactsView", () => {
       expect(JSON.parse(localStorage.getItem("peppy.contacts.sort.v1")!)).toEqual({ key: "given", direction: "asc" });
       expect(screen.queryByRole("menu", { name: "Sort contacts" })).not.toBeInTheDocument();
       await waitFor(() => expect(document.activeElement).toBe(trigger));
-      expect(trigger).toHaveAttribute("title", "Sort: First name, ascending");
+      expect(trigger).toHaveAttribute("title", "View options");
+      expect(trigger).toHaveAccessibleName("View options. Sorted by first name, ascending. Names shown as first name then last name.");
 
       fireEvent.click(trigger);
       fireEvent.keyDown(screen.getByRole("menu", { name: "Sort contacts" }), { key: "Tab" });
@@ -985,29 +828,20 @@ describe("ContactsView", () => {
       expect(document.activeElement).toBe(trigger);
     });
 
-    it("renders header actions in the supplied host on the first Contacts mount", async () => {
-      function ContactsWithHeaderHost() {
-        const [host, setHost] = useState<HTMLDivElement | null>(null);
-        return <><div id="contacts-header-slot" ref={setHost} /><ContactsView headerHost={host} /></>;
-      }
-      render(<ContactsWithHeaderHost />);
-      const host = document.getElementById("contacts-header-slot")!;
-      expect(await screen.findByRole("button", { name: "New contact" })).toBe(host.querySelector("button[data-action='create-contact']"));
+    it("renders the list actions inside the list header on the first Contacts mount", async () => {
+      render(<ContactsView />);
+      const header = document.getElementById("contacts-list-header")!;
+      expect(await screen.findByRole("button", { name: "New contact" })).toBe(header.querySelector("button[data-action='create-contact']"));
+      expect(header.querySelector("#contacts-header-actions")).toHaveAttribute("role", "toolbar");
     });
 
-    it("portals the sort menu outside an overflow-clipped header", async () => {
-      function ContactsWithClippedHeader() {
-        const [host, setHost] = useState<HTMLDivElement | null>(null);
-        return <div id="desktop-shell" className="theme-dark"><header id="thread-pane-header"><div id="contacts-header-slot" ref={setHost} /></header><ContactsView headerHost={host} /></div>;
-      }
-      render(<ContactsWithClippedHeader />);
-      const header = document.getElementById("thread-pane-header")!;
-      header.scrollTop = 0;
-      fireEvent.click(await screen.findByRole("button", { name: /Sort:/ }));
+    it("portals the sort menu into the desktop shell outside the list header", async () => {
+      const { container } = render(<div id="desktop-shell" className="theme-dark"><ContactsView /></div>);
+      const header = container.querySelector<HTMLElement>("#contacts-list-header")!;
+      fireEvent.click(await screen.findByRole("button", { name: /^View options/ }));
       const menu = await screen.findByRole("menu", { name: "Sort contacts" });
       expect(menu.parentElement).toBe(document.getElementById("desktop-shell"));
       expect(header).not.toContainElement(menu);
-      expect(header.scrollTop).toBe(0);
     });
 
     it("sanitizes stored sort preferences before forwarding them to the bridge", async () => {
@@ -1058,7 +892,7 @@ describe("ContactsView", () => {
       render(<ContactsView />);
 
       await waitFor(() => {
-        const btn = screen.getByRole("button", { name: /Aurora Chen/ });
+        const btn = screen.getByRole("button", { name: /^Aurora Chen,/ });
         // aria-label must include national-formatted phone, not raw E.164
         expect(btn).toHaveAttribute("aria-label", expect.stringContaining("(202) 555-0123"));
         expect(btn).toHaveAttribute("aria-label", expect.stringContaining("Aurora Chen"));
@@ -1067,7 +901,7 @@ describe("ContactsView", () => {
 
     it("form inputs have labels that activate focus via htmlFor", async () => {
       render(<ContactsView />);
-      await screen.findByText("Pixel 8");
+      await screen.findAllByText("Pixel 8");
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -1092,7 +926,7 @@ describe("ContactsView", () => {
         expect(screen.getByText("Aurora Chen")).toBeInTheDocument();
       });
 
-      const auroraButton = screen.getByRole("button", { name: /Aurora Chen/ });
+      const auroraButton = screen.getByRole("button", { name: /^Aurora Chen,/ });
       fireEvent.click(auroraButton);
 
       await waitFor(() => {
@@ -1128,7 +962,7 @@ describe("ContactsView", () => {
         expect(screen.getByText("Aurora Chen")).toBeInTheDocument();
       });
 
-      const auroraButton = screen.getByRole("button", { name: /Aurora Chen/ });
+      const auroraButton = screen.getByRole("button", { name: /^Aurora Chen,/ });
       fireEvent.click(auroraButton);
 
       await waitFor(() => {
@@ -1223,27 +1057,11 @@ describe("ContactsView", () => {
       vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
       vi.mocked(bridge.get_contact_sync_request).mockResolvedValue({ requestId: "scan", bookId: "book-pixel8", state: "waiting" });
       render(<ContactsView />);
-      await screen.findByText("Pixel 8");
+      await screen.findAllByText("Pixel 8");
       await waitFor(() => expect(screen.getByText("Waiting for the phone to scan contacts.")).toBeInTheDocument());
       vi.mocked(bridge.get_contact_sync_request).mockResolvedValue({ requestId: "scan", bookId: "book-pixel8", state: "completed" });
       hint?.();
       expect(await screen.findByText("Scan completed.")).toBeInTheDocument();
-    });
-
-    it("pages beyond 200 contacts with bounded Previous/Next requests", async () => {
-      const page = Array.from({ length: 200 }, (_, index) => ({ ...mockContactRiver, id: `c-${index}`, displayName: `Person ${index}` }));
-      vi.mocked(bridge.list_contacts).mockImplementation(async (_book, _query, offset) =>
-        offset ? [{ ...mockContactRiver, id: "c-200", displayName: "Person 200" }] : page,
-      );
-      render(<ContactsView />);
-      await screen.findByText("Person 0");
-      expect(document.querySelectorAll("#contacts-list > li")).toHaveLength(200);
-      fireEvent.click(screen.getByRole("button", { name: "Next" }));
-      await screen.findByText("Person 200");
-      expect(vi.mocked(bridge.list_contacts)).toHaveBeenLastCalledWith("book-pixel8", "", 200, { key: "family", direction: "asc" });
-      expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
-      fireEvent.click(screen.getByRole("button", { name: "Previous" }));
-      await screen.findByText("Person 0");
     });
 
     it("reports a sent edit as waiting for the phone, never as applied", async () => {
@@ -1280,7 +1098,7 @@ describe("ContactsView", () => {
       const { rerender } = render(<ContactsView sync={{ repairRequired: false, projection: { state: "failed" } }} />);
       expect(await screen.findByText("Contacts couldn't be loaded yet.")).toHaveAttribute("data-empty-reason", "failed");
       rerender(<ContactsView sync={{ repairRequired: true }} />);
-      expect(await screen.findByText("No contacts in this book")).toHaveAttribute("data-empty-reason", "none");
+      expect(await screen.findByText("No contacts in Pixel 8. Add one with New contact.")).toHaveAttribute("data-empty-reason", "none");
       expect(document.querySelector("#contacts-sync-status")).toHaveAttribute("data-sync-state", "needsRepair");
       expect(document.querySelector("#contacts-sync-status")).toHaveTextContent("Contacts need a repair from the server.");
     });
@@ -1328,7 +1146,7 @@ describe("ContactsView", () => {
       const consumed = vi.fn();
       render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-400", requestId: 10 }} onTargetConsumed={consumed} />);
 
-      const selected = await screen.findByRole("button", { name: /Person 400/ });
+      const selected = await screen.findByRole("button", { name: /^Person 400/ });
       await waitFor(() => expect(consumed).toHaveBeenCalledWith(10));
       await waitFor(() => expect(document.activeElement).toBe(selected));
       expect(scrollIntoView).toHaveBeenCalled();
@@ -1522,7 +1340,7 @@ describe("ContactsView", () => {
       rerender(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 60 }} onTargetConsumed={consumed} />);
       expect(await screen.findByText("You have unsaved changes.")).toBeInTheDocument();
 
-      fireEvent.click(screen.getByRole("button", { name: /Sort:/ }));
+      fireEvent.click(screen.getByRole("button", { name: /^View options/ }));
       fireEvent.click(await screen.findByRole("menuitemradio", { name: "First name" }));
       expect(consumed).not.toHaveBeenCalled();
       fireEvent.click(screen.getByRole("button", { name: "Discard" }));
@@ -1540,7 +1358,7 @@ describe("ContactsView", () => {
       vi.mocked(bridge.list_contacts).mockImplementation((_book, _query, _offset, sort) => sort?.key === "given" ? newPage.promise : oldPage.promise);
       render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 61 }} />);
       await screen.findByText(/Finding requested contact/);
-      fireEvent.click(screen.getByRole("button", { name: /Sort:/ }));
+      fireEvent.click(screen.getByRole("button", { name: /^View options/ }));
       fireEvent.click(await screen.findByRole("menuitemradio", { name: "First name" }));
       await waitFor(() => expect(bridge.list_contacts).toHaveBeenCalledWith("book-pixel8", "", 0, { key: "given", direction: "asc" }));
       await act(async () => { oldPage.resolve([mockContactRiver]); });
@@ -1568,7 +1386,7 @@ describe("ContactsView", () => {
       vi.mocked(bridge.list_contacts).mockImplementation(() => new Promise(resolve => { resolvers.push(resolve); }));
       const consumed = vi.fn();
       const { rerender } = render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-aurora", requestId: 13 }} onTargetConsumed={consumed} />);
-      await screen.findByText("Pixel 8");
+      await screen.findAllByText("Pixel 8");
       await screen.findByText(/Finding requested contact/);
       rerender(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 14 }} onTargetConsumed={consumed} />);
       await waitFor(() => expect(resolvers).toHaveLength(3));
@@ -1585,7 +1403,7 @@ describe("ContactsView", () => {
       vi.mocked(bridge.list_contacts).mockImplementation(() => new Promise(resolve => { resolveLookup = resolve; }));
       const consumed = vi.fn();
       const view = render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-aurora", requestId: 15 }} onTargetConsumed={consumed} />);
-      await screen.findByText("Pixel 8");
+      await screen.findAllByText("Pixel 8");
       await screen.findByText(/Finding requested contact/);
       view.unmount();
       resolveLookup([mockContactAurora]);
@@ -1594,7 +1412,17 @@ describe("ContactsView", () => {
     });
 
     it("returns to the first page when a removed current book falls back", async () => {
-      const secondBook = { ...mockContactBook, id: "book-iphone", deviceName: "iPhone" };
+      const observers: IntersectionObserverCallback[] = [];
+      vi.stubGlobal("IntersectionObserver", class {
+        constructor(callback: IntersectionObserverCallback) { observers.push(callback); }
+        observe() {}
+        disconnect() {}
+      });
+      const revealSentinel = async () => {
+        await act(async () => undefined);
+        act(() => observers[observers.length - 1]?.([{ isIntersecting: true }] as IntersectionObserverEntry[], {} as IntersectionObserver));
+      };
+      const secondBook = { ...mockContactBook, id: "book-iphone", deviceName: "iPhone", contactCount: 401 };
       let hint: (() => void) | undefined;
       let books = [mockContactBook, secondBook];
       vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
@@ -1609,9 +1437,9 @@ describe("ContactsView", () => {
       render(<ContactsView />);
       fireEvent.click(await screen.findByRole("button", { name: /iPhone/ }));
       await screen.findByText("iPhone 0");
-      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+      await revealSentinel();
       await screen.findByText("iPhone 200");
-      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+      await revealSentinel();
       await screen.findByText("iPhone 400");
 
       books = [mockContactBook];
@@ -1706,7 +1534,7 @@ describe("ContactsView", () => {
       rerender(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-aurora", requestId: 46 }} onTargetConsumed={consumed} />);
 
       expect(await screen.findByRole("heading", { name: "Aurora Chen" })).toBeInTheDocument();
-      const targetedRow = screen.getByRole("button", { name: /Aurora Chen/ });
+      const targetedRow = screen.getByRole("button", { name: /^Aurora Chen/ });
       await waitFor(() => expect(document.activeElement).toBe(targetedRow));
       expect(consumed).toHaveBeenCalledWith(46);
     });
@@ -1797,7 +1625,7 @@ describe("ContactsView", () => {
 
       books = [secondBook];
       act(() => hint?.());
-      await waitFor(() => expect(screen.queryByText("Pixel 8")).not.toBeInTheDocument());
+      await waitFor(() => expect(screen.queryAllByText("Pixel 8")).toHaveLength(0));
       pageTwo.resolve(firstPage);
 
       await waitFor(() => expect(consumed).toHaveBeenCalledWith(52));
@@ -1839,7 +1667,7 @@ describe("ContactsView", () => {
       vi.mocked(bridge.list_contacts).mockResolvedValue([quoted, mockContactRiver]);
       render(<ContactsView target={{ bookId: "book-pixel8", contactId: 'contact"quoted', requestId: 55 }} onTargetConsumed={vi.fn()} />);
 
-      const row = await screen.findByRole("button", { name: /Quoted Person/ });
+      const row = await screen.findByRole("button", { name: /^Quoted Person/ });
       await waitFor(() => expect(document.activeElement).toBe(row));
     });
 
