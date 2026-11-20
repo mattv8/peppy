@@ -207,6 +207,7 @@ impl Client {
         request_id: ReactionRequestId,
     ) -> Result<ReactionAttemptDecision, Error> {
         let mut store = self.lock()?;
+        ensure_recovery_complete(&store)?;
         let (conn, ctx) = store.parts();
         let epoch = ctx.active_epoch.ok_or(Error::KeysUnavailable)?;
         let now = notifications::now_ms();
