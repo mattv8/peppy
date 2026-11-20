@@ -42,7 +42,7 @@ cat >/dev/null
 output=''
 connect=false
 max_time=''
-method=GET url='' data=''
+method=GET url='' data='' query=''
 while (( $# )); do
   case "$1" in
     --output) output="$2"; shift 2 ;;
@@ -50,6 +50,7 @@ while (( $# )); do
     --max-time) max_time="$2"; shift 2 ;;
     --request) method="$2"; shift 2 ;;
     --data-binary) data="$2"; shift 2 ;;
+    --data-urlencode) query="$query|$2"; shift 2 ;;
     https://*) url="$1"; shift ;;
     *) shift ;;
   esac
@@ -58,6 +59,38 @@ done
 exec 3>&1
 exec > "$output"
 [[ "$(stat -f %Lp "$API_PRIVATE_KEYS_DIR/AuthKey_TESTKEY.p8" 2>/dev/null || stat -c %a "$API_PRIVATE_KEYS_DIR/AuthKey_TESTKEY.p8")" == 600 ]]
+if [[ "$url" == *betaGroups* || "$url" == *betaAppReviewSubmission* || "$query" == *'filter[betaGroups]'* ]]; then
+  printf '%s %s %s\n' "$method" "$url" "$query" >> "$TEST_DIR/external-calls"
+  case "$url:$method" in
+    */betaGroups:GET)
+      [[ "$query" == *'filter[app]=6835968609'* && "$query" == *'filter[name]=Beta seats'* && "$query" == *'filter[isInternalGroup]=false'* ]]
+      case "${CASE:-}" in
+        group-missing) echo '{"data":[]}' ;;
+        group-duplicate) echo '{"data":[{"id":"group-1"},{"id":"group-2"}]}' ;;
+        *) echo '{"data":[{"id":"group-1"}]}' ;;
+      esac ;;
+    */relationships/builds:POST)
+      [[ "$url" == */betaGroups/group-1/relationships/builds ]]
+      cp "${data#@}" "$TEST_DIR/group-payload"
+      if [[ "${CASE:-}" == group-add-error ]]; then echo 400 >&3; exit 22; fi
+      echo '{}' ;;
+    */builds:GET)
+      [[ "$query" == *'filter[id]=build-1'* && "$query" == *'filter[betaGroups]=group-1'* ]]
+      if [[ "${CASE:-}" == group-existing ]]; then echo '{"data":[{"id":"build-1"}]}'; else echo '{"data":[]}'; fi ;;
+    */betaAppReviewSubmission:GET)
+      case "${CASE:-}" in
+        review-404) echo 404 >&3; exit 22 ;;
+        review-existing) echo '{"data":{"id":"review-1"}}' ;;
+        *) echo '{"data":null}' ;;
+      esac ;;
+    */betaAppReviewSubmissions:POST)
+      cp "${data#@}" "$TEST_DIR/review-payload"
+      if [[ "${CASE:-}" == review-error ]]; then echo 409 >&3; exit 22; fi
+      echo '{}' ;;
+    *) echo 'unexpected external request' >&2; exit 1 ;;
+  esac
+  echo 200 >&3; exit
+fi
 if [[ "$url" == *betaBuildLocalizations* ]]; then
   if [[ "${CASE:-}" == processing ]]; then
     [[ "$(cat "$TEST_DIR/count")" -ge 2 ]] || { echo 'localization requested before VALID' >&2; exit 1; }
@@ -108,6 +141,14 @@ printf '%s\n' "$@" > "$TEST_DIR/upload-args"
 EOF
 chmod +x "$tmp/bin/curl" "$tmp/bin/xcrun"
 bash "$upload" "$tmp/app.pkg" 1.2.3 1002003
+[[ -f "$tmp/group-payload" && -f "$tmp/review-payload" ]] || { echo 'external distribution missing' >&2; exit 1; }
+python3 - "$tmp/group-payload" "$tmp/review-payload" <<'PY'
+import json, pathlib, sys
+group, review = [json.loads(pathlib.Path(path).read_text()) for path in sys.argv[1:]]
+build = {"type": "builds", "id": "build-1"}
+assert group == {"data": [build]}
+assert review == {"data": {"type": "betaAppReviewSubmissions", "relationships": {"build": {"data": build}}}}
+PY
 [[ -f "$tmp/upload-args" && ! -e "$tmp/runner/private_keys/AuthKey_TESTKEY.p8" ]]
 [[ -f "$tmp/localization-post" ]] || { echo 'VALID build must create TestFlight localization' >&2; exit 1; }
 python3 - "$tmp/localization-post" "$root/packaging/macos/app-store/what-to-test.txt" <<'PY'
@@ -117,9 +158,25 @@ assert data["type"] == "betaBuildLocalizations"
 assert data["attributes"] == {"locale": "en-US", "whatsNew": pathlib.Path(sys.argv[2]).read_text()}
 assert data["relationships"]["build"]["data"] == {"type": "builds", "id": "build-1"}
 PY
-rm "$tmp/upload-args" "$tmp/count"
+rm "$tmp/upload-args" "$tmp/count" "$tmp/group-payload" "$tmp/review-payload"
 EXISTING=true bash "$upload" "$tmp/app.pkg" 1.2.3 1002003
 [[ ! -e "$tmp/upload-args" && ! -e "$tmp/runner/private_keys/AuthKey_TESTKEY.p8" ]]
+[[ -e "$tmp/group-payload" && -e "$tmp/review-payload" ]] || { echo 're-run skipped external distribution' >&2; exit 1; }
+for scenario in group-missing group-duplicate group-existing review-404 review-existing review-error group-add-error; do
+  rm -f "$tmp/count" "$tmp/external-calls" "$tmp/group-payload" "$tmp/review-payload"
+  if CASE="$scenario" EXISTING=true bash "$upload" "$tmp/app.pkg" 1.2.3 1002003 >"$tmp/result" 2>&1; then
+    case "$scenario" in group-duplicate|group-add-error) echo "accepted $scenario" >&2; exit 1 ;; esac
+  else
+    case "$scenario" in group-duplicate|group-add-error) continue ;; *) cat "$tmp/result"; exit 1 ;; esac
+  fi
+  case "$scenario" in
+    group-missing) grep -q '::warning::' "$tmp/result"; [[ ! -e "$tmp/group-payload" && ! -e "$tmp/review-payload" ]] ;;
+    group-existing) [[ ! -e "$tmp/group-payload" && -e "$tmp/review-payload" ]] ;;
+    review-404) [[ -e "$tmp/review-payload" ]] ;;
+    review-existing) [[ ! -e "$tmp/review-payload" ]] ;;
+    review-error) grep -q '::warning::' "$tmp/result"; [[ -e "$tmp/review-payload" ]] ;;
+  esac
+done
 rm "$tmp/count"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/sleep"
 chmod +x "$tmp/bin/sleep"
