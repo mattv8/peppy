@@ -3,7 +3,10 @@ FROM ubuntu@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33
 ARG DEV_UID=1000
 ARG DEV_GID=1000
 ARG ANDROID_CMDLINE_TOOLS_VERSION=11076708
+ARG ANDROID_CMDLINE_TOOLS_SHA256=2d2d50857e4eb553af5a6dc3ad507a17adf43d115264b1afc116f95c92e5e258
 ARG RUST_VERSION=1.98.1
+ARG RUSTUP_VERSION=1.29.3
+ARG RUSTUP_INIT_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
 ENV DEBIAN_FRONTEND=noninteractive \
     ANDROID_SDK_ROOT=/opt/android-sdk \
     ANDROID_HOME=/opt/android-sdk \
@@ -20,6 +23,7 @@ RUN test "$DEV_UID" != 0 && test "$DEV_GID" != 0 \
  && (getent passwd "$DEV_UID" >/dev/null || useradd --uid "$DEV_UID" --gid "$DEV_GID" --home-dir "$HOME" --no-create-home --shell /bin/bash peppy) \
  && mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools" "$HOME/.cargo" "$HOME/.rustup" "$HOME/.gradle" "$HOME/.android" /workspace/target /artifacts \
  && curl --fail --location --retry 3 "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" -o /tmp/tools.zip \
+ && echo "${ANDROID_CMDLINE_TOOLS_SHA256}  /tmp/tools.zip" | sha256sum -c - \
  && unzip -q /tmp/tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools" \
  && mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest" \
  && rm /tmp/tools.zip \
@@ -27,8 +31,11 @@ RUN test "$DEV_UID" != 0 && test "$DEV_GID" != 0 \
 
 ENV PATH=/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/emulator:/home/peppy/.cargo/bin:$PATH
 USER ${DEV_UID}:${DEV_GID}
-RUN curl --fail --location --retry 3 https://sh.rustup.rs -o /tmp/rustup.sh \
- && sh /tmp/rustup.sh -y --default-toolchain "$RUST_VERSION" --profile minimal \
+RUN curl --fail --location --retry 3 "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" -o /tmp/rustup-init \
+ && echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c - \
+ && chmod +x /tmp/rustup-init \
+ && /tmp/rustup-init -y --default-toolchain "$RUST_VERSION" --profile minimal \
+ && rm -f /tmp/rustup-init \
  && rustup target add aarch64-linux-android x86_64-linux-android
 
 # Licenses are intentionally not accepted while building the image.  Set
