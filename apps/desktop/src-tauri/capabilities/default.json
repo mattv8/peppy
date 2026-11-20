@@ -81,6 +81,7 @@
     "allow-list-contacts",
     "allow-list-contacts-page",
     "allow-forget-contact-book",
+    "allow-delete-contact-book",
     "allow-set-contact-book-lookup",
     "allow-list-contact-name-candidates",
     "allow-set-contact-name-pin",

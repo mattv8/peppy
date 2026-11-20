@@ -159,6 +159,30 @@ pub fn forget_book(session: &Session, book_id: &str) -> BridgeResult<()> {
     Ok(())
 }
 
+/// Deletion is queued locally and may be uploaded after reconnecting.
+pub fn delete_book(session: &Session, book_id: &str) -> BridgeResult<Value> {
+    if !valid_id(book_id) {
+        return Err(invalid("The contact book is invalid."));
+    }
+    let input = json!({"book_id": book_id, "revoked_device_ids": session.revoked_devices()});
+    let raw = session
+        .client
+        .delete_contact_book(&input.to_string())
+        .map_err(peppy_desktop_api::contact_error::delete_book_error)
+        .map_err(BridgeError::from)?;
+    let result: Value = serde_json::from_str(&raw).map_err(|_| BridgeError::host_state())?;
+    let id = result
+        .get("book_id")
+        .and_then(Value::as_str)
+        .ok_or_else(BridgeError::host_state)?;
+    let contacts = result
+        .get("contacts")
+        .and_then(Value::as_u64)
+        .ok_or_else(BridgeError::host_state)?;
+    session.notify();
+    Ok(json!({"bookId": id, "contacts": contacts}))
+}
+
 pub fn set_book_lookup(session: &Session, book_id: &str, enabled: bool) -> BridgeResult<()> {
     if !shared::name_lookup_id(book_id) {
         return Err(invalid("The contact book is invalid."));

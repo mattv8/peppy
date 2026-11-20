@@ -3623,6 +3623,16 @@ async fn forget_contact_book(state: State<'_, AppState>, book_id: String) -> Bri
 }
 
 #[tauri::command]
+async fn delete_contact_book(
+    state: State<'_, AppState>,
+    book_id: String,
+) -> BridgeResult<serde_json::Value> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    blocking(move || contacts::delete_book(&session, &book_id)).await
+}
+
+#[tauri::command]
 async fn set_contact_book_lookup(
     state: State<'_, AppState>,
     book_id: String,
@@ -7380,6 +7390,7 @@ pub fn run() {
         list_contacts,
         list_contacts_page,
         forget_contact_book,
+        delete_contact_book,
         set_contact_book_lookup,
         list_contact_name_candidates,
         set_contact_name_pin,

@@ -594,6 +594,7 @@ export class BrowserBridge implements DesktopBridge {
   }
   public list_contact_books(): Promise<ContactBookView[]> { return this.call("list_contact_books"); }
   public forget_contact_book(bookId: string): Promise<void> { return this.call("forget_contact_book", { bookId }); }
+  public delete_contact_book(bookId: string): Promise<{ bookId: string; contacts: number }> { return this.call("delete_contact_book", { bookId }); }
   public set_contact_book_lookup(bookId: string, enabled: boolean): Promise<void> { return this.call("set_contact_book_lookup", { bookId, enabled }); }
   public list_contact_name_candidates(address: string, sourceDeviceId?: string): Promise<ContactNameCandidates> { return this.call("list_contact_name_candidates", { address, sourceDeviceId }); }
   public set_contact_name_pin(address: string, bookId: string, contactId: string, sourceDeviceId?: string): Promise<void> { return this.call("set_contact_name_pin", { address, sourceDeviceId, bookId, contactId }); }

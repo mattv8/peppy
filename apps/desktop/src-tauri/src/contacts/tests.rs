@@ -22,6 +22,28 @@ use std::{
 const BOOK: &str = "book-1";
 
 #[test]
+fn deleting_removed_book_queues_offline_and_refuses_repeated_or_active_deletion() {
+    let h = Harness::new(json!({"read": true}), "auto");
+    assert_eq!(
+        delete_book(&h.session, BOOK).unwrap_err().code,
+        "contact-book-not-deletable"
+    );
+    h.session.set_status(|status| {
+        status.revoked_device_ids.insert(h.owner_id.clone());
+    });
+    assert_eq!(
+        delete_book(&h.session, BOOK).unwrap(),
+        json!({"bookId": BOOK, "contacts": 1})
+    );
+    assert!(list_books(&h.session).unwrap().is_empty());
+    assert!(!h.session.client.pending_outbox().unwrap().is_empty());
+    assert_eq!(
+        delete_book(&h.session, BOOK).unwrap_err().code,
+        "contact-book-deleted"
+    );
+}
+
+#[test]
 fn local_name_controls_validate_and_change_lookup() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let mut h = Harness::new(json!({"read": true, "write": true}), "auto");
