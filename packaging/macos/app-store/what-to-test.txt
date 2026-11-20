@@ -1,14 +1,14 @@
-TEST ACCOUNT
-Use a dedicated Peppy Hosted test account without a Stripe or Google Play subscription, complimentary plan, or beta seat. Before purchasing, have the Peppy administrator confirm tester-list membership for the verified email used by Peppy sign-in, including an Apple private-relay address if you chose Hide My Email. TestFlight purchases use Apple's sandbox; Peppy accepts them only for invited testers.
+TEST ACCOUNTS
+Beta seat holders already have Peppy Hosted free: skip purchases. Purchase testing is only for testers asked by the Peppy administrator. Use a separate account on the tester list, without a Stripe or Google Play subscription, complimentary plan, or beta seat. Ask the administrator to confirm the verified email used for Peppy sign-in is on the list, including your Apple private-relay address if you chose Hide My Email. TestFlight purchases use Apple's sandbox.
 
-SIGN-IN AND PLANS
-Test Apple sign-in, then Google sign-in with a separate authorized account. In Hosted setup, check that monthly and yearly plans load their App Store prices, renewal terms, Terms of use and Privacy policy. Cancel one purchase prompt and check that you can try again. Complete a sandbox purchase and confirm that Hosted setup can continue.
+SIGN-IN AND SYNC
+Test Apple sign-in and Google sign-in with separate authorized accounts. Set up a vault and check that changes sync between devices.
 
-RESTORE
-Use the same Peppy account and purchasing Apple Account. On the Hosted subscription screen, select Restore purchases. Check the resulting plan access, not just the completion message. If an active plan takes you past that screen, record that case for a separate restore test. Do not delete account data, reset Keychain items, or cancel unrelated subscriptions to expose the screen.
+PLANS AND RESTORE
+If asked to test purchases, check monthly and yearly App Store prices, renewal terms, Terms of use and Privacy policy. Cancel a purchase prompt and try again, then complete a sandbox purchase. Using the same Peppy account and purchasing Apple Account, select Restore purchases on the Hosted subscription screen and check the resulting plan access. If an active plan skips that screen, report it for a separate restore test. Do not delete account data, reset Keychain items, or cancel unrelated subscriptions.
 
 STORAGE
-With an active Hosted plan and a configured vault, open Settings > Account > Account & billing > Hosted attachment storage > Add more storage. Check all five tiers (+100 to +500 GB), their monthly App Store prices, Choose, and Manage App Store subscriptions. Tiers replace rather than stack; a smaller size takes effect at the next renewal. Test a sandbox storage purchase and tier change; check the allowance after refresh and relaunch, allowing for that downgrade timing.
+With an active Hosted plan and configured vault, open Settings > Account > Account & billing > Hosted attachment storage > Add more storage. Check all five tiers (+100 to +500 GB), prices, Choose, and Manage App Store subscriptions. If asked to test purchases, try a sandbox storage purchase and tier change; check the allowance after refresh and relaunch. Tiers replace rather than stack; a smaller size takes effect at the next renewal.
 
 REPORT
-Send the build number, steps and visible error through TestFlight feedback. Do not include passwords, vault key phrases, purchase receipts or personal conversations. These are acceptance tests to perform, not claims that the flows have passed.
+Send the build number, steps and visible error through TestFlight feedback. Do not include passwords, vault key phrases, purchase receipts or personal conversations. These are checks to perform, not claims that the flows have passed.

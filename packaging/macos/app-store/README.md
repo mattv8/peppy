@@ -28,6 +28,18 @@ and the SHA must already be in production's history. Configure
 `APPLE_ASC_KEY_ID`, `APPLE_ASC_ISSUER_ID`, and `APPLE_ASC_PRIVATE_KEY` (the p8 text) in the
 protected `mac-app-store` environment, alongside the `APPLE_MAS_*` signing secrets.
 
+Once a build is valid and its notes are set, automation also adds it to the external
+`Beta seats` group and submits it for Beta App Review without waiting for approval.
+If submission fails, the workflow warns so it can be submitted manually.
+
+One-time App Store Connect setup:
+
+1. Create an external TestFlight group named exactly `Beta seats`. This name is
+   load-bearing: renaming it causes a warning and stops external distribution.
+2. Complete Test Information, including a review sign-in account.
+3. After the first build is approved, enable the group's public link and optionally
+   set a tester limit. Paste the link into the beta seat admin.
+
 `ITSAppUsesNonExemptEncryption` is false because Peppy uses only encryption exempt from
 export compliance documentation and France is not offered. If France is added again, set it
 to true and add `ITSEncryptionExportComplianceCode`.

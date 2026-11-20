@@ -55,7 +55,7 @@ verified email UTF-8 (1–320 bytes)
 
 `betaPublicKey { handle }` returns the base64url-unpadded public key.
 `betaOpen { handle, programId, seatId, sealedEmail }` returns the plaintext email
-only after the sealed payload authenticates for that context. `betaReseal {
+only after the sealed payload authenticates for that context. Early-access request emails are sealed with `seatId = requestId`; approval copies the sealed box into the seat unchanged. `betaReseal {
 fromHandle, toHandle, programId, seatId, sealedEmail }` opens and reseals for the
 destination public key, returning only base64url-unpadded `sealedEmail`.
 

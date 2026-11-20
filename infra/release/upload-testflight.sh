@@ -35,7 +35,8 @@ deadline=$((SECONDS + deadline_seconds))
 asc_request() {
   # Generate a short-lived token per request; curl reads the authorization header
   # from stdin rather than exposing the token in its process arguments.
-  local token remaining timeout response status code
+  local token remaining timeout response status code allow_404=false
+  if [[ "${1:-}" == --allow-404 ]]; then allow_404=true; shift; fi
   response="$(mktemp "$RUNNER_TEMP/testflight-response.XXXXXX")"
   while (( SECONDS < deadline )); do
     token="$(python3 - "$key" "$APPLE_ASC_KEY_ID" "$APPLE_ASC_ISSUER_ID" <<'PY'
@@ -65,6 +66,11 @@ PY
     code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl --config - --fail-with-body --silent --show-error --globoff \
       --connect-timeout 10 --max-time "$timeout" --output "$response" --write-out '%{http_code}' \
       "$@")" || status=$?
+    if [[ "$allow_404" == true && "$status" == 22 && "$code" == 404 ]]; then
+      rm -f "$response"
+      printf '%s' '{"data":null}'
+      return 0
+    fi
     if (( status == 0 )); then
       cat "$response"
       rm -f "$response"
@@ -84,6 +90,56 @@ PY
   rm -f "$response"
   echo 'Timed out waiting for App Store Connect' >&2
   return 1
+}
+
+distribute_external() {
+  local build_id group_id groups membership submission payload
+  build_id="$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')"
+  [[ "$build_id" =~ ^[A-Za-z0-9-]+$ ]] || { echo 'invalid build ID' >&2; return 1; }
+  groups="$(asc_request --get --data-urlencode 'filter[app]=6835968609' \
+    --data-urlencode 'filter[name]=Beta seats' --data-urlencode 'filter[isInternalGroup]=false' \
+    'https://api.appstoreconnect.apple.com/v1/betaGroups')"
+  group_id="$(printf '%s' "$groups" | python3 -c '
+import json, sys
+result = json.load(sys.stdin)
+data = result["data"]
+if len(data) > 1 or result.get("links", {}).get("next"):
+    sys.exit("Duplicate or paginated Beta seats groups")
+print(data[0]["id"] if data else "")
+')"
+  [[ "$group_id" =~ ^[A-Za-z0-9-]*$ ]] || { echo 'invalid group ID' >&2; return 1; }
+  if [[ -z "$group_id" ]]; then
+    echo '::warning::External TestFlight group Beta seats not found; skipping external distribution'
+    return 0
+  fi
+  membership="$(asc_request --get --data-urlencode "filter[id]=$build_id" \
+    --data-urlencode "filter[betaGroups]=$group_id" 'https://api.appstoreconnect.apple.com/v1/builds')"
+  if [[ "$(printf '%s' "$membership" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["data"]))')" == 0 ]]; then
+    payload="$(mktemp "$RUNNER_TEMP/testflight-payload.XXXXXX")"
+    python3 - "$build_id" > "$payload" <<'PY'
+import json, sys
+json.dump({"data": [{"type": "builds", "id": sys.argv[1]}]}, sys.stdout)
+PY
+    if ! asc_request --request POST --header 'Content-Type: application/json' --data-binary "@$payload" \
+      "https://api.appstoreconnect.apple.com/v1/betaGroups/$group_id/relationships/builds" >/dev/null; then
+      rm -f "$payload"
+      return 1
+    fi
+    rm -f "$payload"
+  fi
+  submission="$(asc_request --allow-404 "https://api.appstoreconnect.apple.com/v1/builds/$build_id/betaAppReviewSubmission")"
+  if [[ "$(printf '%s' "$submission" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"] is None)')" == True ]]; then
+    payload="$(mktemp "$RUNNER_TEMP/testflight-payload.XXXXXX")"
+    python3 - "$build_id" > "$payload" <<'PY'
+import json, sys
+json.dump({"data": {"type": "betaAppReviewSubmissions", "relationships": {"build": {"data": {"type": "builds", "id": sys.argv[1]}}}}}, sys.stdout)
+PY
+    if ! asc_request --request POST --header 'Content-Type: application/json' --data-binary "@$payload" \
+      'https://api.appstoreconnect.apple.com/v1/betaAppReviewSubmissions' >/dev/null; then
+      echo '::warning::Beta App Review submission failed; submit it manually'
+    fi
+    rm -f "$payload"
+  fi
 }
 
 query_build() {
@@ -150,7 +206,7 @@ fi
 
 while (( SECONDS < deadline )); do
   case "$current" in
-    VALID) echo "Build $version ($build) is VALID"; set_notes; exit 0 ;;
+    VALID) echo "Build $version ($build) is VALID"; set_notes; distribute_external; exit 0 ;;
     INVALID|FAILED) echo "Build processing failed: $current" >&2; exit 1 ;;
   esac
   remaining=$((deadline - SECONDS))
