@@ -1,6 +1,7 @@
 //! Native-owned runtime for floating conversation heads.
 use crate::{
     credentials::Binding,
+    diagnostics::{self, head_typing_outcome, EVENT_HEAD_TYPING, FIELD_OUTCOME},
     error::{core_error, BridgeError, BridgeResult},
     heads::{HeadLayout, HeadLayoutStore, Pin, PinStore, MAX_HEADS},
     tray,
@@ -678,9 +679,20 @@ fn schedule_typing_expiry(
             state.heads.contains_key(&conversation_id)
         };
         if has_head {
+            record_head_typing(false);
             push_typing_update(&handle, token, conversation_id);
         }
     });
+}
+
+/// Records a displayed-flag change pushed to a native head (event 33).
+fn record_head_typing(shown: bool) {
+    let outcome = if shown {
+        head_typing_outcome::SHOWN
+    } else {
+        head_typing_outcome::HIDDEN
+    };
+    diagnostics::record(EVENT_HEAD_TYPING, &[(FIELD_OUTCOME, outcome)]);
 }
 
 /// Records raw typing for a conversation, whether or not it has a head, and pushes the displayed
@@ -720,6 +732,8 @@ pub(crate) fn typing_changed(app: &AppHandle, conversation_id: &str, typing: boo
             TypingTransition::Shown | TypingTransition::Hidden
         )
     {
+        let shown = matches!(transition, TypingTransition::Shown);
+        record_head_typing(shown);
         push_typing_update(app, token.clone(), conversation_id.to_owned());
     }
     if let TypingTransition::HideAfter { delay, epoch } = transition {

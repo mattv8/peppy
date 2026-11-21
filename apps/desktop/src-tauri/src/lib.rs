@@ -29,6 +29,7 @@ mod composer_scope;
 mod contacts;
 mod credentials;
 mod devices;
+mod diagnostics;
 mod dialogs;
 mod distribution;
 mod dto;
@@ -6907,6 +6908,7 @@ pub fn run() {
                     .map_err(|_| "could not protect native app data")?;
             }
             live_typing::install_events(app.handle());
+            diagnostics::install(app.handle());
             notification_icon::recover_at_startup(app.handle());
             let handle = app.handle().clone();
             // State hints only; no payload, no focus or window changes.
@@ -7426,6 +7428,10 @@ pub fn run() {
         set_automatic_updates,
         report_update_activity,
         acknowledge_lifecycle,
+        diagnostics::get_diagnostics_state,
+        diagnostics::set_diagnostics_enabled,
+        diagnostics::clear_diagnostics_log,
+        diagnostics::export_diagnostics_log,
         $($extra,)*
     ] };
     }
