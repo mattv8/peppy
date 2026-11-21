@@ -7,6 +7,7 @@ import type {
   ContactNameCandidates, RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, SendResultView, StartHistorySearchInput,
   BillingSummaryView, HostedSignInProvider, PurchaseOptions, StartupStatus, StoreProduct,
   AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder, NotificationPersistence, NotificationPersistenceSettings, PastedImage, ReactionSubmitView,
+  TypingSignal,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { DEFAULT_NOTIFICATION_PERSISTENCE, notificationPersistence } from "@peppy/desktop-ui/bridge-contracts";
 import { MCP_ENABLE_TIMEOUT_MS } from "@peppy/browser-runtime/enrollment-deadlines";
@@ -15,7 +16,7 @@ import { validateAccountUrl } from "./account-navigation";
 import { beginHostedAuthorization, fetchHostedWebConfig } from "./newhosted-app-auth";
 import { appSessionRenewal } from "./app-session-renewal";
 import { inlineMediaType, safeSuggestedFilename } from "./attachment-safety";
-import { groupDraftFields, normalizeGroupSnapshot, normalizeMessageWindow, parseSendResult } from "./group-payload";
+import { groupDraftFields, normalizeGroupSnapshot, normalizeMessageWindow, parseSendResult, parseTypingSignal } from "./group-payload";
 
 /** Runs a bridge call whose input validation may throw, reporting the failure as a rejected promise. */
 function callChecked<T>(call: () => Promise<T>): Promise<T> {
@@ -27,7 +28,7 @@ function callChecked<T>(call: () => Promise<T>): Promise<T> {
 }
 
 type RpcReply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: BridgeError };
-type WorkerEvent = { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason?: string } | { event: "banner"; candidate: { id: string; title: string; body: string; icon?: string } };
+type WorkerEvent = { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason?: string } | { event: "banner"; candidate: { id: string; title: string; body: string; icon?: string } } | { event: "typing"; signal: unknown };
 type PendingRequest = { resolve(value: unknown): void; reject(error: Error): void; timer: number };
 type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_approved" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
 export type EnrollmentView = { mode: "community" | "hosted"; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string; setupCodeRequired?: boolean; vaultOwnerRequired?: boolean; displayName?: string; username?: string };
@@ -354,6 +355,7 @@ export class BrowserBridge implements DesktopBridge {
   private readonly listeners = new Set<() => void>();
   private readonly readyListeners = new Set<() => void>();
   private readonly stoppedListeners = new Set<(reason: string) => void>();
+  private readonly typingListeners = new Set<(signal: TypingSignal) => void>();
   private readonly blobUrls = new Set<string>();
   private readonly mediaBlobUrls = new Map<string, { attachmentId: string; byteSize: number }>();
   private readonly banners = new Set<Notification>();
@@ -401,6 +403,7 @@ export class BrowserBridge implements DesktopBridge {
       }
       else if (message.event === "stopped") this.stop(message.reason ?? "stopped");
       else if (message.event === "banner") this.showBanner(message.candidate);
+      else if (message.event === "typing") this.showTyping(message.signal);
       return;
     }
     if (message.id === -1) return this.stop(message.ok ? "unavailable" : message.error.code);
@@ -429,6 +432,7 @@ export class BrowserBridge implements DesktopBridge {
     document.removeEventListener("visibilitychange", this.flushDraftSyncWhenHidden);
     window.removeEventListener("pagehide", this.flushDraftSync);
     this.stoppedListeners.forEach((listener) => listener(reason));
+    this.typingListeners.clear();
     this.port.close();
   }
 
@@ -496,6 +500,11 @@ export class BrowserBridge implements DesktopBridge {
   }
   private requiresNotificationInteraction(): boolean {
     return this.notificationPersistenceSupported() && this.notificationPersistence().seconds === null;
+  }
+  /** Invalid payloads are dropped; the parser is the trust boundary for worker-supplied signals. */
+  private showTyping(value: unknown): void {
+    const signal = parseTypingSignal(value);
+    if (signal) this.typingListeners.forEach((listener) => listener(signal));
   }
   private showBanner(candidate: { id: string; title: string; body: string; icon?: string }): void {
     if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
@@ -626,6 +635,12 @@ export class BrowserBridge implements DesktopBridge {
   public get_contact_sync_request(bookId: string): Promise<ContactScanStatus | null> { return this.call("get_contact_sync_request", { bookId }); }
   public list_restorable_contacts(bookId: string): Promise<RestorableContact[]> { return this.call("list_restorable_contacts", { bookId }); }
   public restore_contact(bookId: string, contactId: string): Promise<ContactEditOutcome> { return this.call("restore_contact", { bookId, contactId }); }
+  public send_typing(input: { conversationId: string; state: TypingSignal["state"] }): Promise<void> { return this.call("send_typing", input); }
+  public set_typing_sharing(input: { enabled: boolean }): Promise<void> { return this.call("set_typing_sharing", input); }
+  public subscribe_typing(listener: (signal: TypingSignal) => void): (() => void) & { ready?: Promise<void> } {
+    this.typingListeners.add(listener);
+    return Object.assign(() => { this.typingListeners.delete(listener); }, { ready: Promise.resolve() });
+  }
   public subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   public set_maximize_button_region(_region: MaximizeButtonRegion | null): Promise<void> { return Promise.resolve(); }
   public subscribe_maximize_button_hover(_listener: (hovered: boolean) => void): () => void { return () => undefined; }

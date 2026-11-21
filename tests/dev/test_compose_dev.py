@@ -47,7 +47,7 @@ class ComposeDevelopmentTests(unittest.TestCase):
             if key not in {
                 'BIND_ADDR', 'API_HOST_PORT', 'PUBLIC_API_URL', 'WEB_UI_ENABLED', 'DEBUG',
                 'PEPPY_REPLAY_RETENTION_DAYS', 'VAULT_ATTACHMENT_QUOTA_BYTES',
-                'TRUSTED_PROXY_CIDRS',
+                'TRUSTED_PROXY_CIDRS', 'PEPPY_WEB_LIVE_TRUSTED_ORIGIN',
             }
             and not key.startswith('COMPOSE_')
         }

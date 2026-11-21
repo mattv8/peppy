@@ -1261,6 +1261,58 @@ describe("BrowserBridge", () => {
     expect(ready).toHaveBeenCalledTimes(2);
   });
 
+  it("delivers a valid typing event as a parsed signal and drops invalid payloads", () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const listener = vi.fn();
+    const unsubscribe = bridge.subscribe_typing(listener);
+    port.reply({ event: "typing", signal: { conversationId: "conversation-1", state: "started", expiresAtMs: "1000", extra: true } });
+    port.reply({ event: "typing", signal: { conversationId: "conversation-1", state: "paused" } });
+    port.reply({ event: "typing", signal: { conversationId: 7, state: "stopped" } });
+    port.reply({ event: "typing" });
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith({ conversationId: "conversation-1", state: "started", expiresAtMs: "1000" });
+    unsubscribe();
+  });
+
+  it("stops typing delivery after unsubscribe and resolves the typing ready promise", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const listener = vi.fn();
+    const unsubscribe = bridge.subscribe_typing(listener);
+    await expect(unsubscribe.ready).resolves.toBeUndefined();
+    port.reply({ event: "typing", signal: { conversationId: "conversation-1", state: "stopped" } });
+    unsubscribe();
+    port.reply({ event: "typing", signal: { conversationId: "conversation-1", state: "stopped" } });
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it("drops typing events after the bridge stops, even for a listener that was never unsubscribed", () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const listener = vi.fn();
+    bridge.subscribe_typing(listener);
+    port.reply({ event: "typing", signal: { conversationId: "conversation-1", state: "started" } });
+    port.reply({ event: "stopped", reason: "locked" });
+    port.reply({ event: "typing", signal: { conversationId: "conversation-1", state: "stopped" } });
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it("sends the typing and sharing commands with their exact argument shapes", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort, 60_000);
+    const sending = bridge.send_typing({ conversationId: "conversation-1", state: "started" });
+    const sharing = bridge.set_typing_sharing({ enabled: false });
+    expect(port.sent).toEqual([
+      { id: 1, command: "send_typing", args: { conversationId: "conversation-1", state: "started" } },
+      { id: 2, command: "set_typing_sharing", args: { enabled: false } },
+    ]);
+    port.reply({ id: 1, ok: true, value: undefined });
+    port.reply({ id: 2, ok: true, value: undefined });
+    await expect(sending).resolves.toBeUndefined();
+    await expect(sharing).resolves.toBeUndefined();
+  });
+
   it("rejects requests when a worker response times out", async () => {
     vi.useFakeTimers();
     const bridge = new BrowserBridge(new TestPort() as unknown as MessagePort);
