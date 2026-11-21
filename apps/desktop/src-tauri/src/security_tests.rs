@@ -357,6 +357,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     let notification_quick_reply = include_str!("notification_activation/quick_reply.rs");
     let live_typing = include_str!("live_typing.rs");
     let emoji_picker = include_str!("emoji_picker.rs");
+    let diagnostics = include_str!("diagnostics.rs");
     for command in &commands {
         assert!(
             registered.contains(&format!("enrollment::{command},"))
@@ -378,6 +379,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
                     notification_quick_reply,
                     live_typing,
                     emoji_picker,
+                    diagnostics,
                 ]
                 .iter()
                 .any(|source| {

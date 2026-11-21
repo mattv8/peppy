@@ -169,6 +169,10 @@ const COMMANDS: &[&str] = &[
     "defer_update",
     "set_automatic_updates",
     "report_update_activity",
+    "get_diagnostics_state",
+    "set_diagnostics_enabled",
+    "clear_diagnostics_log",
+    "export_diagnostics_log",
 ];
 
 fn main() {

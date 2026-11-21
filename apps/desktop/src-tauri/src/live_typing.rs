@@ -31,6 +31,11 @@ use tokio_tungstenite::{
 };
 
 use crate::{
+    diagnostics::{
+        self, live_socket_reason, typing_inbound_outcome, typing_send_outcome, EVENT_LIVE_SOCKET,
+        EVENT_LIVE_TYPING, EVENT_TYPING_INBOUND, EVENT_TYPING_SEND, FIELD_ATTEMPT, FIELD_COUNT,
+        FIELD_DELAY_MS, FIELD_OUTCOME, FIELD_REASON,
+    },
     error::BridgeResult,
     session::{NetStatus, Session},
     sync::jitter,
@@ -771,6 +776,14 @@ fn emit_events(
         session.cancel.is_cancelled(),
         session.live_typing.mono_ms(),
     );
+    for event in &events {
+        let outcome = if event.state == TypingStateV2::Started {
+            typing_inbound_outcome::DISPLAY_STARTED
+        } else {
+            typing_inbound_outcome::DISPLAY_STOPPED
+        };
+        record_inbound(outcome);
+    }
     let Some(app) = APP_HANDLE.get() else {
         return 0;
     };
@@ -939,8 +952,13 @@ struct TypingActor {
     published: watch::Sender<Published>,
     counts: TypingCounts,
     counts_open: bool,
+    /// Core cause counters at the actor's last read, keyed by cause code. `None` until a read runs
+    /// while diagnostics is on, so the first read after it turns on only sets the baseline.
+    core_counts: Option<HashMap<u16, u64>>,
     #[cfg(test)]
     stopped_emitted_with_counts_open: bool,
+    #[cfg(test)]
+    counter_reads: usize,
 }
 
 #[derive(Default)]
@@ -984,8 +1002,11 @@ impl TypingActor {
             published,
             counts: TypingCounts::default(),
             counts_open: false,
+            core_counts: None,
             #[cfg(test)]
             stopped_emitted_with_counts_open: false,
+            #[cfg(test)]
+            counter_reads: 0,
         }
     }
 
@@ -1100,26 +1121,41 @@ impl TypingActor {
         if self.counts.sealed == sealed_before {
             self.counts.not_sealed += 1;
         }
-        result
+        match result {
+            Ok(()) => {
+                record_send(typing_send_outcome::SEALED);
+                true
+            }
+            Err(refusal) => {
+                record_send(refusal.outcome());
+                false
+            }
+        }
     }
 
-    fn send_typing_inner(&mut self, conversation_id: ConversationId, state: TypingStateV2) -> bool {
+    fn send_typing_inner(
+        &mut self,
+        conversation_id: ConversationId,
+        state: TypingStateV2,
+    ) -> Result<(), SendRefusal> {
         self.reevaluate();
         if state == TypingStateV2::Started && !self.sharing {
-            return false;
+            return Err(SendRefusal::NotSealed);
         }
         let Some(gateway) = self.resolve_target(conversation_id) else {
-            return false;
+            return Err(SendRefusal::NoTarget);
         };
         let clock = self.session.live_typing.clock();
-        match self.session.client.seal_typing_signal_v2(
+        let sealed = self.session.client.seal_typing_signal_v2(
             conversation_id,
             gateway,
             TypingOriginV2::VaultDevice,
             None,
             state,
             clock,
-        ) {
+        );
+        self.record_core_causes();
+        match sealed {
             Ok(Some(outbound)) => {
                 self.counts.sealed += 1;
                 if self.counts.sealed == 1 {
@@ -1128,33 +1164,65 @@ impl TypingActor {
                 let json = serde_json::to_string(&outbound.signal).ok();
                 self.queue(outbound.generation, json, state)
             }
-            Ok(None) | Err(LiveError::Disabled | LiveError::InvalidContext) => false,
             Err(LiveError::Clock) => {
                 self.retire();
-                false
+                Err(SendRefusal::NotSealed)
             }
-            Err(_) => false,
+            Ok(None) | Err(_) => Err(SendRefusal::NotSealed),
         }
     }
 
+    /// Hands a sealed frame to the transmit queue.
     fn queue(
         &self,
         generation: LiveEnableGeneration,
         json: Option<String>,
         state: TypingStateV2,
-    ) -> bool {
+    ) -> Result<(), SendRefusal> {
         if Some(generation) != self.state.generation() {
-            return false;
+            return Err(SendRefusal::NotCurrent);
         }
         let Some(json) = json else {
-            return false;
+            return Err(SendRefusal::NotSealed);
         };
         let mark = SealMark {
             seq: self.enabled_seq,
             sharing_epoch: self.sharing_epoch,
             state,
         };
-        self.sealed.try_send(SealedFrame { json, mark }).is_ok()
+        self.sealed
+            .try_send(SealedFrame { json, mark })
+            .map_err(|_| SendRefusal::TransmitRefused)
+    }
+
+    /// Records each core cause whose counter rose since this actor's last read (event 29).
+    /// Counters move only inside this actor's core calls, each followed by this read, and a
+    /// read while diagnostics is off drops the baseline, so off-period counts are never
+    /// attributed.
+    fn record_core_causes(&mut self) {
+        if !diagnostics::enabled() {
+            self.core_counts = None;
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.counter_reads += 1;
+        }
+        let Ok(counters) = self.session.client.live_typing_counters() else {
+            return;
+        };
+        let previous = self.core_counts.take();
+        let mut current = HashMap::with_capacity(counters.len());
+        for (cause, count) in counters {
+            let code = cause as u16;
+            if let Some(&last) = previous.as_ref().and_then(|counts| counts.get(&code)) {
+                if count > last {
+                    record_core_cause(code, count - last);
+                }
+            }
+            current.insert(code, count);
+        }
+        self.core_counts = Some(current);
     }
 
     fn resolve_target(&self, conversation_id: ConversationId) -> Option<DeviceId> {
@@ -1190,22 +1258,30 @@ impl TypingActor {
         if context == self.state.context {
             return;
         }
+        if context.is_none() {
+            record_socket(live_socket_reason::TYPING_NO_CONTEXT);
+        }
         let previous = self.state.generation();
         if self.apply_context(context).is_err() {
             self.disable_core();
         }
         if self.state.generation() != previous {
+            if self.state.generation().is_some() {
+                record_socket(live_socket_reason::TYPING_ENABLED);
+            }
             self.incarnation_changed();
         }
         self.emit();
     }
 
     fn apply_context(&mut self, context: Option<LiveEnableContext>) -> Result<(), LiveError> {
-        self.state.apply(
+        let applied = self.state.apply(
             &self.session.client,
             context,
             self.session.live_typing.clock(),
-        )?;
+        );
+        self.record_core_causes();
+        applied?;
         if self.state.generation().is_some() {
             self.session.client.set_typing_sharing(self.sharing)?;
         }
@@ -1213,6 +1289,9 @@ impl TypingActor {
     }
 
     fn disable_core(&mut self) {
+        if self.state.generation().is_some() {
+            record_socket(live_socket_reason::TYPING_DISABLED);
+        }
         let _ = self.session.client.disable_live_typing();
         self.state = LiveTypingState::default();
     }
@@ -1275,6 +1354,7 @@ impl TypingActor {
         let suspended = suspend_detected(self.anchor, now);
         self.anchor = now;
         if suspended {
+            record_socket(live_socket_reason::SUSPEND_DETECTED);
             self.retire();
         }
         suspended
@@ -1301,19 +1381,28 @@ impl TypingActor {
         self.counts.inbound += 1;
         self.reevaluate();
         let clock = self.session.live_typing.clock();
-        match self.session.client.open_typing_signal_v2_json(json, clock) {
+        let opened = self.session.client.open_typing_signal_v2_json(json, clock);
+        self.record_core_causes();
+        match opened {
             Ok(outcome) => self.publish_inbound(outcome, clock),
             Err(LiveError::Clock) => {
                 self.retire();
+                record_inbound(typing_inbound_outcome::NOTHING);
                 InboundOutcome::default()
             }
-            Err(_) => InboundOutcome::default(),
+            Err(_) => {
+                record_inbound(typing_inbound_outcome::NOTHING);
+                InboundOutcome::default()
+            }
         }
     }
 
     /// Publication is decided after the core open, so the suspend recheck and retirement order
     /// are the final boundary for this frame.
     fn publish_inbound(&mut self, mut outcome: LiveOutcome, clock: LiveClock) -> InboundOutcome {
+        let produced = outcome.reply.is_some() || outcome.action.is_some();
+        let reply_present = outcome.reply.is_some();
+        let generation = outcome.generation;
         let suspended = self.observe_suspend();
         if suspended || self.session.cancel.is_cancelled() {
             withhold_started(&mut outcome);
@@ -1326,7 +1415,23 @@ impl TypingActor {
         }
         self.inbound.expire(clock.mono_ms);
         self.emit();
-        let (wire, follow_ups, mark) = if !suspended && !self.session.cancel.is_cancelled() {
+        // The final boundary: cancellation is read again here, exactly as before, and the refusal
+        // classification below uses this same reading, so it never disagrees with the wire decision.
+        let send = !suspended && !self.session.cancel.is_cancelled();
+        let refusal = if !produced {
+            Some(typing_inbound_outcome::NOTHING)
+        } else if !send {
+            Some(typing_inbound_outcome::REPLY_REFUSED)
+        } else if frames.is_none() && (reply_present || Some(generation) != self.state.generation())
+        {
+            Some(typing_inbound_outcome::NOT_CURRENT)
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            record_inbound(refusal);
+        }
+        let (wire, follow_ups, mark) = if send {
             match frames {
                 Some(frames) => (
                     Some(frames.reply),
@@ -1647,7 +1752,16 @@ async fn socket_down_and_back_off(
 ) -> bool {
     session.live_typing.set_socket(false);
     let retry_delay = retry.after_connection(connected_for);
-    wait_or_cancel(session, live_backoff_delay(retry_delay), attempted_at).await
+    let delay = live_backoff_delay(retry_delay);
+    diagnostics::record(
+        EVENT_LIVE_SOCKET,
+        &[
+            (FIELD_REASON, live_socket_reason::BACKOFF),
+            (FIELD_DELAY_MS, millis_i64(delay)),
+            (FIELD_ATTEMPT, i64::from(retry.attempt)),
+        ],
+    );
+    wait_or_cancel(session, delay, attempted_at).await
 }
 
 async fn supervise(
@@ -1659,9 +1773,11 @@ async fn supervise(
     let mut probed = false;
     loop {
         let attempted_at = tokio::time::Instant::now();
+        record_socket(live_socket_reason::CONNECTING);
         let mut socket = match connect(&session).await {
             Ok(socket) => socket,
             Err(()) => {
+                record_socket(live_socket_reason::CONNECT_FAILED);
                 if !probed {
                     probed = true;
                     let probe = session.api.get_json::<serde_json::Value>("/v1/live", 1024);
@@ -1679,13 +1795,16 @@ async fn supervise(
             }
         };
         if !server_hello(&mut socket, &session).await {
+            record_socket(live_socket_reason::HELLO_REJECTED);
             drop(socket);
             let _ = send_cmd(&session, Cmd::SocketClosed);
+            record_socket(live_socket_reason::CLOSED);
             if !socket_down_and_back_off(&session, &mut retry, Duration::ZERO, attempted_at).await {
                 return;
             }
             continue;
         }
+        record_socket(live_socket_reason::HELLO_OK);
         probed = false;
         let connected_at = Instant::now();
         let baseline = published.borrow().retirements;
@@ -1693,6 +1812,7 @@ async fn supervise(
         let end = run_socket(&session, &mut sealed, &mut published, baseline, &mut socket).await;
         drop(socket);
         let _ = send_cmd(&session, Cmd::SocketClosed);
+        record_socket(live_socket_reason::CLOSED);
         session.live_typing.set_socket(false);
         if end == SocketEnd::Cancelled
             || !socket_down_and_back_off(&session, &mut retry, connected_at.elapsed(), attempted_at)
@@ -1752,6 +1872,7 @@ async fn run_socket(
                 }
             }
             _ = session.live_context_wake.notified() => {
+                record_socket(live_socket_reason::CONTEXT_WAKE);
                 session.live_typing.request_reevaluate();
             }
             _ = suspend_tick.tick(), if {
@@ -1825,24 +1946,58 @@ where
 {
     if let Some(reply) = outcome.wire {
         if !bounded_send(socket, &session.cancel, Message::Text(reply.into())).await {
+            record_inbound(typing_inbound_outcome::REPLY_REFUSED);
             return Some(SocketEnd::Lost);
         }
+        record_inbound(typing_inbound_outcome::REPLY_SENT);
         if let Some(mark) = outcome.mark {
-            for json in outcome.follow_ups {
-                let mark = SealMark {
-                    state: TypingStateV2::Started,
-                    ..mark
-                };
-                match transmit(session, socket, SealedFrame { json, mark }).await {
-                    Transmit::Sent => {}
-                    Transmit::Dropped => break,
-                    Transmit::Lost => return Some(SocketEnd::Lost),
-                    Transmit::Cancelled => return Some(SocketEnd::Cancelled),
-                }
-            }
+            return send_follow_ups(session, socket, mark, outcome.follow_ups).await;
         }
     }
     None
+}
+
+/// Sends the replay follow-ups that trail a reply and records how many went out.
+async fn send_follow_ups<S>(
+    session: &Session,
+    socket: &mut WebSocketStream<S>,
+    mark: SealMark,
+    follow_ups: Vec<String>,
+) -> Option<SocketEnd>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let attempted = !follow_ups.is_empty();
+    let mut sent = 0;
+    let mut end = None;
+    for json in follow_ups {
+        let mark = SealMark {
+            state: TypingStateV2::Started,
+            ..mark
+        };
+        match transmit(session, socket, SealedFrame { json, mark }).await {
+            Transmit::Sent => sent += 1,
+            Transmit::Dropped => break,
+            Transmit::Lost => {
+                end = Some(SocketEnd::Lost);
+                break;
+            }
+            Transmit::Cancelled => {
+                end = Some(SocketEnd::Cancelled);
+                break;
+            }
+        }
+    }
+    if attempted {
+        diagnostics::record(
+            EVENT_TYPING_INBOUND,
+            &[
+                (FIELD_OUTCOME, typing_inbound_outcome::FOLLOW_UPS_SENT),
+                (FIELD_COUNT, sent),
+            ],
+        );
+    }
+    end
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1864,22 +2019,35 @@ where
         result = timeout(LIVE_IO_TIMEOUT, futures_util::future::poll_fn(|cx| Pin::new(&mut *socket).poll_ready(cx))) => result,
     };
     if !matches!(ready, Ok(Ok(()))) {
+        record_send(typing_send_outcome::TRANSMIT_REFUSED);
         return Transmit::Lost;
     }
     let mark = frame.mark;
     match ask(session, |reply| Cmd::ConfirmTransmit { mark, reply }).await {
         Some(Admission::Transmit) => {}
-        Some(Admission::Rejected) => return Transmit::Dropped,
-        Some(Admission::Suspended) => return Transmit::Lost,
+        Some(Admission::Rejected) => {
+            record_send(typing_send_outcome::NOT_CURRENT);
+            return Transmit::Dropped;
+        }
+        Some(Admission::Suspended) => {
+            record_send(typing_send_outcome::TRANSMIT_REFUSED);
+            return Transmit::Lost;
+        }
         None => return Transmit::Cancelled,
     }
     if Sink::start_send(Pin::new(&mut *socket), Message::Text(frame.json.into())).is_err() {
+        record_send(typing_send_outcome::TRANSMIT_REFUSED);
         return Transmit::Lost;
     }
     tokio::select! {
         _ = session.cancel.cancelled() => Transmit::Cancelled,
         result = timeout(LIVE_IO_TIMEOUT, socket.flush()) => {
-            if matches!(result, Ok(Ok(()))) { Transmit::Sent } else { Transmit::Lost }
+            if matches!(result, Ok(Ok(()))) {
+                Transmit::Sent
+            } else {
+                record_send(typing_send_outcome::TRANSMIT_REFUSED);
+                Transmit::Lost
+            }
         }
     }
 }
@@ -2010,6 +2178,7 @@ where
         _ = session.cancel.cancelled() => false,
         _ = sleep_until(deadline) => true,
         _ = session.live_context_wake.notified() => {
+            record_socket(live_socket_reason::CONTEXT_WAKE);
             tokio::select! {
                 biased;
                 _ = session.cancel.cancelled() => false,
@@ -2025,12 +2194,15 @@ fn live_backoff_delay(backoff: Duration) -> Duration {
 
 struct LiveRetry {
     backoff: Duration,
+    /// Position in the current run of unstable backoffs (0 after a stable connection). Diagnostics only.
+    attempt: u32,
 }
 
 impl Default for LiveRetry {
     fn default() -> Self {
         Self {
             backoff: Duration::from_secs(1),
+            attempt: 0,
         }
     }
 }
@@ -2043,12 +2215,64 @@ impl LiveRetry {
     fn after_connection(&mut self, connected_for: Duration) -> Duration {
         if connected_for >= crate::sync::STABLE_CONNECTION {
             self.backoff = Duration::from_secs(1);
+            self.attempt = 0;
             return self.backoff;
         }
         let retry_delay = self.backoff;
         self.backoff = next_live_backoff(self.backoff, false);
+        self.attempt = self.attempt.saturating_add(1);
         retry_delay
     }
+}
+
+/// Records one live-socket transition (event 30) by its reason.
+fn record_socket(reason: i64) {
+    diagnostics::record(EVENT_LIVE_SOCKET, &[(FIELD_REASON, reason)]);
+}
+
+/// Why a typing send did not queue a frame. Each variant is one `typing_send` outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SendRefusal {
+    NotSealed,
+    NoTarget,
+    NotCurrent,
+    TransmitRefused,
+}
+
+impl SendRefusal {
+    fn outcome(self) -> i64 {
+        match self {
+            Self::NotSealed => typing_send_outcome::NOT_SEALED,
+            Self::NoTarget => typing_send_outcome::NO_TARGET,
+            Self::NotCurrent => typing_send_outcome::NOT_CURRENT,
+            Self::TransmitRefused => typing_send_outcome::TRANSMIT_REFUSED,
+        }
+    }
+}
+
+/// Records one typing send decision (event 31) by its outcome.
+fn record_send(outcome: i64) {
+    diagnostics::record(EVENT_TYPING_SEND, &[(FIELD_OUTCOME, outcome)]);
+}
+
+/// Records one inbound typing decision (event 32) by its outcome.
+fn record_inbound(outcome: i64) {
+    diagnostics::record(EVENT_TYPING_INBOUND, &[(FIELD_OUTCOME, outcome)]);
+}
+
+/// Records a core cause whose counter rose by `delta` since the actor's last read (event 29).
+fn record_core_cause(code: u16, delta: u64) {
+    diagnostics::record(
+        EVENT_LIVE_TYPING,
+        &[
+            (FIELD_REASON, i64::from(code)),
+            (FIELD_COUNT, i64::try_from(delta).unwrap_or(i64::MAX)),
+        ],
+    );
+}
+
+fn millis_i64(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
 fn next_live_backoff(backoff: Duration, stable: bool) -> Duration {
@@ -2351,6 +2575,7 @@ mod tests {
         };
         let mut retry = LiveRetry {
             backoff: Duration::from_secs(30),
+            attempt: 0,
         };
         for (step, delay) in [(0, 30), (1, 60)] {
             let attempt = start + Duration::from_secs(step * 5);
@@ -4263,6 +4488,265 @@ mod tests {
         h.send(Cmd::SocketUp);
         assert!(h.inbound(&seal_started(&peer, conversation)).wire.is_some());
         assert!(h.actor.counts.summary().contains("replies_produced=1"));
+    }
+
+    /// A produced reply that reaches the final boundary cancelled is withheld with its follow-ups
+    /// and classified as `reply_refused`. Cancellation cannot be injected between the two reads in
+    /// `publish_inbound` without a production seam, so this covers the cancelled-at-boundary branch.
+    #[test]
+    fn cancelled_final_boundary_withholds_the_reply_and_records_reply_refused() {
+        let (fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let local = fixture.binding.device_id.parse().unwrap();
+        let peer = peer_sender(&fixture, local, &[conversation]);
+        share_capabilities(&peer, &session.client);
+        let mut h = harness(&session);
+        h.send(Cmd::GatewayRefresh(status_refresh(
+            &session,
+            &[&fixture.binding.device_id, &peer.device.to_string()],
+            true,
+        )));
+        h.send(Cmd::SocketUp);
+        let clock = session.live_typing.clock();
+        let outcome = session
+            .client
+            .open_typing_signal_v2_json(&seal_started(&peer, conversation), clock)
+            .unwrap();
+        assert!(outcome.reply.is_some(), "the start is challenged");
+        session.cancel.cancel();
+        let capture = diagnostics::start_capture();
+        let inbound = h.actor.publish_inbound(outcome, clock);
+        let records = diagnostics::finish_capture(capture);
+        assert!(inbound.wire.is_none());
+        assert!(inbound.follow_ups.is_empty());
+        assert!(inbound.mark.is_none());
+        assert!(recorded(
+            &records,
+            EVENT_TYPING_INBOUND,
+            &[(FIELD_OUTCOME, typing_inbound_outcome::REPLY_REFUSED)],
+        ));
+        assert!(!recorded(
+            &records,
+            EVENT_TYPING_INBOUND,
+            &[(FIELD_OUTCOME, typing_inbound_outcome::REPLY_SENT)],
+        ));
+    }
+
+    /// A receiver with a linked gateway and a peer device that can start and answer typing.
+    fn peer_ready_session(
+        origin: &str,
+    ) -> (
+        crate::tests::Fixture,
+        Arc<Session>,
+        ConversationId,
+        PeerSender,
+    ) {
+        let (fixture, session, conversation) = real_supervisor_session(origin);
+        let local: DeviceId = fixture.binding.device_id.parse().unwrap();
+        let peer = peer_sender(&fixture, local, &[conversation]);
+        share_capabilities(&peer, &session.client);
+        install_gateway(&session, &peer.device.to_string());
+        session.set_status(|status| status.rcs_live_roster.push(peer.device.to_string()));
+        (fixture, session, conversation, peer)
+    }
+
+    /// The peer's challenge to a start the receiver sealed.
+    fn peer_challenge(peer: &PeerSender, start: &str) -> String {
+        let sent_at: i64 = serde_json::from_str::<serde_json::Value>(start).unwrap()["sent_at_ms"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        peer.wall.set(peer.wall.get().max(sent_at));
+        let challenge = peer
+            .client
+            .open_typing_signal_v2_json(start, peer_clock(peer))
+            .unwrap()
+            .reply
+            .expect("peer challenges the start");
+        serde_json::to_string(&challenge).unwrap()
+    }
+
+    /// The peer's answer to a challenge: its acknowledgement and the replayed starts that follow it.
+    fn peer_answer_with_replays(peer: &PeerSender, challenge: &str) -> (String, Vec<String>) {
+        let header: serde_json::Value = serde_json::from_str(challenge).unwrap();
+        let challenge_sent: i64 = header["sent_at_ms"].as_str().unwrap().parse().unwrap();
+        peer.wall.set(peer.wall.get().max(challenge_sent));
+        let outcome = peer
+            .client
+            .open_typing_signal_v2_json(challenge, peer_clock(peer))
+            .unwrap();
+        let ack =
+            serde_json::to_string(&outcome.reply.expect("peer answers the challenge")).unwrap();
+        let replays = outcome
+            .follow_ups
+            .iter()
+            .map(|frame| serde_json::to_string(frame).unwrap())
+            .collect();
+        (ack, replays)
+    }
+
+    /// Whether `records` holds `event` with exactly these fields, in this order.
+    fn recorded(records: &diagnostics::Captured, event: u32, fields: &[(u32, i64)]) -> bool {
+        records
+            .iter()
+            .any(|(seen, seen_fields)| *seen == event && seen_fields == fields)
+    }
+
+    /// Sums the event 29 deltas per cause code.
+    fn core_deltas(records: &diagnostics::Captured) -> HashMap<i64, u64> {
+        let mut deltas = HashMap::new();
+        for (_, fields) in records
+            .iter()
+            .filter(|(event, _)| *event == EVENT_LIVE_TYPING)
+        {
+            let field = |code: u32| {
+                fields
+                    .iter()
+                    .find(|(seen, _)| *seen == code)
+                    .map(|(_, value)| *value)
+                    .expect("event 29 carries the field")
+            };
+            let delta = u64::try_from(field(FIELD_COUNT)).expect("deltas are positive");
+            *deltas.entry(field(FIELD_REASON)).or_insert(0) += delta;
+        }
+        deltas
+    }
+
+    /// Cumulative core cause counters by code, zero counts included.
+    fn core_counters(session: &Session) -> HashMap<i64, u64> {
+        session
+            .client
+            .live_typing_counters()
+            .unwrap()
+            .into_iter()
+            .map(|(cause, count)| (i64::from(cause as u16), count))
+            .collect()
+    }
+
+    #[test]
+    fn diagnostics_off_makes_no_core_counter_read() {
+        let (_fixture, session, conversation, peer) = peer_ready_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        let _ = h.sealed.try_recv();
+        assert!(h.inbound(&seal_started(&peer, conversation)).wire.is_some());
+        assert!(!diagnostics::enabled());
+        assert_eq!(h.actor.counter_reads, 0);
+    }
+
+    #[test]
+    fn first_read_after_diagnostics_turns_on_sets_the_baseline() {
+        let (_fixture, session, conversation, _peer) = peer_ready_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        let _ = h.sealed.try_recv();
+        let capture = diagnostics::start_capture();
+        // The first read (the stop) sets the baseline at seal_stopped = 1 and records nothing. The
+        // second stop has no active start to end, so the core refuses it: seal_budget moves by one.
+        assert!(h.send_typing(conversation, TypingStateV2::Stopped));
+        let _ = h.sealed.try_recv();
+        assert!(!h.send_typing(conversation, TypingStateV2::Stopped));
+        let records = diagnostics::finish_capture(capture);
+        assert_eq!(h.actor.counter_reads, 2);
+        assert_eq!(core_deltas(&records), HashMap::from([(6, 1)]));
+        assert!(recorded(
+            &records,
+            EVENT_LIVE_TYPING,
+            &[(FIELD_REASON, 6), (FIELD_COUNT, 1)],
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cold_start_exchange_records_socket_send_and_inbound_events_with_core_deltas() {
+        let (_fixture, session, conversation, peer) = peer_ready_session("http://127.0.0.1:9");
+        let (commands, mut received) = mpsc::unbounded_channel();
+        session.live_typing.install(commands);
+        let responder = tokio::spawn(async move {
+            while let Some(Cmd::ConfirmTransmit { reply, .. }) = received.recv().await {
+                let _ = reply.send(Admission::Transmit);
+            }
+        });
+        let (left, right) = tokio::io::duplex(4096);
+        let mut socket =
+            WebSocketStream::from_raw_socket(left, tungstenite::protocol::Role::Client, None).await;
+        let mut remote =
+            WebSocketStream::from_raw_socket(right, tungstenite::protocol::Role::Server, None)
+                .await;
+        let mut h = harness(&session);
+
+        let capture = diagnostics::start_capture();
+        h.send(Cmd::SocketUp);
+        let before = core_counters(&session);
+        // The receiver starts typing, the peer challenges it, and the receiver answers.
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        let start = h.sealed.try_recv().expect("the start is sealed").json;
+        let challenge = peer_challenge(&peer, &start);
+        let outcome = h.inbound(&challenge);
+        assert!(outcome.wire.is_some(), "receiver answers the challenge");
+        let follow_ups = outcome.follow_ups.len() as i64;
+        assert!(send_inbound_outcome(&session, &mut socket, outcome)
+            .await
+            .is_none());
+        assert!(matches!(
+            futures_util::poll!(remote.next()),
+            std::task::Poll::Ready(Some(Ok(Message::Text(_))))
+        ));
+        // The peer's own start is challenged, answered, and its replayed start then displays.
+        let challenge = h
+            .inbound(&seal_started(&peer, conversation))
+            .wire
+            .expect("receiver challenges the peer's start");
+        let (ack, replays) = peer_answer_with_replays(&peer, &challenge);
+        assert!(h.inbound(&ack).wire.is_none());
+        assert_eq!(replays.len(), 1, "the answer replays one active start");
+        for replay in &replays {
+            assert!(h.inbound(replay).wire.is_none());
+        }
+        let records = diagnostics::finish_capture(capture);
+        responder.abort();
+
+        let after = core_counters(&session);
+        let expected: HashMap<i64, u64> = after
+            .iter()
+            .filter_map(|(code, end)| {
+                let start = before[code];
+                (*end > start).then_some((*code, end - start))
+            })
+            .collect();
+        assert_eq!(core_deltas(&records), expected);
+        for code in [21, 26, 28, 30, 32] {
+            assert!(expected.contains_key(&code), "cause {code} moved");
+        }
+        assert!(recorded(
+            &records,
+            EVENT_LIVE_SOCKET,
+            &[(FIELD_REASON, live_socket_reason::TYPING_ENABLED)],
+        ));
+        assert!(recorded(
+            &records,
+            EVENT_TYPING_SEND,
+            &[(FIELD_OUTCOME, typing_send_outcome::SEALED)],
+        ));
+        assert!(recorded(
+            &records,
+            EVENT_TYPING_INBOUND,
+            &[(FIELD_OUTCOME, typing_inbound_outcome::REPLY_SENT)],
+        ));
+        assert!(recorded(
+            &records,
+            EVENT_TYPING_INBOUND,
+            &[
+                (FIELD_OUTCOME, typing_inbound_outcome::FOLLOW_UPS_SENT),
+                (FIELD_COUNT, follow_ups),
+            ],
+        ));
+        assert!(recorded(
+            &records,
+            EVENT_TYPING_INBOUND,
+            &[(FIELD_OUTCOME, typing_inbound_outcome::DISPLAY_STARTED)],
+        ));
     }
 
     fn session_id_of(frame: &str) -> String {

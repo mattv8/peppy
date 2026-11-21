@@ -175,6 +175,10 @@
     "allow-defer-update",
     "allow-set-automatic-updates",
     "allow-report-update-activity",
+    "allow-get-diagnostics-state",
+    "allow-set-diagnostics-enabled",
+    "allow-clear-diagnostics-log",
+    "allow-export-diagnostics-log",
     {
       "identifier": "opener:allow-open-url",
       "allow": [
