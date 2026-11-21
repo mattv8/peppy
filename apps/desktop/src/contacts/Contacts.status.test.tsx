@@ -104,10 +104,11 @@ describe("ContactsView status slot priority", () => {
     expect(container.querySelector("#contacts-status")).toBeNull();
   });
 
-  it("shows no select-a-book strip while the book list is still loading", () => {
+  it("shows book placeholders and no select-a-book strip while the book list is still loading", () => {
     vi.mocked(bridge.list_contact_books).mockReturnValue(new Promise(() => undefined));
     const { container } = render(<ContactsView sync={{ repairRequired: false, readiness: readyReadiness }} />);
     expect(container.querySelector("#contacts-count")).toHaveAttribute("data-count-state", "loading");
+    expect(container.querySelectorAll("#contacts-books > li[data-book-skeleton]")).toHaveLength(3);
     expect(container.querySelector("#contacts-status")).toBeNull();
   });
 });
