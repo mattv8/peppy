@@ -75,6 +75,14 @@ class DetailsPageComposeTest {
         assertStatusRowLayout(280.dp, 1f, stacked = true)
     }
 
+    @Test fun statusRowStaysSideBySideAtThreeThirtyDp() {
+        assertStatusRowLayout(330.dp, 1f, stacked = false)
+    }
+
+    @Test fun statusRowStacksBelowThreeTwelveDp() {
+        assertStatusRowLayout(310.dp, 1f, stacked = true)
+    }
+
     @Test @Config(qualifiers = "w480dp-h800dp")
     fun statusRowStacksAtLargeFontEvenWhenWide() {
         assertStatusRowLayout(400.dp, 1.5f, stacked = true)
@@ -96,8 +104,8 @@ class DetailsPageComposeTest {
             }
         }
         val rowBounds = compose.onNodeWithTag("status").fetchSemanticsNode().boundsInRoot
-        val labelBounds = compose.onNodeWithText(label).fetchSemanticsNode().boundsInRoot
-        val valueBounds = compose.onNodeWithText(value).fetchSemanticsNode().boundsInRoot
+        val labelBounds = compose.onNodeWithText(label, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        val valueBounds = compose.onNodeWithText(value, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
         assertTrue(valueBounds.width > 0f)
         assertTrue(valueBounds.height > 0f)
         assertTrue(valueBounds.left >= rowBounds.left)

@@ -6,13 +6,18 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.onClick
@@ -31,10 +36,11 @@ internal fun SettingToggleRow(
     onClickLabel: String? = null,
     stateDescription: String? = null,
     titleTrailing: (@Composable () -> Unit)? = null,
+    icon: ImageVector? = null,
 ) {
     val settingsStateDescription = stateDescription
     Row(
-        Modifier.fillMaxWidth().defaultMinSize(minHeight = 64.dp).toggleable(
+        Modifier.fillMaxWidth().defaultMinSize(minHeight = 64.dp).clip(RoundedCornerShape(8.dp)).toggleable(
             value = checked,
             enabled = enabled,
             role = Role.Switch,
@@ -53,13 +59,21 @@ internal fun SettingToggleRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
+        icon?.let {
+            Icon(
+                it,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(end = 16.dp).size(24.dp),
+            )
+        }
         Column(Modifier.weight(1f).padding(end = 16.dp)) {
             if (titleTrailing == null) {
                 Text(title, style = MaterialTheme.typography.bodyLarge)
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(title, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.bodyLarge)
-                    titleTrailing()
+                    InfoTargetFootprint { titleTrailing() }
                 }
             }
             subtitle?.let { Text(it, Modifier.testTag("$tag-subtitle"), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium) }
