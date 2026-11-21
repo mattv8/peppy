@@ -23,6 +23,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.peppy_mobile_bindings.liveTypingCauseNames
 
 
 @RunWith(RobolectricTestRunner::class)
@@ -137,6 +138,37 @@ class DiagnosticsLogTest {
         assertFalse(snapshots[0].name == snapshots[1].name)
         assertTrue(snapshots[1].readLines().count { it.startsWith("event=") } >= 128)
         assertTrue(snapshots[1].readLines().any { it.startsWith("event=24 ") && it.contains(" 34=") && it.contains(" 35=") })
+    }
+
+    @Test fun exportHeaderDocumentsLiveTypingEventAndCauseTable() = runBlocking {
+        var snapshot: File? = null
+        val log = DiagnosticsLog(context, { file -> snapshot = file; android.net.Uri.fromFile(file) }) { _, _, _ -> }
+        log.setEnabled(true)
+
+        assertNotNull(log.export())
+
+        val header = requireNotNull(snapshot).readLines().first()
+        assertTrue(header.contains(" 29:live_typing(reason=cause,count=delta)"))
+        val causes = liveTypingCauseNames().joinToString(",", prefix = "live_typing_causes=") { "${it.code}:${it.name}" }
+        assertTrue(header.contains(" $causes"))
+        assertTrue(header.contains("live_typing_causes=1:seal_started,2:seal_stopped,3:seal_sharing_off"))
+    }
+
+    @Test fun exportSucceedsWithoutCauseTableWhenTheBindingThrows() = runBlocking {
+        var snapshot: File? = null
+        val log = DiagnosticsLog(
+            context,
+            { file -> snapshot = file; android.net.Uri.fromFile(file) },
+            { error("binding unavailable") },
+        ) { _, _, _ -> }
+        log.setEnabled(true)
+
+        assertNotNull(log.export())
+
+        val header = requireNotNull(snapshot).readLines().first()
+        assertTrue(header.startsWith("schema=2 "))
+        assertTrue(header.contains(" 29:live_typing(reason=cause,count=delta)"))
+        assertFalse(header.contains("live_typing_causes="))
     }
 
     @Test fun exportHeaderDocumentsTheAdditiveMmsCapturePassSchema() = runBlocking {

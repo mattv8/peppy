@@ -1148,6 +1148,7 @@ class GoogleMessagesLinkServiceTest {
             clock: NativeLiveClock,
         ): NativeLiveOutbound? = null
         override fun open(frameJson: String, clock: NativeLiveClock): NativeLiveOutcome = NativeLiveOutcome(1UL, null, null, null, emptyList())
+        override fun counters(): List<Pair<Int, Long>>? = null
     }
 
     private class QueuedExecutor : Executor {

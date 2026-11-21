@@ -2263,6 +2263,21 @@ impl NativeClient {
         .and_then(typing::outcome_view)
     }
 
+    /// Returns every live typing drop and refusal counter, zeros included, in code order.
+    ///
+    /// Counters are content-free and cumulative for the life of this client. Call this off the UI
+    /// thread.
+    pub fn live_typing_counters(
+        &self,
+    ) -> Result<Vec<typing::NativeLiveTypingCount>, typing::NativeLiveTypingError> {
+        typing::with_live_client(&self.client, |client| {
+            client
+                .live_typing_counters()
+                .map_err(|_| typing::NativeLiveTypingError::InvalidContext)
+        })
+        .map(typing::counter_view)
+    }
+
     pub fn gateway_settings(&self) -> Result<NativeGatewaySettings, MobileBindingsError> {
         with_client(&self.client, Client::gateway_settings).map(gateway_settings_view)
     }

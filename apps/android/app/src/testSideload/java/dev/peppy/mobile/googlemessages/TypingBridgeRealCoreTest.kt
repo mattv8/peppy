@@ -1,11 +1,13 @@
 package dev.peppy.mobile.googlemessages
 
 import android.os.SystemClock
+import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.gateway.GatewayTestBase
 import dev.peppy.mobile.gateway.SharedVault
 import dev.peppy.mobile.googlemessages.live.LiveTypingCredentials
 import dev.peppy.mobile.googlemessages.live.LiveTypingEnableContext
 import dev.peppy.mobile.googlemessages.live.LiveTypingListener
+import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.Executor
 import org.json.JSONArray
@@ -16,6 +18,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowSystemClock
 import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeIncomingSms
 import uniffi.peppy_mobile_bindings.NativeLiveClock
@@ -102,6 +105,51 @@ class TypingBridgeRealCoreTest : GatewayTestBase() {
         assertTrue(host.sentFrames > 0)
         assertTrue(effects.isEmpty())
     }
+
+    @Test fun `a seal through the real core moves seal_started and the bridge records the delta`() {
+        resetSharing()
+        val gateway = enrollAndUnlock()
+        val desktop = SharedVault.desktop
+        val conversationId = UUID.randomUUID().toString()
+        enableGatewayRouting(gateway, conversationId, System.currentTimeMillis() + DESKTOP_WALL_SKEW_MS)
+        syncGatewayStateToDesktop(gateway, desktop)
+        val host = RelayHost(desktop, true, deviceId) { clock(DESKTOP_WALL_SKEW_MS) }
+        val googleConversationId = "google-${UUID.randomUUID()}"
+        val core = object : TypingCore by RealTypingCore(gateway, conversationId, googleConversationId) {
+            override fun receiveContext(googleConversationId: String) = TypingReceiveContext(conversationId, true)
+            override fun seal(
+                conversationId: String,
+                gatewayDeviceId: String,
+                participant: String?,
+                state: NativeTypingState,
+                clock: NativeLiveClock,
+            ) = gateway.sealTypingSignalV2(conversationId, gatewayDeviceId, NativeTypingOrigin.GOOGLE_CONTACT, participant, state, clock)
+        }
+        val bridge = TypingBridge(context, host, Executor(Runnable::run), { core }, TypingSharingPreferences(context)) { "ok" }
+        bridge.start(TypingCredentials("https://vault.example", "bearer", deviceId, 1))
+        host.enable()
+        val inbound = """{"google_conversation_id":"$googleConversationId","state":"started"}"""
+        // This seal runs with diagnostics off, so no read happens; the first read in the block below
+        // sets the baseline after its own seal and only the later seal's delta is recorded.
+        bridge.receive(inbound)
+        assertEquals(1, realCount(gateway, SEAL_STARTED))
+
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            ShadowSystemClock.advanceBy(Duration.ofMinutes(1))
+            bridge.receive(inbound)
+            ShadowSystemClock.advanceBy(Duration.ofMinutes(1))
+            bridge.receive(inbound)
+        }
+        assertEquals(3, realCount(gateway, SEAL_STARTED))
+        assertEquals(
+            listOf("event=29 session=1 timestamp_ms=10 trace=0 29=$SEAL_STARTED 19=1"),
+            records.filter { it.startsWith("event=29 ") },
+        )
+    }
+
+    private fun realCount(client: NativeClient, code: Int): Long =
+        client.liveTypingCounters().single { it.code.toInt() == code }.count.toLong()
 
     private fun bridge(
         gateway: NativeClient,
@@ -274,6 +322,7 @@ class TypingBridgeRealCoreTest : GatewayTestBase() {
 
     private companion object {
         const val PEER = "+12025550123"
+        const val SEAL_STARTED = 1
         const val OWN_NUMBER = "+12025550101"
         const val PUBLICATION = 1L
         const val DESKTOP_WALL_SKEW_MS = -1_250L
@@ -293,5 +342,6 @@ class TypingBridgeRealCoreTest : GatewayTestBase() {
         override fun ownedGoogleConversationId(conversationId: String) = googleConversationId.takeIf { conversationId == this.conversationId }
         override fun seal(conversationId: String, gatewayDeviceId: String, participant: String?, state: NativeTypingState, clock: NativeLiveClock): NativeLiveOutbound? = null
         override fun open(frameJson: String, clock: NativeLiveClock): NativeLiveOutcome = client.openTypingSignalV2(frameJson, clock)
+        override fun counters(): List<Pair<Int, Long>> = client.liveTypingCounters().map { it.code.toInt() to it.count.toLong() }
     }
 }

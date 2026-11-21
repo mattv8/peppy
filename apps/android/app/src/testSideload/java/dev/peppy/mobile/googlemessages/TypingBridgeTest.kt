@@ -848,6 +848,137 @@ class TypingBridgeTest {
         fun disable() = listener.onDisabled(LiveTypingDisabledReason.MEMBERSHIP_REVOKED)
     }
 
+    @Test fun `live typing counter deltas are recorded per cause once the baseline is set`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        val transport = FakeTransport(calls)
+        val bridge = bridge(core, transport, calls)
+        bridge.start(credentials())
+        transport.enable(listOf("gateway"), "gateway")
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            core.countersResult = listOf(1 to 0L, 6 to 4L, 11 to 0L)
+            bridge.onFrame("baseline")
+            core.countersResult = listOf(1 to 2L, 6 to 4L, 11 to 5L)
+            bridge.onFrame("moved")
+        }
+        assertEquals(
+            listOf(
+                "event=29 session=1 timestamp_ms=10 trace=0 29=1 19=2",
+                "event=29 session=1 timestamp_ms=10 trace=0 29=11 19=5",
+            ),
+            records.filter { it.startsWith("event=29 ") },
+        )
+    }
+
+    @Test fun `diagnostics off makes no counter read and records nothing`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        val transport = FakeTransport(calls)
+        val bridge = bridge(core, transport, calls)
+        bridge.start(credentials())
+        transport.enable(listOf("gateway"), "gateway")
+        core.countersResult = listOf(1 to 9L)
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(false, { 10L }, { 0L }, records::add) {
+            bridge.onFrame("frame")
+            bridge.receive("""{"google_conversation_id":"owned","state":"started"}""")
+        }
+        assertEquals(0, core.counterReads)
+        assertTrue(records.isEmpty())
+    }
+
+    @Test fun `process totals are never replayed and each diagnostics session starts a fresh baseline`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        val transport = FakeTransport(calls)
+        val bridge = bridge(core, transport, calls)
+        bridge.start(credentials())
+        transport.enable(listOf("gateway"), "gateway")
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            core.countersResult = listOf(1 to 40L)
+            bridge.onFrame("first")
+        }
+        SyncDiagnostics.withTestConfiguration(false, { 10L }, { 0L }, {}) {
+            core.countersResult = listOf(1 to 45L)
+            bridge.onFrame("off")
+        }
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            core.countersResult = listOf(1 to 47L)
+            bridge.onFrame("reenabled")
+            core.countersResult = listOf(1 to 50L)
+            bridge.onFrame("moved")
+        }
+        assertEquals(listOf("event=29 session=1 timestamp_ms=10 trace=0 29=1 19=3"), records.filter { it.startsWith("event=29 ") })
+    }
+
+    @Test fun `a lower count from a new client counts its whole total as new`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        val transport = FakeTransport(calls)
+        val bridge = bridge(core, transport, calls)
+        bridge.start(credentials())
+        transport.enable(listOf("gateway"), "gateway")
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            core.countersResult = listOf(1 to 10L)
+            bridge.onFrame("first")
+            core.countersResult = listOf(1 to 3L)
+            bridge.onFrame("new client")
+            core.countersResult = listOf(1 to 5L)
+            bridge.onFrame("moved")
+        }
+        assertEquals(
+            listOf(
+                "event=29 session=1 timestamp_ms=10 trace=0 29=1 19=3",
+                "event=29 session=1 timestamp_ms=10 trace=0 29=1 19=2",
+            ),
+            records.filter { it.startsWith("event=29 ") },
+        )
+    }
+
+    @Test fun `the read after enable records counters that moved during enable`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        val moving = object : TypingCore by core {
+            override fun enable(context: NativeLiveEnableContext, clock: NativeLiveClock): ULong {
+                core.countersResult = listOf(1 to 4L)
+                return core.enable(context, clock)
+            }
+        }
+        val transport = FakeTransport(calls)
+        val bridge = TypingBridge(ApplicationProvider.getApplicationContext(), transport, Executor(Runnable::run),
+            { moving }, TypingSharingPreferences(ApplicationProvider.getApplicationContext())) { "ok" }
+        bridge.start(credentials())
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            core.countersResult = listOf(1 to 0L)
+            bridge.onFrame("baseline")
+            transport.enable(listOf("gateway"), "gateway")
+        }
+        assertEquals(listOf("event=29 session=1 timestamp_ms=10 trace=0 29=1 19=4"), records.filter { it.startsWith("event=29 ") })
+    }
+
+    @Test fun `a failed or unavailable counter read records nothing and keeps the baseline`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        val transport = FakeTransport(calls)
+        val bridge = bridge(core, transport, calls)
+        bridge.start(credentials())
+        transport.enable(listOf("gateway"), "gateway")
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            core.countersResult = listOf(1 to 10L)
+            bridge.onFrame("first")
+            core.countersResult = null
+            bridge.onFrame("unavailable")
+            core.countersResult = listOf(1 to 12L)
+            bridge.onFrame("moved")
+        }
+        assertEquals(listOf("event=29 session=1 timestamp_ms=10 trace=0 29=1 19=2"), records.filter { it.startsWith("event=29 ") })
+    }
+
     private class FakeCore(private val calls: MutableList<String>) : TypingCore {
         var enableContext: NativeLiveEnableContext? = null
         var context: TypingReceiveContext? = TypingReceiveContext("conversation", true)
@@ -867,6 +998,9 @@ class TypingBridgeTest {
             return sealed
         }
         override fun open(frameJson: String, clock: NativeLiveClock): NativeLiveOutcome { calls += "core.open"; return nextOpen }
+        var countersResult: List<Pair<Int, Long>>? = null
+        var counterReads = 0
+        override fun counters(): List<Pair<Int, Long>>? { counterReads++; return countersResult }
     }
 
     private class QueuedExecutor : Executor {

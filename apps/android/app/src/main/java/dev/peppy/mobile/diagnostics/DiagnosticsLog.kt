@@ -21,12 +21,15 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
+import uniffi.peppy_mobile_bindings.NativeLiveTypingCauseName
+import uniffi.peppy_mobile_bindings.liveTypingCauseNames
 
 internal class DiagnosticsLog(
     private val context: Context,
     private val uriFactory: (File) -> Uri = { file ->
         FileProvider.getUriForFile(context, "${BuildConfig.APPLICATION_ID}.mms-files", file)
     },
+    private val causeNames: () -> List<NativeLiveTypingCauseName> = ::liveTypingCauseNames,
     private val onState: (Long, Long, DiagnosticsError?) -> Unit,
 ) {
     private data class Record(val generation: Long, val sequence: Long, val text: String)
@@ -264,7 +267,7 @@ internal class DiagnosticsLog(
             snapshot = outputFile
             var remaining = MAX_TOTAL_BYTES
             BufferedOutputStream(FileOutputStream(outputFile)).use { output ->
-                remaining -= write(output, HEADER.toByteArray(StandardCharsets.UTF_8), remaining)
+                remaining -= write(output, headerLine().toByteArray(StandardCharsets.UTF_8), remaining)
                 remaining -= write(output, NEWLINE, remaining)
                 remaining -= write(output, stateRecord().toByteArray(StandardCharsets.UTF_8), remaining)
                 remaining -= write(output, NEWLINE, remaining)
@@ -300,6 +303,17 @@ internal class DiagnosticsLog(
     private fun retainedFiles(): List<File> = listOf(File(directory, PREVIOUS_FILE), currentFile()).filter(File::isFile)
     private fun currentFile(): File = File(directory, CURRENT_FILE)
     private fun publish(error: DiagnosticsError?) = onState(retainedSize, dropped.get(), error)
+    /** The static header plus the live typing cause table; the table is omitted if the binding is unavailable. */
+    private fun headerLine(): String = HEADER + liveTypingCauseTable()
+
+    private fun liveTypingCauseTable(): String = try {
+        causeNames().joinToString(",", prefix = " live_typing_causes=") { "${it.code}:${it.name}" }
+    } catch (_: Exception) {
+        ""
+    } catch (_: LinkageError) {
+        ""
+    }
+
     private fun stateRecord(): String = "event=24 session=0 timestamp_ms=0 trace=0 34=${dropped.get()} 35=${if (enabled.get()) 1 else 0}"
     private fun handleStorageFailure() {
         repaired = false
@@ -347,7 +361,7 @@ internal class DiagnosticsLog(
             .plus(" gateway_progress phase=20:mms_cleanup(count=marked,processed=unlinked,pending=pending_unlink) gateway_phase_core_error=1:transport_io,2:json,3:invalid_request,4:conflict,5:snapshot_too_large,9:other_mobile_bindings,10:other phone_read_outcomes=1:skipped_no_candidate,2:skipped_unchanged,3:no_match,4:blocked,5:acted,6:error,7:completed_only")
             .plus(" mms_hint_failure(event=18,stage=5,reason=5) count=1:enqueue,2:recovery,3:postprocess,4:capture")
             .plus(" mms_pause=0:none,1:absolute_recovery_capacity,2:recovery_capacity,3:local_capacity,4:remote_storage")
-            .plus(" 27:gm_link 28:rcs_sweep(rows=considered,count=skipped,processed=complete,pending=incomplete,unavailable=aborted,page_queries=pages)")
+            .plus(" 27:gm_link 28:rcs_sweep(rows=considered,count=skipped,processed=complete,pending=incomplete,unavailable=aborted,page_queries=pages) 29:live_typing(reason=cause,count=delta)")
             .plus(" gateway_enqueue(reason=cause) gateway_enqueue_causes=1:socket_ready,2:socket_event,3:socket_resync,4:relay_wake,5:notification_listener,6:notification_reconcile,7:sms_receiver,8:sms_capture,9:mms_capture,10:history_control,11:worker_continuation,12:reachability,13:unlock,14:settings,15:enrollment,16:rcs_link,17:rcs_receive,18:rcs_media,19:rcs_send,20:rcs_refusal,21:contact_sync,22:mms_callback,23:boot,24:foreground,25:notification_removed")
             .plus(" http_routes=1:capabilities,2:compaction_capability,3:events,4:snapshot,5:snapshot_records,6:vault,7:attachments,8:other,9:snapshot_manifest")
     }
