@@ -557,6 +557,96 @@ mod tests {
     }
 
     #[test]
+    fn one_to_one_contact_start_without_participant_displays_on_the_peer() {
+        let fixture = live_fixture();
+        let roster = vec![
+            fixture.sender_id.to_string(),
+            fixture.receiver_id.to_string(),
+        ];
+        fixture
+            .sender
+            .enable_live_typing(
+                NativeLiveEnableContext {
+                    trusted_roster: roster.clone(),
+                    local_gateway_device_id: fixture.sender_id.to_string(),
+                    local_executor: NativeLiveExecutor::None,
+                },
+                clock(1_000),
+            )
+            .unwrap();
+        let receiver_generation = fixture
+            .receiver
+            .enable_live_typing(
+                NativeLiveEnableContext {
+                    trusted_roster: roster,
+                    local_gateway_device_id: fixture.receiver_id.to_string(),
+                    local_executor: NativeLiveExecutor::CurrentGateway,
+                },
+                clock(1_000),
+            )
+            .unwrap();
+        let typing = fixture
+            .receiver
+            .seal_typing_signal_v2(
+                fixture.conversation.to_string(),
+                fixture.receiver_id.to_string(),
+                NativeTypingOrigin::GoogleContact,
+                None,
+                NativeTypingState::Started,
+                clock(1_001),
+            )
+            .unwrap()
+            .unwrap();
+        let challenge = fixture
+            .sender
+            .open_typing_signal_v2(typing.frame_json, clock(1_001))
+            .unwrap()
+            .reply_frame_json
+            .unwrap();
+        let answered = fixture
+            .receiver
+            .open_typing_signal_v2(challenge, clock(1_002))
+            .unwrap();
+        let acknowledgement = answered.reply_frame_json.unwrap();
+        fixture
+            .sender
+            .open_typing_signal_v2(acknowledgement, clock(1_003))
+            .unwrap();
+        let fresh = fixture
+            .receiver
+            .seal_typing_signal_v2(
+                fixture.conversation.to_string(),
+                fixture.receiver_id.to_string(),
+                NativeTypingOrigin::GoogleContact,
+                None,
+                NativeTypingState::Started,
+                clock(4_002),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh.generation, receiver_generation);
+        let outcome = fixture
+            .sender
+            .open_typing_signal_v2(fresh.frame_json, clock(4_002))
+            .unwrap();
+        match outcome.action.unwrap() {
+            NativeLiveAction::Display {
+                peer_device_id,
+                conversation_id,
+                participant,
+                state,
+                ..
+            } => {
+                assert_eq!(peer_device_id, fixture.receiver_id.to_string());
+                assert_eq!(conversation_id, fixture.conversation.to_string());
+                assert_eq!(participant, None);
+                assert_eq!(state, NativeTypingState::Started);
+            }
+            action => panic!("unexpected action: {action:?}"),
+        }
+    }
+
+    #[test]
     fn enabled_malformed_json_keeps_the_current_generation() {
         let fixture = live_fixture();
         let generation = fixture

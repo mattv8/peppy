@@ -57,7 +57,7 @@ func TestTypingDiagnosticEvents(t *testing.T) {
 	if !reflect.DeepEqual(host.events, want) {
 		t.Fatalf("events = %v, want %v", host.events, want)
 	}
-	if len(host.typingRecords) != 2 || host.typingRecords[0] != `{"google_conversation_id":"synthetic-conversation","state":"started","participant":"synthetic-participant"}` || host.typingRecords[1] != `{"google_conversation_id":"synthetic-conversation","state":"stopped","participant":"synthetic-participant"}` {
+	if len(host.typingRecords) != 2 || host.typingRecords[0] != `{"google_conversation_id":"synthetic-conversation","state":"started","participant":""}` || host.typingRecords[1] != `{"google_conversation_id":"synthetic-conversation","state":"stopped","participant":""}` {
 		t.Fatalf("typing records = %v", host.typingRecords)
 	}
 	wantOrder := []string{"record", "burst_started", "record", "burst_stopped", "projection_ignored", "conversation_unknown", "conversation_unknown"}

@@ -73,6 +73,8 @@ func typingStateFor(value gmproto.TypingTypes) (typingState, bool) {
 	}
 }
 
+// typingParticipant admits a visible sender. It names the sender only in a group: the core accepts a participant
+// solely for a roster member of a Live group, so a one-to-one record carries an empty participant.
 func typingParticipant(data *gmproto.TypingData, conversations []*gmproto.Conversation) (string, bool) {
 	for _, conversation := range conversations {
 		if conversation == nil || conversation.GetConversationID() != data.GetConversationID() {
@@ -82,21 +84,28 @@ func typingParticipant(data *gmproto.TypingData, conversations []*gmproto.Conver
 			address, ok := canonicalGoogleNumber(participant.GetID().GetNumber(), participant.GetFormattedNumber())
 			if !ok {
 				if !conversation.GetIsGroupChat() && participant.GetID().GetNumber() == data.GetUser().GetNumber() {
-					return data.GetUser().GetNumber(), true
+					return "", true
 				}
 				continue
 			}
 			userAddress, userOK := canonicalGoogleNumber(data.GetUser().GetNumber(), "")
 			if userOK && address == userAddress {
-				return address, true
+				return groupParticipant(conversation, address), true
 			}
 			if !conversation.GetIsGroupChat() && participant.GetID().GetNumber() == data.GetUser().GetNumber() {
-				return data.GetUser().GetNumber(), true
+				return "", true
 			}
 		}
 		return "", false
 	}
 	return "", false
+}
+
+func groupParticipant(conversation *gmproto.Conversation, address string) string {
+	if conversation.GetIsGroupChat() {
+		return address
+	}
+	return ""
 }
 
 // typingSetArguments admits a current start intent for a known RCS conversation.

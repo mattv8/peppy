@@ -88,8 +88,9 @@ class TypingBridgeTest {
         assertEquals("+12025550102", core.sealedParticipant)
         assertEquals(listOf("frame"), transport.sent)
 
-        bridge.receive("{\"google_conversation_id\":\"owned\",\"state\":\"stopped\"}")
+        bridge.receive("{\"google_conversation_id\":\"owned\",\"state\":\"stopped\",\"participant\":\"\"}")
         assertNull(core.sealedParticipant)
+        assertEquals(listOf("frame", "frame"), transport.sent)
     }
 
     @Test fun `stale sequence expired deadline and repeated started never call Google`() {
