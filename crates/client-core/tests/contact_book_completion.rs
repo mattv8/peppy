@@ -51,6 +51,8 @@ fn count(path: &Path, sql: &str) -> i64 {
         .unwrap()
 }
 
+/// Journals one page and reports its end as the server head, then applies it. A page that ends at
+/// the head is the common host case, so completion is never held back by these helpers.
 fn ingest_and_apply(envelopes: &[Envelope], client: &Client) -> ApplyReport {
     let start = client.receive_cursor().unwrap().0;
     for (index, envelope) in envelopes.iter().enumerate() {
@@ -58,6 +60,9 @@ fn ingest_and_apply(envelopes: &[Envelope], client: &Client) -> ApplyReport {
             .ingest(envelope, Cursor(start + index as u64 + 1))
             .unwrap_or_else(|error| panic!("failed to ingest envelope {index}: {error:?}"));
     }
+    client
+        .observe_replay_head(Cursor(start + envelopes.len() as u64))
+        .unwrap();
     client.apply_pending(100).unwrap()
 }
 
@@ -499,6 +504,9 @@ fn a_snapshot_promotion_queues_members_for_contacts_the_fence_covers() {
         .append_snapshot_page(session.generation, &records)
         .unwrap();
     client.finish_snapshot(session.generation).unwrap();
+    client
+        .observe_replay_head(Cursor(records.len() as u64))
+        .unwrap();
     for _ in 0..200 {
         client.apply_pending(1).unwrap();
         if matches!(
@@ -512,6 +520,9 @@ fn a_snapshot_promotion_queues_members_for_contacts_the_fence_covers() {
         }
     }
 
+    // Members wait until every received record is applied, so the tail after the promoted stage
+    // (the deleter's own member) is applied before the completion pass is expected to emit.
+    client.apply_pending(100).unwrap();
     assert_eq!(queued_members(&client, &vault), vec!["c2"]);
     assert_eq!(
         count(&config.database_path, "SELECT COUNT(*) FROM contacts"),
@@ -547,4 +558,319 @@ fn a_member_already_applied_before_the_fence_settles_the_contact() {
 
     assert_eq!(queued_members(&client, &vault), vec!["c2"]);
     assert_eq!(queued_fences(&client, &vault), 0);
+}
+
+/// The owner republishes `c1` at book generation 2, after the generation-1 fence of its book.
+fn republication(vault: &Vault, owner: DeviceId, first_sequence: u64) -> Vec<Envelope> {
+    vec![
+        seal(
+            vault,
+            owner,
+            first_sequence,
+            &PrivatePayload::ContactBookState {
+                book: book(owner, "2"),
+            },
+        ),
+        seal(
+            vault,
+            owner,
+            first_sequence + 1,
+            &PrivatePayload::ContactUpserted {
+                book: book(owner, "2"),
+                contact: contact_body("c1"),
+            },
+        ),
+    ]
+}
+
+/// The generation of the stored `c1` publication, if the contact is live.
+fn published_generation(path: &Path) -> i64 {
+    count(
+        path,
+        "SELECT COALESCE(publication_generation,-1) FROM contacts WHERE id='c1'",
+    )
+}
+
+#[test]
+fn a_republication_in_the_same_batch_as_the_fence_withdraws_the_owed_member() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let owner = DeviceId::new();
+    let (config, client) = receiver(&dir, &vault, "receiver");
+    ingest_and_apply(&owners_book(&vault, owner, &[("c1", "1")]), &client);
+
+    let mut batch = vec![fence(&vault, DeviceId::new(), 1, owner)];
+    batch.extend(republication(&vault, owner, 3));
+    ingest_and_apply(&batch, &client);
+
+    assert!(
+        queued_members(&client, &vault).is_empty(),
+        "c1 continued at generation 2, so a generation-1 member would supersede it"
+    );
+    assert_eq!(owed(&config.database_path), 0);
+    assert_eq!(published_generation(&config.database_path), 2);
+}
+
+#[test]
+fn a_republication_received_after_the_fence_withdraws_the_owed_member() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let owner = DeviceId::new();
+    let (config, client) = receiver(&dir, &vault, "receiver");
+    ingest_and_apply(&owners_book(&vault, owner, &[("c1", "1")]), &client);
+    // The fence is applied with no reported head, so its completion stays deferred.
+    ingest_only(&[fence(&vault, DeviceId::new(), 1, owner)], &client);
+    client.apply_pending(100).unwrap();
+    assert_eq!(owed(&config.database_path), 1);
+    assert!(queued_members(&client, &vault).is_empty());
+    drop(client);
+
+    // A restart before the drain, then the republication in a later batch.
+    let reopened = unlocked(&config, &vault);
+    ingest_and_apply(&republication(&vault, owner, 3), &reopened);
+
+    assert!(queued_members(&reopened, &vault).is_empty());
+    assert_eq!(owed(&config.database_path), 0);
+    assert_eq!(published_generation(&config.database_path), 2);
+}
+
+/// Journals envelopes without applying them, as a host does for one replay page.
+fn ingest_only(envelopes: &[Envelope], client: &Client) {
+    let start = client.receive_cursor().unwrap().0;
+    for (index, envelope) in envelopes.iter().enumerate() {
+        client
+            .ingest(envelope, Cursor(start + index as u64 + 1))
+            .unwrap();
+    }
+}
+
+#[test]
+fn deleter_members_on_a_later_page_than_the_fence_are_not_duplicated() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let owner = DeviceId::new();
+    let (config, client) = receiver(&dir, &vault, "receiver");
+    ingest_and_apply(
+        &owners_book(&vault, owner, &[("c1", "1"), ("c2", "1")]),
+        &client,
+    );
+    let deleter = DeviceId::new();
+    // The server head (6) is past both pages: the fence is page one, the members are page two.
+    ingest_only(&[fence(&vault, deleter, 1, owner)], &client);
+    client.observe_replay_head(Cursor(6)).unwrap();
+    client.apply_pending(100).unwrap();
+    assert!(
+        queued_members(&client, &vault).is_empty(),
+        "receipt has not reached the head, so the deleter's members are not yet known"
+    );
+    assert_eq!(owed(&config.database_path), 2);
+
+    ingest_only(
+        &[
+            member(&vault, deleter, 2, owner, "c1"),
+            member(&vault, deleter, 3, owner, "c2"),
+        ],
+        &client,
+    );
+    client.observe_replay_head(Cursor(6)).unwrap();
+    client.apply_pending(100).unwrap();
+
+    assert!(queued_members(&client, &vault).is_empty());
+    assert_eq!(owed(&config.database_path), 0);
+}
+
+#[test]
+fn a_member_missing_from_the_deleter_is_queued_once_after_catch_up() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let owner = DeviceId::new();
+    let (config, client) = receiver(&dir, &vault, "receiver");
+    ingest_and_apply(
+        &owners_book(&vault, owner, &[("c1", "1"), ("c2", "1")]),
+        &client,
+    );
+    let deleter = DeviceId::new();
+    ingest_only(&[fence(&vault, deleter, 1, owner)], &client);
+    client.observe_replay_head(Cursor(5)).unwrap();
+    client.apply_pending(100).unwrap();
+    assert!(queued_members(&client, &vault).is_empty());
+
+    ingest_only(&[member(&vault, deleter, 2, owner, "c1")], &client);
+    client.observe_replay_head(Cursor(5)).unwrap();
+    client.apply_pending(100).unwrap();
+    client.apply_pending(100).unwrap();
+
+    assert_eq!(queued_members(&client, &vault), vec!["c2"]);
+    assert_eq!(owed(&config.database_path), 0);
+}
+
+#[test]
+fn two_receivers_of_a_split_deletion_each_queue_only_the_missing_member() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let owner = DeviceId::new();
+    let book_events = owners_book(&vault, owner, &[("c1", "1"), ("c2", "1")]);
+    let deleter = DeviceId::new();
+    let fence_page = [fence(&vault, deleter, 1, owner)];
+    let member_page = [member(&vault, deleter, 2, owner, "c1")];
+
+    for name in ["first", "second"] {
+        let (_config, client) = receiver(&dir, &vault, name);
+        ingest_and_apply(&book_events, &client);
+        ingest_only(&fence_page, &client);
+        client.observe_replay_head(Cursor(5)).unwrap();
+        client.apply_pending(100).unwrap();
+        ingest_only(&member_page, &client);
+        client.observe_replay_head(Cursor(5)).unwrap();
+        client.apply_pending(100).unwrap();
+        assert_eq!(
+            queued_members(&client, &vault),
+            vec!["c2"],
+            "{name}: c2 is the only uncovered contact, and c1 is never re-emitted"
+        );
+    }
+}
+
+/// A fresh receiver imports `log` as one snapshot, promotes it, and reports the queued members.
+fn fresh_import_queues(vault: &Vault, log: &[Envelope]) -> Vec<String> {
+    let dir = TempDir::new().unwrap();
+    let (_config, client) = receiver(&dir, vault, "fresh");
+    let records: Vec<SnapshotRecord> = log
+        .iter()
+        .enumerate()
+        .map(|(index, envelope)| SnapshotRecord {
+            cursor: Cursor(index as u64 + 1),
+            envelope: envelope.clone(),
+        })
+        .collect();
+    let session = client
+        .begin_snapshot_with_compaction(
+            Cursor(records.len() as u64),
+            records.len() as u64,
+            SnapshotPurpose::Resync,
+            Some(9),
+        )
+        .unwrap();
+    client
+        .append_snapshot_page(session.generation, &records)
+        .unwrap();
+    client.finish_snapshot(session.generation).unwrap();
+    client
+        .observe_replay_head(Cursor(records.len() as u64))
+        .unwrap();
+    for _ in 0..200 {
+        client.apply_pending(1).unwrap();
+        if matches!(
+            client
+                .snapshot_projection_status()
+                .unwrap()
+                .map(|s| s.state),
+            Some(SnapshotProjectionState::Promoted)
+        ) {
+            break;
+        }
+    }
+    for _ in 0..20 {
+        client.apply_pending(100).unwrap();
+    }
+    queued_members(&client, vault)
+}
+
+/// The owner's history and a real deleter's fence and members. Real clients seal them, so each
+/// record carries the compaction metadata a snapshot retains.
+struct RealDeletion {
+    vault: Vault,
+    history: Vec<Envelope>,
+    deletion: Vec<Envelope>,
+}
+
+fn real_deletion(dir: &TempDir) -> RealDeletion {
+    let vault = Vault::new();
+    let owner_config = config(dir, "owner", &vault);
+    let owner = unlocked(&owner_config, &vault);
+    owner
+        .capture_contact_book(
+            &json!({
+                "schema_version": 1,
+                "book": book(owner_config.device_id, "1"),
+                "contacts": [contact_body("c1"), contact_body("c2")]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    let history = owner.pending_outbox().unwrap();
+    let deleter = unlocked(&config(dir, "deleter", &vault), &vault);
+    ingest_and_apply(&history, &deleter);
+    call_delete(&deleter, owner_config.device_id);
+    RealDeletion {
+        deletion: deleter.pending_outbox().unwrap(),
+        history,
+        vault,
+    }
+}
+
+/// The one envelope of a kind, selected by its decrypted payload.
+fn pick(
+    vault: &Vault,
+    envelopes: &[Envelope],
+    wanted: impl Fn(&PrivatePayload) -> bool,
+) -> Envelope {
+    envelopes
+        .iter()
+        .find(|envelope| wanted(&payload_of(vault, envelope)))
+        .expect("the record is present")
+        .clone()
+}
+
+#[test]
+fn a_fresh_import_owes_an_uncovered_staged_contact_whatever_the_record_order() {
+    let dir = TempDir::new().unwrap();
+    let real = real_deletion(&dir);
+    let vault = &real.vault;
+    let of = |envelopes: &[Envelope], id: &'static str| {
+        pick(vault, envelopes, move |payload| match payload {
+            PrivatePayload::ContactUpserted { contact, .. } => contact["id"] == id,
+            PrivatePayload::ContactBookDeletedMember { contact_id, .. } => {
+                contact_id.as_str() == id
+            }
+            _ => false,
+        })
+    };
+    let book_state = pick(vault, &real.history, |payload| {
+        matches!(payload, PrivatePayload::ContactBookState { .. })
+    });
+    let fence_record = pick(vault, &real.deletion, |payload| {
+        matches!(payload, PrivatePayload::ContactBookDeleted { .. })
+    });
+    let (c1, c2) = (of(&real.history, "c1"), of(&real.history, "c2"));
+    let (member_c1, member_c2) = (of(&real.deletion, "c1"), of(&real.deletion, "c2"));
+
+    // c1 is retained as a publication before the fence, or after it. The deleter sends c2's
+    // member only, so c1 is the uncovered contact.
+    let publication_first = [
+        book_state.clone(),
+        c1.clone(),
+        c2.clone(),
+        fence_record.clone(),
+        member_c2.clone(),
+    ];
+    let fence_first = [
+        book_state.clone(),
+        fence_record.clone(),
+        c1.clone(),
+        c2.clone(),
+        member_c2.clone(),
+    ];
+    assert_eq!(fresh_import_queues(vault, &publication_first), vec!["c1"]);
+    assert_eq!(fresh_import_queues(vault, &fence_first), vec!["c1"]);
+
+    // Controls: a complete set of members leaves nothing owed, in either order.
+    let complete_first = [
+        publication_first.as_slice(),
+        std::slice::from_ref(&member_c1),
+    ]
+    .concat();
+    let complete_fence_first = [fence_first.as_slice(), std::slice::from_ref(&member_c1)].concat();
+    assert!(fresh_import_queues(vault, &complete_first).is_empty());
+    assert!(fresh_import_queues(vault, &complete_fence_first).is_empty());
 }

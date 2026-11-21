@@ -140,6 +140,8 @@ CREATE TABLE IF NOT EXISTS projection_deleted_books(generation INTEGER NOT NULL,
     PRIMARY KEY(generation,book_id,owner_device_id));
 CREATE TABLE IF NOT EXISTS projection_deleted_members(generation INTEGER NOT NULL, book_id TEXT NOT NULL, contact_id TEXT NOT NULL,
     owner_device_id TEXT NOT NULL, book_generation INTEGER NOT NULL, PRIMARY KEY(generation,book_id,contact_id,owner_device_id));
+CREATE TABLE IF NOT EXISTS projection_covered_contacts(generation INTEGER NOT NULL, book_id TEXT NOT NULL, contact_id TEXT NOT NULL,
+    owner_device_id TEXT NOT NULL, book_generation INTEGER NOT NULL, PRIMARY KEY(generation,book_id,contact_id));
 ",
     )?;
     add_column_if_missing(conn, "projection_contacts", "publication_owner TEXT")?;
@@ -1008,6 +1010,10 @@ fn stage_contact_payload(
         }
         PrivatePayload::ContactUpserted { book, contact } => {
             if !stage_book(conn, generation, producer, book)? {
+                if let Ok((id, _, _)) = contacts::peer_contact(contact, contacts::req(book, "id")?)
+                {
+                    keep_covered_book_contact(conn, generation, producer, book, &id)?;
+                }
                 return Ok(true);
             }
             let book_id = contacts::req(book, "id")?;
@@ -1053,6 +1059,7 @@ fn stage_contact_payload(
                     return Ok(false);
                 }
                 if !stage_book(conn, generation, producer, book)? {
+                    keep_covered_book_contact(conn, generation, producer, book, contact_id)?;
                     return Ok(true);
                 }
             }
@@ -1061,6 +1068,16 @@ fn stage_contact_payload(
                 let owner =
                     known_owner(conn, generation, book_id)?.unwrap_or_else(|| producer.to_owned());
                 if staged_covered(conn, generation, book_id, &owner, None)? {
+                    let book_generation =
+                        known_book(conn, generation, book_id)?.map_or(0, |(_, stored)| stored);
+                    keep_covered_contact(
+                        conn,
+                        generation,
+                        book_id,
+                        contact_id,
+                        &owner,
+                        book_generation,
+                    )?;
                     return Ok(true);
                 }
             }
@@ -1120,6 +1137,51 @@ fn stage_contact_payload(
         }
         _ => Ok(true),
     }
+}
+
+/// Keeps an authorized book record's contact that staging drops because a staged fence covers it.
+/// Promotion owes that contact a member if no terminal member covers it. Unauthorized records keep
+/// nothing, as staging ignores them.
+fn keep_covered_book_contact(
+    conn: &Connection,
+    generation: i64,
+    producer: &str,
+    book: &Value,
+    contact_id: &str,
+) -> Result<(), Error> {
+    if !contacts::owner_or_successor(conn, contacts::req(book, "owner_device_id")?, producer)? {
+        return Ok(());
+    }
+    let owner = contacts::publication_owner(conn, book)?;
+    let book_generation = contacts::revision(book, "generation")?;
+    keep_covered_contact(
+        conn,
+        generation,
+        contacts::req(book, "id")?,
+        contact_id,
+        &owner,
+        book_generation,
+    )
+}
+
+/// Records a covered contact for promotion, when a staged fence of `owner` covers the given
+/// generation (`staged_covered`). Duplicates of one contact keep the first record.
+fn keep_covered_contact(
+    conn: &Connection,
+    generation: i64,
+    book_id: &str,
+    contact_id: &str,
+    owner: &str,
+    book_generation: i64,
+) -> Result<(), Error> {
+    if !staged_covered(conn, generation, book_id, owner, Some(book_generation))? {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO projection_covered_contacts(generation,book_id,contact_id,owner_device_id,book_generation) VALUES(?,?,?,?,?)",
+        params![generation, book_id, contact_id, owner, book_generation],
+    )?;
+    Ok(())
 }
 
 /// Stages a vault-wide deletion fence or member record. Nothing live changes here: the fence
@@ -1383,6 +1445,8 @@ fn promote_deletions(conn: &Connection, generation: i64, me: &str) -> Result<(),
         "INSERT INTO deleted_contact_books(book_id,owner_device_id,generation,deleted_at_ms) SELECT d.book_id,d.owner_device_id,d.book_generation,d.deleted_at_ms FROM projection_deleted_books d WHERE d.generation=?1 AND d.owner_device_id<>?2 AND NOT EXISTS(SELECT 1 FROM projection_books b WHERE b.generation=d.generation AND b.book_id=d.book_id AND b.owner_device_id<>d.owner_device_id AND NOT EXISTS(SELECT 1 FROM projection_deleted_books f WHERE f.generation=b.generation AND f.book_id=b.book_id AND f.owner_device_id=b.owner_device_id AND f.book_generation>=b.book_generation)) AND NOT EXISTS(SELECT 1 FROM contact_books c WHERE c.id=d.book_id AND c.owner_device_id<>d.owner_device_id AND NOT EXISTS(SELECT 1 FROM projection_deleted_books f WHERE f.generation=d.generation AND f.book_id=c.id AND f.owner_device_id=c.owner_device_id AND f.book_generation>=c.generation)) ON CONFLICT(book_id,owner_device_id) DO UPDATE SET generation=excluded.generation,deleted_at_ms=excluded.deleted_at_ms WHERE excluded.generation>deleted_contact_books.generation",
         params![generation, me],
     )?;
+    // Staged-only covered contacts owe their members before any covered row below is removed.
+    contact_book_deletion::capture_staged_completion(conn, generation)?;
     let covered: Vec<(String, String, i64)> = conn
         .prepare("SELECT d.book_id,d.owner_device_id,d.book_generation FROM projection_deleted_books d JOIN contact_books b ON b.id=d.book_id AND b.owner_device_id=d.owner_device_id WHERE d.generation=?")?
         .query_map([generation], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
@@ -2012,6 +2076,7 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
         "projection_contacts",
         "projection_deleted_members",
         "projection_deleted_books",
+        "projection_covered_contacts",
         "projection_notifications",
         "projection_tombstones",
         "projection_filters",

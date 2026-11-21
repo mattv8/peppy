@@ -735,7 +735,12 @@ function decimalString(value: unknown): string {
   if (result === undefined) throw new TransportError("invalid");
   return result;
 }
-/** Waiting keys win; "current" needs received and processed frontiers at the authenticated target, no pending apply, and no open snapshot. */
+/**
+ * Waiting keys win; "current" needs received and processed frontiers at the authenticated target, no pending apply, and
+ * no open snapshot. A processed gap is still current when the host reports it as withheld history: rows that a snapshot
+ * isolated on purpose, with nothing else runnable. Desktop maps the same state to Current. Repairing and failed history
+ * stay applying.
+ */
 function progressPhase(
   requested: "receiving" | "applying",
   progress: Record<string, unknown>,
@@ -747,7 +752,8 @@ function progressPhase(
   if (requested === "receiving" || snapshotOpen || targetHighWater === undefined) return "receiving";
   const target = BigInt(targetHighWater);
   if (BigInt(decimalString(progress.receivedThrough)) < target) return "receiving";
-  if (pendingWork || BigInt(decimalString(progress.processedThrough)) < target) return "applying";
+  if (pendingWork) return "applying";
+  if (BigInt(decimalString(progress.processedThrough)) < target && progress.historyBlock !== "withheld") return "applying";
   return "current";
 }
 function nonNegative(value: unknown): number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0; }

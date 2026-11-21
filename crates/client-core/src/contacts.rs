@@ -375,9 +375,14 @@ CREATE TABLE IF NOT EXISTS contact_scan_baseline(scan_id TEXT NOT NULL, contact_
 CREATE TABLE IF NOT EXISTS contact_restore_claims(book_id TEXT NOT NULL, tombstone_id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL, contact_id TEXT NOT NULL, PRIMARY KEY(book_id,tombstone_id));
 CREATE TABLE IF NOT EXISTS deleted_contact_books(book_id TEXT NOT NULL, owner_device_id TEXT NOT NULL, generation INTEGER NOT NULL, deleted_at_ms INTEGER NOT NULL, PRIMARY KEY(book_id,owner_device_id));
 CREATE TABLE IF NOT EXISTS deleted_contact_members(book_id TEXT NOT NULL, contact_id TEXT NOT NULL, owner_device_id TEXT NOT NULL, generation INTEGER NOT NULL, PRIMARY KEY(book_id,contact_id,owner_device_id));
-CREATE TABLE IF NOT EXISTS contact_book_deletion_completion(book_id TEXT NOT NULL, owner_device_id TEXT NOT NULL, generation INTEGER NOT NULL, PRIMARY KEY(book_id,owner_device_id));
+CREATE TABLE IF NOT EXISTS contact_book_deletion_completion(book_id TEXT NOT NULL, owner_device_id TEXT NOT NULL, generation INTEGER NOT NULL, gate_cursor INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(book_id,owner_device_id));
 CREATE TABLE IF NOT EXISTS contact_book_deletion_completion_contacts(book_id TEXT NOT NULL, owner_device_id TEXT NOT NULL, contact_id TEXT NOT NULL, PRIMARY KEY(book_id,owner_device_id,contact_id));
 ",
+    )?;
+    crate::add_column_if_missing(
+        conn,
+        "contact_book_deletion_completion",
+        "gate_cursor INTEGER NOT NULL DEFAULT 0",
     )?;
     let columns = conn
         .prepare("PRAGMA table_info(contacts)")?

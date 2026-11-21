@@ -189,6 +189,65 @@ describe("BrowserScheduler", () => {
     expect(lastSyncCurrent()).toBe(true);
   });
 
+  it("keeps sync currency for intentionally withheld snapshot history, and refuses every other processed gap", async () => {
+    const state: { processed: string; waiting: string; pending: boolean; historyBlock?: string } = {
+      processed: "4",
+      waiting: "0",
+      pending: false,
+      historyBlock: "withheld",
+    };
+    const contexts: Record<string, unknown>[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string, args: Record<string, unknown>) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "5" };
+        if (command === "sync_progress") {
+          return { receivedThrough: "5", processedThrough: state.processed, waitingForKeys: state.waiting, historyBlock: state.historyBlock };
+        }
+        if (command === "sync_work_status") return { pendingApply: state.pending };
+        if (command === "_worker_apply_server_context") { contexts.push(args); return {}; }
+        return [];
+      },
+      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+    };
+    const transport = {
+      json: async (path: string) => {
+        if (path === "/v1/devices" || path === "/v1/capabilities") return path === "/v1/devices" ? { devices: [] } : { capabilities: [] };
+        return { events: [], high_water_cursor: "5", next_after: null };
+      },
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    };
+    const scheduler = new BrowserScheduler(session, transport);
+    const lastSyncCurrent = () => contexts.at(-1)?.syncCurrent;
+
+    await scheduler.poll();
+    expect(lastSyncCurrent()).toBe(true);
+
+    state.historyBlock = "repairing";
+    await scheduler.poll();
+    expect(lastSyncCurrent()).toBe(false);
+
+    state.historyBlock = "failed";
+    await scheduler.poll();
+    expect(lastSyncCurrent()).toBe(false);
+
+    state.historyBlock = undefined;
+    await scheduler.poll();
+    expect(lastSyncCurrent()).toBe(false);
+
+    state.historyBlock = "withheld";
+    state.waiting = "2";
+    await scheduler.poll();
+    expect(lastSyncCurrent()).toBe(false);
+
+    state.waiting = "0";
+    state.pending = true;
+    await scheduler.poll();
+    expect(lastSyncCurrent()).toBe(false);
+  });
+
   it("never reports sync currency when the round cannot reach the server", async () => {
     const contexts: Record<string, unknown>[] = [];
     const session = {

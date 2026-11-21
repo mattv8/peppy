@@ -10,7 +10,7 @@ use crate::contact_media;
 use crate::contacts::{canonical_decimal, invalid, require_unlocked};
 use crate::{
     Ctx, EnvelopePurpose, Error, MAX_SEAL_BATCH, PrivatePayload, enqueue_without_sealing, get_meta,
-    seal_pending,
+    receive_cursor, seal_pending, set_meta, to_i64,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
@@ -25,6 +25,9 @@ pub(crate) const DELETE_OWNER_IS_THIS_DEVICE: &str = "contact book belongs to th
 pub(crate) const DELETE_OWNER_SUCCEEDED: &str =
     "contact book owner was succeeded by another device";
 pub(crate) const DELETE_NOT_CURRENT: &str = "contact book deletion needs an up-to-date sync";
+
+/// Newest server replay head a host reported after committing a page (see `observe_replay_head`).
+const REPLAY_HEAD_META: &str = "contact_completion_replay_head";
 
 /// Book-keyed local state removed with a deleted book. Scan children are deleted before their
 /// scans. Every statement binds the book id as `?1`.
@@ -221,9 +224,10 @@ pub(crate) fn capture_completion(
     generation: i64,
     staged: Option<i64>,
 ) -> Result<(), Error> {
+    let gate = to_i64(receive_cursor(conn)?)?;
     conn.execute(
-        "INSERT INTO contact_book_deletion_completion(book_id,owner_device_id,generation) VALUES(?,?,?) ON CONFLICT(book_id,owner_device_id) DO UPDATE SET generation=MAX(generation,excluded.generation)",
-        params![book_id, owner, generation],
+        "INSERT INTO contact_book_deletion_completion(book_id,owner_device_id,generation,gate_cursor) VALUES(?,?,?,?) ON CONFLICT(book_id,owner_device_id) DO UPDATE SET generation=MAX(generation,excluded.generation),gate_cursor=MAX(gate_cursor,excluded.gate_cursor)",
+        params![book_id, owner, generation, gate],
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO contact_book_deletion_completion_contacts(book_id,owner_device_id,contact_id) SELECT c.book_id,?2,c.id FROM contacts c JOIN contact_books b ON b.id=c.book_id WHERE c.book_id=?1 AND COALESCE(c.publication_owner,b.owner_device_id)=?2 AND COALESCE(c.publication_generation,b.generation)<=?3 AND NOT EXISTS(SELECT 1 FROM deleted_contact_members m WHERE m.book_id=c.book_id AND m.contact_id=c.id AND m.owner_device_id=?2 AND m.generation>=?3)",
@@ -237,6 +241,26 @@ pub(crate) fn capture_completion(
             params![book_id, owner, staged, generation],
         )?;
     }
+    Ok(())
+}
+
+/// Records the owed members of a promotion's covered contacts that live only in the stage: staged
+/// publications (`projection_contacts`) and covered records staging dropped
+/// (`projection_covered_contacts`). Deduplicated against terminal members known in the stage and
+/// live. Called inside the promotion transaction, after this stage's fences reach
+/// `deleted_contact_books` and before the stage rows are removed, so a failed promotion owes nothing.
+pub(crate) fn capture_staged_completion(conn: &Connection, generation: i64) -> Result<(), Error> {
+    let gate = to_i64(receive_cursor(conn)?)?;
+    const STAGED: &str = "WITH staged(book_id,contact_id,owner,gen) AS (SELECT book_id,contact_id,publication_owner,publication_generation FROM projection_contacts WHERE generation=?1 AND publication_owner IS NOT NULL UNION ALL SELECT book_id,contact_id,owner_device_id,book_generation FROM projection_covered_contacts WHERE generation=?1)";
+    let uncovered = "s.gen<=d.generation AND NOT EXISTS(SELECT 1 FROM projection_deleted_members m WHERE m.generation=?1 AND m.book_id=s.book_id AND m.contact_id=s.contact_id AND m.owner_device_id=s.owner AND m.book_generation>=d.generation) AND NOT EXISTS(SELECT 1 FROM deleted_contact_members m WHERE m.book_id=s.book_id AND m.contact_id=s.contact_id AND m.owner_device_id=s.owner AND m.generation>=d.generation)";
+    conn.execute(
+        &format!("{STAGED} INSERT INTO contact_book_deletion_completion(book_id,owner_device_id,generation,gate_cursor) SELECT DISTINCT s.book_id,s.owner,d.generation,?2 FROM staged s JOIN deleted_contact_books d ON d.book_id=s.book_id AND d.owner_device_id=s.owner WHERE {uncovered} ON CONFLICT(book_id,owner_device_id) DO UPDATE SET generation=MAX(generation,excluded.generation),gate_cursor=MAX(gate_cursor,excluded.gate_cursor)"),
+        params![generation, gate],
+    )?;
+    conn.execute(
+        &format!("{STAGED} INSERT OR IGNORE INTO contact_book_deletion_completion_contacts(book_id,owner_device_id,contact_id) SELECT DISTINCT s.book_id,s.owner,s.contact_id FROM staged s JOIN deleted_contact_books d ON d.book_id=s.book_id AND d.owner_device_id=s.owner WHERE {uncovered}"),
+        params![generation],
+    )?;
     Ok(())
 }
 
@@ -270,26 +294,115 @@ fn forget_completion(conn: &Connection, book_id: &str, owner: &str) -> Result<()
     Ok(())
 }
 
-/// Whether `drain_completion` can enqueue now. It needs an unlocked vault, and compaction must be
-/// supported, complete and fully readable: the conditions `compaction_plan` checks before any
-/// contact record may start. Work waits otherwise, and it is not reported as pending either.
+/// Whether `drain_completion` can enqueue now. It needs an unlocked vault and the active epoch's
+/// compaction key. Compaction must also be supported, complete and fully readable: the conditions
+/// `compaction_plan` checks before any contact record may start. Work waits otherwise, and it is
+/// not reported as pending either.
 pub(crate) fn completion_ready(conn: &Connection, ctx: &Ctx<'_>) -> Result<bool, Error> {
     if require_unlocked(ctx).is_err() {
         return Ok(false);
     }
-    Ok(
-        get_meta(conn, "server_compaction_supported")?.as_deref() == Some("1")
-            && get_meta(conn, "compaction_backfill_complete")?.as_deref() == Some("1")
-            && crate::backfill_unreadable(conn, ctx)? == 0,
-    )
+    let compaction_key = ctx
+        .active_epoch
+        .and_then(|epoch| ctx.keys.get(&epoch))
+        .is_some_and(|keys| keys.compaction.is_some());
+    Ok(compaction_key
+        && get_meta(conn, "server_compaction_supported")?.as_deref() == Some("1")
+        && get_meta(conn, "compaction_backfill_complete")?.as_deref() == Some("1")
+        && crate::backfill_unreadable(conn, ctx)? == 0)
+}
+
+/// Replay head that owed members may drain against, or `None` to defer. Deferral holds while
+/// (a) no host has reported a head, (b) receipt has not reached the newest reported head, or
+/// (c) `sync_not_current` finds inbound work, a snapshot or projection in progress, or a repair.
+/// (b) and (c) let the deleter's members, which follow its fence on the server, be received and
+/// applied first. A row is eligible only when its gate (set at capture) is at or below the head.
+fn completion_head(conn: &Connection, ctx: &Ctx<'_>) -> Result<Option<u64>, Error> {
+    if !completion_ready(conn, ctx)? {
+        return Ok(None);
+    }
+    let Some(head) = get_meta(conn, REPLAY_HEAD_META)? else {
+        return Ok(None);
+    };
+    let head: u64 = head.parse().map_err(|_| Error::Database)?;
+    if receive_cursor(conn)? < head || sync_not_current(conn, ctx)? {
+        return Ok(None);
+    }
+    Ok(Some(head))
+}
+
+/// Whether `drain_completion` would enqueue an owed member now. `sync_work_status` reports owed work
+/// only then, so hosts that loop on pending apply cannot spin on work that is still waiting.
+pub(crate) fn completion_pending(conn: &Connection, ctx: &Ctx<'_>) -> Result<bool, Error> {
+    let owed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM contact_book_deletion_completion_contacts LIMIT 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if !owed {
+        return Ok(false);
+    }
+    let Some(head) = completion_head(conn, ctx)? else {
+        return Ok(false);
+    };
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM contact_book_deletion_completion_contacts p JOIN contact_book_deletion_completion w ON w.book_id=p.book_id AND w.owner_device_id=p.owner_device_id WHERE w.gate_cursor<=?1)",
+        params![to_i64(head)?],
+        |row| row.get(0),
+    )?)
+}
+
+/// Records a server replay head that a host observed after committing a page. The highest head
+/// wins. Owed members publish only after receipt reaches it (see `completion_head`).
+pub(crate) fn observe_replay_head(conn: &Connection, cursor: u64) -> Result<(), Error> {
+    let newer = match get_meta(conn, REPLAY_HEAD_META)? {
+        Some(head) => cursor > head.parse::<u64>().map_err(|_| Error::Database)?,
+        None => true,
+    };
+    if newer {
+        set_meta(conn, REPLAY_HEAD_META, &cursor.to_string())?;
+    }
+    Ok(())
+}
+
+/// Whether the contact's current publication is not covered by `owner`'s fence at `generation`: a
+/// higher generation, or another owner. Such a contact continued after the fence, so its owed
+/// member would supersede a newer frontier. An absent contact is not superseded.
+fn superseded_publication(
+    conn: &Connection,
+    book_id: &str,
+    owner: &str,
+    contact_id: &str,
+    generation: i64,
+) -> Result<bool, Error> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM contacts c JOIN contact_books b ON b.id=c.book_id WHERE c.book_id=?1 AND c.id=?2 AND NOT(COALESCE(c.publication_owner,b.owner_device_id)=?3 AND COALESCE(c.publication_generation,b.generation)<=?4))",
+        params![book_id, contact_id, owner, generation],
+        |row| row.get(0),
+    )?)
+}
+
+/// Drops one owed member without emitting it.
+fn settle_owed(
+    conn: &Connection,
+    book_id: &str,
+    owner: &str,
+    contact_id: &str,
+) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM contact_book_deletion_completion_contacts WHERE book_id=?1 AND owner_device_id=?2 AND contact_id=?3",
+        params![book_id, owner, contact_id],
+    )?;
+    Ok(())
 }
 
 /// Publishes the member records still owed by fences this device applied, at most `MAX_SEAL_BATCH`
 /// per pass. The caller runs it at the end of `apply_pending`, inside the batch transaction and
 /// after every row of the batch and any snapshot promotion, so in-batch order does not matter.
-/// Only an unlocked device emits, and only when `completion_ready`. Work for a book this device
-/// owns, or whose owner was succeeded, is dropped because those records are never applied. A
-/// database error fails the batch.
+/// Only an unlocked device emits, and only when `completion_head` allows it. Work for a book this
+/// device owns, or whose owner was succeeded, is dropped because those records are never applied.
+/// A contact that a newer or foreign publication now covers is settled without a member. A failure
+/// other than a compaction deferral fails the batch.
 pub(crate) fn drain_completion(tx: &mut Transaction<'_>, ctx: &Ctx<'_>) -> Result<(), Error> {
     // Work with nothing left owed is finished, whatever the lock or compaction state.
     tx.execute(
@@ -302,9 +415,12 @@ pub(crate) fn drain_completion(tx: &mut Transaction<'_>, ctx: &Ctx<'_>) -> Resul
         [],
         |row| row.get(0),
     )?;
-    if !owed || !completion_ready(tx, ctx)? {
+    if !owed {
         return Ok(());
     }
+    let Some(head) = completion_head(tx, ctx)? else {
+        return Ok(());
+    };
     let me = ctx.device_id.to_string();
     let owners: Vec<(String, String)> = tx
         .prepare("SELECT book_id,owner_device_id FROM contact_book_deletion_completion")?
@@ -317,9 +433,9 @@ pub(crate) fn drain_completion(tx: &mut Transaction<'_>, ctx: &Ctx<'_>) -> Resul
     }
     let batch: Vec<(String, String, i64, String)> = tx
         .prepare(
-            "SELECT p.book_id,p.owner_device_id,w.generation,p.contact_id FROM contact_book_deletion_completion_contacts p JOIN contact_book_deletion_completion w ON w.book_id=p.book_id AND w.owner_device_id=p.owner_device_id ORDER BY p.rowid LIMIT ?1",
+            "SELECT p.book_id,p.owner_device_id,w.generation,p.contact_id FROM contact_book_deletion_completion_contacts p JOIN contact_book_deletion_completion w ON w.book_id=p.book_id AND w.owner_device_id=p.owner_device_id WHERE w.gate_cursor<=?2 ORDER BY p.rowid LIMIT ?1",
         )?
-        .query_map(params![MAX_SEAL_BATCH as i64], |row| {
+        .query_map(params![MAX_SEAL_BATCH as i64, to_i64(head)?], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })?
         .collect::<Result<_, _>>()?;
@@ -327,6 +443,10 @@ pub(crate) fn drain_completion(tx: &mut Transaction<'_>, ctx: &Ctx<'_>) -> Resul
     for (book_id, owner, generation, contact_id) in batch {
         if member_covers(tx, &book_id, &contact_id, &owner, generation)? {
             cancel_completion(tx, &book_id, &owner, &contact_id, generation)?;
+            continue;
+        }
+        if superseded_publication(tx, &book_id, &owner, &contact_id, generation)? {
+            settle_owed(tx, &book_id, &owner, &contact_id)?;
             continue;
         }
         let member = PrivatePayload::ContactBookDeletedMember {
@@ -339,9 +459,10 @@ pub(crate) fn drain_completion(tx: &mut Transaction<'_>, ctx: &Ctx<'_>) -> Resul
         match enqueue_without_sealing(&savepoint, ctx, EnvelopePurpose::Event, None, None, &member)
         {
             Ok(_) => savepoint.commit()?,
-            Err(error @ Error::Database) => return Err(error),
-            // Compaction is not ready to take a compactable record; keep the rest for later.
-            Err(_) => break,
+            // Compaction is not ready to take a compactable record (`compaction_plan`): keep the
+            // rest for a later pass. Any other failure is unexpected and fails the batch.
+            Err(Error::KeysUnavailable | Error::InvalidRequest(_)) => break,
+            Err(error) => return Err(error),
         }
         enqueued = true;
         cancel_completion(tx, &book_id, &owner, &contact_id, generation)?;
@@ -644,6 +765,9 @@ mod tests {
     #[test]
     fn historical_copies_still_fence_later_records() {
         let conn = Connection::open_in_memory().unwrap();
+        // The completion capture reads the receive frontier from metadata.
+        conn.execute_batch("CREATE TABLE metadata(k TEXT PRIMARY KEY, v TEXT NOT NULL)")
+            .unwrap();
         crate::contacts::initialize(&conn).unwrap();
         let fence = PrivatePayload::ContactBookDeleted {
             book_id: "b1".into(),

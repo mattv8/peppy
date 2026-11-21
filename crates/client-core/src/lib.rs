@@ -5368,6 +5368,20 @@ impl Client {
         Ok(())
     }
 
+    /// Records the server head a replay page reported. Call it after the page has committed through
+    /// `ingest_raw_batch` (including an empty page at the head). Owed contact-deletion members are
+    /// published only after receipt reaches the newest head reported after their fence was captured,
+    /// so the deleter's members, which follow its fence, are not duplicated.
+    pub fn observe_replay_head(&self, cursor: Cursor) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        contact_book_deletion::observe_replay_head(&tx, cursor.0)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Whether replay and the message-origin backfill have reached the initial server watermark.
     pub fn initial_replay_caught_up(&self) -> Result<bool, Error> {
         let mut store = self.lock()?;
@@ -5606,11 +5620,7 @@ impl Client {
         // Owed deletion members count only when the drain can enqueue them now.
         let owed_members = {
             let (conn, ctx) = store.parts();
-            contact_book_deletion::completion_ready(conn, &ctx)?
-                && exists(
-                    conn,
-                    "SELECT 1 FROM contact_book_deletion_completion_contacts LIMIT 1",
-                )?
+            contact_book_deletion::completion_pending(conn, &ctx)?
         };
         let pending_seal = store
             .active_epoch
@@ -22539,6 +22549,93 @@ mod tests {
         )
         .unwrap();
         (client, profile, header)
+    }
+
+    #[test]
+    fn owed_deletion_members_wait_for_the_active_compaction_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (client, profile, header) = compaction_test_client(&dir, "owed-v1.db", VaultId::new());
+        let passphrase = "correct horse battery staple";
+        client.unlock(&profile, &header, passphrase).unwrap();
+        let v2 = client
+            .export_native_key_cache(1)
+            .unwrap()
+            .native_storage_bytes()
+            .to_vec();
+        let mut v1 = v2[..LEGACY_KEY_CACHE_BYTES].to_vec();
+        v1[4] = 1;
+        client
+            .lock()
+            .unwrap()
+            .conn
+            .execute(
+                "UPDATE key_cache_checks SET check_value=? WHERE epoch=1",
+                params![key_cache_check(&v1).as_slice()],
+            )
+            .unwrap();
+        let config = client.lock().unwrap().config.clone();
+        drop(client);
+        let reopened = Client::open(config, DatabaseKey::new(&[21; 32]).unwrap()).unwrap();
+        reopened
+            .import_native_key_cache(&NativeKeyCache::from_native_storage(v1))
+            .unwrap();
+        reopened.set_server_compaction_state(true, true).unwrap();
+        // What a receiver holds after applying a fence and before its members are sent.
+        let owner = DeviceId::new().to_string();
+        let owed_rows = |client: &Client| -> i64 {
+            client
+                .lock()
+                .unwrap()
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM contact_book_deletion_completion_contacts",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        {
+            let store = reopened.lock().unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO contact_book_deletion_completion(book_id,owner_device_id,generation,gate_cursor) VALUES('b',?,1,0)",
+                    params![owner],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO contact_book_deletion_completion_contacts(book_id,owner_device_id,contact_id) VALUES('b',?,'c1')",
+                    params![owner],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT OR REPLACE INTO metadata(k,v) VALUES('contact_completion_replay_head','0')",
+                    [],
+                )
+                .unwrap();
+        }
+
+        // The event key is installed but the compaction key is not: nothing is drainable, so the
+        // host is told there is no pending apply, and a pass neither spins nor drops the work.
+        assert!(!reopened.sync_work_status().unwrap().pending_apply);
+        reopened.apply_pending(100).unwrap();
+        assert_eq!(owed_rows(&reopened), 1);
+        assert!(!reopened.sync_work_status().unwrap().pending_apply);
+
+        // The passphrase unlock installs the compaction key, and the owed member is published.
+        reopened.unlock(&profile, &header, passphrase).unwrap();
+        assert!(reopened.sync_work_status().unwrap().pending_apply);
+        reopened.apply_pending(100).unwrap();
+        assert_eq!(owed_rows(&reopened), 0);
+        assert_eq!(
+            reopened.pending_outbox().unwrap().len(),
+            1,
+            "the owed member is queued after unlock"
+        );
     }
 
     fn sealed_compaction(client: &Client) -> Vec<(u64, Option<CompactionMetadata>)> {
