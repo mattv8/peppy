@@ -7,7 +7,12 @@
 // binding, and objc's macros still emit the legacy cargo-clippy feature check.
 #![allow(deprecated, unexpected_cfgs)]
 
-use std::{cell::RefCell, collections::HashMap, ffi::c_void, sync::OnceLock};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    ffi::c_void,
+    sync::OnceLock,
+};
 
 use cocoa::{
     appkit::{
@@ -39,6 +44,12 @@ const NS_NONACTIVATING_PANEL_MASK: u64 = 1 << 7;
 const MONITOR_GEOMETRY_TOLERANCE: f64 = 0.5;
 const IMAGE_SCALING_PROPORTIONALLY_UP_OR_DOWN: i64 = 3;
 const CG_IMAGE_ALPHA_NONE_SKIP_LAST: u32 = 5;
+const TYPING_DOT_SIZE: f64 = 4.0;
+const TYPING_DOT_PITCH: f64 = 7.0;
+const TYPING_DOT_LEFT: f64 = 4.0;
+const TYPING_DOT_REST_Y: f64 = 5.0;
+const TYPING_DOT_STATIC_Y: f64 = 7.0;
+const TYPING_DOT_TRAVEL: f64 = 3.0;
 
 type CFTypeRef = *const c_void;
 type CFDataRef = *const c_void;
@@ -51,6 +62,16 @@ type CGImageRef = *mut c_void;
 extern "C" {
     fn CFDataCreate(allocator: CFTypeRef, bytes: *const u8, length: isize) -> CFDataRef;
     fn CFRelease(value: CFTypeRef);
+}
+
+#[link(name = "AppKit", kind = "framework")]
+extern "C" {
+    static NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification: id;
+}
+
+#[link(name = "QuartzCore", kind = "framework")]
+extern "C" {
+    fn CACurrentMediaTime() -> f64;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -94,6 +115,8 @@ struct HeadViews {
     group: id,
     badge: id,
     badge_label: id,
+    typing_pill: id,
+    typing_dots: [id; 3],
 }
 
 #[derive(Default)]
@@ -101,10 +124,12 @@ struct Registry {
     heads: HashMap<String, Head>,
     views: HashMap<usize, String>,
     screen_observer: Option<usize>,
+    accessibility_observer: Option<usize>,
 }
 
 thread_local! {
     static HEADS: RefCell<Registry> = RefCell::new(Registry::default());
+    static TYPING_DOT_OPTIONS: Cell<Option<(bool, bool)>> = const { Cell::new(None) };
 }
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
@@ -147,6 +172,27 @@ fn badge_frame(unread: u64) -> NSRect {
     )
 }
 
+fn typing_pill_frame() -> NSRect {
+    badge_frame(100)
+}
+
+fn typing_dot_frame(index: usize, y: f64) -> NSRect {
+    NSRect::new(
+        NSPoint::new(TYPING_DOT_LEFT + TYPING_DOT_PITCH * index as f64, y),
+        NSSize::new(TYPING_DOT_SIZE, TYPING_DOT_SIZE),
+    )
+}
+
+fn head_label(label: &str, unread: u64, typing: bool) -> String {
+    if typing && unread == 0 {
+        format!("{label}, typing")
+    } else if typing {
+        format!("{label}, typing, {unread} unread messages")
+    } else {
+        format!("{label}, {unread} unread messages")
+    }
+}
+
 fn badge_label_frame(width: f64, label_height: f64) -> NSRect {
     NSRect::new(
         NSPoint::new(0.0, (BADGE_HEIGHT - label_height) / 2.0),
@@ -154,11 +200,15 @@ fn badge_label_frame(width: f64, label_height: f64) -> NSRect {
     )
 }
 
-fn is_in_badge(point: NSPoint, unread: u64) -> bool {
-    if unread == 0 {
+fn is_in_badge(point: NSPoint, unread: u64, typing: bool) -> bool {
+    if unread == 0 && !typing {
         return false;
     }
-    let frame = badge_frame(unread);
+    let frame = if typing {
+        typing_pill_frame()
+    } else {
+        badge_frame(unread)
+    };
     point.x >= frame.origin.x
         && point.x <= frame.origin.x + frame.size.width
         && point.y >= frame.origin.y
@@ -302,6 +352,10 @@ fn screen_observer_class() -> *const Class {
             sel!(screenParametersChanged:),
             screen_parameters_changed as extern "C" fn(&Object, Sel, id),
         );
+        decl.add_method(
+            sel!(accessibilityDisplayChanged:),
+            accessibility_display_changed as extern "C" fn(&Object, Sel, id),
+        );
         decl.register() as *const Class as usize
     }) as *const Class
 }
@@ -312,8 +366,35 @@ extern "C" fn screen_parameters_changed(_: &Object, _: Sel, _: id) {
     }
 }
 
+extern "C" fn accessibility_display_changed(_: &Object, _: Sel, _: id) {
+    if let Some(app) = APP.get() {
+        let _ = app.run_on_main_thread(|| unsafe {
+            let options = accessibility_display_options();
+            if TYPING_DOT_OPTIONS.with(|applied| applied.get()) == Some(options) {
+                return;
+            }
+            TYPING_DOT_OPTIONS.with(|applied| applied.set(Some(options)));
+            let views = HEADS.with(|registry| {
+                registry
+                    .borrow()
+                    .heads
+                    .values()
+                    .filter(|head| head.spec.typing)
+                    .map(|head| head.views)
+                    .collect::<Vec<_>>()
+            });
+            for views in views {
+                configure_typing_dots(views);
+            }
+        });
+    }
+}
+
 extern "C" fn head_hit_test(view: &Object, _: Sel, point: NSPoint) -> id {
-    let in_badge = with_head(view, |head| is_in_badge(point, head.spec.unread)).unwrap_or(false);
+    let in_badge = with_head(view, |head| {
+        is_in_badge(point, head.spec.unread, head.spec.typing)
+    })
+    .unwrap_or(false);
     if is_in_circle(point) || in_badge {
         view as *const Object as id
     } else {
@@ -736,7 +817,13 @@ unsafe fn set_panel_frame(panel: id, frame: &HeadFrame) {
 
 fn update_head_content(views: HeadViews, spec: &HeadSpec, previous_glyph: Option<&HeadGlyph>) {
     unsafe {
-        apply_color(views.circle, views.badge, spec.color, &spec.glyph);
+        apply_color(
+            views.circle,
+            views.badge,
+            views.typing_pill,
+            spec.color,
+            &spec.glyph,
+        );
         apply_glyph(views, &spec.glyph, previous_glyph);
         let text = if spec.unread >= 100 {
             "99+".to_owned()
@@ -748,14 +835,30 @@ fn update_head_content(views: HeadViews, spec: &HeadSpec, previous_glyph: Option
         let _: () = msg_send![views.badge_label, sizeToFit];
         let natural_frame: NSRect = msg_send![views.badge_label, frame];
         let _: () = msg_send![views.badge_label, setFrame: badge_label_frame(badge_width(spec.unread), natural_frame.size.height)];
-        let _: () = msg_send![views.badge, setHidden: if spec.unread == 0 { YES } else { NO }];
-        let label = ns_string(&format!("{}, {} unread messages", spec.label, spec.unread));
+        let _: () = msg_send![views.badge, setHidden: if spec.unread == 0 || spec.typing { YES } else { NO }];
+        let was_hidden: BOOL = msg_send![views.typing_pill, isHidden];
+        let pill_hidden = if spec.typing { NO } else { YES };
+        let _: () = msg_send![views.typing_pill, setHidden: pill_hidden];
+        if was_hidden != pill_hidden {
+            let window: id = msg_send![views.view, window];
+            if window != nil {
+                let _: () = msg_send![window, invalidateShadow];
+            }
+        }
+        if spec.typing && was_hidden == YES {
+            configure_typing_dots(views);
+        } else if !spec.typing && was_hidden == NO {
+            for dot in views.typing_dots {
+                let _: () = msg_send![dot, removeAllAnimations];
+            }
+        }
+        let label = ns_string(&head_label(&spec.label, spec.unread, spec.typing));
         let _: () = msg_send![views.view, setAccessibilityLabel: label];
         let _: () = msg_send![views.view, setToolTip: label];
     }
 }
 
-unsafe fn apply_color(circle: id, badge: id, color: [u8; 3], glyph: &HeadGlyph) {
+unsafe fn apply_color(circle: id, badge: id, pill: id, color: [u8; 3], glyph: &HeadGlyph) {
     let circle_color = srgb_color(color);
     let circle_color: id = msg_send![circle_color, CGColor];
     let circle_layer: id = msg_send![circle, layer];
@@ -764,6 +867,8 @@ unsafe fn apply_color(circle: id, badge: id, color: [u8; 3], glyph: &HeadGlyph) 
     let badge_ring = srgb_color(badge_ring_color(glyph, color));
     let badge_ring: id = msg_send![badge_ring, CGColor];
     let _: () = msg_send![badge_layer, setBorderColor: badge_ring];
+    let pill_layer: id = msg_send![pill, layer];
+    let _: () = msg_send![pill_layer, setBorderColor: badge_ring];
 }
 
 fn badge_ring_color(glyph: &HeadGlyph, color: [u8; 3]) -> [u8; 3] {
@@ -853,6 +958,21 @@ fn create_head(
         let group = group_icon();
         let badge = NSView::initWithFrame_(NSView::alloc(nil), badge_frame(spec.unread));
         style_badge_container(badge);
+        let typing_pill = NSView::initWithFrame_(NSView::alloc(nil), typing_pill_frame());
+        style_badge_container(typing_pill);
+        let _: () = msg_send![typing_pill, setAccessibilityElement: NO];
+        let pill_layer: id = msg_send![typing_pill, layer];
+        let white: id = msg_send![srgb_color([255, 255, 255]), CGColor];
+        let _: () = msg_send![pill_layer, setBackgroundColor: white];
+        let _: () = msg_send![typing_pill, setHidden: YES];
+        let mut typing_dots = [nil; 3];
+        for (index, slot) in typing_dots.iter_mut().enumerate() {
+            let dot: id = msg_send![class!(CALayer), layer];
+            let _: () = msg_send![dot, setFrame: typing_dot_frame(index, TYPING_DOT_REST_Y)];
+            let _: () = msg_send![dot, setCornerRadius: 2.0f64];
+            let _: () = msg_send![pill_layer, addSublayer: dot];
+            *slot = dot;
+        }
         let badge_label = label(NSRect::new(
             NSPoint::new(0.0, 0.0),
             NSSize::new(badge_width(spec.unread), BADGE_HEIGHT),
@@ -872,6 +992,8 @@ fn create_head(
         let _: () = msg_send![badge_label, release];
         let _: () = msg_send![view, addSubview: badge];
         let _: () = msg_send![badge, release];
+        let _: () = msg_send![view, addSubview: typing_pill];
+        let _: () = msg_send![typing_pill, release];
         panel.setContentView_(view);
         let _: () = msg_send![view, release];
         set_panel_frame(panel, &frame);
@@ -889,6 +1011,8 @@ fn create_head(
                 group,
                 badge,
                 badge_label,
+                typing_pill,
+                typing_dots,
             },
             spec,
             frame: frame.clone(),
@@ -908,6 +1032,7 @@ fn create_head(
                 .insert(head.spec.conversation_id.clone(), head);
         });
         ensure_screen_observer();
+        ensure_accessibility_observer();
     }
     Ok((position, frame))
 }
@@ -1040,6 +1165,125 @@ unsafe fn style_badge_label(badge_label: id) {
     let _: () = msg_send![badge_label, setAccessibilityElement: NO];
 }
 
+unsafe fn number_array(values: &[f64]) -> id {
+    let numbers: Vec<id> = values
+        .iter()
+        .map(|value| msg_send![class!(NSNumber), numberWithDouble: *value])
+        .collect();
+    msg_send![class!(NSArray), arrayWithObjects: numbers.as_ptr() count: numbers.len()]
+}
+
+unsafe fn typing_animation(key_path: &str, values: &[f64]) -> id {
+    let animation: id =
+        msg_send![class!(CAKeyframeAnimation), animationWithKeyPath: ns_string(key_path)];
+    let _: () = msg_send![animation, setDuration: 1.2f64];
+    let _: () = msg_send![animation, setValues: number_array(values)];
+    let _: () = msg_send![animation, setKeyTimes: number_array(&[0.0, 0.2, 0.5, 1.0])];
+    let timings: [id; 3] = [
+        msg_send![class!(CAMediaTimingFunction), functionWithName: ns_string("easeOut")],
+        msg_send![class!(CAMediaTimingFunction), functionWithName: ns_string("easeInEaseOut")],
+        msg_send![class!(CAMediaTimingFunction), functionWithName: ns_string("linear")],
+    ];
+    let timings: id =
+        msg_send![class!(NSArray), arrayWithObjects: timings.as_ptr() count: timings.len()];
+    let _: () = msg_send![animation, setTimingFunctions: timings];
+    animation
+}
+
+/// Reads `(reduce_motion, increase_contrast)` from the shared workspace.
+unsafe fn accessibility_display_options() -> (bool, bool) {
+    let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+    let reduce_motion: BOOL = msg_send![workspace, accessibilityDisplayShouldReduceMotion];
+    let increase_contrast: BOOL = msg_send![workspace, accessibilityDisplayShouldIncreaseContrast];
+    (reduce_motion == YES, increase_contrast == YES)
+}
+
+unsafe fn configure_typing_dots(views: HeadViews) {
+    let (reduce_motion, increase_contrast) = accessibility_display_options();
+    TYPING_DOT_OPTIONS.with(|applied| applied.set(Some((reduce_motion, increase_contrast))));
+    let ink = if increase_contrast {
+        [0, 0, 0]
+    } else {
+        [28, 28, 30]
+    };
+    let ink: id = msg_send![srgb_color(ink), CGColor];
+    let media_time = CACurrentMediaTime();
+    let _: () = msg_send![class!(CATransaction), begin];
+    let _: () = msg_send![class!(CATransaction), setDisableActions: YES];
+    for (index, dot) in views.typing_dots.into_iter().enumerate() {
+        let _: () = msg_send![dot, removeAllAnimations];
+        let y = if reduce_motion {
+            TYPING_DOT_STATIC_Y
+        } else {
+            TYPING_DOT_REST_Y
+        };
+        let _: () = msg_send![dot, setFrame: typing_dot_frame(index, y)];
+        let _: () = msg_send![dot, setBackgroundColor: ink];
+        let opacity: f32 = if increase_contrast {
+            1.0
+        } else if reduce_motion {
+            0.7
+        } else {
+            0.5
+        };
+        let _: () = msg_send![dot, setOpacity: opacity];
+        if !reduce_motion {
+            let position = typing_animation(
+                "transform.translation.y",
+                &[0.0, TYPING_DOT_TRAVEL, 0.0, 0.0],
+            );
+            let animations = if increase_contrast {
+                vec![position]
+            } else {
+                vec![position, typing_animation("opacity", &[0.5, 1.0, 0.5, 0.5])]
+            };
+            let animations: id = msg_send![class!(NSArray), arrayWithObjects: animations.as_ptr() count: animations.len()];
+            let group: id = msg_send![class!(CAAnimationGroup), animation];
+            let _: () = msg_send![group, setAnimations: animations];
+            let _: () = msg_send![group, setDuration: 1.2f64];
+            let _: () = msg_send![group, setRepeatCount: f32::INFINITY];
+            let _: () = msg_send![group, setRemovedOnCompletion: NO];
+            let _: () = msg_send![group, setFillMode: ns_string("backwards")];
+            let now: f64 = msg_send![dot, convertTime: media_time fromLayer: nil];
+            let _: () = msg_send![group, setBeginTime: now + 0.16 * index as f64];
+            let _: () = msg_send![dot, addAnimation: group forKey: ns_string("peppy.typing")];
+        }
+    }
+    let _: () = msg_send![class!(CATransaction), commit];
+}
+
+unsafe fn ensure_accessibility_observer() {
+    HEADS.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        if registry.accessibility_observer.is_some() {
+            return;
+        }
+        let observer: id = msg_send![screen_observer_class(), new];
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let center: id = msg_send![workspace, notificationCenter];
+        let _: () = msg_send![center, addObserver: observer selector: sel!(accessibilityDisplayChanged:) name: NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification object: nil];
+        registry.accessibility_observer = Some(observer as usize);
+    });
+}
+
+unsafe fn remove_accessibility_observer_if_unused() {
+    let observer = HEADS.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        registry
+            .heads
+            .is_empty()
+            .then(|| registry.accessibility_observer.take())
+            .flatten()
+    });
+    if let Some(observer) = observer {
+        let observer = observer as id;
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let center: id = msg_send![workspace, notificationCenter];
+        let _: () = msg_send![center, removeObserver: observer];
+        let _: id = msg_send![observer, autorelease];
+    }
+}
+
 unsafe fn ensure_screen_observer() {
     HEADS.with(|registry| {
         let mut registry = registry.borrow_mut();
@@ -1074,6 +1318,9 @@ unsafe fn remove_screen_observer_if_unused() {
 /// current event stack unwinds. This avoids releasing a view while one of its
 /// Objective-C methods is executing.
 unsafe fn destroy_head(head: Head) {
+    for dot in head.views.typing_dots {
+        let _: () = msg_send![dot, removeAllAnimations];
+    }
     head.panel.orderOut_(nil);
     let _: id = msg_send![head.panel, autorelease];
 }
@@ -1142,6 +1389,7 @@ pub fn show_head(app: &AppHandle, spec: &HeadSpec, events: HeadCallback) -> Resu
             head.spec.color = spec.color;
             head.spec.label = spec.label.clone();
             head.spec.unread = spec.unread;
+            head.spec.typing = spec.typing;
             head.spec.generation = spec.generation;
             head.events = events.clone();
             (
@@ -1190,6 +1438,7 @@ pub fn update_head(app: &AppHandle, spec: &HeadSpec) -> Result<(), String> {
             head.spec.color = spec.color;
             head.spec.label = spec.label.clone();
             head.spec.unread = spec.unread;
+            head.spec.typing = spec.typing;
             head.spec.generation = spec.generation;
             (head.views, head.spec.clone(), previous_glyph)
         })
@@ -1214,6 +1463,7 @@ pub fn hide_head(app: &AppHandle, conversation_id: &str) -> Result<(), String> {
         unsafe {
             destroy_head(head);
             remove_screen_observer_if_unused();
+            remove_accessibility_observer_if_unused();
         }
     }
     let _ = app;
@@ -1233,6 +1483,7 @@ pub fn clear_heads(app: &AppHandle) {
     }
     unsafe {
         remove_screen_observer_if_unused();
+        remove_accessibility_observer_if_unused();
     }
     let _ = app;
 }
@@ -1240,6 +1491,60 @@ pub fn clear_heads(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typing_pill_geometry_and_hit_test() {
+        let pill = typing_pill_frame();
+        let badge = badge_frame(100);
+        assert_eq!(
+            (
+                pill.origin.x,
+                pill.origin.y,
+                pill.size.width,
+                pill.size.height
+            ),
+            (
+                badge.origin.x,
+                badge.origin.y,
+                badge.size.width,
+                badge.size.height
+            )
+        );
+        assert!(is_in_badge(NSPoint::new(53.0, 7.0), 0, true));
+        assert!(!is_in_badge(NSPoint::new(53.0, 7.0), 0, false));
+        // Inside the typing pill but outside the narrower one-digit count badge.
+        assert!(is_in_badge(NSPoint::new(29.0, 15.0), 1, true));
+        assert!(!is_in_badge(NSPoint::new(29.0, 15.0), 1, false));
+        for index in 0..3 {
+            for y in [
+                TYPING_DOT_REST_Y,
+                TYPING_DOT_STATIC_Y,
+                TYPING_DOT_REST_Y + TYPING_DOT_TRAVEL,
+            ] {
+                let dot = typing_dot_frame(index, y);
+                assert!(dot.origin.x >= 2.0 && dot.origin.x + dot.size.width <= 24.0);
+                assert!(dot.origin.y >= 2.0 && dot.origin.y + dot.size.height <= 16.0);
+            }
+        }
+        let xs: Vec<f64> = (0..3)
+            .map(|index| typing_dot_frame(index, TYPING_DOT_REST_Y).origin.x)
+            .collect();
+        assert_eq!(xs, [4.0, 11.0, 18.0]);
+        assert_eq!(typing_dot_frame(0, TYPING_DOT_REST_Y).size.width, 4.0);
+        assert_eq!(typing_dot_frame(0, TYPING_DOT_REST_Y).size.height, 4.0);
+    }
+
+    #[test]
+    fn typing_accessible_label_preserves_unread_wording() {
+        assert_eq!(head_label("Alice", 0, true), "Alice, typing");
+        assert_eq!(
+            head_label("Alice", 2, true),
+            "Alice, typing, 2 unread messages"
+        );
+        assert_eq!(head_label("Alice", 0, false), "Alice, 0 unread messages");
+        assert_eq!(head_label("Alice", 2, false), "Alice, 2 unread messages");
+    }
+
     #[test]
     fn circle_rejects_transparent_corner() {
         assert!(!is_in_circle(NSPoint::new(0.0, 0.0)));
@@ -1257,13 +1562,13 @@ mod tests {
             assert_eq!(frame.origin.y, 6.0);
             assert_eq!((frame.size.width, frame.size.height), (width, BADGE_HEIGHT));
             assert_eq!(frame.origin.x + frame.size.width / 2.0, 41.0);
-            assert!(is_in_badge(NSPoint::new(41.0, 15.0), unread,));
+            assert!(is_in_badge(NSPoint::new(41.0, 15.0), unread, false));
         }
     }
 
     #[test]
     fn hidden_badge_is_not_clickable() {
-        assert!(!is_in_badge(NSPoint::new(41.0, 15.0), 0));
+        assert!(!is_in_badge(NSPoint::new(41.0, 15.0), 0, false));
     }
 
     #[test]

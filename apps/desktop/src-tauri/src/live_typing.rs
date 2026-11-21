@@ -549,7 +549,7 @@ impl LiveTypingState {
     }
 }
 
-const LIVE_MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
+const LIVE_MAX_BACKOFF: Duration = Duration::from_secs(60);
 #[cfg(not(test))]
 const LIVE_SUSPEND_TICK: Duration = Duration::from_secs(2);
 #[cfg(test)]
@@ -612,6 +612,10 @@ impl InboundTyping {
             .values()
             .map(|display| display.deadline_mono)
             .min()
+    }
+
+    fn conversation_is_typing(&self, conversation_id: ConversationId) -> bool {
+        self.displays.keys().any(|(id, _)| *id == conversation_id)
     }
 
     fn expire(&mut self, mono: u64) {
@@ -786,7 +790,7 @@ fn emit_events(
     inbound: &mut InboundTyping,
     session: &Session,
     generation: Option<LiveEnableGeneration>,
-) {
+) -> usize {
     let events = drain_publishable_events(
         inbound,
         generation,
@@ -794,7 +798,7 @@ fn emit_events(
         session.live_typing.mono_ms(),
     );
     let Some(app) = APP_HANDLE.get() else {
-        return;
+        return 0;
     };
     use tauri::{Emitter as _, Manager as _};
     let state = app.state::<AppState>();
@@ -803,7 +807,10 @@ fn emit_events(
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
     let windows = app.webview_windows();
+    let mut conversations = HashSet::new();
+    let count = events.len();
     for event in events {
+        conversations.insert(event.conversation_id);
         let composers = windows
             .keys()
             .filter(|label| crate::tray::composer_conversation(label).is_some())
@@ -812,6 +819,15 @@ fn emit_events(
             let _ = app.emit_to(target, TYPING_EVENT, event.clone());
         }
     }
+    drop(scopes);
+    for conversation in conversations {
+        crate::heads_runtime::typing_changed(
+            app,
+            &conversation.to_string(),
+            inbound.conversation_is_typing(conversation),
+        );
+    }
+    count
 }
 
 /// Gateway state computed by `sync::apply_gateway_refresh`. The actor applies it to `session.status`
@@ -861,6 +877,7 @@ enum Cmd {
     RefreshWake,
     /// Wakes the actor to apply the latest socket lifecycle.
     SocketWake,
+    SocketClosed,
     /// Test seams: apply one socket transition directly, as the supervisor would have reported it.
     #[cfg(test)]
     SocketUp,
@@ -944,6 +961,17 @@ struct TypingActor {
     anchor: (Instant, SystemTime),
     sealed: mpsc::Sender<SealedFrame>,
     published: watch::Sender<Published>,
+    counts: TypingCounts,
+    counts_open: bool,
+}
+
+#[derive(Default)]
+struct TypingCounts {
+    sealed: u64,
+    not_sealed: u64,
+    inbound: u64,
+    replies: u64,
+    displays: u64,
 }
 
 impl TypingActor {
@@ -967,6 +995,8 @@ impl TypingActor {
             anchor,
             sealed,
             published,
+            counts: TypingCounts::default(),
+            counts_open: false,
         }
     }
 
@@ -978,6 +1008,9 @@ impl TypingActor {
             self.handle(cmd);
         }
         self.handle(Cmd::Retire);
+        if self.counts_open {
+            self.log_counts();
+        }
     }
 
     fn handle(&mut self, cmd: Cmd) {
@@ -987,7 +1020,8 @@ impl TypingActor {
                 state,
                 reply,
             } => {
-                let _ = reply.send(self.send_typing(conversation_id, state));
+                let sent = self.send_typing(conversation_id, state);
+                let _ = reply.send(sent);
             }
             Cmd::SetSharing { enabled, reply } => {
                 let _ = reply.send(self.set_sharing(enabled));
@@ -1011,6 +1045,7 @@ impl TypingActor {
                 self.reevaluate();
             }
             Cmd::SocketWake => self.apply_socket_wake(),
+            Cmd::SocketClosed => self.log_counts(),
             #[cfg(test)]
             Cmd::SocketUp => {
                 let _ = self.session.live_typing.set_socket_state(true);
@@ -1065,6 +1100,15 @@ impl TypingActor {
     }
 
     fn send_typing(&mut self, conversation_id: ConversationId, state: TypingStateV2) -> bool {
+        let sealed_before = self.counts.sealed;
+        let result = self.send_typing_inner(conversation_id, state);
+        if self.counts.sealed == sealed_before {
+            self.counts.not_sealed += 1;
+        }
+        result
+    }
+
+    fn send_typing_inner(&mut self, conversation_id: ConversationId, state: TypingStateV2) -> bool {
         self.reevaluate();
         if state == TypingStateV2::Started && !self.sharing {
             return false;
@@ -1082,6 +1126,10 @@ impl TypingActor {
             clock,
         ) {
             Ok(Some(outbound)) => {
+                self.counts.sealed += 1;
+                if self.counts.sealed == 1 {
+                    eprintln!("peppy: live typing first sealed send");
+                }
                 let json = serde_json::to_string(&outbound.signal).ok();
                 self.queue(outbound.generation, json, state)
             }
@@ -1208,6 +1256,8 @@ impl TypingActor {
         }
         if up && !self.socket_up {
             self.socket_up = true;
+            self.counts = TypingCounts::default();
+            self.counts_open = true;
             // A new connection starts a new suspend window; backoff time between sockets is not
             // observed by the periodic tick and must not read as a suspend gap.
             self.anchor = self.session.live_typing.suspend_now();
@@ -1217,6 +1267,15 @@ impl TypingActor {
             self.socket_up = false;
             self.teardown();
         }
+    }
+
+    fn log_counts(&mut self) {
+        self.counts_open = false;
+        let counts = std::mem::take(&mut self.counts);
+        eprintln!(
+            "peppy: live typing sealed={} not_sealed={} inbound={} replies={} displays={}",
+            counts.sealed, counts.not_sealed, counts.inbound, counts.replies, counts.displays
+        );
     }
 
     fn observe_suspend(&mut self) -> bool {
@@ -1247,6 +1306,7 @@ impl TypingActor {
     }
 
     fn inbound_frame(&mut self, json: &str) -> InboundOutcome {
+        self.counts.inbound += 1;
         self.reevaluate();
         let clock = self.session.live_typing.clock();
         match self.session.client.open_typing_signal_v2_json(json, clock) {
@@ -1269,6 +1329,9 @@ impl TypingActor {
         let wire = self
             .inbound
             .publish(outcome, self.state.generation(), clock);
+        if wire.is_some() {
+            self.counts.replies += 1;
+        }
         self.inbound.expire(clock.mono_ms);
         self.emit();
         InboundOutcome { wire, suspended }
@@ -1281,7 +1344,11 @@ impl TypingActor {
 
     fn emit(&mut self) {
         let generation = self.state.generation();
-        emit_events(&mut self.inbound, &self.session, generation);
+        let count = emit_events(&mut self.inbound, &self.session, generation) as u64;
+        if count > 0 && self.counts.displays == 0 {
+            eprintln!("peppy: live typing first published display");
+        }
+        self.counts.displays += count;
     }
 
     fn publish(&self) {
@@ -1527,15 +1594,12 @@ pub(crate) fn start(session: Arc<Session>) {
         return;
     };
     session.live_typing.install(commands.clone());
+    let supervisor = tokio::spawn(supervise(session.clone(), sealed_rx, published_rx));
     session.track_worker(tokio::spawn(shutdown_actor(
         session.clone(),
         commands,
         thread,
-    )));
-    session.track_worker(tokio::spawn(supervise(
-        session.clone(),
-        sealed_rx,
-        published_rx,
+        supervisor,
     )));
 }
 
@@ -1545,8 +1609,10 @@ async fn shutdown_actor(
     session: Arc<Session>,
     commands: mpsc::UnboundedSender<Cmd>,
     thread: thread::JoinHandle<()>,
+    supervisor: tokio::task::JoinHandle<()>,
 ) {
     session.cancel.cancelled().await;
+    let _ = supervisor.await;
     let _ = commands.send(Cmd::Shutdown);
     let _ = tokio::task::spawn_blocking(move || thread.join()).await;
 }
@@ -1555,10 +1621,11 @@ async fn socket_down_and_back_off(
     session: &Session,
     retry: &mut LiveRetry,
     connected_for: Duration,
+    attempted_at: tokio::time::Instant,
 ) -> bool {
     session.live_typing.set_socket(false);
     let retry_delay = retry.after_connection(connected_for);
-    wait_or_cancel(session, live_backoff_delay(retry_delay)).await
+    wait_or_cancel(session, live_backoff_delay(retry_delay), attempted_at).await
 }
 
 async fn supervise(
@@ -1569,6 +1636,7 @@ async fn supervise(
     let mut retry = LiveRetry::default();
     let mut probed = false;
     loop {
+        let attempted_at = tokio::time::Instant::now();
         let mut socket = match connect(&session).await {
             Ok(socket) => socket,
             Err(()) => {
@@ -1580,14 +1648,18 @@ async fn supervise(
                         _ = probe => {}
                     }
                 }
-                if !socket_down_and_back_off(&session, &mut retry, Duration::ZERO).await {
+                if !socket_down_and_back_off(&session, &mut retry, Duration::ZERO, attempted_at)
+                    .await
+                {
                     return;
                 }
                 continue;
             }
         };
         if !server_hello(&mut socket, &session).await {
-            if !socket_down_and_back_off(&session, &mut retry, Duration::ZERO).await {
+            drop(socket);
+            let _ = send_cmd(&session, Cmd::SocketClosed);
+            if !socket_down_and_back_off(&session, &mut retry, Duration::ZERO, attempted_at).await {
                 return;
             }
             continue;
@@ -1598,8 +1670,11 @@ async fn supervise(
         session.live_typing.set_socket(true);
         let end = run_socket(&session, &mut sealed, &mut published, baseline, &mut socket).await;
         drop(socket);
+        let _ = send_cmd(&session, Cmd::SocketClosed);
+        session.live_typing.set_socket(false);
         if end == SocketEnd::Cancelled
-            || !socket_down_and_back_off(&session, &mut retry, connected_at.elapsed()).await
+            || !socket_down_and_back_off(&session, &mut retry, connected_at.elapsed(), attempted_at)
+                .await
         {
             return;
         }
@@ -1852,8 +1927,25 @@ fn suspend_detected(previous: (Instant, SystemTime), now: (Instant, SystemTime))
         || monotonic_elapsed > LIVE_SUSPEND_TICK.saturating_add(LIVE_SUSPEND_SKEW)
 }
 
-async fn wait_or_cancel(session: &Session, delay: Duration) -> bool {
-    tokio::select! { _ = session.cancel.cancelled() => false, _ = sleep(delay) => true }
+async fn wait_or_cancel(
+    session: &Session,
+    delay: Duration,
+    attempted_at: tokio::time::Instant,
+) -> bool {
+    let floor = attempted_at + Duration::from_secs(5);
+    let deadline = (tokio::time::Instant::now() + delay).max(floor);
+    tokio::select! {
+        biased;
+        _ = session.cancel.cancelled() => false,
+        _ = tokio::time::sleep_until(deadline) => true,
+        _ = session.live_context_wake.notified() => {
+            tokio::select! {
+                biased;
+                _ = session.cancel.cancelled() => false,
+                _ = tokio::time::sleep_until(floor) => true,
+            }
+        }
+    }
 }
 
 fn live_backoff_delay(backoff: Duration) -> Duration {
@@ -2165,12 +2257,39 @@ mod tests {
 
     #[test]
     fn probe_failure_backoff_is_jittered_and_capped() {
+        assert_eq!(LIVE_MAX_BACKOFF, Duration::from_secs(60));
         assert_eq!(next_live_backoff(LIVE_MAX_BACKOFF, false), LIVE_MAX_BACKOFF);
         assert_eq!(
             next_live_backoff(LIVE_MAX_BACKOFF, true),
             Duration::from_secs(1)
         );
         assert!(live_backoff_delay(LIVE_MAX_BACKOFF) <= LIVE_MAX_BACKOFF);
+    }
+
+    #[tokio::test]
+    async fn context_wakes_respect_attempt_floor_and_cancellation() {
+        let (_fixture, session, _) = session_with_linked_eligible_gateway();
+        let attempt = tokio::time::Instant::now() - Duration::from_millis(4800);
+        session.live_context_wake.notify_one();
+        let wait = wait_or_cancel(&session, Duration::from_secs(30), attempt);
+        tokio::pin!(wait);
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut wait)
+            .await
+            .is_err());
+        session.live_context_wake.notify_one();
+        assert!(tokio::time::timeout(Duration::from_secs(1), &mut wait)
+            .await
+            .unwrap());
+        session.cancel.cancel();
+        session.live_context_wake.notify_one();
+        assert!(
+            !wait_or_cancel(
+                &session,
+                Duration::from_secs(30),
+                tokio::time::Instant::now()
+            )
+            .await
+        );
     }
 
     #[tokio::test]
@@ -2248,6 +2367,35 @@ mod tests {
                 deadline_mono: deadline,
             }),
         }
+    }
+
+    #[test]
+    fn group_typing_remains_active_until_last_participant_expires() {
+        let peer = DeviceId::new();
+        let conversation = ConversationId::new();
+        let mut inbound = InboundTyping::default();
+        inbound.update_peer(PeerSessionUpdate {
+            peer_device_id: peer,
+            replaced_session_token: None,
+            current_session_token: 1,
+            validation_revision: 1,
+        });
+        for (participant, deadline) in [("+15550000001", 10), ("+15550000002", 20)] {
+            let mut outcome = display_outcome(peer, conversation, 1, 1, 1, deadline);
+            if let Some(LiveAction::Display {
+                participant: member,
+                ..
+            }) = &mut outcome.action
+            {
+                *member = Some(participant.to_owned());
+            }
+            inbound.publish(outcome, Some(LiveEnableGeneration(1)), clock());
+        }
+        assert!(inbound.conversation_is_typing(conversation));
+        inbound.expire(10);
+        assert!(inbound.conversation_is_typing(conversation));
+        inbound.expire(20);
+        assert!(!inbound.conversation_is_typing(conversation));
     }
 
     #[test]
@@ -2786,7 +2934,7 @@ mod tests {
         let observed: Vec<_> = (0..7)
             .map(|_| retry.after_connection(Duration::ZERO))
             .collect();
-        assert_eq!(observed, [1, 2, 4, 8, 16, 32, 64].map(Duration::from_secs));
+        assert_eq!(observed, [1, 2, 4, 8, 16, 32, 60].map(Duration::from_secs));
     }
 
     #[test]
@@ -3387,8 +3535,6 @@ mod tests {
         let (_, session, _) = real_supervisor_session(&origin);
         start(session.clone());
         let mut peer = accept_live_peer(&listener).await;
-        let mut observed_delays = Vec::new();
-
         for base in [
             Duration::from_secs(1),
             Duration::from_secs(2),
@@ -3396,23 +3542,24 @@ mod tests {
         ] {
             peer.send(Message::Text("{}".into())).await.unwrap();
             let rejected_at = Instant::now();
-            let (stream, _) = timeout(base * 2 + Duration::from_secs(1), listener.accept())
+            let (stream, _) = timeout(base * 2 + Duration::from_secs(6), listener.accept())
                 .await
                 .expect("supervisor did not retry after rejected hello")
                 .unwrap();
             let delay = rejected_at.elapsed();
             assert!(
-                delay >= base.saturating_sub(Duration::from_millis(50)),
+                delay
+                    >= base
+                        .max(Duration::from_secs(5))
+                        .saturating_sub(Duration::from_millis(100)),
                 "retry {delay:?} was below the {base:?} backoff"
             );
             assert!(
-                delay <= base + base / 4 + Duration::from_millis(500),
+                delay <= (base + base / 4).max(Duration::from_secs(5)) + Duration::from_millis(500),
                 "retry {delay:?} exceeded the 25% jitter bound for {base:?}"
             );
-            observed_delays.push(delay);
             peer = tokio_tungstenite::accept_async(stream).await.unwrap();
         }
-        assert!(observed_delays.windows(2).all(|pair| pair[1] > pair[0]));
 
         send_server_hello(&mut peer).await;
         wait_for_live_enabled(&session, true).await;
@@ -3430,7 +3577,7 @@ mod tests {
 
         let closed_at = Instant::now();
         drop(peer);
-        let (stream, _) = timeout(Duration::from_secs(4), listener.accept())
+        let (stream, _) = timeout(Duration::from_secs(7), listener.accept())
             .await
             .expect("supervisor did not reconnect after an unstable hello")
             .unwrap();
@@ -3469,7 +3616,7 @@ mod tests {
         drop(first_peer);
         wait_for_live_enabled(&session, false).await;
 
-        let mut second_peer = timeout(Duration::from_secs(2), accept_live_peer(&listener))
+        let mut second_peer = timeout(Duration::from_secs(7), accept_live_peer(&listener))
             .await
             .expect("supervisor did not reconnect after socket loss");
         send_server_hello(&mut second_peer).await;
@@ -3622,7 +3769,14 @@ mod tests {
     async fn cancellation_wakes_supervisor_wait_without_enabling() {
         let (_, session, _) = session_with_linked_eligible_gateway();
         session.cancel.cancel();
-        assert!(!wait_or_cancel(&session, Duration::from_secs(1)).await);
+        assert!(
+            !wait_or_cancel(
+                &session,
+                Duration::from_secs(1),
+                tokio::time::Instant::now()
+            )
+            .await
+        );
         assert_eq!(
             session.client.set_typing_sharing(true),
             Err(LiveError::Disabled)
@@ -3996,7 +4150,7 @@ mod tests {
         assert!(!request_send_typing(&session, second_conversation, TypingStateV2::Started).await);
         session.live_typing.override_mono(None);
 
-        let mut second_peer = timeout(Duration::from_secs(5), accept_live_peer(&listener))
+        let mut second_peer = timeout(Duration::from_secs(7), accept_live_peer(&listener))
             .await
             .expect("the supervisor did not reconnect after an internal retirement");
         send_server_hello(&mut second_peer).await;
