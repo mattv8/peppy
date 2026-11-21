@@ -48,6 +48,9 @@ func projectTypingData(data *gmproto.TypingData, old bool, conversations []*gmpr
 		return typingProjection{Code: "typing_ignored"}
 	}
 	state, ok := typingStateFor(data.GetType())
+	if !ok {
+		return typingProjection{Code: "typing_ignored"}
+	}
 	participant, ok := typingParticipant(data, conversations)
 	if !ok {
 		return typingProjection{Code: "typing_ignored"}
@@ -145,8 +148,13 @@ func (link *Link) projectTypingEventFor(queued queuedEvent, data *gmproto.Typing
 	conversation := cloneConversation(link.conversationRecords[data.GetConversationID()])
 	revision := link.stateRevision
 	link.mu.Unlock()
+	if conversation == nil {
+		link.emitFor(queued.generation, "typing", "conversation_unknown", 0)
+		return
+	}
 	projection := projectTypingData(data, false, []*gmproto.Conversation{conversation})
 	if projection.Record == nil {
+		link.emitFor(queued.generation, "typing", "projection_ignored", 0)
 		return
 	}
 	encoded, _ := json.Marshal(projection.Record)
@@ -159,6 +167,11 @@ func (link *Link) projectTypingEventFor(queued queuedEvent, data *gmproto.Typing
 		requireRevision:   true,
 		requireStream:     true,
 	})
+	if projection.Record.State == string(typingStateStarted) {
+		link.emitFor(queued.generation, "typing", "burst_started", 0)
+	} else {
+		link.emitFor(queued.generation, "typing", "burst_stopped", 0)
+	}
 }
 
 // SetTyping validates one core intent and performs at most one bounded libgm effect.

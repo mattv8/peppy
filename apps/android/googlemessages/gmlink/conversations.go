@@ -790,16 +790,32 @@ func (link *Link) clearConversationIndexLocked() {
 
 func (link *Link) recordSettingsFor(generation uint64, source libgm.StreamSource, streamEpoch uint64, receivedAt time.Time, event *libgm.WrappedSettings) {
 	link.mu.Lock()
-	defer link.mu.Unlock()
 	if link.closed || generation != link.generation || streamEpoch != link.streamEpoch || !link.streamSourceMatchesLocked(source) {
+		link.mu.Unlock()
 		return
+	}
+	code := ""
+	if event != nil && !event.IsOld && event.Settings != nil && event.Settings.GetRCSSettings() != nil {
+		enabled := event.Settings.GetRCSSettings().GetShowTypingIndicators()
+		if link.typingIndicators == nil || *link.typingIndicators != enabled {
+			link.typingIndicators = &enabled
+			if enabled {
+				code = "indicators_on"
+			} else {
+				code = "indicators_off"
+			}
+		}
 	}
 	if event == nil || event.IsOld || event.Settings == nil || event.Settings.GetSIMCards() == nil {
 		link.invalidateSettingsLocked()
-		return
+	} else {
+		link.settings, link.settingsAt, link.settingsStreamEpoch = event.Settings, receivedAt, streamEpoch
+		link.settingsVersion++
 	}
-	link.settings, link.settingsAt, link.settingsStreamEpoch = event.Settings, receivedAt, streamEpoch
-	link.settingsVersion++
+	link.mu.Unlock()
+	if code != "" {
+		link.emitFor(generation, "typing", code, 0)
+	}
 }
 
 // recordSettingsForTest bypasses stream provenance only for package tests.

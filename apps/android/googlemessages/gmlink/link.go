@@ -101,6 +101,7 @@ type Link struct {
 	settings                     *gmproto.Settings
 	settingsAt                   time.Time
 	settingsStreamEpoch          uint64
+	typingIndicators             *bool
 	nativeTicket                 *nativeRcsTicket
 	nativeInFlight               *nativeRcsInFlight
 	settingsVersion              uint64
@@ -467,6 +468,7 @@ func (link *Link) Run() error {
 	}
 	link.generation++
 	link.retirePhysicalSourceLocked()
+	link.typingIndicators = nil
 	generation := link.generation
 	client := link.newRuntimeClient(auth, generation)
 	link.client, link.running, link.stopRun, link.runCtx, link.runGeneration, link.runExitCode = client, true, cancelRun, runCtx, generation, ""
