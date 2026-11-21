@@ -473,12 +473,6 @@ mark { background: var(--peppy-warning-surface); color: var(--peppy-text-primary
   min-width: 0;
   flex: 1;
 }
-.header-copy h1 {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--peppy-text-strong);
-}
 .header-copy b {
   font-size: 14px;
   color: var(--peppy-text-strong);

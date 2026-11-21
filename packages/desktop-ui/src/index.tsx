@@ -117,6 +117,7 @@ export {
   Download,
   ExternalLink,
   FileText,
+  Ellipsis,
   FlaskConical,
   History,
   Image,
@@ -136,6 +137,7 @@ export {
   Minus,
   Plus,
   Radio,
+  PhoneOff,
   RotateCw,
   Search,
   ShieldAlert,
@@ -831,6 +833,7 @@ export function AppTitlebar({
   onToggleSidebar,
   sidebarExpanded,
   sidebarControls,
+  sidebarLabel = "Toggle conversation list",
   onNewMessage,
   newMessageDisabled = false,
   navigation,
@@ -850,6 +853,7 @@ export function AppTitlebar({
   onToggleSidebar?(): void;
   sidebarExpanded?: boolean;
   sidebarControls?: string;
+  sidebarLabel?: string;
   onNewMessage?(): void;
   newMessageDisabled?: boolean;
   navigation?: ReactNode;
@@ -935,8 +939,8 @@ export function AppTitlebar({
         {onToggleSidebar && <button
           type="button"
           data-action="toggle-sidebar"
-          aria-label="Toggle conversation list"
-          title="Toggle conversation list"
+          aria-label={sidebarLabel}
+          title={sidebarLabel}
           aria-expanded={sidebarExpanded}
           aria-controls={sidebarControls}
           onClick={onToggleSidebar}

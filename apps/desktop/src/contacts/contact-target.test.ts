@@ -13,10 +13,20 @@ describe("findContactTarget", () => {
     await expect(findContactTarget({ bookId: "book", contactId: "target" }, listContacts, new AbortController().signal)).resolves.toEqual({
       state: "found",
       contact,
-      offset: CONTACTS_PAGE_SIZE,
-      page: [contact],
+      contacts: [...firstPage, contact],
     });
     expect(listContacts).toHaveBeenNthCalledWith(2, "book", "", CONTACTS_PAGE_SIZE, { key: "family", direction: "asc" });
+  });
+
+  it("returns every fetched page up to the target so the list can show them all", async () => {
+    const firstPage = Array.from({ length: CONTACTS_PAGE_SIZE }, (_, index) => ({ ...contact, id: `contact-${index}` }));
+    const secondPage = Array.from({ length: CONTACTS_PAGE_SIZE }, (_, index) => ({ ...contact, id: `contact-${CONTACTS_PAGE_SIZE + index}` }));
+    const listContacts = vi.fn().mockResolvedValueOnce(firstPage).mockResolvedValueOnce(secondPage).mockResolvedValueOnce([contact]);
+
+    const result = await findContactTarget({ bookId: "book", contactId: "target" }, listContacts, new AbortController().signal);
+
+    expect(result).toMatchObject({ state: "found", contact });
+    expect(result.state === "found" && result.contacts).toEqual([...firstPage, ...secondPage, contact]);
   });
 
   it("does not apply a contact page after cancellation", async () => {

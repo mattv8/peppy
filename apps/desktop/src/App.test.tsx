@@ -2674,6 +2674,18 @@ describe("conversation pinning", () => {
     expect(document.querySelector("[data-pin-conversation-id='aurora']")).toBeDisabled();
   });
 
+  it.each([
+    { view: "Settings", region: "Settings" },
+    { view: "Contacts", region: "Contacts browser" },
+  ])("keeps the update-pause description in the DOM on $view while paused", async ({ view, region }) => {
+    vi.mocked(bridge.load_state).mockImplementation(async id => ({ ...host.load(id), writesPaused: true }));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: view }));
+    await screen.findByRole("region", { name: region });
+    expect(document.getElementById("update-paused-description")).toHaveTextContent("Paused while Peppy updates your messages.");
+  });
+
   it("moves focus to the row when an update disables its pin action", async () => {
     let paused = false;
     vi.mocked(bridge.load_state).mockImplementation(async id => ({ ...host.load(id), writesPaused: paused }));
@@ -4933,6 +4945,33 @@ describe("composer window", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
     expect(screen.queryByRole("tablist", { name: "Conversation views" })).not.toBeInTheDocument();
+    expect(document.getElementById("thread-pane-header")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
+  });
+
+  it("toggles and persists contact books from the titlebar", async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Contacts" }));
+    expect(document.getElementById("thread-pane-header")).not.toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: "Toggle contact books" });
+    expect(toggle).toHaveAttribute("aria-controls", "contacts-book-list");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(document.getElementById("contacts-book-list")).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(document.getElementById("contacts-book-list")).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!)).toMatchObject({ contactsBookCollapsed: true });
+  });
+
+  it("keeps the conversation toggle on compact contacts", async () => {
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+      matches: query === "(max-width: 700px)",
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Contacts" }));
+    expect(screen.getByRole("button", { name: "Toggle conversation list" })).toHaveAttribute("aria-controls", "thread-list");
   });
 
   it("omits conversation tabs when no conversation is open", async () => {

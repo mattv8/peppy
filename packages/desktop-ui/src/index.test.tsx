@@ -1085,6 +1085,7 @@ describe("desktop UI controls", () => {
       onNewMessage={newMessage}
     />);
     const toggle = screen.getByRole("button", { name: "Toggle conversation list" });
+    expect(toggle).toHaveAttribute("title", "Toggle conversation list");
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(toggle).toHaveAttribute("aria-controls", "thread-list");
     fireEvent.click(toggle);
@@ -1100,6 +1101,11 @@ describe("desktop UI controls", () => {
     const actions = document.getElementById("titlebar-actions")!;
     expect(actions).toContainElement(document.getElementById("titlebar-extra-action"));
     expect(actions.querySelector('[data-action="new-message"]')?.nextElementSibling).toBe(document.getElementById("titlebar-extra-action"));
+  });
+
+  it("uses the supplied sidebar label for its accessible name and title", () => {
+    render(<AppTitlebar onToggleSidebar={() => {}} sidebarLabel="Toggle contact books" />);
+    expect(screen.getByRole("button", { name: "Toggle contact books" })).toHaveAttribute("title", "Toggle contact books");
   });
 
   it("renders titlebar actions without built-in conversation controls", () => {

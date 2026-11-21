@@ -7,6 +7,8 @@ import {
   readAccentColor,
   readComposerAttachmentLayout,
   readCompactTimestamps,
+  readContactsBookCollapsed,
+  readContactsBookWidth,
   readContactsDetailWidth,
   readGroupSenderAvatars,
   readShareTyping,
@@ -32,6 +34,16 @@ afterEach(() => {
 });
 
 describe("layout persistence", () => {
+  it("reads only boolean book collapse and finite book width values", () => {
+    expect(readContactsBookCollapsed()).toBe(false);
+    expect(readContactsBookWidth()).toBeUndefined();
+    localStorage.setItem(LAYOUT_KEY, '{"contactsBookCollapsed":true,"contactsBookWidth":220}');
+    expect(readContactsBookCollapsed()).toBe(true);
+    expect(readContactsBookWidth()).toBe(220);
+    localStorage.setItem(LAYOUT_KEY, '{"contactsBookCollapsed":"true","contactsBookWidth":1e999}');
+    expect(readContactsBookCollapsed()).toBe(false);
+    expect(readContactsBookWidth()).toBeUndefined();
+  });
   it("reads only a valid saved accent color", () => {
     localStorage.setItem(LAYOUT_KEY, JSON.stringify({ accentColor: 61 }));
     expect(readAccentColor()).toBe(61);

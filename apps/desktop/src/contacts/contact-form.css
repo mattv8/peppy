@@ -340,8 +340,12 @@
 
 .peppy-modal-panel.photo-crop-panel { width: min(500px, 100%); }
 
+/* Square viewport that fits short windows: the side is the smaller of the panel width and the height budget. */
 #photo-crop-viewport {
-  width: 100%;
+  width: min(100%, calc(100vh - 220px));
+  max-width: 100%;
+  max-height: calc(100vh - 220px);
+  margin: 0 auto;
   aspect-ratio: 1;
   overflow: hidden;
   border: 1px solid var(--peppy-border);
