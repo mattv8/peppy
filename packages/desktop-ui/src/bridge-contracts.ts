@@ -48,6 +48,22 @@ export type { RcsConversationEligibility, RcsEligibilityState, RcsGatewayState, 
 export type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceState, McpDeviceStatus, McpDeviceView, McpGrantView, McpScope, WebhookCreated, WebhookDeliveryState, WebhookEvent, WebhookFilterEntry, WebhookFilterMode, WebhookInput, WebhookList, WebhookSecret, WebhookTestResult, WebhookView } from "@peppy/generated/mcp";
 
 export type ConnectionState = "connected" | "offline" | "missing-native-host" | "error";
+/** Device-local verbose diagnostics state. Carries counters and sizes only; never message content or identifiers. */
+export type DiagnosticsState = {
+  /** Verbose logging is on. Persisted by the native host; off by default. */
+  enabled: boolean;
+  /** Bytes currently retained on disk (current + previous file). */
+  retainedBytes: number;
+  /** Retention cap in bytes. The UI never hard-codes it. */
+  limitBytes: number;
+  /** Records dropped since this app started (queue full, oversize, or invalid). */
+  droppedEvents: number;
+  /** The native writer could not write, rotate or read the log. */
+  storageError: boolean;
+};
+/** `cancelled` when the person closes the native save panel; that is not an error. */
+export type DiagnosticsExportResult = { outcome: "saved" | "cancelled" };
+
 export type TypingSignal = {
   conversationId: string;
   state: "started" | "stopped";
@@ -341,6 +357,14 @@ export interface DesktopBridge {
   subscribe_drafts?(listener: (draft: Draft) => void): (() => void) & { ready?: Promise<void> };
   send_typing?(input: { conversationId: string; state: TypingSignal["state"] }): Promise<void>;
   set_typing_sharing?(input: { enabled: boolean }): Promise<void>;
+  /** Rejects with `diagnostics-storage` when the native log cannot be written, rotated or read. */
+  get_diagnostics_state?(): Promise<DiagnosticsState>;
+  /** Returns the state after the change; the persisted preference is the source of truth. */
+  set_diagnostics_enabled?(input: { enabled: boolean }): Promise<DiagnosticsState>;
+  /** Flushes the writer, then opens the native save panel. The webview never sees a path. */
+  export_diagnostics_log?(): Promise<DiagnosticsExportResult>;
+  /** Deletes retained logs and any pending export copy; returns the state after the clear. */
+  clear_diagnostics_log?(): Promise<DiagnosticsState>;
   subscribe_typing?(listener: (signal: TypingSignal) => void): (() => void) & { ready?: Promise<void> };
   subscribe_lifecycle(listener: (request: { id: string; action: "quit" | "close" | "collapse" }) => void): () => void;
   subscribe_lifecycle_finished(listener: (result: { id: string; ok: boolean }) => void): () => void;

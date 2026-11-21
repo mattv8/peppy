@@ -24,7 +24,8 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   }),
 }));
 
-import { fixtureBridge, missingHostBridge, normalizeComputerClaimant, tauriBridge } from "./bridge";
+import { fixtureBridge, missingHostBridge, normalizeComputerClaimant, resetFixtureDiagnosticsForTests, tauriBridge } from "./bridge";
+import { hasDiagnosticsBridge } from "../settings/useDiagnostics";
 
 describe("native computer claimant normalization", () => {
   const nativeView = (stage: string, errorCode?: string) => ({ stage, invitationId: "id", qrPayload: null, awaitingOwner: false, state: "consumed" as const, expiresInSeconds: 0, verificationCode: null, errorCode });
@@ -705,5 +706,34 @@ describe("fixture draft saves", () => {
     const nextBlank = await fixtureBridge.save_draft({ id: "", conversationId: "", text: "", recipientIds: [], attachmentIds: [], expectedRevision: "0" });
     const addressed = await fixtureBridge.save_draft({ id: nextBlank.id, conversationId: nextBlank.conversationId, text: "Keep", recipientIds: ["+12025550199"], attachmentIds: [], expectedRevision: nextBlank.revision });
     await expect(fixtureBridge.discard_draft({ id: addressed.id, conversationId: addressed.conversationId, expectedRevision: addressed.revision })).rejects.toMatchObject({ code: "draft-not-discardable" });
+  });
+});
+
+describe("diagnostics fixture and missing host", () => {
+  afterEach(() => {
+    resetFixtureDiagnosticsForTests();
+  });
+
+  it("seeds retained logs, grows them only while recording, and cancels an export with nothing retained", async () => {
+    expect(await fixtureBridge.get_diagnostics_state!()).toMatchObject({ enabled: false, retainedBytes: 1.5 * 1024 * 1024, limitBytes: 4 * 1024 * 1024 });
+
+    await fixtureBridge.set_diagnostics_enabled!({ enabled: true });
+    const recordingBytes = (await fixtureBridge.get_diagnostics_state!()).retainedBytes;
+    expect(recordingBytes).toBeGreaterThan(1.5 * 1024 * 1024);
+
+    await fixtureBridge.set_diagnostics_enabled!({ enabled: false });
+    const stoppedBytes = (await fixtureBridge.get_diagnostics_state!()).retainedBytes;
+    expect(await fixtureBridge.get_diagnostics_state!()).toMatchObject({ enabled: false, retainedBytes: stoppedBytes });
+    expect(stoppedBytes).toBe(recordingBytes);
+
+    expect(await fixtureBridge.export_diagnostics_log!()).toEqual({ outcome: "saved" });
+    await fixtureBridge.clear_diagnostics_log!();
+    expect(await fixtureBridge.export_diagnostics_log!()).toEqual({ outcome: "cancelled" });
+  });
+
+  it("omits the diagnostics methods from the missing-host bridge", () => {
+    expect(hasDiagnosticsBridge(missingHostBridge)).toBe(false);
+    expect(missingHostBridge.get_diagnostics_state).toBeUndefined();
+    expect(missingHostBridge.clear_diagnostics_log).toBeUndefined();
   });
 });

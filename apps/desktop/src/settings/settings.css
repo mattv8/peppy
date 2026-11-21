@@ -551,3 +551,34 @@
     border: 1px solid CanvasText;
   }
 }
+
+#settings-diagnostics { container-type: inline-size; container-name: diagnostics; }
+#settings-diagnostics > h2 { display: flex; align-items: center; gap: 4px; margin: 0; }
+#settings-diagnostics #diagnostics-enabled-group { display: grid; gap: 4px; }
+#settings-diagnostics dl#diagnostics-status { display: grid; gap: 0; margin: 0; }
+#settings-diagnostics dl#diagnostics-status > div { display: grid; grid-template-columns: minmax(8rem, 12rem) minmax(0, 1fr); gap: 0 16px; align-items: start; }
+#settings-diagnostics dl#diagnostics-status > div + div { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--peppy-border); }
+#settings-diagnostics dl#diagnostics-status dt { margin: 0; color: var(--peppy-text-secondary); font-size: 12px; line-height: 1.4; }
+#settings-diagnostics dl#diagnostics-status dd { margin: 0; color: var(--peppy-text-primary); font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+#settings-diagnostics #diagnostics-size-bar { height: 8px; margin-top: 4px; overflow: hidden; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-radius-pill); background: var(--peppy-surface-active); }
+#settings-diagnostics #diagnostics-size-bar > span { display: block; height: 100%; background: var(--peppy-accent); transition: width var(--peppy-duration-base) var(--peppy-ease-out); }
+#settings-diagnostics #diagnostics-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; justify-self: start; }
+#settings-diagnostics #diagnostics-actions button[aria-disabled="true"] { opacity: 0.5; cursor: default; }
+#settings-diagnostics #diagnostics-actions button[aria-disabled="true"]:hover:not(:disabled) { background: transparent; }
+#settings-diagnostics #diagnostics-status-message { margin: 0 0 0 4px; color: var(--peppy-text-secondary); font-size: 12px; line-height: 1.4; }
+#settings-diagnostics #diagnostics-status-message:empty { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+
+@container diagnostics (max-width: 420px) {
+  #settings-diagnostics dl#diagnostics-status > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #settings-diagnostics #diagnostics-size-bar > span { transition: none; }
+}
+
+@media (forced-colors: active) {
+  #settings-diagnostics #diagnostics-size-bar { border-color: CanvasText; background: Canvas; }
+  #settings-diagnostics #diagnostics-size-bar > span { background: Highlight; }
+  #settings-diagnostics dl#diagnostics-status > div + div { border-top-color: CanvasText; }
+  #settings-diagnostics #diagnostics-actions button[aria-disabled="true"] { opacity: 1; color: GrayText; border-color: GrayText; }
+}

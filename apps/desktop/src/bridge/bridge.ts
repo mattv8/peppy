@@ -93,6 +93,8 @@ import type {
   WebhookTestResult,
   WebhookView,
   DesktopBridge as SharedDesktopBridge,
+  DiagnosticsExportResult,
+  DiagnosticsState,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { normalizePhoneNumber } from "@peppy/desktop-ui";
 import { errorText } from "./bridgeErrors";
@@ -587,6 +589,19 @@ const fixtureSave = (input: DraftInput): Draft => {
   return saved;
 };
 let fixtureNotificationSound = false;
+const FIXTURE_DIAGNOSTICS_LIMIT_BYTES = 4 * 1024 * 1024;
+const FIXTURE_DIAGNOSTICS_GROWTH_BYTES = 64 * 1024;
+const initialFixtureDiagnostics = (): DiagnosticsState => ({ enabled: false, retainedBytes: 1.5 * 1024 * 1024, limitBytes: FIXTURE_DIAGNOSTICS_LIMIT_BYTES, droppedEvents: 0, storageError: false });
+let fixtureDiagnostics = initialFixtureDiagnostics();
+/** Recording grows the retained log on each read, capped at the limit, as a real writer would. */
+const readFixtureDiagnostics = (): DiagnosticsState => {
+  if (fixtureDiagnostics.enabled) fixtureDiagnostics = { ...fixtureDiagnostics, retainedBytes: Math.min(fixtureDiagnostics.limitBytes, fixtureDiagnostics.retainedBytes + FIXTURE_DIAGNOSTICS_GROWTH_BYTES) };
+  return { ...fixtureDiagnostics };
+};
+/** Restores the seeded fixture state; tests call it between cases. */
+export function resetFixtureDiagnosticsForTests(): void {
+  fixtureDiagnostics = initialFixtureDiagnostics();
+}
 let fixtureNotificationPersistence: NotificationPersistence = { seconds: 5 };
 let fixtureNotificationQuickReply = false;
 export const fixtureBridge: DesktopBridge = {
@@ -814,6 +829,16 @@ export const fixtureBridge: DesktopBridge = {
   subscribe_drafts: () => () => undefined,
   send_typing: async () => undefined,
   set_typing_sharing: async () => undefined,
+  get_diagnostics_state: async () => readFixtureDiagnostics(),
+  set_diagnostics_enabled: async ({ enabled }) => {
+    fixtureDiagnostics = { ...fixtureDiagnostics, enabled };
+    return { ...fixtureDiagnostics };
+  },
+  export_diagnostics_log: async (): Promise<DiagnosticsExportResult> => ({ outcome: fixtureDiagnostics.retainedBytes > 0 ? "saved" : "cancelled" }),
+  clear_diagnostics_log: async () => {
+    fixtureDiagnostics = { ...fixtureDiagnostics, retainedBytes: 0, storageError: false };
+    return { ...fixtureDiagnostics };
+  },
   subscribe_typing: () => () => undefined,
   subscribe_lifecycle: () => () => undefined,
   subscribe_lifecycle_finished: () => () => undefined,
@@ -1097,6 +1122,10 @@ export const tauriBridge: DesktopBridge = {
   request_sender_unblock: conversationId => invoke("request_sender_unblock", { conversationId }),
   send_typing: ({ conversationId, state }) => invoke("send_typing", { conversationId, state }),
   set_typing_sharing: ({ enabled }) => invoke("set_typing_sharing", { enabled }),
+  get_diagnostics_state: () => invoke<DiagnosticsState>("get_diagnostics_state"),
+  set_diagnostics_enabled: ({ enabled }) => invoke<DiagnosticsState>("set_diagnostics_enabled", { enabled }),
+  export_diagnostics_log: () => invoke<DiagnosticsExportResult>("export_diagnostics_log"),
+  clear_diagnostics_log: () => invoke<DiagnosticsState>("clear_diagnostics_log"),
   set_conversation_tone: (seed, paletteIndex) => invoke("set_conversation_tone", { seed, paletteIndex }),
   cancel_send: ({ messageId }) => invoke("cancel_send", { messageId }),
   send_again: input => invoke("send_again", { input }),
@@ -1163,7 +1192,9 @@ const subscribeWindowEvent = (event: string, listener: (payload: unknown) => voi
   return Object.assign(() => { disposed = true; unlisten?.(); }, { ready });
 };
 const missingHost = (method: keyof DesktopBridge) => async () => { throw { code: "missing-native-host", message: `Native host is required for ${String(method)}.` } satisfies BridgeError; };
-export const missingHostBridge: DesktopBridge = Object.fromEntries((Object.keys(fixtureBridge) as (keyof DesktopBridge)[]).map(key => [key, key === "subscribe" || key === "subscribe_maximize_button_hover" || key === "subscribe_drafts" || key === "subscribe_typing" || key === "subscribe_lifecycle" || key === "subscribe_lifecycle_finished" ? (() => () => undefined) : missingHost(key)])) as unknown as DesktopBridge;
+// Hosts without native diagnostics omit all four methods so the settings section is absent.
+const DIAGNOSTICS_METHOD_NAMES: ReadonlySet<string> = new Set(["get_diagnostics_state", "set_diagnostics_enabled", "export_diagnostics_log", "clear_diagnostics_log"]);
+export const missingHostBridge: DesktopBridge = Object.fromEntries((Object.keys(fixtureBridge) as (keyof DesktopBridge)[]).filter(key => !DIAGNOSTICS_METHOD_NAMES.has(key)).map(key => [key, key === "subscribe" || key === "subscribe_maximize_button_hover" || key === "subscribe_drafts" || key === "subscribe_typing" || key === "subscribe_lifecycle" || key === "subscribe_lifecycle_finished" ? (() => () => undefined) : missingHost(key)])) as unknown as DesktopBridge;
 /** Fixtures are development/test-only and are never chosen after a native error. */
 export let bridge: DesktopBridge = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window ? tauriBridge : (import.meta.env.DEV || import.meta.env.MODE === "test" ? fixtureBridge : missingHostBridge);
 

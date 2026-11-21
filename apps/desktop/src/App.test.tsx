@@ -6132,7 +6132,7 @@ describe("host state display", () => {
 
     expect(account).toHaveAttribute("aria-current", "location");
     expect(document.getElementById("settings-account-billing")).toHaveAttribute("data-settings-section", "account-billing");
-    expect(within(navigation).getAllByRole("link").at(-1)).toHaveTextContent("Advanced");
+    expect(within(navigation).getAllByRole("link").at(-1)).toHaveTextContent("Diagnostics");
     expect(within(navigation).queryByRole("link", { name: "Privacy" })).not.toBeInTheDocument();
     expect(document.getElementById("settings-privacy")).toHaveAttribute("data-settings-section", "privacy-links");
   });

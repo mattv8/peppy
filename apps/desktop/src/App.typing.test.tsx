@@ -77,15 +77,16 @@ describe("typing sharing", () => {
     bridge.send_typing = sendTyping;
   });
 
-  it("lists RCS Features directly before Advanced when the setting is available", async () => {
+  it("lists RCS Features directly before Advanced and Diagnostics last when the setting is available", async () => {
     render(<App />);
     await screen.findByRole("textbox", { name: "Message" });
     openSettings();
 
     const navigation = screen.getByRole("navigation", { name: "Settings categories" });
     const links = within(navigation).getAllByRole("link");
-    expect(links.at(-2)).toHaveTextContent("RCS Features");
-    expect(links.at(-1)).toHaveTextContent("Advanced");
+    expect(links.at(-3)).toHaveTextContent("RCS Features");
+    expect(links.at(-2)).toHaveTextContent("Advanced");
+    expect(links.at(-1)).toHaveTextContent("Diagnostics");
     const rcsSection = document.getElementById("settings-rcs-features")!;
     expect(rcsSection).toBeInTheDocument();
     const advancedSection = document.getElementById("settings-advanced")!;
