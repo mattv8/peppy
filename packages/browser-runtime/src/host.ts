@@ -12,6 +12,7 @@ import { RememberedUnlock } from "./remembered-unlock.js";
 import { AttachmentRetentionDriver, AttachmentRetentionStatusFacade } from "./attachment-retention.js";
 import { AccountAccessDriver } from "./account-access.js";
 import { LiveSupervisor } from "./live.js";
+import { TypingController, type TypingSignal } from "./typing-controller.js";
 import { DraftTransport } from "./drafts.js";
 import type { AccountAccessResult } from "@peppy/generated/account-access";
 import type { AttachmentRetentionStatusResult } from "@peppy/generated/attachment-retention";
@@ -58,7 +59,7 @@ export type RpcError = { code: string; message: string; conversationId?: string;
 export type RpcResponse = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: RpcError };
 export type RpcRequest = { id: number; command: string; args: Record<string, unknown> };
 export type BrowserDispatchContext = { sessionScopeId?: string };
-export type WorkerMessage = RpcRequest | { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason: string } | { event: "banner"; candidate: Record<string, unknown> };
+export type WorkerMessage = RpcRequest | { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason: string } | { event: "banner"; candidate: Record<string, unknown> } | { event: "typing"; signal: TypingSignal };
 
 export interface BrowserPort {
   postMessage(message: WorkerMessage | RpcResponse): void;
@@ -142,6 +143,11 @@ export interface BrowserNetwork {
   mcpApproveAuthorization(id: string, scopes: McpScope[]): Promise<McpAuthorizationDecision>;
   mcpDenyAuthorization(id: string): Promise<McpAuthorizationDecision>;
   subscribeChanges?(listener: () => void): () => void;
+  subscribeTyping?(listener: (signal: TypingSignal) => void): () => void;
+  sendTyping?(port: BrowserPort, conversationId: string, state: "started" | "stopped"): Promise<void>;
+  setTypingSharing?(enabled: boolean): Promise<void>;
+  disconnectTyping?(port: BrowserPort): Promise<void>;
+  stopTyping?(): Promise<void>;
   retryAttachment?(id: string): void;
   /** The user asked for a fresh history import attempt (Reload on the too-large notice). */
   retrySnapshotImport?(): void;
@@ -946,6 +952,7 @@ export class BrowserWorkerHost {
   private starting?: Promise<void>;
   private stopping = false;
   private unsubscribeNetwork?: () => void;
+  private unsubscribeTyping?: () => void;
   private presenter?: BannerPresenter;
   private readonly presentationContexts = new Map<BrowserPort, PresentationContext>();
   private readonly presentationRecipients = new Map<string, BrowserPort>();
@@ -1012,6 +1019,7 @@ export class BrowserWorkerHost {
   private beginStop(): boolean {
     if (this.stopping) return false;
     this.stopping = true;
+    void this.dependencies.network?.stopTyping?.().catch(() => {});
     this.presenter?.clear();
     this.presentationContexts.clear();
     this.presentationRecipients.clear();
@@ -1022,6 +1030,7 @@ export class BrowserWorkerHost {
     try {
       try { await this.dependencies.network?.stop(); } catch {}
       this.unsubscribeNetwork?.();
+      this.unsubscribeTyping?.();
       this.cancelSearchIndex();
       this.owner?.owner.shutdown();
       try { await this.owner?.owner.drain?.(); } catch {}
@@ -1060,6 +1069,9 @@ export class BrowserWorkerHost {
         this.dependencies.network?.replayPageInFlight?.(),
       ));
       this.unsubscribeNetwork = this.dependencies.network?.subscribeChanges?.(() => this.changed());
+      this.unsubscribeTyping = this.dependencies.network?.subscribeTyping?.(signal => {
+        if (!this.stopping) for (const port of this.ports) port.postMessage({ event: "typing", signal });
+      });
       if (owner.owner.phase === "ready") await this.startNetwork();
     } catch (error) {
       if (error instanceof TransportError && error.kind === "revoked") {
@@ -1067,6 +1079,8 @@ export class BrowserWorkerHost {
         throw error;
       }
       this.unsubscribeNetwork?.();
+      this.unsubscribeTyping?.();
+      try { await this.dependencies.network?.stop(); } catch {}
       owner.owner.shutdown();
       try { await owner.owner.drain?.(); } catch {}
       try { await owner.release(); } catch {}
@@ -1076,7 +1090,7 @@ export class BrowserWorkerHost {
   }
 
   private async handle(port: BrowserPort, request: unknown): Promise<void> {
-    if (!this.owner || this.stopping) return;
+    if (!this.owner || this.stopping || !this.ports.has(port)) return;
     if (!validRequest(request)) {
       port.postMessage({ id: requestId(request), ok: false, error: { code: "invalid-request", message: "The request is invalid." } });
       return;
@@ -1089,13 +1103,33 @@ export class BrowserWorkerHost {
       return;
     }
     if (request.command === "disconnect") {
+      this.ports.delete(port);
+      try { await this.dependencies.network?.disconnectTyping?.(port); } catch {}
       try { await this.releasePortMedia(port); } catch {} finally {
-        this.ports.delete(port);
         this.mediaLeases.delete(port);
         this.detachHistoryAttempt(port);
         this.removePresentationPort(port);
         port.postMessage({ event: "stopped", reason: "disconnected" });
         port.close();
+      }
+      return;
+    }
+    if (request.command === "send_typing" || request.command === "set_typing_sharing") {
+      if (this.owner.owner.phase !== "ready") { port.postMessage({ id: request.id, ok: false, error: { code: "locked", message: "Browser session is not ready." } }); return; }
+      try {
+        if (request.command === "send_typing") {
+          if (Object.keys(request.args).length !== 2 || (request.args.state !== "started" && request.args.state !== "stopped")) throw { code: "invalid-request" };
+          const conversationId = requiredId({ id: request.args.conversationId });
+          if (!this.dependencies.network?.sendTyping) throw { code: "unavailable" };
+          await this.dependencies.network.sendTyping(port, conversationId, request.args.state);
+        } else {
+          if (Object.keys(request.args).length !== 1 || typeof request.args.enabled !== "boolean") throw { code: "invalid-request" };
+          if (!this.dependencies.network?.setTypingSharing) throw { code: "unavailable" };
+          await this.dependencies.network.setTypingSharing(request.args.enabled);
+        }
+        if (this.ports.has(port)) port.postMessage({ id: request.id, ok: true, value: undefined });
+      } catch (error) {
+        if (this.ports.has(port)) port.postMessage({ id: request.id, ok: false, error: errorFor(error) });
       }
       return;
     }
@@ -1952,13 +1986,15 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
   let retentionAbort: AbortController | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let polling = false;
+  let networkActive = false;
   let pollPromise: Promise<void> | undefined;
   let pollDelay = 5_000;
   let syncProgress: SchedulerSyncProgress | undefined;
   let replayPageInFlight = false;
   let activeSession: BrowserSession | undefined;
-  let liveSupervisor: LiveSupervisor | undefined;
+  let typingController: TypingController | undefined;
   const changeListeners = new Set<() => void>();
+  const typingListeners = new Set<(signal: TypingSignal) => void>();
   const draftSyncPrompt = new DraftSyncPrompt(
     () => polling && scheduler?.isDraftSyncEnabled === true && scheduler.status.connection === "connected",
     () => { void scheduler?.poll().finally(clearReplayPageInFlight).catch(() => undefined); },
@@ -1975,13 +2011,14 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
     notifyChanges();
   };
   const stopNetwork = async () => {
+    networkActive = false;
     resetSyncProgress();
     polling = false;
     if (pollTimer !== undefined) clearTimeout(pollTimer);
     pollTimer = undefined;
     draftSyncPrompt.stop();
     scheduler?.stop();
-    await liveSupervisor?.stop();
+    await typingController?.stop();
     enrollmentAbort?.abort();
     retentionAbort?.abort();
     retentionStatus?.clear();
@@ -2015,7 +2052,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
     locks,
     terminate,
     network: {
-      async start() { if (!scheduler || !retentionAbort) return false; const ready = await scheduler.ensureRetentionNegotiated(retentionAbort.signal); if (!polling) { polling = true; schedulePoll(); } return ready; },
+      async start() { if (!scheduler || !retentionAbort) return false; networkActive = true; const ready = await scheduler.ensureRetentionNegotiated(retentionAbort.signal); if (!networkActive || retentionAbort.signal.aborted) return false; typingController?.start(); if (!polling) { polling = true; schedulePoll(); } return ready; },
       wake() { void scheduler?.poll().finally(clearReplayPageInFlight).catch(() => undefined); },
       draftSaved() { draftSyncPrompt.schedule(); },
       flushDraftSync() { draftSyncPrompt.flush(); },
@@ -2033,6 +2070,11 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       },
       stop: stopNetwork,
       subscribeChanges(listener) { changeListeners.add(listener); return () => changeListeners.delete(listener); },
+      subscribeTyping(listener) { typingListeners.add(listener); return () => typingListeners.delete(listener); },
+      async sendTyping(port, conversationId, state) { await typingController?.send(port, conversationId, state); },
+      async setTypingSharing(enabled) { await typingController?.setSharing(enabled); },
+      async disconnectTyping(port) { await typingController?.disconnect(port); },
+      async stopTyping() { networkActive = false; await typingController?.stop(); },
       async enrollmentDiscover(origin) { return enrollment?.discover(origin) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
        async enrollmentCreateOwner(secrets, username) { return enrollment?.createOwner(secrets, username) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
         async enrollmentSignIn(adminPassword, username) { return enrollment?.signIn(adminPassword, username) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
@@ -2090,15 +2132,22 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       const core = new BrowserCore(() => modulePromise);
       const module = await modulePromise as EmscriptenCoreModule & { FS: EmscriptenFilesystem };
       const origins = await browserOrigins();
-      const session = await BrowserSession.boot({ origin: origins.logicalOrigin, core, filesystem: module.FS, checkpoint: new IndexedDbCheckpointStore(OWNER_NAME), rememberedUnlock: browserRememberedUnlock(origins.fetchBase), liveTeardown: () => liveSupervisor?.stop() ?? Promise.resolve(), onFatal });
+       const session = await BrowserSession.boot({ origin: origins.logicalOrigin, core, filesystem: module.FS, checkpoint: new IndexedDbCheckpointStore(OWNER_NAME), rememberedUnlock: browserRememberedUnlock(origins.fetchBase), liveTeardown: () => typingController?.stop() ?? Promise.resolve(), onFatal });
       activeSession = session;
         enrollmentAbort = new AbortController();
         enrollment = new BrowserEnrollment(session.enrollmentCore(), session, origins.logicalOrigin, undefined, origins.fetchBase, enrollmentAbort.signal);
        publicTransport = new OriginTransport({ origin: self.location.origin, deviceToken: () => session.tokenForTransport() });
-       liveSupervisor = new LiveSupervisor({
-         transport: publicTransport,
-         origin: self.location.origin,
-         socket: (url, protocol) => new WebSocket(url, protocol),
+       typingController = new TypingController({
+         core: { invoke: (command, args) => session.query(command, args) },
+         clock: () => ({ wallMs: Date.now(), monoMs: Math.floor(performance.now()) }),
+         publish: signal => { for (const listener of typingListeners) listener(signal); },
+         onError: error => onFatal(error instanceof Error ? error : new Error("typing failure")),
+         supervisor: callbacks => new LiveSupervisor({
+           transport: publicTransport!,
+           origin: self.location.origin,
+           socket: (url, protocol) => new WebSocket(url, protocol),
+           ...callbacks,
+         }),
        });
        retentionGeneration += 1;
        retentionAbort = new AbortController();
@@ -2110,7 +2159,18 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
         publicTransport,
         {
           media: { readCiphertext: (file, expectedBytes, signal) => session.readCiphertext(file, expectedBytes, signal), stageDownload: (bytes, signal) => session.stageDownload(bytes, signal), cleanupStagedDownload: source => session.cleanupStagedDownload(source) },
-          rotateEpoch: (profile, header, passphrase) => session.rotate(profile, header, passphrase),
+           rotateEpoch: (profile, header, passphrase) => session.rotate(profile, header, passphrase),
+           onEpochUnlocked: () => { void typingController?.refreshContext().catch(error => onFatal(error instanceof Error ? error : new Error("typing failure"))); },
+           onPollSettled: status => {
+             if (status.connection === "revoked") {
+               polling = false;
+               networkActive = false;
+               void typingController?.stop();
+               void session.clearRememberedUnlock().catch(() => undefined);
+             } else {
+               void typingController?.refreshContext().catch(error => onFatal(error instanceof Error ? error : new Error("typing failure")));
+             }
+           },
             onProgress: progress => {
              syncProgress = progress;
              replayPageInFlight = progress.phase === "receiving";

@@ -53,6 +53,7 @@ export interface BrowserSchedulerOptions {
   hasPendingProjectionWork?: () => Promise<boolean>;
   rotateEpoch?: (profile: unknown, header: unknown, passphrase: string) => Promise<void>;
   onEpochUnlocked?: () => void;
+  onPollSettled?: (status: SchedulerStatus) => void;
   onProgress?: (progress: SchedulerSyncProgress) => void;
   retention?: AttachmentRetentionDriver;
 }
@@ -112,7 +113,11 @@ export class BrowserScheduler {
         if (isSnapshotTooLarge(error)) return this.setStatus("connected");
         return this.setStatus(statusFor(error));
       })
-    this.running = running.finally(() => { this.running = undefined; this.controller = undefined; });
+    this.running = running.finally(() => {
+      this.running = undefined;
+      this.controller = undefined;
+      this.options.onPollSettled?.(this.statusValue);
+    });
     return this.running;
   }
 

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserScheduler } from "./scheduler.js";
 import { transferMedia } from "./scheduler-media.js";
 import { CoreRejectedError } from "./core.js";
-import { TransportError } from "./transport.js";
+import { OriginTransport, TransportError } from "./transport.js";
 
 describe("BrowserScheduler", () => {
   it("negotiates before producer work and advertises readiness only after replay", async () => {
@@ -547,6 +547,29 @@ describe("BrowserScheduler", () => {
 
     expect(result).toEqual({ connection: "revoked" });
     expect(contexts.some(context => context.outboxRejected === true)).toBe(false);
+  });
+
+  it("reports revoked to the settle hook for a directly requested poll", async () => {
+    const onPollSettled = vi.fn();
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_outbox") return { envelopes: [{ envelope_id: "outbox-1", purpose: "event" }] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        return { uploads: [] };
+      },
+      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+    };
+    const fetch = vi.fn(async () => new Response(null, { status: 401 }));
+    const transport = new OriginTransport({ origin: "https://peppy.test", deviceToken: () => "a".repeat(96), fetch });
+    const scheduler = new BrowserScheduler(session, {
+      json: transport.json.bind(transport), upload: async () => undefined, download: async () => new Uint8Array(),
+    }, { onPollSettled });
+
+    expect(await scheduler.poll()).toEqual({ connection: "revoked" });
+    expect(fetch).toHaveBeenCalled();
+    expect(onPollSettled).toHaveBeenCalledOnce();
+    expect(onPollSettled).toHaveBeenCalledWith({ connection: "revoked" });
   });
 
   it("publishes a clean connected context when the outbox is empty", async () => {

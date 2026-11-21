@@ -5,6 +5,7 @@ import { browserRememberedUnlock, BrowserWorkerHost, DraftSyncPrompt, dispatchBr
 import type { OwnerLockManager } from "./owner.js";
 import { TransportError } from "./transport.js";
 import { RememberedUnlock } from "./remembered-unlock.js";
+import { TypingController, type TypingSignal } from "./typing-controller.js";
 
 function locks(): OwnerLockManager {
   let held = false;
@@ -132,6 +133,145 @@ function familyHost(enrollment: BrowserEnrollment): BrowserWorkerHost {
 describe("browser host RPC", () => {
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
+  it("routes validated typing RPCs and rejects private fields", async () => {
+    const sendTyping = vi.fn(async () => {});
+    const setTypingSharing = vi.fn(async () => {});
+    const network = { start: async () => true, stop: async () => {}, sendTyping, setTypingSharing } as unknown as import("./host.js").BrowserNetwork;
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => new FakeSession(), network });
+    const attached = port();
+    await host.attach(attached);
+    const conversationId = "00000000-0000-4000-8000-000000000001";
+    attached.emit({ id: 1, command: "send_typing", args: { conversationId, state: "started" } });
+    attached.emit({ id: 2, command: "set_typing_sharing", args: { enabled: false } });
+    attached.emit({ id: 3, command: "send_typing", args: { conversationId, state: "started", gatewayDeviceId: "forged" } });
+    await eventually(() => response(attached, 1) !== undefined && response(attached, 2) !== undefined && response(attached, 3) !== undefined);
+    expect(response(attached, 1)).toEqual({ id: 1, ok: true, value: undefined });
+    expect(response(attached, 2)).toEqual({ id: 2, ok: true, value: undefined });
+    expect(response(attached, 3)).toMatchObject({ ok: false, error: { code: "invalid-request" } });
+    expect(sendTyping).toHaveBeenCalledWith(attached, conversationId, "started");
+    expect(setTypingSharing).toHaveBeenCalledWith(false);
+    await host.stop();
+  });
+
+  it("fans typing out to tabs, retires their interests, and suppresses events on lock", async () => {
+    const conversationId = "00000000-0000-4000-8000-000000000001";
+    let callbacks!: { onReady: () => void; onClosed: () => void; onFrame: (frame: string) => void };
+    let listener: ((signal: TypingSignal) => void) | undefined;
+    const invoke = vi.fn(async (command: string, _args: Record<string, unknown>): Promise<unknown> => {
+      if (command === "_worker_typing_context_key") return { key: "context" };
+      if (command === "_worker_typing_enable") return { generation: "1" };
+      if (command === "_worker_typing_seal") return { generation: "1", frameJson: "sealed" };
+      if (command === "_worker_typing_open") return {
+        generation: "1",
+        sessionUpdate: { peerDeviceId: "peer", currentSessionToken: "1", validationRevision: "1" },
+        action: { kind: "display", peerDeviceId: "peer", sessionToken: "1", sequence: "1", conversationId, state: "started", deadlineMono: "200" },
+      };
+      return null;
+    });
+    const controller = new TypingController({
+      core: { invoke }, clock: () => ({ wallMs: 1_000, monoMs: 100 }),
+      publish: signal => listener?.(signal), onError: error => { throw error; },
+      supervisor: handlers => { callbacks = handlers; return { start() {}, async stop() {}, transmit: () => true }; },
+    });
+    const network = {
+      async start() { controller.start(); },
+      async stop() { await controller.stop(); },
+      stopTyping: () => controller.stop(),
+      sendTyping: (port: BrowserPort, id: string, state: "started" | "stopped") => controller.send(port, id, state),
+      setTypingSharing: (enabled: boolean) => controller.setSharing(enabled),
+      disconnectTyping: (port: BrowserPort) => controller.disconnect(port),
+      subscribeTyping: (callback: (signal: TypingSignal) => void) => { listener = callback; return () => { listener = undefined; }; },
+    } as unknown as import("./host.js").BrowserNetwork;
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => new FakeSession(), network });
+    const first = port();
+    const second = port();
+    await host.attach(first);
+    await host.attach(second);
+    callbacks.onReady();
+    await eventually(() => invoke.mock.calls.some(([command]) => command === "_worker_typing_set_sharing"));
+    await controller.refreshContext();
+    expect(invoke.mock.calls.filter(([command]) => command === "_worker_typing_enable")).toHaveLength(1);
+    callbacks.onFrame("frame");
+    const event = { event: "typing", signal: { conversationId, state: "started", expiresAtMs: "1100" } };
+    await eventually(() => first.messages.some(message => JSON.stringify(message) === JSON.stringify(event)));
+    expect(second.messages).toContainEqual(event);
+    first.emit({ id: 1, command: "send_typing", args: { conversationId, state: "started" } });
+    second.emit({ id: 2, command: "send_typing", args: { conversationId, state: "started" } });
+    await eventually(() => response(first, 1) !== undefined && response(second, 2) !== undefined);
+    first.emit({ id: 3, command: "send_typing", args: { conversationId, state: "stopped" } });
+    await eventually(() => response(first, 3) !== undefined);
+    expect(invoke.mock.calls.filter(([command, args]) => command === "_worker_typing_seal" && args.state === "stopped")).toHaveLength(0);
+    second.emit({ id: 4, command: "disconnect", args: {} });
+    await eventually(() => second.closed);
+    expect(invoke.mock.calls.filter(([command, args]) => command === "_worker_typing_seal" && args.state === "stopped")).toHaveLength(1);
+    first.emit({ id: 5, command: "lock_sync", args: {} });
+    await eventually(() => first.closed);
+    expect(invoke.mock.calls.filter(([command]) => command === "_worker_typing_disable")).toHaveLength(1);
+    callbacks.onFrame("frame");
+    await Promise.resolve();
+    expect(first.messages.filter(message => JSON.stringify(message) === JSON.stringify(event))).toHaveLength(1);
+  });
+
+  it("ignores requests from a port while its disconnect stop is pending", async () => {
+    const conversationId = "00000000-0000-4000-8000-000000000001";
+    let ready!: () => void;
+    let finishStop!: (value: unknown) => void;
+    let stopCount = 0;
+    const invoke = vi.fn(async (command: string, args: Record<string, unknown>): Promise<unknown> => {
+      if (command === "_worker_typing_context_key") return { key: "context" };
+      if (command === "_worker_typing_enable") return { generation: "1" };
+      if (command === "_worker_typing_seal") {
+        if (args.state === "stopped" && ++stopCount === 1) return new Promise(resolve => { finishStop = resolve; });
+        return { generation: "1", frameJson: "frame" };
+      }
+      return null;
+    });
+    const controller = new TypingController({
+      core: { invoke }, clock: () => ({ wallMs: 1, monoMs: 1 }), publish: () => {}, onError: error => { throw error; },
+      supervisor: callbacks => { ready = callbacks.onReady; return { start() {}, async stop() {}, transmit: () => true }; },
+    });
+    const network = {
+      async start() { controller.start(); },
+      stop: () => controller.stop(), stopTyping: () => controller.stop(),
+      sendTyping: (port: BrowserPort, id: string, state: "started" | "stopped") => controller.send(port, id, state),
+      disconnectTyping: (port: BrowserPort) => controller.disconnect(port),
+    } as unknown as import("./host.js").BrowserNetwork;
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => new FakeSession(), network });
+    const first = port();
+    const second = port();
+    await host.attach(first);
+    await host.attach(second);
+    ready();
+    await eventually(() => invoke.mock.calls.some(([command]) => command === "_worker_typing_set_sharing"));
+    first.emit({ id: 1, command: "send_typing", args: { conversationId, state: "started" } });
+    await eventually(() => response(first, 1) !== undefined);
+    first.emit({ id: 2, command: "disconnect", args: {} });
+    await eventually(() => finishStop !== undefined);
+    first.emit({ id: 3, command: "send_typing", args: { conversationId, state: "started" } });
+    finishStop({ generation: "1", frameJson: "stop" });
+    await eventually(() => first.closed);
+    second.emit({ id: 4, command: "send_typing", args: { conversationId, state: "stopped" } });
+    await eventually(() => response(second, 4) !== undefined);
+    expect(stopCount).toBe(2);
+    expect(invoke.mock.calls.filter(([command, args]) => command === "_worker_typing_seal" && args.state === "started")).toHaveLength(1);
+    await host.stop();
+  });
+
+  it("rejects typing when locked and never exposes worker typing commands", async () => {
+    const session = new FakeSession();
+    session.phase = "locked";
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "set_typing_sharing", args: { enabled: true } });
+    attached.emit({ id: 2, command: "_worker_typing_enable", args: { clock: {} } });
+    await eventually(() => response(attached, 1) !== undefined && response(attached, 2) !== undefined);
+    expect(response(attached, 1)).toMatchObject({ ok: false, error: { code: "locked" } });
+    expect(response(attached, 2)).toMatchObject({ ok: false, error: { code: "invalid-request" } });
+    expect(session.calls.some(call => call.command === "_worker_typing_enable")).toBe(false);
+    await host.stop();
+  });
+
   it("preserves enrollment command results and network call traces", async () => {
     const trace: unknown[] = [];
     const network = new Proxy({}, {
@@ -243,8 +383,8 @@ describe("browser host RPC", () => {
     expect(bannerCount(survivor)).toBe(0);
     recipient.emit({ id: 4, command: "display_ack", args: { ids: ["candidate-1"] } });
     survivor.emit({ id: 5, command: "display_failed", args: { ids: ["candidate-1"] } });
-    await eventually(() => response(recipient, 4) !== undefined && response(survivor, 5) !== undefined);
-    expect(response(recipient, 4)).toEqual(expect.objectContaining({ ok: false }));
+    await eventually(() => response(survivor, 5) !== undefined);
+    expect(response(recipient, 4)).toBeUndefined();
     expect(response(survivor, 5)).toEqual(expect.objectContaining({ ok: false }));
 
     now += 2 * 60 * 1000 + 1;
