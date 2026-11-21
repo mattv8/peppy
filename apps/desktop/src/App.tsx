@@ -127,6 +127,7 @@ import { AttachmentStorageSettingsHost, HostedAccountSettings } from "./settings
 import { PrivacySettings } from "./settings/PrivacySettings";
 import { RcsFeaturesSettings } from "./settings/RcsFeaturesSettings";
 import { AdvancedSettings } from "./settings/AdvancedSettings";
+import { DiagnosticsSettings, hasDiagnosticsBridge, type DiagnosticsBridge } from "./settings/DiagnosticsSettings";
 import { searchRecipientSuggestions } from "./contacts/recipientSearch";
 export { searchRecipientSuggestions } from "./contacts/recipientSearch";
 import { SetupLanding, savedSetupMode } from "./setup/SetupLanding";
@@ -1727,6 +1728,7 @@ function SettingsView({
   typingShare,
   typingShareError = false,
   onTypingShare,
+  diagnostics,
   requestedSection,
   onRequestedSectionConsumed,
   onAddDevice,
@@ -1785,6 +1787,8 @@ function SettingsView({
   typingShare?: boolean;
   typingShareError?: boolean;
   onTypingShare(enabled: boolean): void;
+  /** Undefined when the host lacks any diagnostics method; the section is then absent. */
+  diagnostics?: DiagnosticsBridge;
   requestedSection?: "notifications" | "notification-apps" | "devices" | "updates";
   onRequestedSectionConsumed?(): void;
   onAddDevice?(): void;
@@ -1869,6 +1873,7 @@ function SettingsView({
     ...(hasAccount ? [{ id: "account-billing", label: "Account" }] : []),
     ...(typingShare !== undefined ? [{ id: "rcs-features", label: "RCS Features" }] : []),
     { id: "advanced", label: "Advanced" },
+    ...(diagnostics ? [{ id: "diagnostics", label: "Diagnostics" }] : []),
   ];
   const sectionElementId = (id: string) => {
     if (id === "notifications") return "notification-settings";
@@ -2181,6 +2186,7 @@ function SettingsView({
       </section>}
       {typingShare !== undefined && <RcsFeaturesSettings typingShare={{ enabled: typingShare, onChange: onTypingShare, error: typingShareError }} />}
       <AdvancedSettings sessionKey={sessionScopeId ?? "unavailable"} unlocked={encryption === "unlocked"} serverOffline={serverOffline} browserHost={browserHost} onOpenDevices={() => { selectSection("devices"); window.setTimeout(() => document.getElementById("mcp-custody-review")?.focus(), 0); }} />
+      {diagnostics && <DiagnosticsSettings bridge={diagnostics} />}
       <PrivacySettings browserHost={browserHost} bridge={bridge} />
       </div>
       </div>
@@ -6849,6 +6855,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                typingShare={typingLinkAvailable && bridge.send_typing ? shareTyping : undefined}
                typingShareError={typingShareError}
                onTypingShare={changeTypingShare}
+               diagnostics={hasDiagnosticsBridge(bridge) ? bridge : undefined}
                 requestedSection={settingsSectionRequested}
                 onRequestedSectionConsumed={() => setSettingsSectionRequested(undefined)}
                 onAddDevice={snapshot?.deviceRole === "owner" ? openAddDevice : undefined}
