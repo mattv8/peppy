@@ -1,5 +1,6 @@
 package dev.peppy.mobile.googlemessages
 
+import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import uniffi.peppy_mobile_bindings.NativeLiveAction
 import uniffi.peppy_mobile_bindings.NativeLiveOutcome
 import uniffi.peppy_mobile_bindings.NativeTypingState
@@ -55,7 +56,10 @@ internal class LiveTypingAdapter(
 
     fun consume(outcome: NativeLiveOutcome, isAuthorityCurrent: () -> Boolean = { true }) {
         val admitted = synchronized(this) {
-            if (outcome.generation != generation || !isAuthorityCurrent()) return@synchronized null
+            if (outcome.generation != generation || !isAuthorityCurrent()) {
+                recordGoogleMessagesLinkEvent("typing", "outcome_not_current", 0)
+                return
+            }
 
             outcome.sessionUpdate?.let { update ->
                 val current = sessions[update.peerDeviceId]
@@ -65,7 +69,14 @@ internal class LiveTypingAdapter(
                 }
             }
 
-            val action = outcome.action as? NativeLiveAction.GatewayTypingIntent ?: return@synchronized null
+            val action = outcome.action as? NativeLiveAction.GatewayTypingIntent
+            if (action == null) {
+                val reason = if (outcome.action == null && (outcome.replyFrameJson != null || outcome.sessionUpdate != null)) {
+                    "handshake"
+                } else "frame_ignored"
+                recordGoogleMessagesLinkEvent("typing", reason, 0)
+                return
+            }
             val session = sessions[action.peerDeviceId]
                 ?.takeIf { it.token == action.sessionToken }
                 ?: return@synchronized null

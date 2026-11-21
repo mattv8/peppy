@@ -749,6 +749,32 @@ class LinkRuntimeTest {
     }
 
     @Test
+    fun `typing callbacks record fenced and missing sink reasons`() {
+        lateinit var host: LinkHost
+        val queued = QueueExecutor()
+        val handle = FakeHandle(
+            accepts = { generation, revision -> generation == 3L && revision == 4L },
+            acceptsStream = { generation, revision, epoch -> generation == 3L && revision == 4L && epoch == 8L },
+        )
+        LinkRuntimeTestHooks.callbackExecutor = queued
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = true
+            override fun open(state: ByteArray, callback: LinkHost): LinkHandle = handle.also { host = callback }
+        }
+        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkRuntimeTestHooks.typingReceiveSink = null
+        TypingReceiveSinkRegistry.sink = null
+        LinkRuntime.handle(context)
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            host.typingEventOwned("{}", 3, 4, 9)
+            host.typingEventOwned("{}", 3, 4, 8)
+            queued.runAll()
+        }
+        assertEquals(listOf(313, 314).map { "event=27 session=1 timestamp_ms=10 trace=0 29=$it" }, records)
+    }
+
+    @Test
     fun `close during emoji callback finishes`() {
         lateinit var host: LinkHost
         val handle = BlockingCloseHandle()

@@ -12,6 +12,31 @@ import org.robolectric.shadows.ShadowLog
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class GoogleMessagesLinkDiagnosticsTest {
+    @Test fun `typing diagnostic reasons retain their assigned codes`() {
+        val pairs = listOf(
+            "typing" to "projection_ignored", "typing" to "conversation_unknown",
+            "typing" to "burst_started", "typing" to "burst_stopped",
+            "typing" to "indicators_off", "typing" to "indicators_on",
+            "typing" to "inbound_fenced", "typing" to "inbound_no_sink",
+            "typing" to "inbound_no_client", "typing" to "inbound_malformed",
+            "typing" to "inbound_not_owned", "typing" to "inbound_seal_refused",
+            "typing" to "inbound_seal_failed", "typing" to "inbound_not_current",
+            "live" to "send_refused", "typing" to "enable_no_client",
+            "typing" to "enable_failed", "typing" to "enable_sharing_failed",
+            "typing" to "handshake", "typing" to "open_failed",
+            "typing" to "reply_not_current", "typing" to "refused_unavailable",
+            "typing" to "refused_stale", "typing" to "refused_expired",
+            "typing" to "refused_failed", "typing" to "refused_invalid",
+            "typing" to "refused_conversation", "live" to "restart_after_fuse",
+            "typing" to "enable_retry",
+        )
+        pairs.forEachIndexed { index, pair ->
+            assertEquals((307 + index).toLong(), GoogleMessagesLinkDiagnosticReason.codes[pair])
+        }
+        assertEquals(336L, GoogleMessagesLinkDiagnosticReason.codes["typing" to "frame_ignored"])
+        assertEquals(337L, GoogleMessagesLinkDiagnosticReason.codes["typing" to "outcome_not_current"])
+    }
+
     private val stablePairs = listOf(
         "link" to "pair_ok", "link" to "pair_failed", "link" to "pair_no_phone", "link" to "cookie_refused",
         "link" to "pair_multiple_phones", "link" to "pair_wrong_emoji", "link" to "pair_cancelled",

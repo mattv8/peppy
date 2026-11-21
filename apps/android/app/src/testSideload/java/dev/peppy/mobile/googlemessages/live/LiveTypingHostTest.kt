@@ -1,5 +1,6 @@
 package dev.peppy.mobile.googlemessages.live
 
+import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
@@ -19,10 +20,11 @@ class LiveTypingHostTest {
 
     private class Socket : WebSocket {
         val sent = CopyOnWriteArrayList<String>()
+        var rejectText = false
         var closed = false
         override fun request(): Request = Request.Builder().url("https://example.test").build()
         override fun queueSize() = 0L
-        override fun send(text: String) = sent.add(text)
+        override fun send(text: String) = if (rejectText) false else sent.add(text)
         override fun send(bytes: okio.ByteString) = false
         override fun close(code: Int, reason: String?) = true.also { closed = true }
         override fun cancel() { closed = true }
@@ -95,6 +97,33 @@ class LiveTypingHostTest {
     fun `outbound frames at the server limit are accepted`() {
         assertTrue(LiveTypingHost.isOutboundFrame("x".repeat(LiveTransport.MAX_TEXT_BYTES)))
         assertFalse(LiveTypingHost.isOutboundFrame("x".repeat(LiveTransport.MAX_TEXT_BYTES + 1)))
+    }
+
+    @Test
+    fun `socket enqueue failure records send refusal asynchronously`() {
+        val factory = Factory()
+        val listener = Listener()
+        val executor = QueueExecutor()
+        val host = LiveTypingHost.forTest(factory::create, Scheduler(), executor = executor)
+        host.start(LiveTypingCredentials("https://example.test", "secret", local), listener)
+        executor.runAll()
+        val socket = factory.sockets.single()
+        val callback = factory.listeners.single()
+        callback.onMessage(socket, bootstrap(device(local)))
+        executor.runAll()
+        val challenge = Regex("\\\"challenge_id\\\":\\\"([^\\\"]+)\\\"").find(socket.sent.single())!!.groupValues[1]
+        callback.onMessage(socket, "{\"type\":\"membership_response\",\"version\":1,\"connection_id\":\"$connectionId\",\"challenge_id\":\"$challenge\",\"membership_version\":\"1\",\"roster\":[${device(local)}]}")
+        executor.runAll()
+        socket.rejectText = true
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            assertTrue(host.send("{}", listener.enabled.single().publication))
+            assertTrue(records.isEmpty())
+            executor.runAll()
+        }
+        assertEquals(listOf("event=27 session=1 timestamp_ms=10 trace=0 29=321"), records)
+        host.stop()
+        executor.runAll()
     }
 
     @Test

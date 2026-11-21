@@ -4,11 +4,13 @@ import androidx.test.core.app.ApplicationProvider
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.googlemessages.live.LiveScheduledTask
 import dev.peppy.mobile.googlemessages.live.LiveScheduler
+import dev.peppy.mobile.googlemessages.live.LiveClock
 import dev.peppy.mobile.googlemessages.live.LiveTypingCredentials
 import dev.peppy.mobile.googlemessages.live.LiveTypingDisabledReason
 import dev.peppy.mobile.googlemessages.live.LiveTypingEnableContext
 import dev.peppy.mobile.googlemessages.live.LiveTypingHost
 import dev.peppy.mobile.googlemessages.live.LiveTypingListener
+import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
@@ -25,6 +27,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowSystemClock
 import uniffi.peppy_mobile_bindings.NativeLiveAction
 import uniffi.peppy_mobile_bindings.NativeLiveClock
 import uniffi.peppy_mobile_bindings.NativeLiveEnableContext
@@ -190,7 +193,7 @@ class TypingBridgeTest {
         assertEquals(listOf("event=27 session=1 timestamp_ms=10 trace=0 29=280"), records)
     }
 
-    @Test fun `refused Google typing records outbound_refused and does not open the suppression window`() {
+    @Test fun `failed Google typing records its reason and does not open the suppression window`() {
         val calls = mutableListOf<String>()
         val core = FakeCore(calls)
         val transport = FakeTransport(calls)
@@ -208,7 +211,232 @@ class TypingBridgeTest {
         }
 
         assertEquals(2, effects.size)
-        assertEquals(List(2) { "event=27 session=1 timestamp_ms=10 trace=0 29=281" }, records)
+        assertEquals(List(2) { "event=27 session=1 timestamp_ms=10 trace=0 29=331" }, records)
+    }
+
+    @Test fun `handshake is distinct from rejected intent`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        val transport = FakeTransport(calls)
+        val bridge = bridge(core, transport, calls)
+        bridge.start(credentials())
+        transport.enable(listOf("gateway"), "gateway")
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            core.nextOpen = outcome(update = session())
+            bridge.onFrame("handshake")
+            core.nextOpen = outcome(action = intent(sequence = 1UL, deadline = 0UL))
+            bridge.onFrame("expired")
+        }
+        assertEquals(listOf(
+            "event=27 session=1 timestamp_ms=10 trace=0 29=325",
+            "event=27 session=1 timestamp_ms=10 trace=0 29=59",
+        ), records)
+    }
+
+    @Test fun `opened frame diagnostics distinguish ignored current stale and handshakes`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        val transport = FakeTransport(calls)
+        val bridge = bridge(core, transport, calls)
+        bridge.start(credentials())
+        transport.enable(listOf("gateway"), "gateway")
+        val display = NativeLiveAction.Display("peer", 1UL, 1UL, "conversation", null, NativeTypingState.STARTED, 9999UL)
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            core.nextOpen = outcome()
+            bridge.onFrame("empty")
+            core.nextOpen = outcome(action = display)
+            bridge.onFrame("display")
+            core.nextOpen = NativeLiveOutcome(2UL, null, null, null)
+            bridge.onFrame("stale")
+            core.nextOpen = outcome(reply = "reply")
+            bridge.onFrame("reply")
+            core.nextOpen = outcome(update = session())
+            bridge.onFrame("session")
+            core.nextOpen = outcome(action = intent(deadline = 0UL))
+            bridge.onFrame("rejected")
+        }
+        assertEquals(listOf(336, 336, 337, 325, 325, 59).map {
+            "event=27 session=1 timestamp_ms=10 trace=0 29=$it"
+        }, records)
+    }
+
+    @Test fun `inbound malformed, unowned and refused seal have distinct reasons`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        val transport = FakeTransport(calls)
+        val bridge = bridge(core, transport, calls)
+        bridge.start(credentials())
+        transport.enable(listOf("gateway"), "gateway")
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            bridge.receive("not json")
+            core.context = null
+            bridge.receive("""{"google_conversation_id":"id","state":"started"}""")
+            core.context = TypingReceiveContext("conversation", true)
+            core.sealed = null
+            bridge.receive("""{"google_conversation_id":"id","state":"started"}""")
+        }
+        assertEquals(listOf(316, 317, 318).map {
+            "event=27 session=1 timestamp_ms=10 trace=0 29=$it"
+        }, records)
+    }
+
+    @Test fun `Google typing refusal codes remain distinct and unknown uses fallback`() {
+        val expected = listOf(
+            "typing_unavailable" to 328, "typing_stale" to 329,
+            "typing_expired" to 330, "typing_deadline" to 330,
+            "typing_failed" to 331, "typing_cancelled" to 331,
+            "typing_invalid" to 332, "typing_stopped" to 332,
+            "typing_refused" to 333, "typing_unknown_conversation" to 333,
+            "typing_not_one_to_one" to 333, "unknown" to 281,
+        )
+        expected.forEach { (result, reason) ->
+            val calls = mutableListOf<String>()
+            val core = FakeCore(calls)
+            val bridge = bridge(core, FakeTransport(calls), calls) { result }
+            bridge.start(credentials())
+            bridge.onEnabled(LiveTypingEnableContext(listOf("gateway"), "gateway"))
+            val records = mutableListOf<String>()
+            SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+                core.nextOpen = outcome(update = session(), action = intent())
+                bridge.onFrame("frame")
+            }
+            assertEquals(listOf("event=27 session=1 timestamp_ms=10 trace=0 29=$reason"), records)
+        }
+    }
+
+    @Test fun `unavailable client records inbound open and enable reasons`() {
+        val calls = mutableListOf<String>()
+        val transport = FakeTransport(calls)
+        val bridge = TypingBridge(ApplicationProvider.getApplicationContext(), transport, Executor(Runnable::run),
+            { null }, TypingSharingPreferences(ApplicationProvider.getApplicationContext())) { "ok" }
+        bridge.start(credentials())
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            bridge.receive("{}")
+            bridge.onFrame("{}")
+            transport.enable(listOf("gateway"), "gateway")
+        }
+        listOf(315, 326, 322).forEach { reason ->
+            assertTrue(records.any { it.endsWith("29=$reason") })
+        }
+    }
+
+    @Test fun `seal and open exceptions and moved authority have distinct reasons`() {
+        val calls = mutableListOf<String>()
+        val delegate = FakeCore(calls)
+        var sealFails = true
+        var openFails = true
+        val core = object : TypingCore by delegate {
+            override fun seal(conversationId: String, gatewayDeviceId: String, participant: String?,
+                state: NativeTypingState, clock: NativeLiveClock): NativeLiveOutbound? {
+                if (sealFails) error("seal")
+                return NativeLiveOutbound(2UL, "frame")
+            }
+            override fun open(frameJson: String, clock: NativeLiveClock): NativeLiveOutcome {
+                if (openFails) error("open")
+                return NativeLiveOutcome(2UL, null, null, "reply")
+            }
+        }
+        val transport = FakeTransport(calls)
+        val bridge = TypingBridge(ApplicationProvider.getApplicationContext(), transport, Executor(Runnable::run),
+            { core }, TypingSharingPreferences(ApplicationProvider.getApplicationContext())) { "ok" }
+        bridge.start(credentials())
+        transport.enable(listOf("gateway"), "gateway")
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            bridge.receive("""{"google_conversation_id":"id","state":"started"}""")
+            bridge.onFrame("frame")
+            sealFails = false
+            openFails = false
+            bridge.receive("""{"google_conversation_id":"id","state":"started"}""")
+            bridge.onFrame("frame")
+        }
+        listOf(319, 320, 326, 327).forEach { reason ->
+            assertTrue(records.any { it.endsWith("29=$reason") })
+        }
+    }
+
+    @Test fun `enable and sharing exceptions have distinct reasons`() {
+        listOf(false to 323, true to 324).forEach { (sharingFailure, reason) ->
+            val calls = mutableListOf<String>()
+            val core = object : TypingCore by FakeCore(calls) {
+                override fun enable(context: NativeLiveEnableContext, clock: NativeLiveClock): ULong {
+                    if (!sharingFailure) error("enable")
+                    return 1UL
+                }
+                override fun setSharing(enabled: Boolean) { error("sharing") }
+            }
+            val transport = FakeTransport(calls)
+            val bridge = TypingBridge(ApplicationProvider.getApplicationContext(), transport, Executor(Runnable::run),
+                { core }, TypingSharingPreferences(ApplicationProvider.getApplicationContext())) { "ok" }
+            bridge.start(credentials())
+            val records = mutableListOf<String>()
+            SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+                transport.enable(listOf("gateway"), "gateway")
+            }
+            assertTrue(records.any { it.endsWith("29=$reason") })
+        }
+    }
+
+    @Test fun `transport refusal records live send refusal not accepted frame`() {
+        val core = FakeCore(mutableListOf())
+        val transport = object : TypingTransport {
+            override fun start(credentials: LiveTypingCredentials, listener: LiveTypingListener) = Unit
+            override fun stop() = Unit
+            override fun send(frameJson: String) = false
+        }
+        val bridge = TypingBridge(ApplicationProvider.getApplicationContext(), transport, Executor(Runnable::run),
+            { core }, TypingSharingPreferences(ApplicationProvider.getApplicationContext())) { "ok" }
+        bridge.start(credentials())
+        bridge.onEnabled(LiveTypingEnableContext(listOf("gateway"), "gateway"))
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            bridge.receive("""{"google_conversation_id":"id","state":"started"}""")
+        }
+        assertTrue(records.any { it.endsWith("29=321") })
+        assertFalse(records.any { it.endsWith("29=56") })
+    }
+
+    @Test fun `authority retired during seal records not current rather than send refusal`() {
+        val calls = mutableListOf<String>()
+        val delegate = FakeCore(calls)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val core = object : TypingCore by delegate {
+            override fun seal(conversationId: String, gatewayDeviceId: String, participant: String?,
+                state: NativeTypingState, clock: NativeLiveClock): NativeLiveOutbound? {
+                entered.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+                return NativeLiveOutbound(1UL, "frame")
+            }
+        }
+        val executor = Executors.newSingleThreadExecutor()
+        val transport = FakeTransport(calls)
+        val bridge = TypingBridge(ApplicationProvider.getApplicationContext(), transport, executor,
+            { core }, TypingSharingPreferences(ApplicationProvider.getApplicationContext())) { "ok" }
+        try {
+            bridge.start(credentials())
+            executor.submit {}.get(5, TimeUnit.SECONDS)
+            transport.enable(listOf("gateway"), "gateway")
+            executor.submit {}.get(5, TimeUnit.SECONDS)
+            val records = CopyOnWriteArrayList<String>()
+            SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+                bridge.receive("""{"google_conversation_id":"id","state":"started"}""")
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                bridge.stop()
+                release.countDown()
+                executor.submit {}.get(5, TimeUnit.SECONDS)
+            }
+            assertTrue(records.any { it.endsWith("29=320") })
+            assertFalse(records.any { it.endsWith("29=321") })
+            assertTrue(transport.sent.isEmpty())
+        } finally {
+            release.countDown()
+            executor.shutdownNow()
+        }
     }
 
     @Test fun `membership retirement drops an effect queued behind the bridge executor`() {
@@ -284,7 +512,7 @@ class TypingBridgeTest {
         }
     }
 
-    @Test fun `protocol rejections trip the host fuse and ordinary Google events never restart it`() {
+    @Test fun `protocol fuse restarts lazily after cooldown and doubles the next cooldown`() {
         val factory = SocketFactory()
         val scheduler = ManualScheduler()
         val calls = mutableListOf<String>()
@@ -301,6 +529,143 @@ class TypingBridgeTest {
 
         assertEquals(3, factory.sockets.size)
         assertEquals(0, scheduler.pendingCount())
+
+        ShadowSystemClock.advanceBy(Duration.ofMillis(299_999))
+        bridge.start(credentials())
+        assertEquals(3, factory.sockets.size)
+        ShadowSystemClock.advanceBy(Duration.ofMillis(1))
+        bridge.start(credentials())
+        assertEquals(4, factory.sockets.size)
+
+        repeat(3) { rejectCurrentSocket(factory); if (it < 2) scheduler.runNext() }
+        ShadowSystemClock.advanceBy(Duration.ofMillis(599_999))
+        bridge.start(credentials())
+        assertEquals(6, factory.sockets.size)
+        ShadowSystemClock.advanceBy(Duration.ofMillis(1))
+        bridge.start(credentials())
+        assertEquals(7, factory.sockets.size)
+    }
+
+    @Test fun `failed core enable retries on renewal after one minute`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        var attempts = 0
+        val flaky = object : TypingCore by core {
+            override fun enable(context: NativeLiveEnableContext, clock: NativeLiveClock): ULong {
+                attempts++
+                if (attempts == 1) error("unavailable")
+                return core.enable(context, clock)
+            }
+        }
+        val transport = FakeTransport(calls)
+        val bridge = TypingBridge(
+            ApplicationProvider.getApplicationContext(), transport, Executor(Runnable::run),
+            { flaky }, TypingSharingPreferences(ApplicationProvider.getApplicationContext()),
+        ) { "ok" }
+        bridge.start(credentials())
+        transport.enable(listOf("gateway"), "gateway")
+        ShadowSystemClock.advanceBy(Duration.ofMillis(59_999))
+        transport.listener.onMembershipRenewed()
+        assertEquals(1, attempts)
+        ShadowSystemClock.advanceBy(Duration.ofMillis(1))
+        transport.listener.onMembershipRenewed()
+        assertEquals(2, attempts)
+        assertTrue(calls.contains("core.share"))
+        ShadowSystemClock.advanceBy(Duration.ofMinutes(1))
+        transport.listener.onMembershipRenewed()
+        assertEquals(2, attempts)
+    }
+
+    @Test fun `membership renewals from real host retry a failed enable once after one minute`() {
+        val local = "00000000-0000-4000-8000-000000000000"
+        val connection = "AAAAAAAAAAAAAAAAAAAAAA"
+        val roster = """{"device_id":"$local","revoked":false,"key_epoch":1,"role":"gateway"}"""
+        val factory = SocketFactory()
+        val scheduler = ManualScheduler()
+        val inline = Executor(Runnable::run)
+        val host = LiveTypingHost.forTest(factory::create, scheduler,
+            object : LiveClock { override fun elapsedRealtime() = android.os.SystemClock.elapsedRealtime() }, inline)
+        val core = FakeCore(mutableListOf())
+        var attempts = 0
+        val flaky = object : TypingCore by core {
+            override fun enable(context: NativeLiveEnableContext, clock: NativeLiveClock): ULong {
+                attempts++
+                if (attempts == 1) error("unavailable")
+                return core.enable(context, clock)
+            }
+        }
+        val bridge = TypingBridge(ApplicationProvider.getApplicationContext(), HostTransport(host), inline,
+            { flaky }, TypingSharingPreferences(ApplicationProvider.getApplicationContext())) { "ok" }
+        bridge.start(credentials().copy(localDeviceId = local))
+        val socket = factory.sockets.single()
+        val callback = factory.listeners.single()
+        callback.onMessage(socket, """{"type":"membership_bootstrap","version":1,"connection_id":"$connection","membership_version":"1","roster":[$roster]}""")
+        fun respond() {
+            val challenge = org.json.JSONObject(socket.sent.last()).getString("challenge_id")
+            callback.onMessage(socket, """{"type":"membership_response","version":1,"connection_id":"$connection","challenge_id":"$challenge","membership_version":"1","roster":[$roster]}""")
+        }
+        respond()
+        assertEquals(1, attempts)
+        repeat(3) {
+            ShadowSystemClock.advanceBy(Duration.ofSeconds(20))
+            scheduler.runNext()
+            respond()
+            assertEquals(if (it < 2) 1 else 2, attempts)
+        }
+        ShadowSystemClock.advanceBy(Duration.ofSeconds(20))
+        scheduler.runNext()
+        respond()
+        assertEquals(2, attempts)
+        bridge.stop()
+    }
+
+    @Test fun `disabled or stopped bridge clears pending enable`() {
+        listOf(false, true).forEach { stop ->
+            val calls = mutableListOf<String>()
+            var attempts = 0
+            val core = object : TypingCore by FakeCore(calls) {
+                override fun enable(context: NativeLiveEnableContext, clock: NativeLiveClock): ULong {
+                    attempts++
+                    error("unavailable")
+                }
+            }
+            val transport = FakeTransport(calls)
+            val bridge = TypingBridge(ApplicationProvider.getApplicationContext(), transport, Executor(Runnable::run),
+                { core }, TypingSharingPreferences(ApplicationProvider.getApplicationContext())) { "ok" }
+            bridge.start(credentials())
+            transport.enable(listOf("gateway"), "gateway")
+            if (stop) bridge.stop() else transport.disable()
+            ShadowSystemClock.advanceBy(Duration.ofMinutes(1))
+            transport.listener.onMembershipRenewed()
+            assertEquals(1, attempts)
+        }
+    }
+
+    @Test fun `authentication failure remains terminal until explicit stop`() {
+        val calls = mutableListOf<String>()
+        val transport = FakeTransport(calls)
+        val bridge = bridge(FakeCore(calls), transport, calls)
+        bridge.start(credentials())
+        transport.listener.onDisabled(LiveTypingDisabledReason.AUTHENTICATION_FAILED)
+        ShadowSystemClock.advanceBy(Duration.ofHours(2))
+        bridge.start(credentials())
+        assertEquals(1, calls.count { it == "host.start" })
+        bridge.stop()
+        bridge.start(credentials())
+        assertEquals(2, calls.count { it == "host.start" })
+    }
+
+    @Test fun `membership revocation remains terminal until generation changes`() {
+        val calls = mutableListOf<String>()
+        val transport = FakeTransport(calls)
+        val bridge = bridge(FakeCore(calls), transport, calls)
+        bridge.start(credentials())
+        transport.listener.onDisabled(LiveTypingDisabledReason.MEMBERSHIP_REVOKED)
+        ShadowSystemClock.advanceBy(Duration.ofHours(2))
+        bridge.start(credentials())
+        assertEquals(1, calls.count { it == "host.start" })
+        bridge.start(credentials(generation = 2))
+        assertEquals(2, calls.count { it == "host.start" })
     }
 
     @Test fun `credential change restarts the host with the fuse reset`() {
@@ -332,6 +697,18 @@ class TypingBridgeTest {
 
         rejectCurrentSocket(factory)
         assertEquals(1, scheduler.pendingCount())
+    }
+
+    @Test fun `stopped fused bridge does not restart on elapsed time`() {
+        val factory = SocketFactory()
+        val scheduler = ManualScheduler()
+        val bridge = fuseBridge(factory, scheduler, mutableListOf())
+        bridge.start(credentials())
+        repeat(3) { rejectCurrentSocket(factory); if (it < 2) scheduler.runNext() }
+        bridge.stop()
+        ShadowSystemClock.advanceBy(Duration.ofHours(2))
+        assertEquals(3, factory.sockets.size)
+        assertEquals(0, scheduler.pendingCount())
     }
 
     private fun fuseBridge(factory: SocketFactory, scheduler: ManualScheduler, calls: MutableList<String>): TypingBridge {
@@ -367,9 +744,10 @@ class TypingBridgeTest {
     }
 
     private class FakeSocket : WebSocket {
+        val sent = mutableListOf<String>()
         override fun request(): Request = Request.Builder().url("https://example.test").build()
         override fun queueSize() = 0L
-        override fun send(text: String) = true
+        override fun send(text: String) = true.also { sent += text }
         override fun send(bytes: okio.ByteString) = false
         override fun close(code: Int, reason: String?) = true
         override fun cancel() {}
