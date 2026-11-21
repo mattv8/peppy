@@ -589,6 +589,22 @@ describe("fixture draft saves", () => {
     expect((await fixtureBridge.list_contact_books()).some(book => book.id === removed.id)).toBe(false);
   });
 
+  it("refuses fixture deletion with the host's offline and sync-not-current codes, leaving the book in place", async () => {
+    // This describe resets modules, so the gate setter must come from the same module instance as fixtureBridge.
+    const { setFixtureContactDeleteGateForTests } = await import("./bridge");
+    const removed = (await fixtureBridge.list_contact_books()).find(book => book.sourceRevoked)!;
+    try {
+      setFixtureContactDeleteGateForTests("offline");
+      await expect(fixtureBridge.delete_contact_book(removed.id)).rejects.toMatchObject({ code: "offline", message: "Connect to the server to delete this book for all devices." });
+      setFixtureContactDeleteGateForTests("sync-not-current");
+      await expect(fixtureBridge.delete_contact_book(removed.id)).rejects.toMatchObject({ code: "sync-not-current", message: "Finish syncing to delete this book for all devices." });
+    } finally {
+      setFixtureContactDeleteGateForTests("ready");
+    }
+    expect((await fixtureBridge.list_contact_books()).some(book => book.id === removed.id)).toBe(true);
+    await expect(fixtureBridge.delete_contact_book(removed.id)).resolves.toEqual({ bookId: removed.id, contacts: removed.contactCount });
+  });
+
   it("returns fixture contacts through a requested contact, and reports whether it was found", async () => {
     const listed = await fixtureBridge.list_contacts("book-pixel8", "", 0);
     const first = await fixtureBridge.list_contacts_page("book-pixel8", {});

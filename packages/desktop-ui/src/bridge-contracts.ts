@@ -365,7 +365,7 @@ export interface DesktopBridge {
   mcp_approve_authorization(id: string, scopes: McpScope[]): Promise<McpAuthorizationDecision>;
   mcp_deny_authorization(id: string): Promise<McpAuthorizationDecision>;
   forget_contact_book(bookId: string): Promise<void>;
-  /** Deletes a removed phone's synced copy of its contacts for every vault device. Never touches the phone. Rejects with `contact-book-not-deletable`, `contact-book-deleted` or `locked`. */
+  /** Deletes a removed phone's synced copy of its contacts for every vault device. Never touches the phone. Rejects with `offline` (no live server connection, refused before core runs), `sync-not-current` (this device has not applied every row through the server head yet), `contact-book-not-deletable`, `contact-book-deleted` or `locked`. */
   delete_contact_book(bookId: string): Promise<{ bookId: string; contacts: number }>;
   /** Hides a book from names and recipient search on this computer only; `enabled: true` restores it. */
   set_contact_book_lookup(bookId: string, enabled: boolean): Promise<void>;

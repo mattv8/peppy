@@ -19,7 +19,7 @@ use peppy_client_core::{AttachmentId, Client, Error as CoreError};
 use peppy_desktop_api::contacts as shared;
 use serde_json::{json, Map, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -160,11 +160,24 @@ pub fn forget_book(session: &Session, book_id: &str) -> BridgeResult<()> {
 }
 
 /// Deletion is queued locally and may be uploaded after reconnecting.
+/// Core input for a vault-wide book deletion. Both trusted facts come from the host, never the
+/// renderer: the revoked roster and whether every row through the server head is applied.
+fn delete_book_input(book_id: &str, revoked: &HashSet<String>, sync_current: bool) -> Value {
+    json!({
+        "book_id": book_id,
+        "revoked_device_ids": revoked,
+        "sync_current": sync_current,
+    })
+}
+
 pub fn delete_book(session: &Session, book_id: &str) -> BridgeResult<Value> {
     if !valid_id(book_id) {
         return Err(invalid("The contact book is invalid."));
     }
-    let input = json!({"book_id": book_id, "revoked_device_ids": session.revoked_devices()});
+    if !session.connected() {
+        return Err(peppy_desktop_api::contact_error::delete_book_offline().into());
+    }
+    let input = delete_book_input(book_id, &session.revoked_devices(), session.sync_current()?);
     let raw = session
         .client
         .delete_contact_book(&input.to_string())

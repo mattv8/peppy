@@ -24,6 +24,7 @@ const BOOK: &str = "book-1";
 #[test]
 fn deleting_removed_book_queues_offline_and_refuses_repeated_or_active_deletion() {
     let h = Harness::new(json!({"read": true}), "auto");
+    h.session.set_status(|status| status.live = true);
     assert_eq!(
         delete_book(&h.session, BOOK).unwrap_err().code,
         "contact-book-not-deletable"
@@ -41,6 +42,46 @@ fn deleting_removed_book_queues_offline_and_refuses_repeated_or_active_deletion(
         delete_book(&h.session, BOOK).unwrap_err().code,
         "contact-book-deleted"
     );
+}
+
+#[test]
+fn deleting_refuses_offline_before_core_runs() {
+    let h = Harness::new(json!({"read": true}), "auto");
+    h.session.set_status(|status| {
+        status.revoked_device_ids.insert(h.owner_id.clone());
+    });
+    let error = delete_book(&h.session, BOOK).unwrap_err();
+    assert_eq!(error.code, "offline");
+    assert_eq!(
+        error.message,
+        "Connect to the server to delete this book for all devices."
+    );
+    // Core was never called: the book is still listed and nothing was queued.
+    assert_eq!(list_books(&h.session).unwrap().len(), 1);
+    assert!(h.session.client.pending_outbox().unwrap().is_empty());
+}
+
+#[test]
+fn delete_input_passes_host_sync_currency_and_roster_through() {
+    let revoked: HashSet<String> = ["phone-1".to_owned()].into();
+    assert_eq!(
+        delete_book_input(BOOK, &revoked, true),
+        json!({"book_id": BOOK, "revoked_device_ids": ["phone-1"], "sync_current": true})
+    );
+    assert_eq!(
+        delete_book_input(BOOK, &HashSet::new(), false)["sync_current"],
+        false
+    );
+}
+
+#[test]
+fn sync_currency_requires_a_live_connection_and_a_committed_head() {
+    let h = Harness::new(json!({"read": true}), "auto");
+    // Not live: never current, whatever the replay state.
+    assert!(!h.session.sync_current().unwrap());
+    // Live but no committed server head recorded yet: not current.
+    h.session.set_status(|status| status.live = true);
+    assert!(!h.session.sync_current().unwrap());
 }
 
 #[test]

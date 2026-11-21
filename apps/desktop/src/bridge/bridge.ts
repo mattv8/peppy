@@ -284,6 +284,11 @@ const fixtureDevices: ManagedDeviceView[] = [
 ];
 const fixtureScanStatuses = new Map<string, ContactScanStatus>();
 const fixtureLookupExcludedBookIds = new Set<string>();
+/** Test-only gate for `delete_contact_book`: exercises the host's offline and sync-not-current refusals. */
+let fixtureContactDeleteGate: "ready" | "offline" | "sync-not-current" = "ready";
+export function setFixtureContactDeleteGateForTests(gate: "ready" | "offline" | "sync-not-current"): void {
+  fixtureContactDeleteGate = gate;
+}
 const fixtureNameCandidates: Array<ContactNameCandidate & { address: string }> = [
   { address: "+12025550123", bookId: "book-pixel8", contactId: "contact-aurora", displayName: "Aurora Chen" },
   { address: "+12025550124", bookId: "book-pixel8", contactId: "contact-river", displayName: "River Park" },
@@ -851,6 +856,8 @@ export const fixtureBridge: DesktopBridge = {
   },
   delete_contact_book: async bookId => {
     const index = fixtureContactBooks.findIndex(book => book.id === bookId);
+    if (fixtureContactDeleteGate === "offline") throw fixtureError("offline", "Connect to the server to delete this book for all devices.");
+    if (fixtureContactDeleteGate === "sync-not-current") throw fixtureError("sync-not-current", "Finish syncing to delete this book for all devices.");
     if (index < 0 || !fixtureContactBooks[index].sourceRevoked) throw fixtureError("contact-book-not-deletable", "This contact book can't be deleted for all devices.");
     const book = dropFixtureContactBook(index);
     return { bookId, contacts: book.contactCount };

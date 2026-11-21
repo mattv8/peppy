@@ -317,9 +317,17 @@ impl BrowserCore {
             .and_then(Value::as_str)
             .filter(|id| shared::valid_id(id))
             .ok_or_else(|| Failure::new("invalid-contact-edit", "The contact book is invalid."))?;
-        // The queued event uploads after reconnecting; renderer-supplied revocations are ignored.
-        let input =
-            json!({"book_id": book_id, "revoked_device_ids": self.context.revoked_device_ids});
+        if !self.server_connected() {
+            return Err(contact_error(
+                peppy_desktop_api::contact_error::delete_book_offline(),
+            ));
+        }
+        // Renderer-supplied revocations and sync currency are ignored; both are host facts.
+        let input = json!({
+            "book_id": book_id,
+            "revoked_device_ids": self.context.revoked_device_ids,
+            "sync_current": self.sync_current(),
+        });
         let raw = self
             .client()?
             .delete_contact_book(&input.to_string())
@@ -783,9 +791,45 @@ mod tests {
     }
 
     #[test]
+    fn delete_contact_book_refuses_offline_before_core_runs() {
+        let mut fixture = ContactFixture::new();
+        let args = json!({"bookId": BOOK_ID});
+        fixture
+            .browser
+            .context
+            .revoked_device_ids
+            .insert(fixture.owner_config.device_id.to_string());
+        // Not connected (no server status yet): refused, and the book is untouched.
+        assert_eq!(
+            fixture.error("delete_contact_book", args.clone())["code"],
+            "offline"
+        );
+        assert_eq!(
+            fixture.error("delete_contact_book", args)["message"],
+            "Connect to the server to delete this book for all devices."
+        );
+        let books = fixture.command("list_contact_books", json!({}));
+        let listed = books.as_array().unwrap();
+        assert!(listed.iter().any(|book| book["id"] == BOOK_ID));
+    }
+
+    #[test]
+    fn sync_currency_is_host_fact_and_requires_connection() {
+        let mut fixture = ContactFixture::new();
+        fixture.browser.context.sync_current = true;
+        assert!(!fixture.browser.sync_current(), "offline is never current");
+        fixture.browser.context.connection = Some("connected".into());
+        assert!(fixture.browser.sync_current());
+        fixture.browser.context.connection = Some("error".into());
+        assert!(!fixture.browser.sync_current(), "degraded is never current");
+    }
+
+    #[test]
     fn delete_contact_book_uses_trusted_revocations_and_reports_repeat() {
         let mut fixture = ContactFixture::new();
         let args = json!({"bookId": BOOK_ID, "revokedDeviceIds": [fixture.owner_config.device_id]});
+        fixture.browser.context.connection = Some("connected".into());
+        fixture.browser.context.sync_current = true;
         assert_eq!(
             fixture.error("delete_contact_book", args.clone())["code"],
             "contact-book-not-deletable"

@@ -6826,7 +6826,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onAppFilter={setNotificationAppFilter}
             />
           ) : contactsOpen ? (
-            <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} toneOverrides={toneOverrides} toneDisabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pendingToneSeeds={pendingToneSeeds} toneErrors={toneErrors} onSelectTone={(seed, index) => { void saveTone(seed, index); }} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} bookCollapsed={contactsBookCollapsed} onBookCollapsedChange={setContactsBookCollapsedPersisted} query={contactQuery} onClearQuery={() => setContactQuery("")} />
+            <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} serverConnected={snapshot?.connection.state === "connected"} toneOverrides={toneOverrides} toneDisabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pendingToneSeeds={pendingToneSeeds} toneErrors={toneErrors} onSelectTone={(seed, index) => { void saveTone(seed, index); }} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} bookCollapsed={contactsBookCollapsed} onBookCollapsedChange={setContactsBookCollapsedPersisted} query={contactQuery} onClearQuery={() => setContactQuery("")} />
           ) : (
             <>
               {reenrolRequired && !revoked ? (

@@ -1313,6 +1313,28 @@ impl Session {
             || replay_is_behind(&progress, self.replay_target_high_water()))
     }
 
+    /// Whether the live WebSocket is negotiated. Trusted host state, never renderer input.
+    pub fn connected(&self) -> bool {
+        self.status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .live
+    }
+
+    /// Whether every row through the newest committed server head is applied. Uses the replay
+    /// cut recorded after a non-empty page commits, the receive frontier, and the sync phase
+    /// (snapshot staging, key waits, apply backlog). Not current before the first non-empty page
+    /// of this session, and not while a page is in flight.
+    pub fn sync_current(&self) -> BridgeResult<bool> {
+        if !self.connected() || self.replay_target_high_water().is_none() || self.catching_up()? {
+            return Ok(false);
+        }
+        Ok(matches!(
+            self.sync_progress()?.phase,
+            dto::SyncProgressPhase::Current
+        ))
+    }
+
     fn sync_progress(&self) -> BridgeResult<dto::SyncProgress> {
         let progress = self.replay_progress()?;
         let target_high_water = self.replay_target_high_water();

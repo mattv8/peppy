@@ -11,6 +11,8 @@ vi.mock("../bridge/bridge", { spy: true });
 
 const removedBook: ContactBookView = { ...mockContactBook, id: "book-iphone", deviceName: "iPhone", state: "retired", sourceRevoked: true, contactCount: 803 };
 const UNLOCK_REASON = "Unlock sync to delete this book for all devices.";
+const OFFLINE_REASON = "Connect to the server to delete this book for all devices.";
+const SYNCING_REASON = "Finish syncing to delete this book for all devices.";
 
 const deleteDialog = () => document.getElementById("contacts-book-delete-dialog");
 const ackBox = () => document.getElementById("contacts-book-delete-ack") as HTMLInputElement;
@@ -96,6 +98,55 @@ describe("removed book delete actions", () => {
     fireEvent.click(menuDeleteItem());
     expect(deleteDialog()).not.toBeInTheDocument();
   });
+
+  it("disables both actions with the offline reason when the server is not connected", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([removedBook, mockContactBook]);
+    render(<ContactsView serverConnected={false} />);
+    const button = await screen.findByRole("button", { name: "Delete for all devices…" });
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).toHaveAttribute("title", OFFLINE_REASON);
+    expect(button).toHaveAttribute("aria-describedby", "contacts-book-delete-reason");
+    expect(document.getElementById("contacts-book-delete-reason")).toHaveTextContent(OFFLINE_REASON);
+    fireEvent.click(button);
+    expect(deleteDialog()).not.toBeInTheDocument();
+  });
+
+  it("disables the menu item with the offline reason when the server is not connected", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, removedBook]);
+    render(<ContactsView serverConnected={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "More actions for iPhone" }));
+    expect(menuDeleteItem()).toHaveAttribute("aria-disabled", "true");
+    expect(menuDeleteItem()).toHaveAttribute("title", OFFLINE_REASON);
+    fireEvent.click(menuDeleteItem());
+    expect(deleteDialog()).not.toBeInTheDocument();
+  });
+
+  it("disables both actions with the syncing reason while contacts are rebuilding or need repair", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([removedBook, mockContactBook]);
+    const { rerender } = render(<ContactsView sync={{ repairRequired: false, projection: { state: "rebuilding" } }} />);
+    const button = await screen.findByRole("button", { name: "Delete for all devices…" });
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(document.getElementById("contacts-book-delete-reason")).toHaveTextContent(SYNCING_REASON);
+
+    rerender(<ContactsView sync={{ repairRequired: true }} />);
+    expect(document.getElementById("contacts-book-delete-reason")).toHaveTextContent(SYNCING_REASON);
+    rerender(<ContactsView />);
+    expect(document.getElementById("contacts-book-delete-reason")).not.toBeInTheDocument();
+  });
+
+  it("gives the locked reason priority over offline and syncing", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([removedBook, mockContactBook]);
+    render(<ContactsView toneDisabled serverConnected={false} sync={{ repairRequired: true }} />);
+    await screen.findByRole("button", { name: "Delete for all devices…" });
+    expect(document.getElementById("contacts-book-delete-reason")).toHaveTextContent(UNLOCK_REASON);
+  });
+
+  it("gives the offline reason priority over syncing", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([removedBook, mockContactBook]);
+    render(<ContactsView serverConnected={false} sync={{ repairRequired: true }} />);
+    await screen.findByRole("button", { name: "Delete for all devices…" });
+    expect(document.getElementById("contacts-book-delete-reason")).toHaveTextContent(OFFLINE_REASON);
+  });
 });
 
 describe("delete for all devices dialog", () => {
@@ -173,6 +224,8 @@ describe("delete for all devices dialog", () => {
   it.each([
     ["contact-book-not-deletable", "This contact book can't be deleted for all devices."],
     ["locked", UNLOCK_REASON],
+    ["offline", OFFLINE_REASON],
+    ["sync-not-current", SYNCING_REASON],
     [undefined, "Couldn't delete this book for all devices. Try again."],
   ])("keeps the dialog open and explains a %s failure", async (code, message) => {
     vi.mocked(bridge.delete_contact_book).mockRejectedValue(code ? { code, message: "native" } : new Error("offline"));
@@ -195,6 +248,21 @@ describe("delete for all devices dialog", () => {
 
     await waitFor(() => expect(document.getElementById("contacts-book-delete-error")).toHaveTextContent("This book was already deleted for all devices."));
     await waitFor(() => expect(vi.mocked(bridge.list_contact_books).mock.calls.length).toBe(loadsBefore + 1));
+  });
+
+  it("keeps the destructive action inert with its reason when the connection drops while open", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([removedBook, mockContactBook]);
+    const { rerender } = render(<ContactsView />);
+    fireEvent.click(await screen.findByRole("button", { name: "Delete for all devices…" }));
+    fireEvent.click(ackBox());
+    expect(dialogDeleteButton()).not.toHaveAttribute("aria-disabled");
+
+    rerender(<ContactsView serverConnected={false} />);
+    expect(dialogDeleteButton()).toHaveAttribute("aria-disabled", "true");
+    expect(dialogDeleteButton()).toHaveAttribute("aria-describedby", "contacts-book-delete-dialog-reason");
+    expect(document.getElementById("contacts-book-delete-dialog-reason")).toHaveTextContent(OFFLINE_REASON);
+    fireEvent.click(dialogDeleteButton());
+    expect(bridge.delete_contact_book).not.toHaveBeenCalled();
   });
 
   it("blocks Escape and disables Cancel while deleting, then closes when it finishes", async () => {

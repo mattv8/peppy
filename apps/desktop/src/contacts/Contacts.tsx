@@ -22,6 +22,7 @@ import { persistLayoutPatch, readContactsBookCollapsed, readContactsBookWidth, r
 import { IsolatedText } from "../notices/IsolatedText";
 import { ContactDetail } from "./ContactDetail";
 import { RestorePanel } from "./RestorePanel";
+import { DELETE_LOCKED_REASON, DELETE_OFFLINE_REASON, DELETE_SYNCING_REASON } from "./book-delete-copy";
 import "./contacts.css";
 
 /** Core returns at most this many contacts per page (search runs before paging). */
@@ -59,9 +60,11 @@ function isCreateEditing(editing: ContactView | null | CreateContactEditing): ed
   return editing === "create" || (editing !== null && "createPrefill" in editing);
 }
 
-export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard, target, onTargetConsumed, toneOverrides = {}, toneDisabled = false, pendingToneSeeds = {}, toneErrors = {}, onSelectTone, bookCollapsed: bookCollapsedProp, onBookCollapsedChange, query = "", onClearQuery }: {
+export function ContactsView({ books: initialBooks = [], sync, serverConnected = true, onNavigationGuard, target, onTargetConsumed, toneOverrides = {}, toneDisabled = false, pendingToneSeeds = {}, toneErrors = {}, onSelectTone, bookCollapsed: bookCollapsedProp, onBookCollapsedChange, query = "", onClearQuery }: {
   books?: ContactBookView[];
   sync?: ContactSyncStatus;
+  /** Whether the host has a live server connection. Deleting a book for all devices needs one. */
+  serverConnected?: boolean;
   onNavigationGuard?(guard: ContactNavigationGuard | null): void;
   target?: ContactTarget | null;
   onTargetConsumed?(requestId: number): void;
@@ -963,8 +966,12 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     </p>
   );
 
-  // Deleting a removed phone's book for every device needs unlocked sync; the strip and menu say why when it is locked.
-  const deleteDisabledReason = toneDisabled || sync?.readiness?.state === "needs_unlock" ? "Unlock sync to delete this book for all devices." : undefined;
+  // Deleting a removed phone's book for every device needs unlocked sync, a live connection and a settled contacts sync.
+  // The strip and menu show the first reason that applies: locked, then offline, then syncing.
+  const deleteDisabledReason = toneDisabled || sync?.readiness?.state === "needs_unlock" ? DELETE_LOCKED_REASON
+    : !serverConnected ? DELETE_OFFLINE_REASON
+    : contactsRepairState ? DELETE_SYNCING_REASON
+    : undefined;
 
   // Priority order: the first present strip is the only one the status slot shows.
   const statusStrips: Array<ContactsStatusStrip | false | null | undefined> = [
@@ -1012,7 +1019,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
         <RemoveBookDialog book={bookRemoval.book} opener={bookRemoval.opener} onDismiss={() => setBookRemoval(undefined)} onRemoved={handleBookRemoved} onNotice={setActionNotice} />
       )}
       {bookDeletion && (
-        <DeleteBookDialog book={bookDeletion.book} opener={bookDeletion.opener} onDismiss={() => setBookDeletion(undefined)} onDeleted={handleBookDeleted} onBooksChanged={loadBooks} />
+        <DeleteBookDialog book={bookDeletion.book} opener={bookDeletion.opener} disabledReason={deleteDisabledReason} onDismiss={() => setBookDeletion(undefined)} onDeleted={handleBookDeleted} onBooksChanged={loadBooks} />
       )}
       {railVisible && !noBooks && (
         <BookRail
