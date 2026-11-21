@@ -256,6 +256,14 @@ fn client(session: &Arc<Session>) -> Client {
     session.client.clone()
 }
 
+async fn wake_replay_for_owed_deletions(session: &Arc<Session>) -> BridgeResult<()> {
+    let c = client(session);
+    if blocking(move || c.completion_needs_replay_head().map_err(core_error)).await? {
+        session.replay_wake.notify_one();
+    }
+    Ok(())
+}
+
 /// Resets the save debounce for this session. Cancellation fences delayed work from retired
 /// sessions, while the generation ensures a superseded save cannot wake early.
 pub(crate) fn schedule_draft_push(session: Arc<Session>, delay: Duration) {
@@ -3135,13 +3143,8 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                         // Socket records carry no replay head. Owed deletion members that wait only
                         // for one get it from the live loop's next HTTP round. The notify coalesces,
                         // and nothing asks again until another record arrives.
-                        let c = client(session);
-                        match blocking(move || c.completion_needs_replay_head().map_err(core_error))
-                            .await
-                        {
-                            Ok(true) => session.replay_wake.notify_one(),
-                            Ok(false) => {}
-                            Err(error) => return ended(error.code),
+                        if let Err(error) = wake_replay_for_owed_deletions(session).await {
+                            return ended(error.code);
                         }
                         let _ = observe_history_progress(session).await;
                         continue 'frames;
@@ -3285,6 +3288,90 @@ mod first_snapshot_tests {
     fn session() -> Arc<Session> {
         let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
         Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]))
+    }
+
+    #[tokio::test]
+    async fn owed_deletion_wakes_replay_until_head_is_observed() {
+        use peppy_client_core::{
+            Cursor, DeviceId, Envelope, EnvelopeId, EnvelopePurpose, PrivatePayload,
+            SourceSequence, VaultId,
+        };
+        use peppy_crypto::{derive_purpose_key, derive_root_key, encrypt, KeyPurpose};
+        use serde_json::json;
+
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]));
+        let client = &session.client;
+        client
+            .unlock(&fixture.profile, &fixture.header, crate::tests::PHRASE)
+            .unwrap();
+        client.set_server_compaction_state(true, true).unwrap();
+        let root = derive_root_key(crate::tests::PHRASE, &fixture.profile).unwrap();
+        let key = derive_purpose_key(&root, &fixture.profile, KeyPurpose::Event).unwrap();
+        let owner = DeviceId::new();
+        let deleter = DeviceId::new();
+        let book = json!({"id": "book", "owner_device_id": owner.to_string(),
+            "generation": "1", "state": "active", "region": "US"});
+        let contact = json!({"id": "c1", "book_id": "book", "revision": "1",
+            "display_name": "c1", "name": {"given": "c1"}, "phones": [],
+            "emails": [], "addresses": []});
+        let payloads = [
+            (
+                owner,
+                1,
+                PrivatePayload::ContactBookState { book: book.clone() },
+            ),
+            (owner, 2, PrivatePayload::ContactUpserted { book, contact }),
+            (
+                deleter,
+                1,
+                PrivatePayload::ContactBookDeleted {
+                    book_id: "book".into(),
+                    owner_device_id: owner.to_string(),
+                    generation: "1".into(),
+                    deleted_at_ms: 1000,
+                },
+            ),
+        ];
+        for (index, (producer, sequence, payload)) in payloads.into_iter().enumerate() {
+            let mut envelope = Envelope {
+                protocol_version: 1,
+                envelope_id: EnvelopeId::new(),
+                command_id: None,
+                vault_id: VaultId(uuid::Uuid::parse_str(&fixture.binding.vault_id).unwrap()),
+                producer_device_id: producer,
+                producer_sequence: SourceSequence(sequence),
+                key_epoch: 1,
+                crypto_suite: fixture.profile.crypto_suite,
+                profile_fingerprint: fixture.profile.fingerprint().unwrap(),
+                purpose: EnvelopePurpose::Event,
+                route: None,
+                compaction: None,
+                origin_tag: None,
+                ciphertext: Vec::new(),
+            };
+            let encrypted = encrypt(
+                &key,
+                &envelope.aad_bytes().unwrap(),
+                &serde_json::to_vec(&payload).unwrap(),
+            )
+            .unwrap();
+            envelope.ciphertext = [encrypted.nonce.as_slice(), &encrypted.ciphertext].concat();
+            client.ingest(&envelope, Cursor(index as u64 + 1)).unwrap();
+            client.apply_pending(100).unwrap();
+            if index == 1 {
+                client.observe_replay_head(Cursor(2)).unwrap();
+            }
+        }
+        assert!(client.completion_needs_replay_head().unwrap());
+        wake_replay_for_owed_deletions(&session).await.unwrap();
+        assert!(session.replay_wake.notified().now_or_never().is_some());
+        assert!(session.replay_wake.notified().now_or_never().is_none());
+        client.observe_replay_head(Cursor(3)).unwrap();
+        client.apply_pending(100).unwrap();
+        assert!(!client.completion_needs_replay_head().unwrap());
+        wake_replay_for_owed_deletions(&session).await.unwrap();
+        assert!(session.replay_wake.notified().now_or_never().is_none());
     }
 
     #[tokio::test]
