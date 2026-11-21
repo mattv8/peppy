@@ -2909,7 +2909,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_contact_scan() and 0xFFFF) != 7624) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_server_high_water() and 0xFFFF) != 10269) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_server_high_water() and 0xFFFF) != 23619) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_history_import_gate() and 0xFFFF) != 17220) {
@@ -4272,7 +4272,7 @@ public interface NativeClientInterface {
     fun `observeContactScan`(`inputJson`: kotlin.String): kotlin.String
     
     /**
-     * Records the first server replay watermark observed by the host.
+     * Records the server watermark after each replay page has been ingested.
      */
     fun `observeServerHighWater`(`highWaterCursor`: kotlin.String)
     
@@ -6531,7 +6531,7 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
 
     
     /**
-     * Records the first server replay watermark observed by the host.
+     * Records the server watermark after each replay page has been ingested.
      */
     @Throws(MobileBindingsException::class)override fun `observeServerHighWater`(`highWaterCursor`: kotlin.String)
         = 

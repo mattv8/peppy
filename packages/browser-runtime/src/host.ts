@@ -242,6 +242,7 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   set_notification_preferences: { coreCommand: "set_notification_preferences", mutation: true },
   list_contact_books: { coreCommand: "list_contact_books", mutation: false },
   forget_contact_book: { coreCommand: "forget_contact_book", mutation: true },
+  delete_contact_book: { coreCommand: "delete_contact_book", mutation: true },
   set_contact_book_lookup: { coreCommand: "set_contact_book_lookup", mutation: true },
   list_contact_name_candidates: { coreCommand: "list_contact_name_candidates", mutation: false },
   set_contact_name_pin: { coreCommand: "set_contact_name_pin", mutation: true },
@@ -373,7 +374,7 @@ function errorFor(error: unknown): RpcError {
   if (error instanceof BrowserSessionError) return { code: error.code, message: "Browser session is not ready." };
   if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
     const details = errorDetails(error);
-    const codes = new Set(["already-open", "attachment-invalid", "attachment-local", "busy", "core", "database-key-mismatch", "gateway-offline", "gateway-unavailable", "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found", "request-too-large", "stale-draft", "draft-moved", "draft-not-discardable", "recipientless-draft-exists", "draft-merge-overflow", "unknown-command", "unlock-failed", "invalid-contact-edit", "contact-book-read-only", "contact-field-read-only", "contact-photo-invalid", "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable", "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message", "message-too-long", "already-sent-again", "route-unavailable", "attachments-unavailable", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "media-pending", "public-copy-unsupported", "public-copy-too-large", "host-state", "device-revoked", "unsupported", "http-401", "http-403", "invalid_setup_token", "instance_already_claimed", "setup_window_closed"]);
+    const codes = new Set(["already-open", "attachment-invalid", "attachment-local", "busy", "core", "database-key-mismatch", "gateway-offline", "gateway-unavailable", "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found", "request-too-large", "stale-draft", "draft-moved", "draft-not-discardable", "recipientless-draft-exists", "draft-merge-overflow", "unknown-command", "unlock-failed", "invalid-contact-edit", "contact-book-read-only", "contact-book-deleted", "contact-book-not-deletable", "contact-field-read-only", "contact-photo-invalid", "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable", "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message", "message-too-long", "already-sent-again", "route-unavailable", "attachments-unavailable", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "media-pending", "public-copy-unsupported", "public-copy-too-large", "host-state", "device-revoked", "unsupported", "http-401", "http-403", "invalid_setup_token", "instance_already_claimed", "setup_window_closed"]);
     const code = codes.has(error.code) ? error.code : "unavailable";
     return { code, message: "Browser operation failed.", ...details };
   }

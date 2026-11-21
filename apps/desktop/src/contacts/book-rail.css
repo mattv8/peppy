@@ -187,6 +187,70 @@
   outline: none;
 }
 
+#contacts-book-menu .contacts-book-menu-item-destructive {
+  color: var(--peppy-error-text);
+}
+
+#contacts-book-menu .contacts-book-menu-item[aria-disabled="true"] {
+  color: var(--peppy-text-secondary);
+  cursor: default;
+}
+
+#contacts-book-menu .contacts-book-menu-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--peppy-border);
+}
+
+/* Locked: the destructive button reads as disabled, with no hover change, and keeps its reason in title and description. */
+.destructive-button[aria-disabled="true"] {
+  background: transparent;
+  color: var(--peppy-text-secondary);
+  border: 1px dashed var(--peppy-border-strong);
+  cursor: not-allowed;
+}
+
+.destructive-button[aria-disabled="true"]:hover {
+  background: transparent;
+}
+
+@media (forced-colors: active) {
+  .destructive-button[aria-disabled="true"] {
+    color: GrayText;
+    border-color: GrayText;
+  }
+}
+
+#contacts-book-delete-dialog ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+
+.contacts-book-delete-ack {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 0;
+  font-size: 13px;
+}
+
+.contacts-book-delete-ack input {
+  accent-color: var(--peppy-accent);
+}
+
+.contacts-book-delete-ack input:focus-visible {
+  outline: 2px solid var(--peppy-focus-ring);
+  outline-offset: 2px;
+}
+
+#contacts-book-delete-reason {
+  margin: 2px 0 0;
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+}
+
 /* Compact lookup strip (rail hidden). With the list header's book select it is one row plus its hint; the title line shows only when no select does. */
 #contacts-book-use { padding: 6px 10px; border-bottom: 1px solid var(--peppy-border); }
 #contacts-book-use-title, .contacts-book-use-row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
@@ -250,6 +314,12 @@
 
 #contacts-book-removed .contacts-strip-actions button {
   white-space: nowrap;
+}
+
+#contacts-book-removed .contacts-strip-actions .destructive-button {
+  height: 26px;
+  min-height: 26px;
+  line-height: 24px;
 }
 
 #contacts-book-removed .contacts-strip-actions .secondary-button {

@@ -13,6 +13,7 @@ import type { ContactActionNotice } from "./contact-action-notice";
 import { BookLookupStrip, BookRail } from "./BookRail";
 import { ContactListHeader } from "./ContactListHeader";
 import { RemoveBookDialog, RemovedBookStrip } from "./RemovedBookStrip";
+import { DeleteBookDialog } from "./DeleteBookDialog";
 import { ContactsActionNotice } from "./ContactsActionNotice";
 import { ContactsStatus, SyncStatusStrip, activeContactsStatus, type ContactsStatusStrip } from "./ContactsStatus";
 import { persistSortPreference, readSortPreference } from "./contact-sort";
@@ -22,6 +23,7 @@ import { persistLayoutPatch, readContactsBookCollapsed, readContactsBookWidth, r
 import { IsolatedText } from "../notices/IsolatedText";
 import { ContactDetail } from "./ContactDetail";
 import { RestorePanel } from "./RestorePanel";
+import { DELETE_LOCKED_REASON, DELETE_OFFLINE_REASON, DELETE_SYNCING_REASON } from "./book-delete-copy";
 import { defaultLookupFailure, type LookupFailure } from "./useBookLookup";
 import "./contacts.css";
 
@@ -60,9 +62,11 @@ function isCreateEditing(editing: ContactView | null | CreateContactEditing): ed
   return editing === "create" || (editing !== null && "createPrefill" in editing);
 }
 
-export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard, target, onTargetConsumed, toneOverrides = {}, toneDisabled = false, writesPaused = false, pauseNoticeVisible = writesPaused, onUpdateInProgress, pendingToneSeeds = {}, toneErrors = {}, onSelectTone, bookCollapsed: bookCollapsedProp, onBookCollapsedChange, query = "", onClearQuery }: {
+export function ContactsView({ books: initialBooks = [], sync, serverConnected = true, onNavigationGuard, target, onTargetConsumed, toneOverrides = {}, toneDisabled = false, writesPaused = false, pauseNoticeVisible = writesPaused, onUpdateInProgress, pendingToneSeeds = {}, toneErrors = {}, onSelectTone, bookCollapsed: bookCollapsedProp, onBookCollapsedChange, query = "", onClearQuery }: {
   books?: ContactBookView[];
   sync?: ContactSyncStatus;
+  /** Whether the host has a live server connection. Deleting a book for all devices needs one. */
+  serverConnected?: boolean;
   onNavigationGuard?(guard: ContactNavigationGuard | null): void;
   target?: ContactTarget | null;
   onTargetConsumed?(requestId: number): void;
@@ -124,6 +128,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const [notice, setNotice] = useState<ReactNode>("");
   const [actionNotice, setActionNotice] = useState<ContactActionNotice>();
   const [bookRemoval, setBookRemoval] = useState<{ book: ContactBookView; opener: RefObject<HTMLElement | null> }>();
+  const [bookDeletion, setBookDeletion] = useState<{ book: ContactBookView; opener: RefObject<HTMLElement | null> }>();
   const pages = useContactPages({ bookId, sort, query, onError: setLoadError });
   const { contacts } = pages;
   useEffect(() => {
@@ -235,6 +240,11 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       .list_contact_books()
       .then(next => {
         if (!mountedRef.current) return;
+        const selectedBook = booksRef.current.find(item => item.id === currentBookRef.current);
+        // A removed phone's book vanishing while this computer did not remove or delete it means another device deleted it.
+        if (selectedBook?.sourceRevoked && !next.some(item => item.id === selectedBook.id) && !removedBookIdRef.current) {
+          setActionNotice({ kind: "success", message: <><IsolatedText text={selectedBook.deviceName} />'s contacts were deleted from another device.</> });
+        }
         setBooks(next);
         if (editorBookIdRef.current && !next.some(book => book.id === editorBookIdRef.current)) {
           setError("This contact book is no longer available. Your draft is still open.");
@@ -747,6 +757,13 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   };
   // One removal dialog for the whole view, so it survives the status slot changing and focus returns to its opener.
   const requestRemoveBook = (book: ContactBookView, opener: RefObject<HTMLElement | null>) => setBookRemoval({ book, opener });
+  // Deleting for every device follows the same path as removal: one view-level dialog, then the same reload and focus.
+  const requestDeleteBook = (book: ContactBookView, opener: RefObject<HTMLElement | null>) => setBookDeletion({ book, opener });
+  const handleBookDeleted = (deleted: ContactBookView) => {
+    setBookDeletion(undefined);
+    handleBookRemoved(deleted.id);
+    setActionNotice({ kind: "success", message: <>Deleted <IsolatedText text={deleted.deviceName} />'s contacts for all devices. Other devices remove it as they sync.</> });
+  };
   // The request stays armed until the removed book is actually gone, so an earlier books refresh cannot consume it.
   useEffect(() => {
     const removedId = removedBookIdRef.current;
@@ -969,11 +986,19 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     </p>
   );
 
+  // Deleting a removed phone's book for every device needs unlocked sync, a live connection and a settled contacts sync.
+  // The strip and menu show the first reason that applies: updating, then locked, then offline, then syncing.
+  const deleteDisabledReason = writesPaused ? UPDATE_PAUSED_DESCRIPTION
+    : toneDisabled || sync?.readiness?.state === "needs_unlock" ? DELETE_LOCKED_REASON
+    : !serverConnected ? DELETE_OFFLINE_REASON
+    : contactsRepairState ? DELETE_SYNCING_REASON
+    : undefined;
+
   // Priority order: the first present strip is the only one the status slot shows.
   const statusStrips: Array<ContactsStatusStrip | false | null | undefined> = [
     !detailOverlay && unsavedBanner ? { kind: "unsaved", node: unsavedBanner } : null,
     !detailOverlay && !restore && errorBanner ? { kind: "error", node: errorBanner } : null,
-    book?.sourceRevoked ? { kind: "removed", node: <RemovedBookStrip book={book} onRemoveRequest={requestRemoveBook} /> } : null,
+    book?.sourceRevoked ? { kind: "removed", node: <RemovedBookStrip book={book} onRemoveRequest={requestRemoveBook} onDeleteRequest={requestDeleteBook} deleteDisabledReason={deleteDisabledReason} /> } : null,
     // The sync strip carries the completed-scan wording too, so a finished scan is not hidden behind the repair state.
     contactsRepairState ? { kind: "sync", node: <SyncStatusStrip state={contactsRepairState} text={scanStatus?.state === "completed" && completedScanText ? completedScanText : contactsSyncText} /> } : null,
     sync?.readiness && (sync.readiness.state !== "ready" || !sync.readiness.server_active) ? { kind: "readiness", node: (
@@ -1014,6 +1039,9 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       {bookRemoval && (
         <RemoveBookDialog book={bookRemoval.book} opener={bookRemoval.opener} onDismiss={() => setBookRemoval(undefined)} onRemoved={handleBookRemoved} onNotice={setActionNotice} />
       )}
+      {bookDeletion && (
+        <DeleteBookDialog book={bookDeletion.book} opener={bookDeletion.opener} disabledReason={deleteDisabledReason} onDismiss={() => setBookDeletion(undefined)} onDeleted={handleBookDeleted} onBooksChanged={loadBooks} />
+      )}
       {railVisible && !noBooks && (
         <BookRail
           books={books}
@@ -1024,6 +1052,8 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
           onSelect={handleSelectBook}
           onBooksChanged={loadBooks}
           onRemoveRequest={requestRemoveBook}
+          onDeleteRequest={requestDeleteBook}
+          deleteDisabledReason={deleteDisabledReason}
           onNotice={setActionNotice}
           lookupFailure={lookupFailure}
         />

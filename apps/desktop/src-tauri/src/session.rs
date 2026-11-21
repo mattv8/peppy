@@ -591,6 +591,8 @@ pub struct Session {
     pub(crate) refuse_snapshot_append: Mutex<Option<crate::sync::AppendKind>>,
     /// Refused snapshot begin, shared by every snapshot path (see `sync::SnapshotTooLargeGate`).
     pub(crate) snapshot_too_large: Mutex<crate::sync::SnapshotTooLargeGate>,
+    /// Replay-head requests made for owed contact-deletion members, shared by every socket and pass.
+    pub(crate) replay_head_asks: Mutex<crate::sync::ReplayHeadAsks>,
     /// Prevents duplicate standalone search-index maintenance loops for one session.
     pub index_driver_running: AtomicBool,
     /// Latches completed search-index maintenance for this session.
@@ -1010,6 +1012,7 @@ pub(crate) fn open_session_with_progress(
         repair_attempted: AtomicBool::new(false),
         repair_finished: AtomicBool::new(false),
         snapshot_too_large: Mutex::new(crate::sync::SnapshotTooLargeGate::default()),
+        replay_head_asks: Mutex::new(crate::sync::ReplayHeadAsks::default()),
         #[cfg(test)]
         refuse_snapshot_append: Mutex::new(None),
         index_driver_running: AtomicBool::new(false),
@@ -1382,6 +1385,28 @@ impl Session {
         let progress = self.replay_progress()?;
         Ok(self.replay_page_in_flight.load(Ordering::Acquire)
             || replay_is_behind(&progress, self.replay_target_high_water()))
+    }
+
+    /// Whether the live WebSocket is negotiated. Trusted host state, never renderer input.
+    pub fn connected(&self) -> bool {
+        self.status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .live
+    }
+
+    /// Whether every row through the newest committed server head is applied. Uses the replay
+    /// cut recorded after a non-empty page commits, the receive frontier, and the sync phase
+    /// (snapshot staging, key waits, apply backlog). Not current before the first non-empty page
+    /// of this session, and not while a page is in flight.
+    pub fn sync_current(&self) -> BridgeResult<bool> {
+        if !self.connected() || self.replay_target_high_water().is_none() || self.catching_up()? {
+            return Ok(false);
+        }
+        Ok(matches!(
+            self.sync_progress()?.phase,
+            dto::SyncProgressPhase::Current
+        ))
     }
 
     fn sync_progress(&self) -> BridgeResult<dto::SyncProgress> {

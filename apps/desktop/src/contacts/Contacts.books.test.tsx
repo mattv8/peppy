@@ -18,8 +18,9 @@ function renderRail(books: ContactBookView[]) {
   const onSelect = vi.fn();
   const onBooksChanged = vi.fn();
   const onRemoveRequest = vi.fn();
+  const onDeleteRequest = vi.fn();
   const onNotice = vi.fn();
-  render(<BookRail books={books} loading={false} bookId={books[0].id} width={220} panelRef={{ current: null }} onSelect={onSelect} onBooksChanged={onBooksChanged} onRemoveRequest={onRemoveRequest} onNotice={onNotice} />);
+  render(<BookRail books={books} loading={false} bookId={books[0].id} width={220} panelRef={{ current: null }} onSelect={onSelect} onBooksChanged={onBooksChanged} onRemoveRequest={onRemoveRequest} onDeleteRequest={onDeleteRequest} onNotice={onNotice} />);
   return { onSelect, onBooksChanged, onRemoveRequest, onNotice };
 }
 
@@ -39,7 +40,7 @@ describe("removed contact book", () => {
 
   it("passes the book and its strip button to onRemoveRequest", () => {
     const onRemoveRequest = vi.fn();
-    render(<RemovedBookStrip book={mockContactBook} onRemoveRequest={onRemoveRequest} />);
+    render(<RemovedBookStrip book={mockContactBook} onRemoveRequest={onRemoveRequest} onDeleteRequest={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Remove from this computer" }));
     expect(onRemoveRequest).toHaveBeenCalledWith(mockContactBook, expect.objectContaining({ current: expect.any(HTMLButtonElement) }));
   });
@@ -127,7 +128,7 @@ describe("contact book rail", () => {
   afterEach(() => restoreContactDomGlobals());
 
   it("shows placeholder rows, hidden from assistive tech, until the book list has loaded", () => {
-    const railProps = { bookId: "", width: 220, panelRef: { current: null }, onSelect: vi.fn(), onBooksChanged: vi.fn(), onRemoveRequest: vi.fn(), onNotice: vi.fn() };
+    const railProps = { bookId: "", width: 220, panelRef: { current: null }, onSelect: vi.fn(), onBooksChanged: vi.fn(), onRemoveRequest: vi.fn(), onDeleteRequest: vi.fn(), onNotice: vi.fn() };
     const view = render(<BookRail books={[]} loading {...railProps} />);
     const list = document.getElementById("contacts-books")!;
     expect(list).toHaveAttribute("aria-busy", "true");
@@ -147,7 +148,7 @@ describe("contact book rail", () => {
   });
 
   it("hides the switch for one included book and keeps it for one excluded book", () => {
-    const { unmount } = render(<BookRail books={[mockContactBook]} loading={false} bookId={mockContactBook.id} width={220} panelRef={{ current: null }} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onNotice={vi.fn()} />);
+    const { unmount } = render(<BookRail books={[mockContactBook]} loading={false} bookId={mockContactBook.id} width={220} panelRef={{ current: null }} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onDeleteRequest={vi.fn()} onNotice={vi.fn()} />);
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     unmount();
     renderRail([{ ...mockContactBook, lookupExcluded: true }]);
@@ -445,7 +446,7 @@ describe("book rail placement, hidden-name line, icon, and sync reason", () => {
 
   it("anchors the menu under its more button, never left of the rail", () => {
     const panelRef = { current: null as HTMLElement | null };
-    render(<BookRail books={[mockContactBook, removedBook]} loading={false} bookId={mockContactBook.id} width={220} panelRef={panelRef} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onNotice={vi.fn()} />);
+    render(<BookRail books={[mockContactBook, removedBook]} loading={false} bookId={mockContactBook.id} width={220} panelRef={panelRef} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onDeleteRequest={vi.fn()} onNotice={vi.fn()} />);
     vi.spyOn(panelRef.current!, "getBoundingClientRect").mockReturnValue({ left: 60 } as DOMRect);
     const button = screen.getByRole("button", { name: "More actions for iPhone" });
     vi.spyOn(button, "getBoundingClientRect").mockReturnValue({ left: 80, right: 100, top: 26, bottom: 50 } as DOMRect);
@@ -455,7 +456,7 @@ describe("book rail placement, hidden-name line, icon, and sync reason", () => {
 
   it("keeps a right-click menu's pointer position but clamps it to the rail", () => {
     const panelRef = { current: null as HTMLElement | null };
-    render(<BookRail books={[mockContactBook, removedBook]} loading={false} bookId={mockContactBook.id} width={220} panelRef={panelRef} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onNotice={vi.fn()} />);
+    render(<BookRail books={[mockContactBook, removedBook]} loading={false} bookId={mockContactBook.id} width={220} panelRef={panelRef} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onDeleteRequest={vi.fn()} onNotice={vi.fn()} />);
     vi.spyOn(panelRef.current!, "getBoundingClientRect").mockReturnValue({ left: 60 } as DOMRect);
     fireEvent.contextMenu(document.querySelector<HTMLElement>('li[data-book-id="book-iphone"]')!, { clientX: 20, clientY: 90 });
     expect(document.getElementById("contacts-book-menu")).toHaveStyle({ left: "64px", top: "90px" });
@@ -531,7 +532,7 @@ describe("removed book row menu", () => {
     fireEvent.mouseDown(document.body);
     expect(menu()).not.toBeInTheDocument();
     fireEvent.click(moreButton()!);
-    fireEvent.keyDown(screen.getByRole("menuitem"), { key: "Tab" });
+    fireEvent.keyDown(screen.getAllByRole("menuitem")[0], { key: "Tab" });
     expect(menu()).not.toBeInTheDocument();
     expect(moreButton()).toHaveFocus();
   });
@@ -633,7 +634,7 @@ describe("book lookup save that finishes after its strip unmounted", () => {
     vi.mocked(bridge.set_contact_book_lookup).mockReturnValue(save.promise);
     const onNotice = vi.fn();
     const onBooksChanged = vi.fn();
-    const rail = render(<BookRail books={[mockContactBook, otherBook]} loading={false} bookId={mockContactBook.id} width={220} panelRef={{ current: null }} onSelect={vi.fn()} onBooksChanged={onBooksChanged} onRemoveRequest={vi.fn()} onNotice={onNotice} />);
+    const rail = render(<BookRail books={[mockContactBook, otherBook]} loading={false} bookId={mockContactBook.id} width={220} panelRef={{ current: null }} onSelect={vi.fn()} onBooksChanged={onBooksChanged} onRemoveRequest={vi.fn()} onDeleteRequest={vi.fn()} onNotice={onNotice} />);
     fireEvent.click(rowSwitch("book-pixel8"));
     await waitFor(() => expect(bridge.set_contact_book_lookup).toHaveBeenCalledWith("book-pixel8", false));
 

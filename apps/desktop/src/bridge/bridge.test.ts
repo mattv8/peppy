@@ -453,7 +453,9 @@ describe("bridge subscriptions", () => {
     await tauriBridge.list_contact_name_candidates("+12025550123", "device-id");
     await tauriBridge.set_contact_name_pin("+12025550123", "book-id", "contact-id", "device-id");
     await tauriBridge.clear_contact_name_pin("+12025550123");
+    await tauriBridge.delete_contact_book("book-id");
 
+    expect(invokeMock).toHaveBeenCalledWith("delete_contact_book", { bookId: "book-id" });
     expect(invokeMock).toHaveBeenCalledWith("set_contact_book_lookup", { bookId: "book-id", enabled: false });
     expect(invokeMock).toHaveBeenCalledWith("list_contact_name_candidates", { address: "+12025550123", sourceDeviceId: "device-id" });
     expect(invokeMock).toHaveBeenCalledWith("set_contact_name_pin", { address: "+12025550123", sourceDeviceId: "device-id", bookId: "book-id", contactId: "contact-id" });
@@ -576,6 +578,31 @@ describe("fixture draft saves", () => {
 
     const givenDesc = { key: "given" as const, direction: "desc" as const };
     expect((await fixtureBridge.list_contacts_page("book-pixel8", { sort: givenDesc })).contacts).toEqual(await fixtureBridge.list_contacts("book-pixel8", "", 0, givenDesc));
+  });
+
+  it("deletes only a removed phone's fixture book, for every device, and reports its contact count", async () => {
+    await expect(fixtureBridge.delete_contact_book("book-pixel8")).rejects.toMatchObject({ code: "contact-book-not-deletable" });
+    await expect(fixtureBridge.delete_contact_book("missing")).rejects.toMatchObject({ code: "contact-book-not-deletable" });
+
+    const removed = (await fixtureBridge.list_contact_books()).find(book => book.sourceRevoked)!;
+    await expect(fixtureBridge.delete_contact_book(removed.id)).resolves.toEqual({ bookId: removed.id, contacts: removed.contactCount });
+    expect((await fixtureBridge.list_contact_books()).some(book => book.id === removed.id)).toBe(false);
+  });
+
+  it("refuses fixture deletion with the host's offline and sync-not-current codes, leaving the book in place", async () => {
+    // This describe resets modules, so the gate setter must come from the same module instance as fixtureBridge.
+    const { setFixtureContactDeleteGateForTests } = await import("./bridge");
+    const removed = (await fixtureBridge.list_contact_books()).find(book => book.sourceRevoked)!;
+    try {
+      setFixtureContactDeleteGateForTests("offline");
+      await expect(fixtureBridge.delete_contact_book(removed.id)).rejects.toMatchObject({ code: "offline", message: "Connect to the server to delete this book for all devices." });
+      setFixtureContactDeleteGateForTests("sync-not-current");
+      await expect(fixtureBridge.delete_contact_book(removed.id)).rejects.toMatchObject({ code: "sync-not-current", message: "Finish syncing to delete this book for all devices." });
+    } finally {
+      setFixtureContactDeleteGateForTests("ready");
+    }
+    expect((await fixtureBridge.list_contact_books()).some(book => book.id === removed.id)).toBe(true);
+    await expect(fixtureBridge.delete_contact_book(removed.id)).resolves.toEqual({ bookId: removed.id, contacts: removed.contactCount });
   });
 
   it("returns fixture contacts through a requested contact, and reports whether it was found", async () => {

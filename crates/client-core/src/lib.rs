@@ -21,6 +21,8 @@
 //!   clear. Rolling a database back behind the application is not detectable.
 mod attachment_retention;
 mod compose_create;
+mod contact_book_deletion;
+pub use contact_book_deletion::CompletionReplayNeed;
 mod contact_media;
 mod contact_photos;
 mod contact_queries;
@@ -802,6 +804,22 @@ pub enum PrivatePayload {
         book_id: String,
         contact_id: String,
         tombstone: serde_json::Value,
+    },
+    /// Vault-wide fence for one contact book (see `contact_book_deletion`). Non-terminal: it stays
+    /// the retained frontier of the book. `generation` is the canonical decimal string used by books.
+    ContactBookDeleted {
+        book_id: String,
+        owner_device_id: String,
+        generation: String,
+        deleted_at_ms: i64,
+    },
+    /// Terminal per-contact record of a vault-wide book deletion. Shares the identity of the
+    /// contact's own records, so it prunes their history.
+    ContactBookDeletedMember {
+        book_id: String,
+        contact_id: String,
+        owner_device_id: String,
+        generation: String,
     },
     ContactEditRequest {
         request: serde_json::Value,
@@ -2743,6 +2761,23 @@ impl Client {
         let mut store = self.lock()?;
         let (conn, ctx) = store.parts();
         contact_sync_requests::request(conn, &ctx, input)
+    }
+    /// Deletes a removed device's synced contact book for every device in the vault. Input is
+    /// `{"book_id", "revoked_device_ids", "sync_current"}`; the revoked list and `sync_current` are
+    /// the host's trusted facts (a missing `sync_current` is false). Refusals are
+    /// `Error::InvalidRequest` with a static reason: "contact book deletion input is invalid",
+    /// "contact book deletion needs an up-to-date sync" (`sync_current` is false, or this device
+    /// holds pending inbound work, a snapshot not yet drained, a projection draining, staging or
+    /// failed, or a latched contact repair), "contact book is not on this device", "contact book
+    /// was already deleted for all devices", "contact book owner is not a removed device", "contact
+    /// book belongs to this device" and "contact book owner was succeeded by another device". A
+    /// locked vault returns `KeysUnavailable`, checked before the sync gate. Success returns
+    /// `{"status":"deleted","book_id","contacts"}`.
+    pub fn delete_contact_book(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        ensure_recovery_complete(&store)?;
+        let (conn, ctx) = store.parts();
+        contact_book_deletion::delete(conn, &ctx, input)
     }
     /// Returns this caller's durable status for a requested book scan.
     pub fn contact_sync_request_status(&self, input: &str) -> Result<String, Error> {
@@ -5393,6 +5428,36 @@ impl Client {
         Ok(())
     }
 
+    /// Records the server head a replay page reported. Call it after the page has committed through
+    /// `ingest_raw_batch` (including an empty page at the head). Owed contact-deletion members are
+    /// published only after receipt reaches the newest head reported after their fence was captured,
+    /// so the deleter's members, which follow its fence, are not duplicated.
+    pub fn observe_replay_head(&self, cursor: Cursor) -> Result<(), Error> {
+        let mut store = self.lock()?;
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        contact_book_deletion::observe_replay_head(&tx, cursor.0)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Whether owed contact-deletion members wait only for a newer replay head. A host that receives
+    /// records over a live socket requests one HTTP replay when this is true. Owed work is not
+    /// reported as pending apply for this, so hosts cannot spin. See `completion_replay_need`.
+    pub fn completion_needs_replay_head(&self) -> Result<bool, Error> {
+        Ok(self.completion_replay_need()?.is_some())
+    }
+
+    /// The replay head that owed contact-deletion members wait for, with the gate it must reach, or
+    /// `None` when nothing waits for one. A host compares the reported head with the last request it
+    /// made for the same need, so an unresolved need is not asked for again on every frame.
+    pub fn completion_replay_need(&self) -> Result<Option<CompletionReplayNeed>, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        contact_book_deletion::completion_replay_need(conn, &ctx)
+    }
+
     /// Whether replay and the message-origin backfill have reached the initial server watermark.
     pub fn initial_replay_caught_up(&self) -> Result<bool, Error> {
         let mut store = self.lock()?;
@@ -5582,12 +5647,15 @@ impl Client {
                 }
             }
             let savepoint = tx.savepoint()?;
-            match apply_record(&savepoint, &ctx, &wire, historical)? {
+            let mut unknown_kind = false;
+            match apply_record(&savepoint, &ctx, &wire, historical, &mut unknown_kind)? {
                 None => {
                     savepoint.commit()?;
+                    // Consumed without effect; the tag tells a skipped kind apart from an applied one.
+                    let reason = unknown_kind.then_some(UNKNOWN_KIND_REASON);
                     tx.execute(
-                        "UPDATE journal SET status='applied' WHERE cursor=?",
-                        params![cursor],
+                        "UPDATE journal SET status='applied',reason=? WHERE cursor=?",
+                        params![reason, cursor],
                     )?;
                     report.applied += 1;
                 }
@@ -5615,6 +5683,8 @@ impl Client {
             let superseded = snapshot_projection::supersede_omitted_rcs_metadata(&tx, &ctx, limit)?;
             report.superseded += usize::try_from(superseded).map_err(|_| Error::Database)?;
         }
+        // After every row and any promotion above: fences applied here owe their members.
+        contact_book_deletion::drain_completion(&mut tx, &ctx)?;
         advance_processed_frontier(&tx)?;
         attachment_retention::complete_processed_restores(&tx)?;
         tx.commit()?;
@@ -5629,7 +5699,12 @@ impl Client {
     /// Reports whether `seal_pending_batch` or `apply_pending` can make durable progress without
     /// opening a write transaction. Pending records for locked epochs intentionally do not count.
     pub fn sync_work_status(&self) -> Result<SyncWorkStatus, Error> {
-        let store = self.lock()?;
+        let mut store = self.lock()?;
+        // Owed deletion members count only when the drain can enqueue them now.
+        let owed_members = {
+            let (conn, ctx) = store.parts();
+            contact_book_deletion::completion_pending(conn, &ctx)?
+        };
         let pending_seal = store
             .active_epoch
             .is_some_and(|epoch| store.keys.contains_key(&epoch))
@@ -5666,6 +5741,7 @@ impl Client {
             pending_apply: pending_snapshot
                 || projection_work
                 || pending_journal
+                || owed_members
                 || conversation_merge::has_work(&store.conn)?
                 || snapshot_projection::supersede_scan_pending(&store.conn)?,
             pending_snapshot,
@@ -12863,6 +12939,8 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "contact_book_state"
             | "contact_upserted"
             | "contact_removed"
+            | "contact_book_deleted"
+            | "contact_book_deleted_member"
             | "contact_edit_request"
             | "contact_edit_result"
             | "contact_scan_request"
@@ -12874,12 +12952,17 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
     )
 }
 
+/// Journal `reason` on an applied row whose authenticated Event kind this build does not know.
+const UNKNOWN_KIND_REASON: &str = "unknown_kind";
+
 /// Applies one decrypted record. `Ok(Some(reason))` means quarantine; the caller rolls back.
+/// `consumed_unknown` is set when the record was an authenticated unknown Event kind.
 fn apply_record(
     conn: &Connection,
     ctx: &Ctx,
     wire: &[u8],
     historical: bool,
+    consumed_unknown: &mut bool,
 ) -> Result<Option<QuarantineReason>, Error> {
     use QuarantineReason as Q;
     debug_assert!(
@@ -12891,7 +12974,10 @@ fn apply_record(
     };
     let payload = match open_payload(ctx, &envelope) {
         Ok(Opened::Payload(payload)) => payload,
-        Ok(Opened::UnknownEvent) => return Ok(None),
+        Ok(Opened::UnknownEvent) => {
+            *consumed_unknown = true;
+            return Ok(None);
+        }
         Err(reason) => return Ok(Some(reason)),
     };
     // Producer and compaction sequences are persisted as SQLite INTEGER values.
@@ -13777,6 +13863,8 @@ fn apply_record(
             payload @ (PrivatePayload::ContactBookState { .. }
             | PrivatePayload::ContactUpserted { .. }
             | PrivatePayload::ContactRemoved { .. }
+            | PrivatePayload::ContactBookDeleted { .. }
+            | PrivatePayload::ContactBookDeletedMember { .. }
             | PrivatePayload::ContactEditRequest { .. }
             | PrivatePayload::ContactEditResult { .. }
             | PrivatePayload::ContactScanRequest { .. }
@@ -13785,6 +13873,9 @@ fn apply_record(
             let Some(payload) = contact_media::ingest(conn, payload)? else {
                 return Ok(Some(Q::InvalidPayload));
             };
+            if contact_book_deletion::targets_own_book(&payload, &ctx.device_id.to_string()) {
+                return Ok(Some(Q::InvalidPayload));
+            }
             if !contacts::apply_event(
                 conn,
                 &producer.to_string(),
@@ -14669,7 +14760,9 @@ const AUTO_BACKFILL_ROWS: usize = 2_000;
 
 /// Local compaction bookkeeping, independent of the versioned schema:
 /// - `compaction_frontier`: per identity, every known record (own outbox, received journal,
-///   legacy header-free or marked) that no known metadata record supersedes yet;
+///   legacy header-free or marked) that no known metadata record supersedes yet. `terminal` marks
+///   a record of a terminal group (it expires on the server). Rows learned before the column
+///   existed read as non-terminal, so a deletion owes at worst one extra member;
 /// - `compaction_covered`: every `(producer, sequence)` some known record supersedes, so a late
 ///   older record never re-enters the frontier.
 fn initialize_compaction_state(conn: &Connection) -> Result<(), Error> {
@@ -14679,12 +14772,17 @@ CREATE INDEX IF NOT EXISTS compaction_frontier_identity ON compaction_frontier(i
 CREATE TABLE IF NOT EXISTS compaction_covered(producer_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL, PRIMARY KEY(producer_device_id, source_sequence));
 CREATE TABLE IF NOT EXISTS compaction_backfill_skipped(source TEXT NOT NULL CHECK(source IN ('outbox','journal')), position INTEGER NOT NULL, key_epoch INTEGER NOT NULL, PRIMARY KEY(source, position));",
     )?;
+    add_column_if_missing(
+        conn,
+        "compaction_frontier",
+        "terminal INTEGER NOT NULL DEFAULT 0",
+    )?;
     Ok(())
 }
 
 /// Records one known record: its references leave the frontier (and stay covered), and the
 /// record itself joins its identity's frontier unless something already supersedes it.
-fn learn_compaction(
+pub(crate) fn learn_compaction(
     conn: &Connection,
     identity: Option<&str>,
     producer: &str,
@@ -14709,9 +14807,10 @@ fn learn_compaction(
         )?;
     }
     if let Some(identity) = identity {
+        let terminal = metadata.is_some_and(|m| m.terminal);
         conn.execute(
-            "INSERT OR IGNORE INTO compaction_frontier(producer_device_id,source_sequence,identity) SELECT ?1,?2,?3 WHERE NOT EXISTS(SELECT 1 FROM compaction_covered WHERE producer_device_id=?1 AND source_sequence=?2)",
-            params![producer, sequence, identity],
+            "INSERT OR IGNORE INTO compaction_frontier(producer_device_id,source_sequence,identity,terminal) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS(SELECT 1 FROM compaction_covered WHERE producer_device_id=?1 AND source_sequence=?2)",
+            params![producer, sequence, identity, terminal],
         )?;
     }
     Ok(())
@@ -14983,6 +15082,8 @@ fn is_contact_payload(payload: &PrivatePayload) -> bool {
         PrivatePayload::ContactBookState { .. }
             | PrivatePayload::ContactUpserted { .. }
             | PrivatePayload::ContactRemoved { .. }
+            | PrivatePayload::ContactBookDeleted { .. }
+            | PrivatePayload::ContactBookDeletedMember { .. }
             | PrivatePayload::ContactEditRequest { .. }
             | PrivatePayload::ContactEditResult { .. }
             | PrivatePayload::ContactScanRequest { .. }
@@ -15215,6 +15316,29 @@ fn compaction_group(
             vec![book_id.as_bytes().to_vec(), contact_id.as_bytes().to_vec()],
             true,
         ),
+        // The book fence is the retained frontier of its book, so it is never terminal. It has its
+        // own group: a later book state of the same book never supersedes it.
+        PrivatePayload::ContactBookDeleted {
+            book_id,
+            owner_device_id,
+            ..
+        } => (
+            b"contact-book-deleted",
+            vec![
+                book_id.as_bytes().to_vec(),
+                owner_device_id.as_bytes().to_vec(),
+            ],
+            false,
+        ),
+        PrivatePayload::ContactBookDeletedMember {
+            book_id,
+            contact_id,
+            ..
+        } => (
+            b"contact",
+            vec![book_id.as_bytes().to_vec(), contact_id.as_bytes().to_vec()],
+            true,
+        ),
         // Requests are actionable for at most 7 days, far inside the 90-day terminal window, so
         // a request is a terminal root: an unanswered one expires instead of living forever.
         PrivatePayload::ContactEditRequest { request } => (
@@ -15282,7 +15406,7 @@ fn compaction_group(
 /// Frontier identity of a compactable payload: the set of records one new state supersedes.
 /// Notification posts and removals of one key (all lifetimes) share an identity, as do an edit
 /// request and all its results. Dismissals are standalone terminal roots.
-fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
+pub(crate) fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
     match payload {
         PrivatePayload::RcsMessageStatus { message_id, .. } => {
             Some(format!("rcs-message-status:{message_id}"))
@@ -15359,6 +15483,16 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
             .zip(contact.get("id").and_then(serde_json::Value::as_str))
             .map(|(book, contact)| format!("contact:{book}:{contact}")),
         PrivatePayload::ContactRemoved {
+            book_id,
+            contact_id,
+            ..
+        } => Some(format!("contact:{book_id}:{contact_id}")),
+        PrivatePayload::ContactBookDeleted {
+            book_id,
+            owner_device_id,
+            ..
+        } => Some(format!("contact-book-deleted:{book_id}:{owner_device_id}")),
+        PrivatePayload::ContactBookDeletedMember {
             book_id,
             contact_id,
             ..
@@ -15731,6 +15865,8 @@ pub(crate) fn outbox_priority(purpose: EnvelopePurpose, payload: &PrivatePayload
         PrivatePayload::ContactBookState { .. }
         | PrivatePayload::ContactUpserted { .. }
         | PrivatePayload::ContactRemoved { .. }
+        | PrivatePayload::ContactBookDeleted { .. }
+        | PrivatePayload::ContactBookDeletedMember { .. }
         | PrivatePayload::ContactEditRequest { .. }
         | PrivatePayload::ContactEditResult { .. }
         | PrivatePayload::ContactScanRequest { .. }
@@ -21744,6 +21880,8 @@ mod tests {
             "reaction_result",
             "reaction_capability",
             "message_reactions",
+            "contact_book_deleted",
+            "contact_book_deleted_member",
             "future_unknown_event",
         ] {
             let mut envelope = Envelope {
@@ -22831,6 +22969,101 @@ mod tests {
         )
         .unwrap();
         (client, profile, header)
+    }
+
+    #[test]
+    fn owed_deletion_members_wait_for_the_active_compaction_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (client, profile, header) = compaction_test_client(&dir, "owed-v1.db", VaultId::new());
+        let passphrase = "correct horse battery staple";
+        client.unlock(&profile, &header, passphrase).unwrap();
+        let v2 = client
+            .export_native_key_cache(1)
+            .unwrap()
+            .native_storage_bytes()
+            .to_vec();
+        let mut v1 = v2[..LEGACY_KEY_CACHE_BYTES].to_vec();
+        v1[4] = 1;
+        client
+            .lock()
+            .unwrap()
+            .conn
+            .execute(
+                "UPDATE key_cache_checks SET check_value=? WHERE epoch=1",
+                params![key_cache_check(&v1).as_slice()],
+            )
+            .unwrap();
+        let config = client.lock().unwrap().config.clone();
+        drop(client);
+        let reopened = Client::open(config, DatabaseKey::new(&[21; 32]).unwrap()).unwrap();
+        reopened
+            .import_native_key_cache(&NativeKeyCache::from_native_storage(v1))
+            .unwrap();
+        reopened.set_server_compaction_state(true, true).unwrap();
+        // What a receiver holds after applying a fence and before its members are sent.
+        let owner = DeviceId::new().to_string();
+        let owed_rows = |client: &Client| -> i64 {
+            client
+                .lock()
+                .unwrap()
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM contact_book_deletion_completion_contacts",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        {
+            let store = reopened.lock().unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO contact_book_deletion_completion(book_id,owner_device_id,generation,gate_cursor) VALUES('b',?,1,0)",
+                    params![owner],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO contact_book_deletion_completion_contacts(book_id,owner_device_id,contact_id) VALUES('b',?,'c1')",
+                    params![owner],
+                )
+                .unwrap();
+            // The owed contact's open publication, which the drain needs to owe a member.
+            store
+                .conn
+                .execute(
+                    "INSERT INTO compaction_frontier(producer_device_id,source_sequence,identity,terminal) VALUES(?,2,'contact:b:c1',0)",
+                    params![owner],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT OR REPLACE INTO metadata(k,v) VALUES('contact_completion_replay_head','0')",
+                    [],
+                )
+                .unwrap();
+        }
+
+        // The event key is installed but the compaction key is not: nothing is drainable, so the
+        // host is told there is no pending apply, and a pass neither spins nor drops the work.
+        assert!(!reopened.sync_work_status().unwrap().pending_apply);
+        reopened.apply_pending(100).unwrap();
+        assert_eq!(owed_rows(&reopened), 1);
+        assert!(!reopened.sync_work_status().unwrap().pending_apply);
+
+        // The passphrase unlock installs the compaction key, and the owed member is published.
+        reopened.unlock(&profile, &header, passphrase).unwrap();
+        assert!(reopened.sync_work_status().unwrap().pending_apply);
+        reopened.apply_pending(100).unwrap();
+        assert_eq!(owed_rows(&reopened), 0);
+        assert_eq!(
+            reopened.pending_outbox().unwrap().len(),
+            1,
+            "the owed member is queued after unlock"
+        );
     }
 
     fn sealed_compaction(client: &Client) -> Vec<(u64, Option<CompactionMetadata>)> {

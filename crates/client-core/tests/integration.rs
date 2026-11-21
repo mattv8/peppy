@@ -9,6 +9,8 @@ mod c4_media;
 mod c5_snapshot;
 mod compaction_frontier;
 mod compose_create;
+mod contact_book_completion;
+mod contact_book_deletion;
 mod contact_epoch_guard;
 mod contact_media;
 mod contact_photos;

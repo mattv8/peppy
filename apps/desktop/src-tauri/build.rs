@@ -73,6 +73,7 @@ const COMMANDS: &[&str] = &[
     "list_contacts",
     "list_contacts_page",
     "forget_contact_book",
+    "delete_contact_book",
     "set_contact_book_lookup",
     "list_contact_name_candidates",
     "set_contact_name_pin",

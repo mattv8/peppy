@@ -116,6 +116,9 @@ impl Server {
             ));
         }
         assert_eq!(client.receive_cursor().unwrap().0, self.log.len() as u64);
+        client
+            .observe_replay_head(Cursor(self.log.len() as u64))
+            .unwrap();
         client.apply_pending(100).unwrap()
     }
 }

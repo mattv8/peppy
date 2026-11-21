@@ -11,10 +11,11 @@ use crate::{
 };
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use peppy_client_core::{
-    Client, Cursor, DraftPush, DraftPushOutcome, DraftTerminalReasonCore, DraftTransferDirection,
-    DraftUpload, EnvelopePurpose, HistorySearchReplayProof, HistorySearchSyncFacts, KeyProfile,
-    RawReplayRecord, RawSnapshotRecord, SnapshotManifestEntry, SnapshotPurpose, VaultCheckHeader,
-    MAX_APPLY_BATCH, MAX_SEAL_BATCH, MAX_SNAPSHOT_MANIFEST_PAGE, MAX_SNAPSHOT_PAGE,
+    Client, CompletionReplayNeed, Cursor, DraftPush, DraftPushOutcome, DraftTerminalReasonCore,
+    DraftTransferDirection, DraftUpload, EnvelopePurpose, HistorySearchReplayProof,
+    HistorySearchSyncFacts, KeyProfile, RawReplayRecord, RawSnapshotRecord, SnapshotManifestEntry,
+    SnapshotPurpose, VaultCheckHeader, MAX_APPLY_BATCH, MAX_SEAL_BATCH, MAX_SNAPSHOT_MANIFEST_PAGE,
+    MAX_SNAPSHOT_PAGE,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
@@ -255,6 +256,77 @@ pub async fn blocking<T: Send + 'static>(
 
 fn client(session: &Arc<Session>) -> Client {
     session.client.clone()
+}
+
+/// First wait before the same unresolved replay-head need is requested again. Each repeat doubles it.
+const REPLAY_HEAD_RETRY: Duration = Duration::from_secs(1);
+/// Longest wait between requests for one unresolved need.
+const REPLAY_HEAD_RETRY_CAP: Duration = Duration::from_secs(60);
+
+/// Session-wide memory of the replay-head requests owed deletion members caused. A need that is new
+/// (a newer reported head, or a different gate) is requested at once. The same need is requested
+/// again only after an exponential wait, so a head that never arrives costs a bounded number of
+/// replays however many socket batches arrive. Satisfied or absent need resets the memory. Pure:
+/// callers pass `now`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplayHeadAsks {
+    asked: Option<CompletionReplayNeed>,
+    attempts: u32,
+    not_before: Option<Instant>,
+}
+
+impl ReplayHeadAsks {
+    /// Whether a replay should be requested for `need` at `now`.
+    pub(crate) fn admit(&mut self, need: Option<CompletionReplayNeed>, now: Instant) -> bool {
+        let Some(need) = need else {
+            *self = Self::default();
+            return false;
+        };
+        if self.asked == Some(need) {
+            if self.not_before.is_some_and(|at| now < at) {
+                return false;
+            }
+            self.attempts = self.attempts.saturating_add(1);
+        } else {
+            self.attempts = 1;
+        }
+        self.asked = Some(need);
+        self.not_before = Some(now + replay_head_retry(self.attempts));
+        true
+    }
+}
+
+/// Wait after the `attempts`-th request for one need: `REPLAY_HEAD_RETRY` doubled per repeat, capped.
+fn replay_head_retry(attempts: u32) -> Duration {
+    let doublings = attempts.saturating_sub(1).min(16);
+    REPLAY_HEAD_RETRY
+        .saturating_mul(1 << doublings)
+        .min(REPLAY_HEAD_RETRY_CAP)
+}
+
+/// One deferred apply pass, then the replay request its records may now need. Records journaled while
+/// locked, or with a compaction key not yet installed, become ready here with no socket frame, so the
+/// worker runs this after an unlock and on its own passes.
+async fn apply_pass_and_wake_owed_deletions(session: &Arc<Session>) -> BridgeResult<()> {
+    drain_apply(session, APPLY_STEPS).await?;
+    wake_replay_for_owed_deletions(session).await
+}
+
+/// Asks the live loop for one replay when owed deletion members need a newer replay head that this
+/// request has not already asked for (see `ReplayHeadAsks`). Socket records carry no head, so the
+/// live loop asks after each socket batch through this function as well.
+async fn wake_replay_for_owed_deletions(session: &Arc<Session>) -> BridgeResult<()> {
+    let c = client(session);
+    let need = blocking(move || c.completion_replay_need().map_err(core_error)).await?;
+    let admitted = session
+        .replay_head_asks
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .admit(need, Instant::now());
+    if admitted {
+        session.replay_wake.notify_one();
+    }
+    Ok(())
 }
 
 /// Resets the save debounce for this session. Cancellation fences delayed work from retired
@@ -1301,6 +1373,14 @@ async fn replay(session: &Arc<Session>) -> BridgeResult<ReplayOutcome> {
                 });
         if count == 0 {
             let _ = observe_history_replay(session, contexts, proof).await;
+            // An empty page proves this pull reached the server head, so the cut is safe to expose
+            // even when nothing new arrived (e.g. after a restart). Without a head there is no proof.
+            if let Some(target) = replay_target {
+                let c = client(session);
+                blocking(move || c.observe_replay_head(target).map_err(core_error)).await?;
+                session.set_replay_target_high_water(Some(target));
+                session.notify();
+            }
             caught_up = true;
             break;
         }
@@ -1315,6 +1395,10 @@ async fn replay(session: &Arc<Session>) -> BridgeResult<ReplayOutcome> {
         }
         // Both the receive frontier and this target are now safe to expose: receipt committed in
         // one SQLite transaction. Do not notify when the HTTP page is merely fetched.
+        if let Some(target) = replay_target {
+            let c = client(session);
+            blocking(move || c.observe_replay_head(target).map_err(core_error)).await?;
+        }
         session.set_replay_target_high_water(replay_target);
         session.notify();
         drain_apply(session, APPLY_STEPS).await?;
@@ -2459,7 +2543,7 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
     }
     // Records journaled while keys were locked (for example history that arrived before an
     // unlock or key-cache import) are applied here; the worker is woken after every unlock.
-    drain_apply(session, APPLY_STEPS).await?;
+    apply_pass_and_wake_owed_deletions(session).await?;
     if session
         .attachment_retention_supported
         .load(std::sync::atomic::Ordering::Acquire)
@@ -3137,6 +3221,12 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                             }
                             return ended("core");
                         }
+                        // Socket records carry no replay head. Owed deletion members that wait only
+                        // for one get it from the live loop's next HTTP round. The notify coalesces,
+                        // and nothing asks again until another record arrives.
+                        if let Err(error) = wake_replay_for_owed_deletions(session).await {
+                            return ended(error.code);
+                        }
                         let _ = observe_history_progress(session).await;
                         continue 'frames;
                     }
@@ -3444,6 +3534,223 @@ mod first_snapshot_tests {
         Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]))
     }
 
+    /// Sealed records of an owner's book (state and contact `c1`), then the deleter's fence over that
+    /// book and its member for `c1`. The fixture's event key seals them, so they apply once unlocked.
+    fn owed_deletion_envelopes(
+        fixture: &crate::tests::Fixture,
+    ) -> Vec<peppy_client_core::Envelope> {
+        use peppy_client_core::{
+            DeviceId, Envelope, EnvelopeId, EnvelopePurpose, PrivatePayload, SourceSequence,
+            VaultId,
+        };
+        use peppy_crypto::{derive_purpose_key, derive_root_key, encrypt, KeyPurpose};
+        use serde_json::json;
+
+        let root = derive_root_key(crate::tests::PHRASE, &fixture.profile).unwrap();
+        let key = derive_purpose_key(&root, &fixture.profile, KeyPurpose::Event).unwrap();
+        let owner = DeviceId::new();
+        let deleter = DeviceId::new();
+        let book = json!({"id": "book", "owner_device_id": owner.to_string(),
+            "generation": "1", "state": "active", "region": "US"});
+        let contact = json!({"id": "c1", "book_id": "book", "revision": "1",
+            "display_name": "c1", "name": {"given": "c1"}, "phones": [],
+            "emails": [], "addresses": []});
+        let payloads = [
+            (
+                owner,
+                1,
+                PrivatePayload::ContactBookState { book: book.clone() },
+            ),
+            (owner, 2, PrivatePayload::ContactUpserted { book, contact }),
+            (
+                deleter,
+                1,
+                PrivatePayload::ContactBookDeleted {
+                    book_id: "book".into(),
+                    owner_device_id: owner.to_string(),
+                    generation: "1".into(),
+                    deleted_at_ms: 1000,
+                },
+            ),
+        ];
+        payloads
+            .into_iter()
+            .map(|(producer, sequence, payload)| {
+                let mut envelope = Envelope {
+                    protocol_version: 1,
+                    envelope_id: EnvelopeId::new(),
+                    command_id: None,
+                    vault_id: VaultId(uuid::Uuid::parse_str(&fixture.binding.vault_id).unwrap()),
+                    producer_device_id: producer,
+                    producer_sequence: SourceSequence(sequence),
+                    key_epoch: 1,
+                    crypto_suite: fixture.profile.crypto_suite,
+                    profile_fingerprint: fixture.profile.fingerprint().unwrap(),
+                    purpose: EnvelopePurpose::Event,
+                    route: None,
+                    compaction: None,
+                    origin_tag: None,
+                    ciphertext: Vec::new(),
+                };
+                let encrypted = encrypt(
+                    &key,
+                    &envelope.aad_bytes().unwrap(),
+                    &serde_json::to_vec(&payload).unwrap(),
+                )
+                .unwrap();
+                envelope.ciphertext = [encrypted.nonce.as_slice(), &encrypted.ciphertext].concat();
+                envelope
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn owed_deletion_wakes_replay_until_head_is_observed() {
+        use peppy_client_core::Cursor;
+
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]));
+        let client = &session.client;
+        client
+            .unlock(&fixture.profile, &fixture.header, crate::tests::PHRASE)
+            .unwrap();
+        client.set_server_compaction_state(true, true).unwrap();
+        for (index, envelope) in owed_deletion_envelopes(&fixture).iter().enumerate() {
+            client.ingest(envelope, Cursor(index as u64 + 1)).unwrap();
+            client.apply_pending(100).unwrap();
+            if index == 1 {
+                client.observe_replay_head(Cursor(2)).unwrap();
+            }
+        }
+        assert!(client.completion_needs_replay_head().unwrap());
+        wake_replay_for_owed_deletions(&session).await.unwrap();
+        assert!(session.replay_wake.notified().now_or_never().is_some());
+        assert!(session.replay_wake.notified().now_or_never().is_none());
+        client.observe_replay_head(Cursor(3)).unwrap();
+        client.apply_pending(100).unwrap();
+        assert!(!client.completion_needs_replay_head().unwrap());
+        wake_replay_for_owed_deletions(&session).await.unwrap();
+        assert!(session.replay_wake.notified().now_or_never().is_none());
+    }
+
+    #[tokio::test]
+    async fn owed_deletion_wakes_replay_after_unlock_without_a_socket_frame() {
+        use peppy_client_core::Cursor;
+
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]));
+        let client = &session.client;
+        // Locked: the records are journaled, the fence cannot apply, and nothing is owed or asked.
+        for (index, envelope) in owed_deletion_envelopes(&fixture).iter().enumerate() {
+            client.ingest(envelope, Cursor(index as u64 + 1)).unwrap();
+        }
+        drain_apply(&session, APPLY_STEPS).await.unwrap();
+        wake_replay_for_owed_deletions(&session).await.unwrap();
+        assert!(session.replay_wake.notified().now_or_never().is_none());
+
+        // Unlock, then the worker's deferred pass applies the fence. No socket frame follows.
+        client
+            .unlock(&fixture.profile, &fixture.header, crate::tests::PHRASE)
+            .unwrap();
+        client.set_server_compaction_state(true, true).unwrap();
+        apply_pass_and_wake_owed_deletions(&session).await.unwrap();
+        assert!(session.replay_wake.notified().now_or_never().is_some());
+        assert!(session.replay_wake.notified().now_or_never().is_none());
+
+        // The replay that the wake starts reports the head, and the owed member is then published.
+        let queued = client.pending_outbox_count().unwrap();
+        client
+            .observe_replay_head(client.receive_cursor().unwrap())
+            .unwrap();
+        drain_apply(&session, APPLY_STEPS).await.unwrap();
+        assert_eq!(client.pending_outbox_count().unwrap(), queued + 1);
+        assert!(!client.completion_needs_replay_head().unwrap());
+    }
+
+    #[tokio::test]
+    async fn owed_deletion_asks_once_across_repeated_socket_batches_without_a_head() {
+        use peppy_client_core::Cursor;
+
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]));
+        let client = &session.client;
+        client
+            .unlock(&fixture.profile, &fixture.header, crate::tests::PHRASE)
+            .unwrap();
+        client.set_server_compaction_state(true, true).unwrap();
+        for (index, envelope) in owed_deletion_envelopes(&fixture).iter().enumerate() {
+            client.ingest(envelope, Cursor(index as u64 + 1)).unwrap();
+        }
+        client.apply_pending(100).unwrap();
+
+        // Each socket batch repeats the same unresolved need while no head arrives.
+        for _ in 0..5 {
+            wake_replay_for_owed_deletions(&session).await.unwrap();
+        }
+
+        assert!(session.replay_wake.notified().now_or_never().is_some());
+        assert!(session.replay_wake.notified().now_or_never().is_none());
+    }
+
+    #[test]
+    fn replay_head_asks_back_off_for_an_unchanged_need() {
+        let need = CompletionReplayNeed {
+            replay_head: Some(4),
+            gate: 9,
+        };
+        let start = Instant::now();
+        let mut asks = ReplayHeadAsks::default();
+        assert!(asks.admit(Some(need), start));
+        assert!(!asks.admit(Some(need), start + Duration::from_millis(999)));
+        assert!(asks.admit(Some(need), start + Duration::from_secs(1)));
+        assert!(!asks.admit(Some(need), start + Duration::from_millis(2999)));
+        assert!(asks.admit(Some(need), start + Duration::from_secs(3)));
+
+        // Socket batches once a second for ten minutes ask only a handful of times.
+        let mut asks = ReplayHeadAsks::default();
+        let admitted = (0..600)
+            .filter(|second| asks.admit(Some(need), start + Duration::from_secs(*second)))
+            .count();
+        assert!((2..=16).contains(&admitted), "admitted {admitted} requests");
+    }
+
+    #[test]
+    fn replay_head_asks_follow_a_changed_or_satisfied_need() {
+        let start = Instant::now();
+        let low = CompletionReplayNeed {
+            replay_head: Some(4),
+            gate: 9,
+        };
+        let newer_head = CompletionReplayNeed {
+            replay_head: Some(7),
+            gate: 9,
+        };
+        let higher_gate = CompletionReplayNeed {
+            replay_head: Some(7),
+            gate: 12,
+        };
+        let mut asks = ReplayHeadAsks::default();
+        assert!(asks.admit(Some(low), start));
+        assert!(!asks.admit(Some(low), start));
+        assert!(
+            asks.admit(Some(newer_head), start),
+            "a newer head is a new need"
+        );
+        assert!(!asks.admit(Some(newer_head), start));
+        assert!(
+            asks.admit(Some(higher_gate), start),
+            "a new gate is a new need"
+        );
+        assert!(
+            !asks.admit(None, start),
+            "a satisfied need asks for nothing"
+        );
+        assert!(
+            asks.admit(Some(low), start),
+            "satisfaction resets the backoff"
+        );
+    }
+
     #[tokio::test]
     async fn drain_apply_finishes_pending_conversation_merge() {
         use peppy_client_core::{ConversationId, IncomingSms};
@@ -3697,6 +4004,51 @@ mod transport_status_tests {
             "a non-advancing round must not start another replay round"
         );
         assert_eq!(session.client.receive_cursor().unwrap(), Cursor(100));
+    }
+
+    #[tokio::test]
+    async fn empty_first_page_after_restart_records_the_server_head_for_sync_currency() {
+        let (origin, _) = mock_server(move |method, path, _| match (method, path) {
+            ("GET", path) if path.starts_with("/v1/events?") => (
+                200,
+                json!({"events": [], "high_water_cursor": "0", "next_after": null}).to_string(),
+            ),
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let fixture = fixture_at(&origin);
+        // Restart: a fresh session over the same store has no in-memory replay cut.
+        drop(open(&fixture, &fixture.binding, &[]));
+        let restarted = Arc::new(open(&fixture, &fixture.binding, &[]));
+        restarted.set_status(|status| status.live = true);
+        assert!(!restarted.sync_current().unwrap());
+
+        replay_until_caught_up(&restarted).await.unwrap();
+
+        assert!(restarted.sync_current().unwrap());
+    }
+
+    #[tokio::test]
+    async fn replay_page_in_flight_keeps_sync_not_current() {
+        let (origin, _) = mock_server(move |method, path, _| match (method, path) {
+            ("GET", path) if path.starts_with("/v1/events?") => (
+                200,
+                json!({"events": [], "high_water_cursor": "0", "next_after": null}).to_string(),
+            ),
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let fixture = fixture_at(&origin);
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        session.set_status(|status| status.live = true);
+        replay_until_caught_up(&session).await.unwrap();
+        assert!(session.sync_current().unwrap());
+
+        let in_flight = session.replay_page_in_flight();
+        assert!(!session.sync_current().unwrap());
+        drop(in_flight);
+
+        assert!(session.sync_current().unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

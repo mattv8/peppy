@@ -409,9 +409,26 @@ pub(crate) fn after_apply(conn: &Connection, payload: &PrivatePayload) -> Result
             contact_id,
             ..
         } => sync_contact(conn, book_id, contact_id),
-        PrivatePayload::ContactEditRequest { request } => hold_request(conn, request),
+        PrivatePayload::ContactEditRequest { request } => {
+            // A request its book's vault-wide deletion covers was ignored at apply: it holds nothing.
+            if fenced_request(conn, request)? {
+                return Ok(());
+            }
+            hold_request(conn, request)
+        }
         _ => Ok(()),
     }
+}
+
+/// Whether the request's book is fenced for its target owner, as apply judged it.
+fn fenced_request(conn: &Connection, request: &Value) -> Result<bool, Error> {
+    let (Some(book_id), Some(target)) = (
+        request.get("book_id").and_then(Value::as_str),
+        request.get("target_owner").and_then(Value::as_str),
+    ) else {
+        return Ok(false);
+    };
+    crate::contact_book_deletion::covers(conn, book_id, target, None)
 }
 
 fn sync_contact_from_payload(
@@ -513,6 +530,20 @@ fn set_holder(
         }
     }
     // Released photos become reclaim candidates lazily in `transfer_state`; nothing is deleted here.
+    Ok(())
+}
+
+/// Releases the edit-request photo holders and name-first markers of a deleted book. Contact
+/// holders are released per contact by `sync_contact` once the contact rows are gone.
+pub(crate) fn release_book_edit_holders(conn: &Connection, book_id: &str) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM contact_photo_references WHERE holder_kind='edit' AND book_id=?",
+        [book_id],
+    )?;
+    conn.execute(
+        "DELETE FROM contact_photo_names_first WHERE book_id=?",
+        [book_id],
+    )?;
     Ok(())
 }
 

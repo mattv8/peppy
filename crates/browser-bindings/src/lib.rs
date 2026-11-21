@@ -223,6 +223,9 @@ struct HostContext {
     outbox_rejected: bool,
     #[serde(skip)]
     snapshot_too_large: bool,
+    /// Set only by the worker's last committed server pull; never deserialized from renderer context.
+    #[serde(skip)]
+    sync_current: bool,
 }
 
 fn connection_snapshot(context: &HostContext) -> (&'static str, Option<&'static str>) {

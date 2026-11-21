@@ -15,9 +15,23 @@ struct ServerContextInput {
     outbox_rejected: bool,
     #[serde(default)]
     snapshot_too_large: bool,
+    /// The scheduler's verdict for its last pull: the response reached the server head and every
+    /// row through it is applied. Absent or false means not current (fail closed).
+    #[serde(default)]
+    sync_current: bool,
 }
 
 impl BrowserCore {
+    /// Whether the last server status was a live connection.
+    pub(crate) fn server_connected(&self) -> bool {
+        self.context.connection.as_deref() == Some("connected")
+    }
+
+    /// Host-trusted sync currency for contact book deletion; renderer context never sets it.
+    pub(crate) fn sync_current(&self) -> bool {
+        self.server_connected() && self.context.sync_current
+    }
+
     /// Applies raw authenticated server responses only after the browser identity is verified in
     /// the roster. This is intentionally not renderer-routable.
     pub(crate) fn context_command(&mut self, command: &str, args: Value) -> Result<Value, Failure> {
@@ -42,12 +56,14 @@ impl BrowserCore {
         let has_roster = input.devices.is_some() || input.capabilities.is_some();
         let applies_roster =
             has_roster && (input.connection == "connected" || input.connection == "error");
+        let sync_current = input.sync_current && input.connection == "connected";
         if !applies_roster {
             if has_roster {
                 return Err(invalid());
             }
             self.context.connection = Some(input.connection);
             self.context.snapshot_too_large = input.snapshot_too_large;
+            self.context.sync_current = sync_current;
             if !matches!(self.context.connection.as_deref(), Some("offline")) {
                 self.context.rcs_roster_validated = false;
             }
@@ -80,6 +96,7 @@ impl BrowserCore {
         self.context.connection = Some(input.connection);
         self.context.outbox_rejected = input.outbox_rejected;
         self.context.snapshot_too_large = input.snapshot_too_large;
+        self.context.sync_current = sync_current;
         self.context.device_role = Some(role.clone());
         self.context.gateways = Some(views.clone());
         self.context.revoked_device_ids = devices
@@ -158,6 +175,32 @@ mod tests {
 
     fn error_context(devices: Value, capabilities: Value) -> Value {
         json!({"connection": "error", "devices": devices, "capabilities": capabilities})
+    }
+
+    fn apply_status(core: &mut BrowserCore, connection: &str, sync_current: Option<bool>) {
+        let mut args = json!({"connection": connection});
+        if let Some(sync_current) = sync_current {
+            args["syncCurrent"] = json!(sync_current);
+        }
+        response(core, "_worker_apply_server_context", args);
+    }
+
+    #[test]
+    fn sync_currency_is_set_only_by_a_connected_worker_status() {
+        let (_root, mut core, _device) = unlocked_core();
+        assert!(!core.sync_current(), "no status yet is not current");
+
+        apply_status(&mut core, "connected", Some(true));
+        assert!(core.sync_current());
+
+        // A later status without the verdict (e.g. an offline refresh) clears it: fail closed.
+        apply_status(&mut core, "connected", None);
+        assert!(!core.sync_current());
+
+        apply_status(&mut core, "connected", Some(true));
+        apply_status(&mut core, "offline", Some(true));
+        assert!(!core.sync_current(), "offline is never current");
+        assert!(!core.server_connected());
     }
 
     #[test]

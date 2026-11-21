@@ -136,6 +136,7 @@ pub(super) fn handles(command: &str) -> bool {
             | "ack_outbox"
             | "ingest"
             | "ingest_batch"
+            | "_worker_observe_replay_head"
             | "sync_progress"
             | "key_status"
             | "activate_epoch"
@@ -445,6 +446,11 @@ impl BrowserCore {
             "ack_outbox" => self.ack_outbox(args),
             "ingest" => self.ingest(args),
             "ingest_batch" => self.ingest_batch(args),
+            "_worker_observe_replay_head" => {
+                let cursor = parse_cursor(required_string(&args, "highWaterCursor")?)?;
+                self.client()?.observe_replay_head(cursor).map_err(core)?;
+                Ok(json!({}))
+            }
             "sync_progress" => self.sync_progress(),
             "key_status" => self.key_status(),
             "activate_epoch" => self.activate_epoch(args),
@@ -552,11 +558,23 @@ impl BrowserCore {
 
     fn sync_progress(&self) -> Result<Value, Failure> {
         let progress = self.client()?.replay_progress().map_err(core)?;
-        Ok(json!({
+        let mut result = json!({
             "receivedThrough": progress.received_through.0.to_string(),
             "processedThrough": progress.processed_through.0.to_string(),
             "waitingForKeys": progress.waiting_for_keys.to_string(),
-        }))
+        });
+        if progress.received_through.0 > progress.processed_through.0 {
+            let block = match self.client()?.history_block().map_err(core)? {
+                Some(peppy_client_core::HistoryBlock::Withheld) => Some("withheld"),
+                Some(peppy_client_core::HistoryBlock::Repairing) => Some("repairing"),
+                Some(peppy_client_core::HistoryBlock::Failed) => Some("failed"),
+                None => None,
+            };
+            if let Some(block) = block {
+                result["historyBlock"] = json!(block);
+            }
+        }
+        Ok(result)
     }
 
     fn key_status(&self) -> Result<Value, Failure> {
@@ -997,6 +1015,28 @@ mod tests {
     }
 
     #[test]
+    fn replay_head_requires_a_canonical_cursor_and_accepts_empty_head() {
+        let mut fixture = open_core();
+        let core = &mut fixture.core;
+        assert_eq!(
+            response(
+                core,
+                "_worker_observe_replay_head",
+                json!({"highWaterCursor": "0"})
+            )["value"],
+            json!({})
+        );
+        assert_eq!(
+            response(
+                core,
+                "_worker_observe_replay_head",
+                json!({"highWaterCursor": "01"})
+            )["error"]["code"],
+            "invalid-request"
+        );
+    }
+
+    #[test]
     fn raw_malformed_records_quarantine_without_blocking_contiguous_cursor() {
         let mut fixture = open_core();
         let core = &mut fixture.core;
@@ -1120,6 +1160,45 @@ mod tests {
                 "waitingForKeys": "0"
             })
         );
+    }
+
+    #[test]
+    fn sync_progress_reports_history_block_only_for_a_blocked_gap() {
+        let mut fixture = open_core();
+        let db = rusqlite::Connection::open(fixture._root.path().join("client.db")).unwrap();
+        db.execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";
+             INSERT INTO journal(cursor,key_epoch,wire,status,reason,historical)
+             VALUES(1,1,X'00','pending','snapshot_rcs_isolated',1);
+             INSERT OR REPLACE INTO metadata(k,v) VALUES('receive_cursor','1'),('processed_cursor','0');",
+        )
+        .unwrap();
+        let progress =
+            |core: &mut BrowserCore| response(core, "sync_progress", json!({}))["value"].clone();
+        assert_eq!(progress(&mut fixture.core)["historyBlock"], "withheld");
+
+        db.execute(
+            "INSERT INTO metadata(k,v) VALUES('contact_repair_required','1')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(progress(&mut fixture.core)["historyBlock"], "repairing");
+
+        db.execute("DELETE FROM metadata WHERE k='contact_repair_required'", [])
+            .unwrap();
+        db.execute(
+            "INSERT INTO projection_generations(generation,high_water,state) VALUES(1,1,'failed')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(progress(&mut fixture.core)["historyBlock"], "failed");
+
+        db.execute("UPDATE journal SET reason=NULL WHERE cursor=1", [])
+            .unwrap();
+        assert!(progress(&mut fixture.core).get("historyBlock").is_none());
+        db.execute("UPDATE metadata SET v='1' WHERE k='processed_cursor'", [])
+            .unwrap();
+        assert!(progress(&mut fixture.core).get("historyBlock").is_none());
     }
 
     #[test]
