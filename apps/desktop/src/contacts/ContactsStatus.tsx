@@ -6,15 +6,15 @@ export type ContactsRepairState = "rebuilding" | "repairWaiting" | "failed" | "n
 
 export type ContactsStatusStrip = { kind: ContactsStatusKind; node: ReactNode };
 
-/**
- * The single persistent strip above the contacts list. Strips arrive in priority order and only the first one present
- * is shown; lower-priority strips wait until the higher one clears.
- */
 /** The strip the status slot shows: the first present one in priority order. */
 export function activeContactsStatus(strips: Array<ContactsStatusStrip | false | null | undefined>): ContactsStatusStrip | undefined {
   return strips.find((strip): strip is ContactsStatusStrip => Boolean(strip));
 }
 
+/**
+ * The single persistent strip above the contacts list. Strips arrive in priority order and only the first one present
+ * is shown; lower-priority strips wait until the higher one clears.
+ */
 export function ContactsStatus({ strips }: { strips: Array<ContactsStatusStrip | false | null | undefined> }) {
   const active = activeContactsStatus(strips);
   if (!active) return null;

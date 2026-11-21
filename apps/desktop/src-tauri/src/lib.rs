@@ -1489,11 +1489,11 @@ async fn search_local(
     let session = state.require_session_admitted(&operation).await?;
     let search_session = session.clone();
     let page = blocking(move || {
-        search_session
+        let page = search_session
             .client
             .search_local(input.into())
-            .map(peppy_desktop_api::local_search_page_view)
-            .map_err(core_error)
+            .map_err(core_error)?;
+        contacts::search_page_view(&search_session, page)
     })
     .await?;
     if state.app_locked.load(Ordering::Acquire) || !session_is_current(&state, &session).await {
@@ -3520,6 +3520,17 @@ async fn rename_device(
     let operation = admit_update_operation(&state)?;
     let session = state.require_session_admitted(&operation).await?;
     devices::rename(&session, &device_id, &name).await
+}
+
+#[tauri::command]
+async fn list_contacts_page(
+    state: State<'_, AppState>,
+    book_id: String,
+    request: serde_json::Value,
+) -> BridgeResult<serde_json::Value> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    blocking(move || contacts::list_contacts_page(&session, &book_id, &request)).await
 }
 
 #[tauri::command]
@@ -7370,6 +7381,7 @@ pub fn run() {
         rename_device,
         list_contact_books,
         list_contacts,
+        list_contacts_page,
         forget_contact_book,
         set_contact_book_lookup,
         list_contact_name_candidates,

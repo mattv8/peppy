@@ -16,6 +16,7 @@ pub(super) fn handles(command: &str) -> bool {
             | "set_contact_name_pin"
             | "clear_contact_name_pin"
             | "list_contacts"
+            | "list_contacts_page"
             | "submit_contact_edit"
             | "list_contact_edits"
             | "search_contact_recipients"
@@ -84,6 +85,7 @@ impl BrowserCore {
                 self.contact_name_command(command, args)
             }
             "list_contacts" => self.list_contacts(args),
+            "list_contacts_page" => self.list_contacts_page(args),
             "submit_contact_edit" => self.submit_contact_edit(args),
             "list_contact_edits" => self.list_contact_edits(args),
             "search_contact_recipients" => self.search_contact_recipients(args),
@@ -376,6 +378,21 @@ impl BrowserCore {
         let sort = shared::list_sort(args.get("sort").filter(|sort| !sort.is_null()))
             .map_err(contact_error)?;
         let raw = parse(self.client()?.contact_book_view(&json!({"schema_version": 1, "book_id": book_id, "search": query, "limit": shared::PAGE_LIMIT, "offset": offset, "sort": sort}).to_string()))?;
+        self.contact_list_view(book_id, &raw)
+    }
+
+    fn list_contacts_page(&self, args: Value) -> Result<Value, Failure> {
+        let book_id = args.get("bookId").and_then(Value::as_str).unwrap_or("");
+        let request = args.get("request").unwrap_or(&Value::Null);
+        let input = shared::contact_page_input(book_id, request).map_err(contact_error)?;
+        let raw = parse(self.client()?.contact_book_view(&input.to_string()))?;
+        let Value::Array(contacts) = self.contact_list_view(book_id, &raw)? else {
+            return Err(core(CoreError::Database));
+        };
+        shared::contact_page_view(&raw, contacts).map_err(contact_error)
+    }
+
+    fn contact_list_view(&self, book_id: &str, raw: &Value) -> Result<Value, Failure> {
         let contacts = raw
             .get("contacts")
             .and_then(Value::as_array)
@@ -831,6 +848,18 @@ mod tests {
             assert_eq!(display_state, expected_state);
             assert_eq!(display_reason.as_deref(), expected_reason);
         }
+    }
+
+    #[test]
+    fn contact_page_dispatch_returns_total_and_through_status() {
+        let mut fixture = ContactFixture::new();
+        let page = fixture.command(
+            "list_contacts_page",
+            json!({"bookId": BOOK_ID, "request": {"through": "c2"}}),
+        );
+        assert_eq!(page["total"], 3);
+        assert_eq!(page["throughFound"], true);
+        assert_eq!(page["contacts"].as_array().unwrap().len(), 3);
     }
 
     #[test]

@@ -10,7 +10,7 @@ import {
 import { StrictMode, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ContactsView, type ContactTarget } from "./Contacts";
-import { PhotoCropDialog } from "./ContactForm";
+import { PhotoCropDialog } from "./useContactPhotoChange";
 import {
   bridge,
   type ContactBookView,
@@ -19,6 +19,7 @@ import {
 } from "../bridge/bridge";
 import {
   DeferredCropImage,
+  contactPage,
   deferred,
   mockContactAurora,
   mockContactBook,
@@ -400,7 +401,9 @@ describe("ContactsView", () => {
       });
       const { container } = render(<ContactsView />);
 
-      fireEvent.click(await screen.findByLabelText("New contact"));
+      const newContact = await screen.findByLabelText("New contact");
+      await waitFor(() => expect(newContact).toBeEnabled());
+      fireEvent.click(newContact);
       fireEvent.click(container.querySelector('[data-form-disclosure="birthday"] > summary')!);
       fireEvent.change(screen.getByLabelText("Month"), { target: { value: "2" } });
       fireEvent.click(container.querySelector('[data-form-disclosure="birthday"] > summary')!);
@@ -810,13 +813,13 @@ describe("ContactsView", () => {
     });
 
     it("reloads contacts after successful save", async () => {
-      vi.mocked(bridge.list_contacts).mockClear();
-      vi.mocked(bridge.list_contacts).mockResolvedValueOnce([mockContactAurora]).mockResolvedValueOnce([mockContactAurora]);
+      vi.mocked(bridge.list_contacts_page).mockClear();
+      vi.mocked(bridge.list_contacts_page).mockResolvedValueOnce(contactPage([mockContactAurora])).mockResolvedValueOnce(contactPage([mockContactAurora]));
       vi.mocked(bridge.submit_contact_edit).mockResolvedValue({ state: "pending", requestId: "new-contact" });
 
       render(<ContactsView />);
       await screen.findAllByText("Pixel 8");
-      expect(bridge.list_contacts).toHaveBeenCalledTimes(1);
+      expect(bridge.list_contacts_page).toHaveBeenCalledTimes(1);
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
@@ -827,7 +830,7 @@ describe("ContactsView", () => {
 
       await waitFor(() => {
         expect(vi.mocked(bridge.submit_contact_edit).mock.calls).toHaveLength(1);
-        expect(vi.mocked(bridge.list_contacts).mock.calls).toHaveLength(2);
+        expect(vi.mocked(bridge.list_contacts_page).mock.calls).toHaveLength(2);
       });
     });
   });
@@ -846,7 +849,7 @@ describe("ContactsView", () => {
       expect(document.activeElement).toBe(lastName);
       fireEvent.keyDown(menu, { key: "ArrowDown" });
       fireEvent.click(document.activeElement as HTMLButtonElement);
-      await waitFor(() => expect(bridge.list_contacts).toHaveBeenLastCalledWith("book-pixel8", "", 0, { key: "given", direction: "asc" }));
+      await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-pixel8", { cursor: undefined, sort: { key: "given", direction: "asc" } }));
       expect(JSON.parse(localStorage.getItem("peppy.contacts.sort.v1")!)).toEqual({ key: "given", direction: "asc" });
       expect(screen.queryByRole("menu", { name: "Sort contacts" })).not.toBeInTheDocument();
       await waitFor(() => expect(document.activeElement).toBe(trigger));
@@ -883,7 +886,7 @@ describe("ContactsView", () => {
     it("sanitizes stored sort preferences before forwarding them to the bridge", async () => {
       localStorage.setItem("peppy.contacts.sort.v1", JSON.stringify({ key: "given", direction: "desc", unexpected: true }));
       render(<ContactsView />);
-      await waitFor(() => expect(bridge.list_contacts).toHaveBeenCalledWith("book-pixel8", "", 0, { key: "given", direction: "desc" }));
+      await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenCalledWith("book-pixel8", { cursor: undefined, sort: { key: "given", direction: "desc" } }));
     });
 
     it("resizes, resets, and persists the detail width without replacing a dirty form", async () => {
@@ -990,7 +993,7 @@ describe("ContactsView", () => {
         pendingEditState: "pending",
         pendingEditSummary: "Phone number update",
       };
-      vi.mocked(bridge.list_contacts).mockResolvedValue([contactWithPending, mockContactRiver]);
+      vi.mocked(bridge.list_contacts_page).mockResolvedValue(contactPage([contactWithPending, mockContactRiver]));
 
       render(<ContactsView />);
 
@@ -1014,7 +1017,7 @@ describe("ContactsView", () => {
         capabilities: { canWrite: false, canDelete: false, supportsNotes: false, supportsPhoto: false },
       };
       vi.mocked(bridge.list_contact_books).mockResolvedValue([readOnlyBook]);
-      vi.mocked(bridge.list_contacts).mockResolvedValue([mockContactAurora]);
+      vi.mocked(bridge.list_contacts_page).mockResolvedValue(contactPage([mockContactAurora]));
 
       render(<ContactsView />);
 
@@ -1075,13 +1078,13 @@ describe("ContactsView", () => {
       const given = await screen.findByLabelText("Given name");
       fireEvent.change(given, { target: { value: "Aurelia" } });
 
-      vi.mocked(bridge.list_contacts).mockResolvedValue([
+      vi.mocked(bridge.list_contacts_page).mockResolvedValue(contactPage([
         { ...mockContactAurora, pendingEditId: "r1", pendingEditState: "awaiting-approval", pendingEditSummary: "Name" },
         mockContactRiver,
-      ]);
-      const before = vi.mocked(bridge.list_contacts).mock.calls.length;
+      ]));
+      const before = vi.mocked(bridge.list_contacts_page).mock.calls.length;
       hint?.();
-      await waitFor(() => expect(vi.mocked(bridge.list_contacts).mock.calls.length).toBeGreaterThan(before));
+      await waitFor(() => expect(vi.mocked(bridge.list_contacts_page).mock.calls.length).toBeGreaterThan(before));
       expect(screen.getByLabelText("Given name")).toHaveValue("Aurelia");
       expect(screen.getByRole("form")).toHaveAccessibleName("Edit contact");
       expect(await screen.findByRole("button", { name: /Waiting for approval on the phone/ })).toBeInTheDocument();
@@ -1130,7 +1133,7 @@ describe("ContactsView", () => {
     });
 
     it("explains an empty book differently for failed and repairing projections", async () => {
-      vi.mocked(bridge.list_contacts).mockResolvedValue([]);
+      vi.mocked(bridge.list_contacts_page).mockResolvedValue(contactPage([]));
       const { rerender } = render(<ContactsView sync={{ repairRequired: false, projection: { state: "failed" } }} />);
       expect(await screen.findByText("Contacts couldn't be loaded yet.")).toHaveAttribute("data-empty-reason", "failed");
       rerender(<ContactsView sync={{ repairRequired: true }} />);
@@ -1178,7 +1181,7 @@ describe("ContactsView", () => {
       const scrollIntoView = vi.fn();
       Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
       vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, contactCount: 1 }]);
-      vi.mocked(bridge.list_contacts).mockImplementation(async (_book, _query, offset = 0) => pages[offset / 200] ?? [targetContact]);
+      vi.mocked(bridge.list_contacts_page).mockImplementation(async (_book, { through }) => through ? contactPage([...pages.flat(), targetContact], through) : { contacts: pages[0], total: 401, nextCursor: "200" });
       const consumed = vi.fn();
       render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-400", requestId: 10 }} onTargetConsumed={consumed} />);
 
@@ -1231,8 +1234,8 @@ describe("ContactsView", () => {
     });
 
     it("cancels an active contact lookup before opening a create target", async () => {
-      const lookup = deferred<ContactView[]>();
-      vi.mocked(bridge.list_contacts).mockReturnValue(lookup.promise);
+      const lookup = deferred<ReturnType<typeof contactPage>>();
+      vi.mocked(bridge.list_contacts_page).mockReturnValue(lookup.promise);
       const { rerender, container } = render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 73 }} />);
       await screen.findByText("Finding requested contact…");
 
@@ -1384,65 +1387,65 @@ describe("ContactsView", () => {
       expect(await screen.findByRole("heading", { name: "River Park" })).toBeInTheDocument();
       expect(consumed).toHaveBeenCalledTimes(1);
       expect(consumed).toHaveBeenCalledWith(60);
-      expect(bridge.list_contacts).toHaveBeenCalledWith("book-pixel8", "", 0, { key: "given", direction: "asc" });
+      expect(bridge.list_contacts_page).toHaveBeenCalledWith("book-pixel8", { through: "contact-river", sort: { key: "given", direction: "asc" } });
       expect(screen.queryByText(/Finding requested contact/)).not.toBeInTheDocument();
     });
 
     it("restarts an active target lookup under the selected sort and ignores its old page", async () => {
-      const oldPage = deferred<ContactView[]>();
-      const newPage = deferred<ContactView[]>();
-      vi.mocked(bridge.list_contacts).mockImplementation((_book, _query, _offset, sort) => sort?.key === "given" ? newPage.promise : oldPage.promise);
+      const oldPage = deferred<ReturnType<typeof contactPage>>();
+      const newPage = deferred<ReturnType<typeof contactPage>>();
+      vi.mocked(bridge.list_contacts_page).mockImplementation((_book, { sort }) => sort?.key === "given" ? newPage.promise : oldPage.promise);
       render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 61 }} />);
       await screen.findByText(/Finding requested contact/);
       fireEvent.click(screen.getByRole("button", { name: /^View options/ }));
       fireEvent.click(await screen.findByRole("menuitemradio", { name: "First name" }));
-      await waitFor(() => expect(bridge.list_contacts).toHaveBeenCalledWith("book-pixel8", "", 0, { key: "given", direction: "asc" }));
-      await act(async () => { oldPage.resolve([mockContactRiver]); });
+      await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenCalledWith("book-pixel8", { through: "contact-river", sort: { key: "given", direction: "asc" } }));
+      await act(async () => { oldPage.resolve(contactPage([mockContactRiver], "contact-river")); });
       expect(screen.queryByRole("heading", { name: "River Park" })).not.toBeInTheDocument();
-      newPage.resolve([mockContactRiver]);
+      newPage.resolve(contactPage([mockContactRiver], "contact-river"));
       expect(await screen.findByRole("heading", { name: "River Park" })).toBeInTheDocument();
     });
 
     it("clears list loading when a target page wins over an older ordinary page", async () => {
-      const pages: Array<ReturnType<typeof deferred<ContactView[]>>> = [];
-      vi.mocked(bridge.list_contacts).mockImplementation(() => {
-        const page = deferred<ContactView[]>();
+      const pages: Array<ReturnType<typeof deferred<ReturnType<typeof contactPage>>>> = [];
+      vi.mocked(bridge.list_contacts_page).mockImplementation(() => {
+        const page = deferred<ReturnType<typeof contactPage>>();
         pages.push(page);
         return page.promise;
       });
       render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 62 }} />);
       await waitFor(() => expect(pages).toHaveLength(2));
-      pages[1].resolve([mockContactRiver]);
+      pages[1].resolve(contactPage([mockContactRiver], "contact-river"));
       expect(await screen.findByRole("heading", { name: "River Park" })).toBeInTheDocument();
       expect(document.getElementById("contacts-list")).toHaveAttribute("aria-busy", "false");
     });
 
     it("does not let a replaced target's deferred page apply", async () => {
-      const resolvers: Array<(contacts: ContactView[]) => void> = [];
-      vi.mocked(bridge.list_contacts).mockImplementation(() => new Promise(resolve => { resolvers.push(resolve); }));
+      const resolvers: Array<(page: ReturnType<typeof contactPage>) => void> = [];
+      vi.mocked(bridge.list_contacts_page).mockImplementation(() => new Promise(resolve => { resolvers.push(resolve); }));
       const consumed = vi.fn();
       const { rerender } = render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-aurora", requestId: 13 }} onTargetConsumed={consumed} />);
       await screen.findAllByText("Pixel 8");
       await screen.findByText(/Finding requested contact/);
       rerender(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 14 }} onTargetConsumed={consumed} />);
       await waitFor(() => expect(resolvers).toHaveLength(3));
-      resolvers[0]([mockContactAurora]);
-      resolvers[1]([mockContactAurora]);
-      await act(async () => { resolvers[2]([mockContactRiver]); });
+      resolvers[0](contactPage([mockContactAurora]));
+      resolvers[1](contactPage([mockContactAurora], "contact-aurora"));
+      await act(async () => { resolvers[2](contactPage([mockContactRiver], "contact-river")); });
       expect(await screen.findByRole("heading", { name: "River Park" })).toBeInTheDocument();
       expect(consumed).toHaveBeenCalledWith(14);
       expect(consumed).not.toHaveBeenCalledWith(13);
     });
 
     it("consumes a pending target on unmount without applying a late page", async () => {
-      let resolveLookup!: (contacts: ContactView[]) => void;
-      vi.mocked(bridge.list_contacts).mockImplementation(() => new Promise(resolve => { resolveLookup = resolve; }));
+      let resolveLookup!: (page: ReturnType<typeof contactPage>) => void;
+      vi.mocked(bridge.list_contacts_page).mockImplementation(() => new Promise(resolve => { resolveLookup = resolve; }));
       const consumed = vi.fn();
       const view = render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-aurora", requestId: 15 }} onTargetConsumed={consumed} />);
       await screen.findAllByText("Pixel 8");
       await screen.findByText(/Finding requested contact/);
       view.unmount();
-      resolveLookup([mockContactAurora]);
+      resolveLookup(contactPage([mockContactAurora], "contact-aurora"));
       await waitFor(() => expect(consumed).toHaveBeenCalledWith(15));
       expect(screen.queryByText("Aurora Chen")).not.toBeInTheDocument();
     });
@@ -1463,12 +1466,13 @@ describe("ContactsView", () => {
       let books = [mockContactBook, secondBook];
       vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
       vi.mocked(bridge.list_contact_books).mockImplementation(async () => books);
-      vi.mocked(bridge.list_contacts).mockImplementation(async (id, _query, offset = 0) => {
+      vi.mocked(bridge.list_contacts_page).mockImplementation(async (id, { cursor }) => {
+        const offset = Number(cursor ?? 0);
         if (id === "book-iphone" && offset < 400) {
-          return Array.from({ length: 200 }, (_, index) => ({ ...mockContactRiver, id: `iphone-${offset + index}`, bookId: id, displayName: `iPhone ${offset + index}` }));
+          return { contacts: Array.from({ length: 200 }, (_, index) => ({ ...mockContactRiver, id: `iphone-${offset + index}`, bookId: id, displayName: `iPhone ${offset + index}` })), total: 401, nextCursor: String(offset + 200) };
         }
-        if (id === "book-iphone") return [{ ...mockContactRiver, id: "iphone-400", bookId: id, displayName: "iPhone 400" }];
-        return [mockContactAurora];
+        if (id === "book-iphone") return { contacts: [{ ...mockContactRiver, id: "iphone-400", bookId: id, displayName: "iPhone 400" }], total: 401 };
+        return contactPage([mockContactAurora]);
       });
       render(<ContactsView />);
       fireEvent.click(await screen.findByRole("button", { name: /iPhone/ }));
@@ -1482,13 +1486,13 @@ describe("ContactsView", () => {
       act(() => hint?.());
 
       await screen.findByText("Aurora Chen");
-      expect(bridge.list_contacts).toHaveBeenLastCalledWith("book-pixel8", "", 0, { key: "family", direction: "asc" });
+      expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-pixel8", { cursor: undefined, sort: { key: "family", direction: "asc" } });
     });
 
     it("keeps the real app target through a StrictMode fake unmount", async () => {
       const targetContact = { ...mockContactAurora, id: "contact-400", displayName: "Person 400" };
       const firstPage = Array.from({ length: 200 }, (_, index) => ({ ...mockContactRiver, id: `contact-${index}`, displayName: `Person ${index}` }));
-      vi.mocked(bridge.list_contacts).mockImplementation(async (_book, _query, offset = 0) => offset === 0 ? firstPage : offset === 200 ? firstPage : [targetContact]);
+      vi.mocked(bridge.list_contacts_page).mockImplementation(async (_book, { through }) => through ? contactPage([...firstPage, targetContact], through) : contactPage(firstPage));
 
       function StrictAppHarness() {
         const [target, setTarget] = useState<ContactTarget | null>({ bookId: "book-pixel8", contactId: "contact-400", requestId: 40 });
@@ -1504,36 +1508,35 @@ describe("ContactsView", () => {
 
     it("does not restart a deferred target walk when a live hint refreshes books", async () => {
       let hint: (() => void) | undefined;
-      const pageTwo = deferred<ContactView[]>();
+      const pageTwo = deferred<ReturnType<typeof contactPage>>();
       const firstPage = Array.from({ length: 200 }, (_, index) => ({ ...mockContactRiver, id: `contact-${index}`, displayName: `Person ${index}` }));
       const targetContact = { ...mockContactAurora, id: "contact-400", displayName: "Person 400" };
       vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
-      vi.mocked(bridge.list_contacts).mockImplementation((_book, query, offset = 0) => {
-        if (query || offset === 0) return Promise.resolve(firstPage);
-        if (offset === 200) return pageTwo.promise;
-        return Promise.resolve([targetContact]);
+      vi.mocked(bridge.list_contacts_page).mockImplementation((_book, { through }) => {
+        if (through) return pageTwo.promise;
+        return Promise.resolve(contactPage(firstPage));
       });
       render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-400", requestId: 41 }} />);
-      await waitFor(() => expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && offset === 200)).toHaveLength(1));
-      const offsetZeroBefore = vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && (offset ?? 0) === 0).length;
+      await waitFor(() => expect(vi.mocked(bridge.list_contacts_page).mock.calls.filter(([, request]) => request.through)).toHaveLength(1));
+      const offsetZeroBefore = vi.mocked(bridge.list_contacts_page).mock.calls.filter(([, request]) => !request.through).length;
 
       // Keep jsdom's focus-fixup rendering interval on the real clock.
       vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout", "Date"] });
       try {
         act(() => hint?.());
         await act(async () => { await vi.advanceTimersByTimeAsync(150); });
-        expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && (offset ?? 0) === 0)).toHaveLength(offsetZeroBefore + 1);
-        pageTwo.resolve(firstPage);
+        expect(vi.mocked(bridge.list_contacts_page).mock.calls.filter(([, request]) => !request.through)).toHaveLength(offsetZeroBefore + 1);
+        pageTwo.resolve(contactPage([...firstPage, targetContact], "contact-400"));
 
         expect(await screen.findByRole("heading", { name: "Person 400" })).toBeInTheDocument();
-        expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && offset === 200)).toHaveLength(1);
+        expect(vi.mocked(bridge.list_contacts_page).mock.calls.filter(([, request]) => request.through)).toHaveLength(1);
       } finally {
         vi.useRealTimers();
       }
     });
 
     it("clears a failed target alert when a newer target succeeds", async () => {
-      vi.mocked(bridge.list_contacts).mockImplementation(async (_book, _query, offset = 0) => offset === 0 ? [mockContactAurora, mockContactRiver] : []);
+      vi.mocked(bridge.list_contacts_page).mockImplementation(async (_book, { through }) => contactPage([mockContactAurora, mockContactRiver], through));
       const consumed = vi.fn();
       const { rerender, container } = render(<ContactsView target={{ bookId: "missing-book", contactId: "missing", requestId: 42 }} onTargetConsumed={consumed} />);
       await waitFor(() => expect(container.querySelector("#contacts-target-error")).toHaveAttribute("data-target-state", "error"));
@@ -1547,14 +1550,14 @@ describe("ContactsView", () => {
     });
 
     it("does not apply a late target page after editing starts", async () => {
-      const latePage = deferred<ContactView[]>();
+      const latePage = deferred<ReturnType<typeof contactPage>>();
       const firstPage = Array.from({ length: 200 }, (_, index) => ({ ...mockContactRiver, id: `contact-${index}`, displayName: `Person ${index}` }));
-      vi.mocked(bridge.list_contacts).mockImplementation((_book, _query, offset = 0) => offset === 200 ? latePage.promise : Promise.resolve(firstPage));
+      vi.mocked(bridge.list_contacts_page).mockImplementation((_book, { through }) => through ? latePage.promise : Promise.resolve(contactPage(firstPage)));
       render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-400", requestId: 44 }} />);
-      await waitFor(() => expect(vi.mocked(bridge.list_contacts)).toHaveBeenCalledWith("book-pixel8", "", 200, { key: "family", direction: "asc" }));
+      await waitFor(() => expect(vi.mocked(bridge.list_contacts_page)).toHaveBeenCalledWith("book-pixel8", { through: "contact-400", sort: { key: "family", direction: "asc" } }));
       fireEvent.click(screen.getByRole("button", { name: "New contact" }));
       expect(screen.getByRole("form")).toBeInTheDocument();
-      await act(async () => { latePage.resolve([{ ...mockContactAurora, id: "contact-400", displayName: "Person 400" }]); });
+      await act(async () => { latePage.resolve(contactPage([{ ...mockContactAurora, id: "contact-400", displayName: "Person 400" }], "contact-400")); });
 
       expect(screen.getByRole("form")).toBeInTheDocument();
       expect(screen.queryByRole("heading", { name: "Person 400" })).not.toBeInTheDocument();
@@ -1576,12 +1579,12 @@ describe("ContactsView", () => {
     });
 
     it("keeps the old target absent when it resolves after its replacement", async () => {
-      const oldLookup = deferred<ContactView[]>();
-      const newLookup = deferred<ContactView[]>();
+      const oldLookup = deferred<ReturnType<typeof contactPage>>();
+      const newLookup = deferred<ReturnType<typeof contactPage>>();
       let targetCall = 0;
-      vi.mocked(bridge.list_contacts).mockImplementation((_book, _query, _offset) => {
+      vi.mocked(bridge.list_contacts_page).mockImplementation(() => {
         targetCall += 1;
-        if (targetCall === 1) return Promise.resolve([]);
+        if (targetCall === 1) return Promise.resolve(contactPage([]));
         return targetCall === 2 ? oldLookup.promise : newLookup.promise;
       });
       const { rerender } = render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-aurora", requestId: 47 }} />);
@@ -1589,9 +1592,9 @@ describe("ContactsView", () => {
       rerender(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 48 }} />);
       await waitFor(() => expect(targetCall).toBe(3));
 
-      await act(async () => { oldLookup.resolve([mockContactAurora]); });
+      await act(async () => { oldLookup.resolve(contactPage([mockContactAurora], "contact-aurora")); });
       expect(screen.queryByRole("heading", { name: "Aurora Chen" })).not.toBeInTheDocument();
-      newLookup.resolve([mockContactRiver]);
+      newLookup.resolve(contactPage([mockContactRiver], "contact-river"));
       expect(await screen.findByRole("heading", { name: "River Park" })).toBeInTheDocument();
     });
 
@@ -1607,15 +1610,14 @@ describe("ContactsView", () => {
 
     it("keeps a deferred target through one transient background book-list failure", async () => {
       let hint: (() => void) | undefined;
-      const pageTwo = deferred<ContactView[]>();
+      const pageTwo = deferred<ReturnType<typeof contactPage>>();
       const firstPage = Array.from({ length: 200 }, (_, index) => ({ ...mockContactRiver, id: `contact-${index}`, displayName: `Person ${index}` }));
       const targetContact = { ...mockContactAurora, id: "contact-400", displayName: "Person 400" };
       const consumed = vi.fn();
       vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
-      vi.mocked(bridge.list_contacts).mockImplementation((_book, query, offset = 0) => {
-        if (query || offset === 0) return Promise.resolve(firstPage);
-        if (offset === 200) return pageTwo.promise;
-        return Promise.resolve([targetContact]);
+      vi.mocked(bridge.list_contacts_page).mockImplementation((_book, { through }) => {
+        if (through) return pageTwo.promise;
+        return Promise.resolve(contactPage(firstPage));
       });
       function StatefulParent() {
         const [target, setTarget] = useState<ContactTarget | null>({ bookId: "book-pixel8", contactId: "contact-400", requestId: 51 });
@@ -1625,7 +1627,7 @@ describe("ContactsView", () => {
         }} />;
       }
       const { container } = render(<StatefulParent />);
-      await waitFor(() => expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && offset === 200)).toHaveLength(1));
+      await waitFor(() => expect(vi.mocked(bridge.list_contacts_page).mock.calls.filter(([, request]) => request.through)).toHaveLength(1));
 
       vi.mocked(bridge.list_contact_books).mockRejectedValueOnce(new Error("transient"));
       act(() => hint?.());
@@ -1634,7 +1636,7 @@ describe("ContactsView", () => {
       expect(consumed).not.toHaveBeenCalled();
       expect(screen.getByText(/Finding requested contact/)).toBeInTheDocument();
 
-      pageTwo.resolve(firstPage);
+      pageTwo.resolve(contactPage([...firstPage, targetContact], "contact-400"));
       expect(await screen.findByRole("heading", { name: "Person 400" })).toBeInTheDocument();
       expect(consumed).toHaveBeenCalledTimes(1);
       expect(consumed).toHaveBeenCalledWith(51);
@@ -1643,7 +1645,7 @@ describe("ContactsView", () => {
 
     it("aborts a deferred target with a book notice when its book disappears", async () => {
       let hint: (() => void) | undefined;
-      const pageTwo = deferred<ContactView[]>();
+      const pageTwo = deferred<ReturnType<typeof contactPage>>();
       const secondBook = { ...mockContactBook, id: "book-iphone", deviceName: "iPhone" };
       const firstPage = Array.from({ length: 200 }, (_, index) => ({ ...mockContactRiver, id: `contact-${index}`, displayName: `Person ${index}` }));
       const targetContact = { ...mockContactAurora, id: "contact-400", displayName: "Person 400" };
@@ -1651,18 +1653,17 @@ describe("ContactsView", () => {
       const consumed = vi.fn();
       vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
       vi.mocked(bridge.list_contact_books).mockImplementation(async () => books);
-      vi.mocked(bridge.list_contacts).mockImplementation((_book, query, offset = 0) => {
-        if (query || offset === 0) return Promise.resolve(firstPage);
-        if (offset === 200) return pageTwo.promise;
-        return Promise.resolve([targetContact]);
+      vi.mocked(bridge.list_contacts_page).mockImplementation((_book, { through }) => {
+        if (through) return pageTwo.promise;
+        return Promise.resolve(contactPage(firstPage));
       });
       const { container } = render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-400", requestId: 52 }} onTargetConsumed={consumed} />);
-      await waitFor(() => expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && offset === 200)).toHaveLength(1));
+      await waitFor(() => expect(vi.mocked(bridge.list_contacts_page).mock.calls.filter(([, request]) => request.through)).toHaveLength(1));
 
       books = [secondBook];
       act(() => hint?.());
       await waitFor(() => expect(screen.queryAllByText("Pixel 8")).toHaveLength(0));
-      pageTwo.resolve(firstPage);
+      pageTwo.resolve(contactPage([...firstPage, targetContact], "contact-400"));
 
       await waitFor(() => expect(consumed).toHaveBeenCalledWith(52));
       expect(container.querySelector("#contacts-target-error")).toHaveTextContent("The requested contact book is no longer available.");
@@ -1700,7 +1701,7 @@ describe("ContactsView", () => {
     it("focuses a target row whose id contains selector-special characters", async () => {
       const quoted = { ...mockContactAurora, id: 'contact"quoted', displayName: "Quoted Person" };
       Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
-      vi.mocked(bridge.list_contacts).mockResolvedValue([quoted, mockContactRiver]);
+      vi.mocked(bridge.list_contacts_page).mockImplementation(async (_book, { through }) => contactPage([quoted, mockContactRiver], through));
       render(<ContactsView target={{ bookId: "book-pixel8", contactId: 'contact"quoted', requestId: 55 }} onTargetConsumed={vi.fn()} />);
 
       const row = await screen.findByRole("button", { name: /^Quoted Person/ });
@@ -1713,9 +1714,9 @@ describe("ContactsView", () => {
       vi.mocked(bridge.get_contact_sync_request).mockImplementation(async bookId => bookId === "book-pixel8"
         ? { requestId: "old", bookId, state: "waiting" }
         : null);
-      vi.mocked(bridge.list_contacts).mockImplementation(async bookId => bookId === "book-iphone"
+      vi.mocked(bridge.list_contacts_page).mockImplementation(async (bookId, { through }) => contactPage(bookId === "book-iphone"
         ? [{ ...mockContactRiver, id: "iphone-contact", bookId, displayName: "iPhone Person" }]
-        : [mockContactAurora]);
+        : [mockContactAurora], through));
       const { rerender } = render(<ContactsView />);
       expect(await screen.findByText("Waiting for the phone to scan contacts.")).toBeInTheDocument();
 
@@ -1753,9 +1754,9 @@ describe("ContactsView", () => {
       books = [restorableBook, otherBook];
       vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
       vi.mocked(bridge.list_contact_books).mockImplementation(async () => books);
-      vi.mocked(bridge.list_contacts).mockImplementation(async bookId => bookId === "book-iphone"
+      vi.mocked(bridge.list_contacts_page).mockImplementation(async (bookId, { through }) => contactPage(bookId === "book-iphone"
         ? [otherBookContact]
-        : [mockContactAurora, mockContactRiver]);
+        : [mockContactAurora, mockContactRiver], through));
       vi.mocked(bridge.get_contact_sync_request).mockResolvedValue(null);
     });
 
@@ -1816,10 +1817,10 @@ describe("ContactsView", () => {
         };
         if (rejectionOrder === "before refresh starts") await rejectSave();
 
-        vi.mocked(bridge.list_contacts).mockReturnValueOnce(refreshedPage.promise);
+        vi.mocked(bridge.list_contacts_page).mockReturnValueOnce(refreshedPage.promise.then(contacts => contactPage(contacts)));
         act(() => hint?.());
         await waitFor(() => expect(bridge.list_contact_books).toHaveBeenCalledTimes(2));
-        await waitFor(() => expect(bridge.list_contacts).toHaveBeenCalledTimes(2));
+        await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenCalledTimes(2));
         if (rejectionOrder === "while refresh is pending") await rejectSave();
 
         await act(async () => {

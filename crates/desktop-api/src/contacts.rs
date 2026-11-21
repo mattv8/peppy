@@ -14,6 +14,8 @@ pub const MAX_SEARCH_RESULTS: u64 = 20;
 const MAX_ID: usize = 1024;
 pub const MAX_TEXT: usize = 1024;
 const MAX_NOTES_BYTES: usize = 8192;
+/// Longest contact search the page request accepts, in characters after trimming.
+pub const MAX_CONTACT_QUERY_CHARS: usize = 256;
 const MAX_VALUES: usize = 20;
 const MAX_PATCHES: usize = 100;
 pub const MAX_PHOTO_SOURCE_BYTES: usize = 8 * 1024 * 1024;
@@ -153,6 +155,55 @@ pub fn list_sort(value: Option<&Value>) -> ContactResult<Value> {
         return Err(invalid("The contact sort is invalid."));
     }
     Ok(json!({"key": key, "direction": direction}))
+}
+
+pub fn contact_page_input(book_id: &str, request: &Value) -> ContactResult<Value> {
+    if !valid_id(book_id) {
+        return Err(invalid("The contact book is invalid."));
+    }
+    let request = request
+        .as_object()
+        .ok_or_else(|| invalid("The contact page is invalid."))?;
+    let sort = list_sort(request.get("sort").filter(|value| !value.is_null()))?;
+    let mut input =
+        json!({"schema_version": 1, "book_id": book_id, "limit": PAGE_LIMIT, "sort": sort});
+    for (source, target) in [("cursor", "after"), ("through", "through")] {
+        if let Some(value) = request.get(source).filter(|value| !value.is_null()) {
+            let text = value
+                .as_str()
+                .filter(|value| !value.is_empty() && (source != "through" || valid_id(value)))
+                .ok_or_else(|| invalid("The contact page is invalid."))?;
+            input[target] = json!(text);
+        }
+    }
+    if let Some(value) = request.get("query").filter(|value| !value.is_null()) {
+        let query = value
+            .as_str()
+            .ok_or_else(|| invalid("The contact page is invalid."))?
+            .trim();
+        if query.chars().count() > MAX_CONTACT_QUERY_CHARS {
+            return Err(invalid("The contact search is too long."));
+        }
+        if !query.is_empty() {
+            input["search"] = json!(query);
+        }
+    }
+    Ok(input)
+}
+
+pub fn contact_page_view(raw: &Value, contacts: Vec<Value>) -> ContactResult<Value> {
+    let total = raw
+        .get("total")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid("The contact page is invalid."))?;
+    let mut page = json!({"contacts": contacts, "total": total});
+    if let Some(cursor) = raw.get("next_cursor").and_then(Value::as_str) {
+        page["nextCursor"] = json!(cursor);
+    }
+    if let Some(found) = raw.get("through_found").and_then(Value::as_bool) {
+        page["throughFound"] = json!(found);
+    }
+    Ok(page)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1190,6 +1241,35 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn contact_page_query_maps_to_core_search_and_rejects_oversize_values() {
+        let page = |query: Value| contact_page_input("book-a", &json!({ "query": query }));
+
+        assert_eq!(page(json!("  Ada  ")).unwrap()["search"], "Ada");
+        assert!(page(json!("   ")).unwrap().get("search").is_none());
+        assert!(
+            contact_page_input("book-a", &json!({}))
+                .unwrap()
+                .get("search")
+                .is_none()
+        );
+        assert!(page(json!("a".repeat(MAX_CONTACT_QUERY_CHARS))).is_ok());
+        assert!(matches!(
+            page(json!("a".repeat(MAX_CONTACT_QUERY_CHARS + 1))),
+            Err(ContactError::Ui {
+                code: "invalid-contact-edit",
+                ..
+            })
+        ));
+        assert!(matches!(
+            page(json!(42)),
+            Err(ContactError::Ui {
+                code: "invalid-contact-edit",
+                ..
+            })
+        ));
     }
 
     #[test]

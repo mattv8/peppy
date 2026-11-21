@@ -217,9 +217,7 @@ mark { background: var(--peppy-warning-surface); color: var(--peppy-text-primary
 @media (prefers-reduced-motion: reduce) { .notif-row-actions, .notif-inline-action, .notif-stack-dismiss-btn { transition: none; } }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 #notifications-empty-state, #notifications-locked-state { display: grid; height: 100%; place-content: center; justify-items: center; gap: 12px; padding: 32px; color: var(--peppy-text-secondary); text-align: center; }
-#notifications-no-match { display: grid; height: 100%; place-content: center; justify-items: center; gap: 12px; padding: 32px; color: var(--peppy-text-secondary); text-align: center; }
 #notifications-empty-state .link-button { justify-self: center; }
-#notifications-no-match p { margin: 0; color: var(--peppy-text-muted); font-size: 12px; }
 #notifications-search-status { box-sizing: border-box; margin: 0; padding: 8px 12px; color: var(--peppy-text-secondary); font-size: 12px; }
 #notifications-empty-state p, #notifications-locked-state p { margin: 0; }
 .setup-hint, .settings-note { color: var(--peppy-text-muted); font-size: 12px; }

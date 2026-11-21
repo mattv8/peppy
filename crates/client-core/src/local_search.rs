@@ -48,6 +48,13 @@ pub enum LocalSearchHit {
         contact_id: String,
         title: String,
         subtitle: String,
+        phones: Vec<String>,
+        phone_count: u32,
+        organization: Option<String>,
+        book_label: Option<String>,
+        photo_attachment_id: Option<String>,
+        match_field: Option<String>,
+        match_snippet: Option<String>,
     },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -585,7 +592,6 @@ fn display_name(contact: &Value) -> Option<String> {
         .or_else(|| scalar("organization").map(str::to_owned))
         .or_else(|| first_contact_value(contact, "phones"))
         .or_else(|| first_contact_value(contact, "emails"))
-        .or_else(|| Some("Contact".to_owned()))
 }
 
 fn first_contact_value(contact: &Value, field: &str) -> Option<String> {
@@ -805,22 +811,59 @@ fn contact_hits(
         let book_label = book
             .get("display_name")
             .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or(&book_id);
-        let phone = contact
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let mut phones = contact
             .get("phones")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .filter_map(|phone| phone.get("value").and_then(Value::as_str))
-            .find(|value| !value.trim().is_empty());
-        let primary_subtitle = phone.map_or_else(
-            || book_label.to_owned(),
-            |phone| format!("{book_label} · {phone}"),
-        );
-        let subtitle = matched.field.map_or(primary_subtitle, |field| {
-            format!("{book_label} · {field} · {}", matched.snippet)
-        });
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let phone_count = u32::try_from(phones.len()).unwrap_or(u32::MAX);
+        if matched.rank == 2
+            && let Some(digits) = phone_query_digits(query)
+            && let Some(index) = phones.iter().position(|phone| {
+                phone
+                    .chars()
+                    .filter(char::is_ascii_digit)
+                    .collect::<String>()
+                    .contains(&digits)
+            })
+            && index >= 3
+        {
+            let matched_phone = phones.remove(index);
+            phones.insert(0, matched_phone);
+        }
+        phones.truncate(3);
+        let organization = contact
+            .get("organization")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let photo_attachment_id = contact
+            .get("photo")
+            .and_then(|photo| photo.get("attachment_id").or(Some(photo)))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let match_field = matched.field.map(str::to_owned);
+        let match_snippet = matched.field.map(|_| matched.snippet.clone());
+        let mut subtitle_parts = Vec::new();
+        if let Some(label) = book_label.as_deref() {
+            subtitle_parts.push(label);
+        }
+        if let Some(field) = matched.field {
+            subtitle_parts.push(field);
+            subtitle_parts.push(&matched.snippet);
+        } else if let Some(phone) = phones.first() {
+            subtitle_parts.push(phone);
+        }
+        let subtitle = subtitle_parts.join(" · ");
         let key = format!("{book_id}\0{contact_id}");
         matches.push((
             matched.rank,
@@ -830,6 +873,13 @@ fn contact_hits(
                 contact_id,
                 title: display_name(&contact).unwrap_or_default(),
                 subtitle,
+                phones,
+                phone_count,
+                organization,
+                book_label,
+                photo_attachment_id,
+                match_field,
+                match_snippet,
             },
         ));
     }

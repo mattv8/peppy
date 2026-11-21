@@ -13,7 +13,7 @@ function contactsFrom(prefix: string, count: number): ContactView[] {
   return Array.from({ length: count }, (_, index) => ({ ...mockContactRiver, id: `${prefix}-${index}`, bookId: "book-pixel8" }));
 }
 
-function renderPages(initial: { bookId: string; sort?: typeof SORT }) {
+function renderPages(initial: { bookId: string; sort?: typeof SORT; query?: string }) {
   const onError = vi.fn();
   const view = renderHook((props: typeof initial) => useContactPages({ ...props, sort: props.sort ?? SORT, onError }), { initialProps: initial });
   return { ...view, onError };
@@ -28,8 +28,8 @@ describe("useContactPages", () => {
     restoreContactDomGlobals();
   });
 
-  it("has more rows only while the last page is full, even when the book count is stale", async () => {
-    vi.mocked(bridge.list_contacts).mockResolvedValueOnce(contactsFrom("a", 200)).mockResolvedValueOnce(contactsFrom("b", 10));
+  it("continues using the returned cursor and stops when none remains", async () => {
+    vi.mocked(bridge.list_contacts_page).mockResolvedValueOnce({ contacts: contactsFrom("a", 200), total: 210, nextCursor: "next" }).mockResolvedValueOnce({ contacts: contactsFrom("b", 10), total: 210 });
     const { result } = renderPages({ bookId: "book-pixel8" });
     await waitFor(() => expect(result.current.contacts).toHaveLength(200));
     expect(result.current.hasMore).toBe(true);
@@ -37,27 +37,28 @@ describe("useContactPages", () => {
     act(() => result.current.loadMore());
     await waitFor(() => expect(result.current.contacts).toHaveLength(210));
     expect(result.current.hasMore).toBe(false);
-    expect(bridge.list_contacts).toHaveBeenLastCalledWith("book-pixel8", "", 200, SORT);
+    expect(result.current.total).toBe(210);
+    expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-pixel8", { cursor: "next", sort: SORT });
   });
 
   it("drops loaded rows and starts again when the book changes, discarding the old book's response", async () => {
-    const oldBook = deferred<ContactView[]>();
-    vi.mocked(bridge.list_contacts).mockReturnValueOnce(oldBook.promise).mockResolvedValueOnce(contactsFrom("new", 2));
+    const oldBook = deferred<{ contacts: ContactView[]; total: number }>();
+    vi.mocked(bridge.list_contacts_page).mockReturnValueOnce(oldBook.promise).mockResolvedValueOnce({ contacts: contactsFrom("new", 2), total: 2 });
     const { result, rerender } = renderPages({ bookId: "book-old" });
     expect(result.current.loading).toBe(true);
 
     rerender({ bookId: "book-pixel8" });
 
     await waitFor(() => expect(result.current.contacts.map(contact => contact.id)).toEqual(["new-0", "new-1"]));
-    await act(async () => oldBook.resolve(contactsFrom("old", 5)));
+    await act(async () => oldBook.resolve({ contacts: contactsFrom("old", 5), total: 5 }));
     expect(result.current.contacts.map(contact => contact.id)).toEqual(["new-0", "new-1"]);
   });
 
   it("keeps the shown rows when a refresh fails and reports the error", async () => {
     let fail = false;
-    vi.mocked(bridge.list_contacts).mockImplementation(async () => {
+    vi.mocked(bridge.list_contacts_page).mockImplementation(async () => {
       if (fail) throw new Error("offline");
-      return contactsFrom("a", 3);
+      return { contacts: contactsFrom("a", 3), total: 3 };
     });
     const { result, onError } = renderPages({ bookId: "book-pixel8" });
     await waitFor(() => expect(result.current.contacts).toHaveLength(3));
@@ -67,5 +68,106 @@ describe("useContactPages", () => {
 
     await waitFor(() => expect(onError.mock.lastCall?.[0]).toBeTruthy());
     expect(result.current.contacts).toHaveLength(3);
+  });
+
+  it("refreshes until the previously loaded count and swaps all pages at once", async () => {
+    const second = deferred<{ contacts: ContactView[]; total: number }>();
+    vi.mocked(bridge.list_contacts_page)
+      .mockResolvedValueOnce({ contacts: contactsFrom("old", 3), total: 3 })
+      .mockResolvedValueOnce({ contacts: contactsFrom("new", 1), total: 3, nextCursor: "next" })
+      .mockReturnValueOnce(second.promise);
+    const { result } = renderPages({ bookId: "book-pixel8" });
+    await waitFor(() => expect(result.current.contacts).toHaveLength(3));
+    act(() => result.current.refresh());
+    await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-pixel8", { cursor: "next", sort: SORT }));
+    expect(result.current.contacts.map(contact => contact.id)).toEqual(["old-0", "old-1", "old-2"]);
+    await act(async () => second.resolve({ contacts: contactsFrom("rest", 2), total: 3 }));
+    expect(result.current.contacts.map(contact => contact.id)).toEqual(["new-0", "rest-0", "rest-1"]);
+    expect(result.current.hasMore).toBe(false);
+  });
+
+  it("coalesces refreshes requested during a refresh into one more refresh after it", async () => {
+    const pending = deferred<{ contacts: ContactView[]; total: number }>();
+    vi.mocked(bridge.list_contacts_page)
+      .mockResolvedValueOnce({ contacts: contactsFrom("old", 3), total: 3 })
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce({ contacts: contactsFrom("new", 3), total: 3 });
+    const { result } = renderPages({ bookId: "book-pixel8" });
+    await waitFor(() => expect(result.current.contacts).toHaveLength(3));
+
+    act(() => result.current.refresh());
+    act(() => result.current.refresh());
+    act(() => result.current.refresh());
+    expect(bridge.list_contacts_page).toHaveBeenCalledTimes(2);
+
+    await act(async () => pending.resolve({ contacts: contactsFrom("first", 3), total: 3 }));
+    await waitFor(() => expect(result.current.contacts.map(contact => contact.id)).toEqual(["new-0", "new-1", "new-2"]));
+    expect(bridge.list_contacts_page).toHaveBeenCalledTimes(3);
+  });
+
+  it("re-fetches only the capped pages and keeps the rows loaded beyond the cap after the refreshed ones", async () => {
+    const { result } = renderPages({ bookId: "book-pixel8" });
+    // The mount fetch is superseded by the restored range below, so its response is never shown.
+    vi.mocked(bridge.list_contacts_page).mockImplementation(async (_book, { cursor }) => {
+      const index = cursor === undefined ? 0 : Number(cursor.slice(1));
+      return { contacts: contactsFrom(`p${index}`, 200), total: 3000, nextCursor: `c${index + 1}` };
+    });
+    act(() => result.current.resetTo({ contacts: contactsFrom("old", 2200), total: 3000, nextCursor: "c-old" }, { bookId: "book-pixel8", sort: SORT }));
+    vi.mocked(bridge.list_contacts_page).mockClear();
+
+    act(() => result.current.refresh());
+
+    await waitFor(() => expect(result.current.contacts[0]?.id).toBe("p0-0"));
+    expect(bridge.list_contacts_page).toHaveBeenCalledTimes(10);
+    expect(result.current.contacts).toHaveLength(2200);
+    expect(result.current.contacts[1999]?.id).toBe("p9-199");
+    expect(result.current.contacts[2000]?.id).toBe("old-2000");
+    expect(result.current.contacts[2199]?.id).toBe("old-2199");
+    expect(result.current.hasMore).toBe(true);
+
+    act(() => result.current.loadMore());
+    await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-pixel8", { cursor: "c10", sort: SORT }));
+  });
+
+  describe("search", () => {
+    it("searches the server with the trimmed query once it settles, starting from the first page", async () => {
+      vi.mocked(bridge.list_contacts_page).mockResolvedValueOnce({ contacts: contactsFrom("all", 3), total: 3, nextCursor: "next" });
+      const { result, rerender } = renderPages({ bookId: "book-pixel8" });
+      await waitFor(() => expect(result.current.contacts).toHaveLength(3));
+
+      vi.mocked(bridge.list_contacts_page).mockResolvedValueOnce({ contacts: contactsFrom("hit", 1), total: 1 });
+      rerender({ bookId: "book-pixel8", query: "  river " });
+      expect(result.current.query).toBe("");
+
+      await waitFor(() => expect(result.current.query).toBe("river"));
+      await waitFor(() => expect(result.current.contacts.map(contact => contact.id)).toEqual(["hit-0"]));
+      expect(result.current.total).toBe(1);
+      expect(result.current.hasMore).toBe(false);
+      expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-pixel8", { sort: SORT, query: "river" });
+    });
+
+    it("clears the search at once and returns to the unfiltered list", async () => {
+      const { result, rerender } = renderPages({ bookId: "book-pixel8", query: "river" });
+      await waitFor(() => expect(result.current.query).toBe("river"));
+
+      rerender({ bookId: "book-pixel8", query: "" });
+
+      expect(result.current.query).toBe("");
+      await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenLastCalledWith("book-pixel8", { sort: SORT }));
+    });
+
+    it("discards a response for a superseded search", async () => {
+      const oldSearch = deferred<{ contacts: ContactView[]; total: number }>();
+      vi.mocked(bridge.list_contacts_page).mockReturnValueOnce(oldSearch.promise).mockResolvedValueOnce({ contacts: contactsFrom("ada", 1), total: 1 });
+      const { result, rerender } = renderPages({ bookId: "book-pixel8", query: "old" });
+      await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenCalledTimes(1));
+
+      rerender({ bookId: "book-pixel8", query: "ada" });
+
+      await waitFor(() => expect(result.current.contacts.map(contact => contact.id)).toEqual(["ada-0"]));
+      await act(async () => oldSearch.resolve({ contacts: contactsFrom("old", 5), total: 5 }));
+      expect(result.current.contacts.map(contact => contact.id)).toEqual(["ada-0"]);
+      expect(result.current.total).toBe(1);
+    });
   });
 });

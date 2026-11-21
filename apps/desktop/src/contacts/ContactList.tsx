@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
-import { ContactAvatar, Loader2, contactSeed, formatPhoneNumber } from "@peppy/desktop-ui";
+import { ContactAvatar, Loader2, Users, contactSeed, formatPhoneNumber } from "@peppy/desktop-ui";
 import type { ContactView } from "../bridge/bridge";
 import { editStateLabel } from "./contact-labels";
+import { SearchNoMatch } from "../search/SearchNoMatch";
 import { formatContactName, type ContactNameFormat } from "./contact-name-format";
 
 const SKELETON_ROWS = 10;
@@ -10,6 +11,7 @@ const PAGE_STEP = 10;
 /** Starts loading the next page while the sentinel is still this far below the visible list. */
 const LOAD_MORE_ROOT_MARGIN = "0px 0px 600px 0px";
 const countFormat = new Intl.NumberFormat();
+const NO_BOOKS_ANNOUNCEMENT = "No contact books.";
 
 export type ContactListProps = {
   contacts: ContactView[];
@@ -18,16 +20,26 @@ export type ContactListProps = {
   loadingMore: boolean;
   loadMoreError: string;
   hasMore: boolean;
+  /** The first page failed and no rows are shown: the empty list offers a retry instead of "no contacts". */
+  loadFailed: boolean;
   contactCount?: number;
   deviceName?: string;
+  /** The selected book's label from `bookLabels`, adding its ID when another book shares the device name. */
+  deviceLabel?: string;
   canWrite: boolean;
   /** The local projection is failed or waiting for repair; the empty list says so. */
   emptyFailed: boolean;
+  /** No contact book exists at all: the list area explains that instead of showing an empty book. */
+  noBooks: boolean;
   nameFormat: ContactNameFormat;
   selectedId?: string;
+  /** The search text the rows answer; an empty list under a search says nothing matched. */
+  query: string;
   onSelect(contact: ContactView): void;
   onLoadMore(): void;
   onRetryLoadMore(): void;
+  onRetryFirstPage(): void;
+  onClearQuery(): void;
 };
 
 function rowButtons(list: HTMLElement | null): HTMLButtonElement[] {
@@ -42,6 +54,17 @@ function emptyCopy({ emptyFailed, deviceName, canWrite }: Pick<ContactListProps,
   if (emptyFailed) return "Contacts couldn't be loaded yet.";
   if (!deviceName) return "No contacts in this book.";
   return canWrite ? `No contacts in ${deviceName}. Add one with New contact.` : `No contacts in ${deviceName}.`;
+}
+
+/** Shown instead of the list when no contact book exists; styled like the search no-match state, without actions. */
+function NoContactBooks() {
+  return (
+    <div id="contacts-no-books" className="search-no-match" data-empty-reason="no-books">
+      <Users size={32} aria-hidden />
+      <h2 tabIndex={-1}>No contact books yet</h2>
+      <p>Contacts appear here after a phone shares its contacts with Peppy.</p>
+    </div>
+  );
 }
 
 /** The one row that takes Tab: the focused row, else the selected row, else the first row. */
@@ -86,9 +109,10 @@ function ContactSkeleton() {
  * a single tab stop with roving focus, and the polite announcer for loads the user triggers from the keyboard.
  */
 export function ContactList({
-  contacts, loading, loadingMore, loadMoreError, hasMore, contactCount, deviceName, canWrite, emptyFailed,
-  nameFormat, selectedId, onSelect, onLoadMore, onRetryLoadMore,
+  contacts, loading, loadingMore, loadMoreError, hasMore, loadFailed, contactCount, deviceName, deviceLabel, canWrite, emptyFailed, noBooks,
+  nameFormat, selectedId, query, onSelect, onLoadMore, onRetryLoadMore, onRetryFirstPage, onClearQuery,
 }: ContactListProps) {
+  const searchedBook = deviceLabel ?? deviceName ?? "this book";
   const listRef = useRef<HTMLUListElement>(null);
   const sentinelRef = useRef<HTMLLIElement>(null);
   const pendingFocusIndex = useRef<number | undefined>(undefined);
@@ -104,10 +128,10 @@ export function ContactList({
       pendingFocusIndex.current = undefined;
       setAnnouncement("Loading contacts.");
     } else if (wasLoading.current) {
-      setAnnouncement(loadedAnnouncement(loadedCount, total));
+      setAnnouncement(noBooks ? NO_BOOKS_ANNOUNCEMENT : loadedAnnouncement(loadedCount, total));
     }
     wasLoading.current = loading;
-  }, [loading, loadedCount, total]);
+  }, [loading, loadedCount, total, noBooks]);
 
   // A load started from the keyboard moves focus to its first new row once that row exists.
   useEffect(() => {
@@ -118,10 +142,12 @@ export function ContactList({
     setAnnouncement(loadedAnnouncement(loadedCount, total));
   }, [loadedCount, total]);
 
+  // A keyboard load that can no longer deliver rows must not move focus later, when some other load adds them.
   useEffect(() => {
-    if (loadMoreError) pendingFocusIndex.current = undefined;
-  }, [loadMoreError]);
+    if (!hasMore || loadMoreError) pendingFocusIndex.current = undefined;
+  }, [hasMore, loadMoreError]);
 
+  // Rebuilt after every change to the rows: a refresh swaps them in, and a sentinel still in view then reports again.
   useEffect(() => {
     const sentinel = sentinelRef.current;
     if (!sentinel || typeof IntersectionObserver === "undefined" || !hasMore || loadingMore || loadMoreError) return;
@@ -130,7 +156,7 @@ export function ContactList({
     }, { root: listRef.current, rootMargin: LOAD_MORE_ROOT_MARGIN });
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasMore, loadingMore, loadMoreError, onLoadMore]);
+  }, [contacts, hasMore, loadingMore, loadMoreError, onLoadMore]);
 
   const handleKeyDown = (event: KeyboardEvent<HTMLUListElement>) => {
     const rows = rowButtons(listRef.current);
@@ -138,7 +164,7 @@ export function ContactList({
     if (index < 0) return;
     if (event.key === "ArrowDown" && index === rows.length - 1) {
       event.preventDefault();
-      if (hasMore) {
+      if (hasMore && !loadMoreError) {
         pendingFocusIndex.current = rows.length;
         onLoadMore();
       }
@@ -155,12 +181,23 @@ export function ContactList({
     if (id) setFocusedId(id);
   };
 
+  const announcer = <p id="contacts-announcer" className="visually-hidden" role="status" aria-live="polite">{announcement}</p>;
+  if (noBooks) {
+    return (
+      <>
+        <NoContactBooks />
+        {announcer}
+      </>
+    );
+  }
+
   return (
     <>
       {loading && <ContactSkeleton />}
       <ul
         id="contacts-list"
         ref={listRef}
+        tabIndex={-1}
         aria-label={deviceName ? `Contacts in ${deviceName}` : "Contacts"}
         aria-busy={loading}
         onKeyDown={handleKeyDown}
@@ -196,11 +233,16 @@ export function ContactList({
             </li>
           );
         })}
-        {!loading && contacts.length === 0 && (
+        {!loading && contacts.length === 0 && (loadFailed ? (
+          <li id="contacts-empty-state" data-empty-reason="load-failed">
+            <span>Couldn't load contacts.</span>
+            <button type="button" data-action="retry-first-page" onClick={onRetryFirstPage}>Try again</button>
+          </li>
+        ) : query ? null : (
           <li id="contacts-empty-state" data-empty-reason={emptyFailed ? "failed" : "none"}>
             {emptyCopy({ emptyFailed, deviceName, canWrite })}
           </li>
-        )}
+        ))}
         {loadingMore && (
           <li id="contacts-list-more" data-more-state="loading">
             <Loader2 className="busy-indicator-icon" size={14} aria-hidden />
@@ -215,7 +257,10 @@ export function ContactList({
         )}
         <li id="contacts-list-sentinel" ref={sentinelRef} aria-hidden="true" />
       </ul>
-      <p id="contacts-announcer" className="visually-hidden" role="status" aria-live="polite">{announcement}</p>
+      {!loading && contacts.length === 0 && !loadFailed && query && (
+        <SearchNoMatch id="contacts-no-match" noun="contacts" query={query} hint={`Searching ${searchedBook} only. Search covers names, phone numbers, email addresses and organizations.`} onClearQuery={onClearQuery} />
+      )}
+      {announcer}
     </>
   );
 }

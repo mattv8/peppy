@@ -110,12 +110,14 @@ import {
 import { useMaximizeButtonRegion } from "./shell/useMaximizeButtonRegion";
 import { dismissibleNotifications, notificationAppName, notificationMuteKey, notificationSourceName, NotificationsView, notificationTuple, visibleNotifications } from "./notifications/Notifications";
 import { useNotificationSearch } from "./notifications/useNotificationSearch";
+import { useScopedSearch } from "./search/useScopedSearch";
 import { NotificationMuteNotice, type NotificationMuteNotice as NotificationMuteNoticeState } from "./notifications/NotificationMuteNotice";
 import { createNotificationActivationDrain, nativeNotificationActivation, type ActivationContext } from "./notifications/notificationActivation";
 import type { NotificationActivation, NotificationActivationTarget } from "@peppy/generated/notification-activation";
 import { NotificationSettings } from "./notifications/NotificationSettings";
 import { DefinitivePreEditRefusal, NotificationReplyRecovery } from "./notifications/NotificationReplyRecovery";
 import { ContactsView, type ContactNavigationGuard, type ContactTarget } from "./contacts/Contacts";
+import { COMPACT_BOOK_LIST_QUERY, useMediaMatch } from "./contacts/useMediaMatch";
 import { findContactTarget } from "./contacts/contact-target";
 import { useHistorySearch } from "./search/useHistorySearch";
 import { DevicesSettings } from "./settings/DevicesSettings";
@@ -2558,15 +2560,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   );
   const [contactTarget, setContactTarget] = useState<(ContactTarget & { requestId: number })>();
   const [contactsBookCollapsed, setContactsBookCollapsed] = useState(readContactsBookCollapsed);
-  const [compactContacts, setCompactContacts] = useState(() => window.matchMedia?.("(max-width: 700px)").matches ?? false);
-  useEffect(() => {
-    const media = window.matchMedia?.("(max-width: 700px)");
-    if (!media) return;
-    const update = () => setCompactContacts(media.matches);
-    update();
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
-  }, []);
+  const compactContacts = useMediaMatch(COMPACT_BOOK_LIST_QUERY);
+  const setContactsBookCollapsedPersisted = (collapsed: boolean) => {
+    setContactsBookCollapsed(collapsed);
+    persistLayoutPatch({ contactsBookCollapsed: collapsed });
+  };
   const contactTargetRequestId = useRef(0);
   const contactNavigation = useRef<ContactNavigationGuard | null>(null);
   const notificationNavigationEpoch = useRef(0);
@@ -3551,6 +3549,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const openContactTarget = async (target: ContactTarget & { requestId: number }, failurePrefix = "Search result not opened") => {
     const navigation = await flushBeforeNavigation(failurePrefix);
     if (!navigation || !navigation.isCurrent()) return false;
+    resetContactSearch();
+    resetConversationSearch();
     setActiveViewNow("contacts");
     setContactTarget(target);
     return true;
@@ -3894,8 +3894,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setNotificationMutePending(false);
     setNotificationAppFilter(null);
     resetNotificationSearch();
+    resetContactSearch();
+    resetConversationSearch();
     setNotificationMuteNotice(undefined);
   }, [renderedSearchSessionKey, loading, appLock?.locked]);
+  useEffect(() => {
+    if (activeView !== "contacts") resetContactSearch();
+    if (activeView !== "conversations") resetConversationSearch();
+  }, [activeView]);
   useEffect(() => {
     if (activeView === "notifications") return;
     notificationFocusContext.current = undefined;
@@ -4603,7 +4609,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   ) => {
     const result = await findContactTarget(
       { bookId: hit.bookId, contactId: hit.contactId },
-      bridge.list_contacts,
+      bridge.list_contacts_page,
       signal,
     );
     if (signal.aborted) return [];
@@ -5536,6 +5542,21 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       navigateNotificationSearch(undefined);
     },
   });
+  const { query: contactQuery, setQuery: setContactQuery, scope: contactSearchScope, resetSearch: resetContactSearch } = useScopedSearch({
+    active: contactsOpen,
+    locked: !snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked),
+    label: "Contacts",
+    placeholder: "Search contacts",
+  });
+  const { scope: conversationSearchScope, resetSearch: resetConversationSearch } = useScopedSearch({
+    active: !revoked && activeView === "conversations",
+    locked: !snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked),
+    label: "Conversations",
+    placeholder: "Search conversations and messages",
+    mode: "results",
+  });
+  // Only one tab is active, so at most one scope exists.
+  const titleSearchScope = notificationSearchScope ?? contactSearchScope ?? conversationSearchScope;
 
   const accountIdentityKey = snapshot ? `${snapshot.connection.origin ?? ""}|${snapshot.sessionScopeId ?? ""}` : null;
   const accountNotice = useAccountNotice(accountIdentityKey);
@@ -6472,12 +6493,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         onClose={browserHost ? undefined : () => void closeAfterSave(() => bridge.window("close"))}
         platform={platform}
         nativeWindowControls={!browserHost && platform === "macos"}
-        search={<OmniSearch onSearch={searchLocal} onActivate={activateSearchHit} resolveContactNumbers={resolveOmniContactNumbers} onStartConversation={startOmniConversation} sessionKey={searchSessionKey} disabled={searchDisabled} refreshKey={mediaStateHint} historySearch={historyControls.historySearch} onSearchFurtherBack={historyControls.onSearchFurtherBack} onCancelHistorySearch={historyControls.onCancelHistorySearch} onOpenChange={setHistorySearchVisible} scope={notificationSearchScope} notificationResults={notificationSearchScope ? undefined : notificationResults} />}
-        onToggleSidebar={activeView === "contacts" && !compactContacts ? () => {
-          const collapsed = !contactsBookCollapsed;
-          setContactsBookCollapsed(collapsed);
-          persistLayoutPatch({ contactsBookCollapsed: collapsed });
-        } : toggleConversationList}
+        search={<OmniSearch showContactBook={(snapshot?.contactBooks?.length ?? 0) > 1} onSearch={searchLocal} onActivate={activateSearchHit} resolveContactNumbers={resolveOmniContactNumbers} onStartConversation={startOmniConversation} sessionKey={searchSessionKey} disabled={searchDisabled} refreshKey={mediaStateHint} historySearch={historyControls.historySearch} onSearchFurtherBack={historyControls.onSearchFurtherBack} onCancelHistorySearch={historyControls.onCancelHistorySearch} onOpenChange={setHistorySearchVisible} scope={titleSearchScope} notificationResults={titleSearchScope ? undefined : notificationResults} />}
+        onToggleSidebar={activeView === "contacts" && !compactContacts ? () => setContactsBookCollapsedPersisted(!contactsBookCollapsed) : toggleConversationList}
         sidebarExpanded={activeView === "contacts" && !compactContacts ? !contactsBookCollapsed : narrowConversationListMode ? showingMobileConversationList : activeView === "conversations" && !listCollapsed}
         sidebarControls={activeView === "contacts" && !compactContacts ? "contacts-book-list" : "thread-list"}
         sidebarLabel={activeView === "contacts" && !compactContacts ? "Toggle contact books" : undefined}
@@ -6903,7 +6920,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onAppFilter={setNotificationAppFilter}
             />
           ) : contactsOpen ? (
-            <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} writesPaused={isWritesPaused(snapshot)} pauseNoticeVisible={updateNoticeVisible} onUpdateInProgress={() => { void refresh().catch(reportRefresh("")); }} toneOverrides={toneOverrides} toneDisabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked) || isWritesPaused(snapshot)} pendingToneSeeds={pendingToneSeeds} toneErrors={toneErrors} onSelectTone={(seed, index) => { void saveTone(seed, index); }} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} bookCollapsed={contactsBookCollapsed} onBookCollapsedChange={(collapsed) => { setContactsBookCollapsed(collapsed); persistLayoutPatch({ contactsBookCollapsed: collapsed }); }} />
+            <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} writesPaused={isWritesPaused(snapshot)} pauseNoticeVisible={updateNoticeVisible} onUpdateInProgress={() => { void refresh().catch(reportRefresh("")); }} toneOverrides={toneOverrides} toneDisabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked) || isWritesPaused(snapshot)} pendingToneSeeds={pendingToneSeeds} toneErrors={toneErrors} onSelectTone={(seed, index) => { void saveTone(seed, index); }} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} bookCollapsed={contactsBookCollapsed} onBookCollapsedChange={setContactsBookCollapsedPersisted} query={contactQuery} onClearQuery={() => setContactQuery("")} />
           ) : (
             <>
               {reenrolRequired && !revoked ? (

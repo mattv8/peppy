@@ -71,6 +71,7 @@ const COMMANDS: &[&str] = &[
     "open_notification_settings",
     "list_contact_books",
     "list_contacts",
+    "list_contacts_page",
     "forget_contact_book",
     "set_contact_book_lookup",
     "list_contact_name_candidates",

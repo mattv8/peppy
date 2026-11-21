@@ -1,85 +1,39 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import type { ContactView } from "../bridge/bridge";
-import { CONTACTS_PAGE_SIZE, MAX_TARGET_LOOKUP_PAGES, findContactTarget } from "./contact-target";
+import { findContactTarget } from "./contact-target";
 
 const contact = { id: "target", bookId: "book", revision: "1", displayName: "Target", phones: [], emails: [], addresses: [] } satisfies ContactView;
+const sort = { key: "given", direction: "desc" } as const;
 
 describe("findContactTarget", () => {
-  it("finds the exact contact in a later page of its requested book", async () => {
-    const firstPage = Array.from({ length: CONTACTS_PAGE_SIZE }, (_, index) => ({ ...contact, id: `contact-${index}` }));
-    const listContacts = vi.fn().mockResolvedValueOnce(firstPage).mockResolvedValueOnce([contact]);
-
-    await expect(findContactTarget({ bookId: "book", contactId: "target" }, listContacts, new AbortController().signal)).resolves.toEqual({
-      state: "found",
-      contact,
-      contacts: [...firstPage, contact],
-    });
-    expect(listContacts).toHaveBeenNthCalledWith(2, "book", "", CONTACTS_PAGE_SIZE, { key: "family", direction: "asc" });
+  it("looks through the target in one call and preserves continuation", async () => {
+    const list = vi.fn().mockResolvedValue({ contacts: [contact], total: 10, nextCursor: "next", throughFound: true });
+    await expect(findContactTarget({ bookId: "book", contactId: "target" }, list, new AbortController().signal, undefined, sort))
+      .resolves.toEqual({ state: "found", contact, contacts: [contact], total: 10, nextCursor: "next" });
+    expect(list).toHaveBeenCalledOnce();
+    expect(list).toHaveBeenCalledWith("book", { through: "target", sort });
   });
 
-  it("returns every fetched page up to the target so the list can show them all", async () => {
-    const firstPage = Array.from({ length: CONTACTS_PAGE_SIZE }, (_, index) => ({ ...contact, id: `contact-${index}` }));
-    const secondPage = Array.from({ length: CONTACTS_PAGE_SIZE }, (_, index) => ({ ...contact, id: `contact-${CONTACTS_PAGE_SIZE + index}` }));
-    const listContacts = vi.fn().mockResolvedValueOnce(firstPage).mockResolvedValueOnce(secondPage).mockResolvedValueOnce([contact]);
-
-    const result = await findContactTarget({ bookId: "book", contactId: "target" }, listContacts, new AbortController().signal);
-
-    expect(result).toMatchObject({ state: "found", contact });
-    expect(result.state === "found" && result.contacts).toEqual([...firstPage, ...secondPage, contact]);
+  it("reports missing targets and capped lookups separately", async () => {
+    const list = vi.fn().mockResolvedValueOnce({ contacts: [], total: 0, throughFound: false })
+      .mockResolvedValueOnce({ contacts: Array.from({ length: 200 }, () => contact), total: 2500, throughFound: false })
+      .mockResolvedValueOnce({ contacts: Array.from({ length: 150 }, () => contact), total: 150, throughFound: false });
+    const target = { bookId: "book", contactId: "missing" };
+    await expect(findContactTarget(target, list, new AbortController().signal)).resolves.toEqual({ state: "unavailable" });
+    await expect(findContactTarget(target, list, new AbortController().signal)).resolves.toEqual({ state: "oversized" });
+    await expect(findContactTarget(target, list, new AbortController().signal)).resolves.toEqual({ state: "unavailable" });
   });
 
-  it("does not apply a contact page after cancellation", async () => {
+  it("discards results after cancellation or book removal", async () => {
     const controller = new AbortController();
-    const listContacts = vi.fn(async () => {
+    const list = vi.fn(async () => {
       controller.abort();
-      return [contact];
+      return { contacts: [contact], total: 1, throughFound: true };
     });
-
-    await expect(findContactTarget({ bookId: "book", contactId: "target" }, listContacts, controller.signal)).resolves.toEqual({ state: "cancelled" });
-  });
-
-  it("reports an unavailable exact target after the final short page", async () => {
-    const listContacts = vi.fn().mockResolvedValue([]);
-
-    await expect(findContactTarget({ bookId: "book", contactId: "missing" }, listContacts, new AbortController().signal)).resolves.toEqual({ state: "unavailable" });
-  });
-
-  it("reports an oversized book after the bounded exact lookup", async () => {
-    const fullPage = Array.from({ length: CONTACTS_PAGE_SIZE }, (_, index) => ({ ...contact, id: `contact-${index}` }));
-    const listContacts = vi.fn().mockResolvedValue(fullPage);
-
-    await expect(findContactTarget({ bookId: "book", contactId: "missing" }, listContacts, new AbortController().signal)).resolves.toEqual({ state: "oversized" });
-    expect(listContacts).toHaveBeenCalledTimes(MAX_TARGET_LOOKUP_PAGES);
-  });
-
-  it("stops a paged lookup when its book disappears between pages", async () => {
-    const firstPage = Array.from({ length: CONTACTS_PAGE_SIZE }, (_, index) => ({ ...contact, id: `contact-${index}` }));
-    let available = true;
-    const listContacts = vi.fn(async () => {
-      available = false;
-      return firstPage;
-    });
-
-    await expect(findContactTarget({ bookId: "book", contactId: "target" }, listContacts, new AbortController().signal, () => available)).resolves.toEqual({ state: "cancelled" });
-    expect(listContacts).toHaveBeenCalledOnce();
-  });
-
-  it("keeps the displayed sort while walking pages", async () => {
-    const listContacts = vi.fn().mockResolvedValue([contact]);
-    const sort = { key: "given" as const, direction: "desc" as const };
-    await findContactTarget({ bookId: "book", contactId: "target" }, listContacts, new AbortController().signal, undefined, sort);
-    expect(listContacts).toHaveBeenCalledWith("book", "", 0, sort);
-  });
-
-  it("uses the same sort for every page of a multi-page target lookup", async () => {
-    const firstPage = Array.from({ length: CONTACTS_PAGE_SIZE }, (_, index) => ({ ...contact, id: `contact-${index}` }));
-    const sort = { key: "given" as const, direction: "desc" as const };
-    const listContacts = vi.fn().mockResolvedValueOnce(firstPage).mockResolvedValueOnce([contact]);
-
-    await findContactTarget({ bookId: "book", contactId: "target" }, listContacts, new AbortController().signal, undefined, sort);
-
-    expect(listContacts).toHaveBeenNthCalledWith(1, "book", "", 0, sort);
-    expect(listContacts).toHaveBeenNthCalledWith(2, "book", "", CONTACTS_PAGE_SIZE, sort);
+    await expect(findContactTarget({ bookId: "book", contactId: "target" }, list, controller.signal)).resolves.toEqual({ state: "cancelled" });
+    const removed = vi.fn(async () => ({ contacts: [contact], total: 1, throughFound: true }));
+    await expect(findContactTarget({ bookId: "book", contactId: "target" }, removed, new AbortController().signal, () => false)).resolves.toEqual({ state: "cancelled" });
+    expect(removed).not.toHaveBeenCalled();
   });
 });

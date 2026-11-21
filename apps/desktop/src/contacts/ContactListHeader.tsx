@@ -29,11 +29,18 @@ function contactCountText(booksLoaded: boolean, book: ContactBookView | undefine
   return `${countFormat.format(count)} contacts`;
 }
 
+/** Count text while a search is active; `matchCount` is undefined until its first page lands. */
+function searchCountText(query: string, matchCount: number | undefined): string {
+  if (matchCount === undefined) return "Searching contacts…";
+  if (matchCount === 1) return `1 contact matches “${query}”`;
+  return `${countFormat.format(matchCount)} contacts match “${query}”`;
+}
+
 /**
  * Header of the contact list column: the selected book (a select when the rail is hidden), its contact count,
- * and the list actions passed as children.
+ * and the list actions passed as children. A search replaces the count with its match count.
  */
-export function ContactListHeader({ books, bookId, booksLoaded, railVisible, loaded, loadingMore, onSelectBook, children }: {
+export function ContactListHeader({ books, bookId, booksLoaded, railVisible, loaded, loadingMore, query, matchCount, onSelectBook, children }: {
   books: ContactBookView[];
   bookId: string;
   booksLoaded: boolean;
@@ -41,15 +48,21 @@ export function ContactListHeader({ books, bookId, booksLoaded, railVisible, loa
   /** Rows loaded so far in the list. */
   loaded: number;
   loadingMore: boolean;
+  /** The active search text; empty when the list is unfiltered. */
+  query: string;
+  /** Contacts the active search matches. */
+  matchCount?: number;
   onSelectBook(bookId: string): void;
   children: ReactNode;
 }) {
   const book = books.find(item => item.id === bookId);
   const { label } = bookLabels(books);
   const showSelector = !railVisible && books.length >= 2;
+  // Books have loaded and there are none: the header is just "Contacts", with no count.
+  const noBooks = booksLoaded && books.length === 0;
   const total = book?.contactCount;
   const delayedLoadingMore = useDelayedFlag(loadingMore, COUNT_PROGRESS_DELAY_MS);
-  const progressTotal = delayedLoadingMore && total !== undefined && loaded > 0 && loaded <= total ? total : undefined;
+  const progressTotal = !query && delayedLoadingMore && total !== undefined && loaded > 0 && loaded <= total ? total : undefined;
   return (
     <header id="contacts-list-header">
       <div id="contacts-list-heading">
@@ -60,16 +73,18 @@ export function ContactListHeader({ books, bookId, booksLoaded, railVisible, loa
             ))}
           </select>
         ) : (
-          <h2 id="contacts-list-title">{book ? label(book) : "Contact book"}</h2>
+          <h2 id="contacts-list-title" tabIndex={-1}>{book ? label(book) : noBooks ? "Contacts" : "Contact book"}</h2>
         )}
-        <span id="contacts-count" data-count-state={progressTotal !== undefined ? "progress" : booksLoaded ? "known" : "loading"}>
-          {progressTotal !== undefined ? (
-            <>
-              {`${countFormat.format(loaded)} of ${countFormat.format(progressTotal)} contacts`}
-              <progress id="contacts-count-bar" aria-label="Loading contacts" value={loaded} max={progressTotal} />
-            </>
-          ) : contactCountText(booksLoaded, book)}
-        </span>
+        {!noBooks && (
+          <span id="contacts-count" data-count-state={query ? "search" : progressTotal !== undefined ? "progress" : booksLoaded ? "known" : "loading"}>
+            {query ? searchCountText(query, matchCount) : progressTotal !== undefined ? (
+              <>
+                {`${countFormat.format(loaded)} of ${countFormat.format(progressTotal)} contacts`}
+                <progress id="contacts-count-bar" aria-label="Loading contacts" value={loaded} max={progressTotal} />
+              </>
+            ) : contactCountText(booksLoaded, book)}
+          </span>
+        )}
       </div>
       {children}
     </header>

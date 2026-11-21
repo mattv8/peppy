@@ -1446,3 +1446,122 @@ fn legacy_state_applied_after_unlock_during_staging_survives_promotion() {
     assert_eq!(shown(&unlocked_client), ["c1", "c2", "c3", "n1"]);
     assert_eq!(muted(&unlocked_client, "com.example.news"), Some(true));
 }
+
+/// The owner's authoritative full scan observes exactly `contacts`: unobserved rows are deleted
+/// and observed rows take their supplied bodies.
+fn replace_contacts(owner: &Client, book_id: &str, scan: &str, contacts: Vec<Value>) {
+    call(owner.begin_contact_scan(
+        &json!({"schema_version": 1, "scan_id": scan, "book_id": book_id, "generation": "1", "access": "full", "authoritative": true}).to_string(),
+    ));
+    for contact in contacts {
+        owner
+            .observe_contact_scan(
+                &json!({"schema_version": 1, "scan_id": scan, "contact": contact}).to_string(),
+            )
+            .unwrap();
+    }
+    let done = call(owner.finish_contact_scan(
+        &json!({"schema_version": 1, "scan_id": scan, "complete": true}).to_string(),
+    ));
+    assert_eq!(done["deletions_applied"], true, "{done}");
+}
+
+#[test]
+fn snapshot_promotion_between_cursor_pages_keeps_keyset_order() {
+    let mut p = pair();
+    let b = book(&p.owner_cfg, BOOK);
+    capture(
+        &p.owner,
+        &b,
+        ["a:Ada", "b:Bea", "c:Cy", "d:Dee", "e:Eve"]
+            .iter()
+            .map(|entry| {
+                let (id, given) = entry.split_once(':').unwrap();
+                contact(BOOK, id, given)
+            })
+            .collect(),
+    );
+    p.server.upload(&p.owner);
+    p.server.sync(&p.peer);
+    settle(&p.peer);
+
+    let sort = json!({"key": "given", "direction": "asc"});
+    let page = |after: Option<Value>| -> Value {
+        let mut input = json!({"schema_version": 1, "book_id": BOOK, "sort": sort, "limit": 2});
+        if let Some(cursor) = after {
+            input["after"] = cursor;
+        }
+        call(p.peer.contact_book_view(&input.to_string()))
+    };
+    let ids_of = |output: &Value| -> Vec<String> {
+        output["contacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    // The first page ends at "b" (Bea), the cursor boundary.
+    let first = page(None);
+    assert_eq!(ids_of(&first), ["a", "b"]);
+    assert_eq!(first["total"], 5);
+    let cursor = first["next_cursor"].clone();
+    assert!(cursor.is_string());
+
+    // The owner deletes the boundary row "b", moves "d" from after the boundary to before it,
+    // and inserts "f" after it. The changes are published as one authoritative scan and then
+    // promoted from a full snapshot while the peer is mid-pagination.
+    replace_contacts(
+        &p.owner,
+        BOOK,
+        "scan-boundary",
+        ["a:Ada", "c:Cy", "d:Aaron", "e:Eve", "f:Fay"]
+            .iter()
+            .map(|entry| {
+                let (id, given) = entry.split_once(':').unwrap();
+                contact(BOOK, id, given)
+            })
+            .collect(),
+    );
+    p.server.upload(&p.owner);
+    let log = full(&p.server.log);
+    import(&p.peer, &log, p.server.log.len(), Some(7));
+    settle(&p.peer);
+    assert_eq!(
+        state(&p.peer),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+
+    // Rows sorting after the cursor key ("Bea") in the promoted state.
+    let promoted = call(p.peer.contact_book_view(
+        &json!({"schema_version": 1, "book_id": BOOK, "sort": sort, "limit": 200}).to_string(),
+    ));
+    assert_eq!(promoted["total"], 5);
+    let expected: Vec<String> = promoted["contacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["name"]["given"].as_str().unwrap() > "Bea")
+        .map(|row| row["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(expected, ["c", "e", "f"]);
+
+    // Continue with the pre-promotion cursor and walk the rest of the book.
+    let mut returned = ids_of(&first);
+    let mut after = cursor;
+    loop {
+        let output = page(Some(after.clone()));
+        assert_eq!(output["total"], 5);
+        let ids = ids_of(&output);
+        for id in &ids {
+            assert!(!returned.contains(id), "{id} was returned twice");
+        }
+        returned.extend(ids);
+        if output["next_cursor"].is_null() {
+            break;
+        }
+        after = output["next_cursor"].clone();
+    }
+    assert_eq!(returned[2..], expected[..]);
+}

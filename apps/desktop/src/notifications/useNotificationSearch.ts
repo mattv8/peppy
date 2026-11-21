@@ -1,6 +1,7 @@
-import { useMemo, useRef, useState } from "react";
-import { formatDateTime, formatElapsedShort, type OmniNotificationResults, type OmniSearchScope } from "@peppy/desktop-ui";
+import { useMemo, useRef } from "react";
+import { formatDateTime, formatElapsedShort, type OmniNotificationResults } from "@peppy/desktop-ui";
 import type { AppFilter, MirroredNotification } from "../bridge/bridge";
+import { useScopedSearch } from "../search/useScopedSearch";
 import { notificationAppName, notificationSourceName, visibleNotifications } from "./Notifications";
 import { highlightSegments, notificationSearchTerms, searchNotifications } from "./notificationSearch";
 import { notificationKey } from "./notificationSections";
@@ -23,8 +24,12 @@ type UseNotificationSearchOptions = {
 export function useNotificationSearch({
   active, locked, notifications, filters, sources, displayTitle, onOpenHit, onShowAll, onUnavailable,
 }: UseNotificationSearchOptions) {
-  const [notificationQuery, setNotificationQuery] = useState("");
-  const [scoped, setScoped] = useState(true);
+  const { query: notificationQuery, setQuery: setNotificationQuery, scope, resetSearch } = useScopedSearch({
+    active,
+    locked,
+    label: "Notifications",
+    placeholder: "Search notifications",
+  });
   const targets = useRef(new Map<string, MirroredNotification["target"]>());
   const onOpenHitRef = useRef(onOpenHit);
   const onShowAllRef = useRef(onShowAll);
@@ -32,10 +37,6 @@ export function useNotificationSearch({
   onOpenHitRef.current = onOpenHit;
   onShowAllRef.current = onShowAll;
   onUnavailableRef.current = onUnavailable;
-  const resetSearch = () => {
-    setScoped(true);
-    setNotificationQuery("");
-  };
   const notificationResults = useMemo<OmniNotificationResults | undefined>(() => {
     if (locked) return undefined;
     const visible = visibleNotifications(notifications, filters, false);
@@ -75,19 +76,5 @@ export function useNotificationSearch({
       onShowAll: query => onShowAllRef.current(query),
     };
   }, [displayTitle, filters, locked, notifications, sources]);
-  const scope = useMemo<OmniSearchScope | undefined>(() => (
-    active && scoped && !locked
-      ? {
-        label: "Notifications",
-        placeholder: "Search notifications",
-        query: notificationQuery,
-        onQueryChange: setNotificationQuery,
-        onExit: () => {
-          setScoped(false);
-          setNotificationQuery("");
-        },
-      }
-      : undefined
-  ), [active, locked, notificationQuery, scoped]);
   return { notificationQuery, setNotificationQuery, notificationResults, resetSearch, scope };
 }

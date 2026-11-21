@@ -26,10 +26,9 @@ const openNotifications = async () => {
 };
 
 const leaveScopeAndSearch = async (query = "searchable") => {
-  const scopeExit = screen.queryByRole("button", { name: "Search everything, not just Notifications" });
-  if (scopeExit) fireEvent.click(scopeExit);
   const input = screen.getByRole("combobox", { name: "Search Peppy" });
   await waitFor(() => expect(input).not.toBeDisabled());
+  fireEvent.click(await screen.findByRole("button", { name: "Search everything, not just Conversations" }));
   fireEvent.change(input, { target: { value: query } });
   await screen.findByText(/Show all \d+ in Notifications/);
 };

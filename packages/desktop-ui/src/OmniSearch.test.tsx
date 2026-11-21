@@ -3,9 +3,32 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { historyPresentation, OmniSearch } from "./OmniSearch";
-import type { OmniNotificationResults, OmniSearchScope } from "./OmniSearch";
+import type { OmniNotificationResults, OmniSearchProps, OmniSearchScope } from "./OmniSearch";
 import type { HistorySearchSnapshot, LocalSearchHit, LocalSearchPage } from "./bridge-contracts";
 import { formatDateTime } from "./datetime";
+
+type ContactHit = Extract<LocalSearchHit, { kind: "contact" }>;
+
+const contactHit = (overrides: Partial<Omit<ContactHit, "kind">> = {}): LocalSearchHit => ({
+  kind: "contact",
+  bookId: "book",
+  contactId: "contact",
+  title: "Ada Lovelace",
+  subtitle: "Legacy subtitle",
+  phones: [],
+  phoneCount: 0,
+  ...overrides,
+});
+
+async function openContactResults(hit: LocalSearchHit, props: Partial<OmniSearchProps> = {}, query = "ada"): Promise<HTMLElement> {
+  vi.useFakeTimers();
+  render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [hit])} {...props} />);
+  fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value: query } });
+  await act(async () => { vi.advanceTimersByTime(100); await Promise.resolve(); });
+  const row = document.querySelector<HTMLElement>("[data-omni-contact-hit]");
+  if (!row) throw new Error("contact row not rendered");
+  return row;
+}
 
 const page = (query: string, items: LocalSearchHit[] = [{ kind: "conversation", conversationId: "c1", title: "Aurora", subtitle: "Recent" }]) => ({
   query,
@@ -46,6 +69,110 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+it("scopes dropdown results to conversations and restores everything on exit", async () => {
+  vi.useFakeTimers();
+  const notificationResults: OmniNotificationResults = {
+    search: () => ({ hits: [{ key: "alert", appName: "Slack", title: [{ text: "Alert", match: false }], snippet: [] }], total: 1 }),
+    onActivate: vi.fn(),
+    onShowAll: vi.fn(),
+  };
+  const onSearch = vi.fn(async (request) => ({
+    ...page(request.query, [
+      { kind: "conversation", conversationId: "c1", title: "Aurora", subtitle: "Recent" },
+      { kind: "message", conversationId: "c1", messageId: "m1", title: "Found message", snippet: "Body", timestamp: "Now" },
+      contactHit(),
+    ]),
+    hasMore: { conversation: false, message: false, contact: true },
+  }));
+  const props = { sessionKey: "one", onActivate: vi.fn(), onSearch, notificationResults };
+  const scope = { mode: "results" as const, label: "Conversations", placeholder: "Search conversations and messages", onExit: vi.fn() };
+  const { rerender } = render(<OmniSearch {...props} scope={scope} />);
+  const input = screen.getByRole("combobox", { name: "Search Peppy" });
+  expect(screen.getByRole("button", { name: "Search everything, not just Conversations" })).toHaveAttribute("data-omni-scope");
+  fireEvent.change(input, { target: { value: "aurora" } });
+  await act(async () => { vi.advanceTimersByTime(100); });
+  expect(screen.getByText("Aurora")).toBeInTheDocument();
+  expect(screen.getByText("Found message")).toBeInTheDocument();
+  expect(screen.queryByText("Ada Lovelace")).not.toBeInTheDocument();
+  expect(screen.queryByRole("group", { name: "Contacts" })).not.toBeInTheDocument();
+  expect(screen.queryByText("Alert")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Search everything, not just Conversations" }));
+  expect(scope.onExit).toHaveBeenCalled();
+  rerender(<OmniSearch {...props} />);
+  await act(async () => { vi.advanceTimersByTime(100); });
+  expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
+  expect(screen.getByText("Alert")).toBeInTheDocument();
+});
+
+it("resets the results scroll to the top when the query changes", async () => {
+  vi.useFakeTimers();
+  render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, conversationHits(12))} />);
+  const input = screen.getByRole("combobox", { name: "Search Peppy" });
+  fireEvent.change(input, { target: { value: "conv" } });
+  await act(async () => { vi.advanceTimersByTime(100); });
+  const results = document.querySelector<HTMLElement>("[data-omni-search-results]")!;
+  results.scrollTop = 120;
+  fireEvent.change(input, { target: { value: "conversation" } });
+  expect(results.scrollTop).toBe(0);
+});
+
+it("starts the results at the top after exiting a scope chip", async () => {
+  vi.useFakeTimers();
+  const onSearch = async (request: { query: string }) => page(request.query, conversationHits(12));
+  const scope = { mode: "results" as const, label: "Conversations", placeholder: "Search conversations and messages", onExit: vi.fn() };
+  const { rerender } = render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={onSearch} />);
+  const input = screen.getByRole("combobox", { name: "Search Peppy" });
+  fireEvent.change(input, { target: { value: "conv" } });
+  await act(async () => { vi.advanceTimersByTime(100); });
+  document.querySelector<HTMLElement>("[data-omni-search-results]")!.scrollTop = 120;
+
+  rerender(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={onSearch} scope={scope} />);
+  input.focus();
+  rerender(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={onSearch} />);
+
+  const results = document.querySelector<HTMLElement>("[data-omni-search-results]");
+  expect(results).not.toBeNull();
+  expect(results!.scrollTop).toBe(0);
+});
+
+it("says no conversations or messages match in a results scope that shows only a number candidate", async () => {
+  vi.useFakeTimers();
+  const props = {
+    sessionKey: "one",
+    onActivate: () => {},
+    onSearch: async (request: { query: string }) => page(request.query, []),
+    onStartConversation: async () => true,
+  };
+  const scope = { mode: "results" as const, label: "Conversations", placeholder: "Search conversations and messages", onExit: vi.fn() };
+  const { rerender } = render(<OmniSearch {...props} scope={scope} />);
+  fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value: "+14155552671" } });
+  await act(async () => { vi.advanceTimersByTime(100); });
+  expect(screen.getByRole("option", { name: /Start conversation with/ })).toBeInTheDocument();
+  expect(screen.getByText("No conversations or messages match.")).toBeInTheDocument();
+  expect(screen.queryByText("No matches.")).not.toBeInTheDocument();
+
+  rerender(<OmniSearch {...props} />);
+  await act(async () => { vi.advanceTimersByTime(100); });
+  expect(screen.queryByText("No conversations or messages match.")).not.toBeInTheDocument();
+  expect(screen.queryByText("No matches.")).not.toBeInTheDocument();
+});
+
+it("exits a results scope with Backspace on empty", () => {
+  const onExit = vi.fn();
+  render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async request => page(request.query)} scope={{ mode: "results", label: "Conversations", placeholder: "Search conversations and messages", onExit }} />);
+  fireEvent.keyDown(screen.getByRole("combobox"), { key: "Backspace" });
+  expect(onExit).toHaveBeenCalledOnce();
+});
+
+it("offers the number candidate and history search in results mode", async () => {
+  vi.useFakeTimers();
+  render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async request => page(request.query, [])} onStartConversation={async () => true} historySearch={history()} onSearchFurtherBack={async () => {}} scope={{ mode: "results", label: "Conversations", placeholder: "Search conversations and messages", onExit: () => {} }} />);
+  fireEvent.change(screen.getByRole("combobox"), { target: { value: "+12025550100" } });
+  await act(async () => { vi.advanceTimersByTime(100); });
+  expect(document.querySelector("[data-omni-number-candidate]")).toBeInTheDocument();
+  expect(screen.getByText("Search further back")).toBeInTheDocument();
+});
+
 describe("OmniSearch", () => {
   it("uses a controlled scoped query without a popover or async search", () => {
     const onSearch = vi.fn(async (request) => page(request.query));
@@ -78,7 +205,7 @@ describe("OmniSearch", () => {
       onActivate,
       onShowAll,
     };
-    render(<OmniSearch sessionKey="one" onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }])} onActivate={() => {}} notificationResults={notifications} />);
+    render(<OmniSearch sessionKey="one" onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend", phones: [], phoneCount: 0 }])} onActivate={() => {}} notificationResults={notifications} />);
     const input = screen.getByRole("combobox", { name: "Search Peppy" });
     expect(input).toHaveAttribute("placeholder", "Search messages, conversations, contacts, notifications");
     fireEvent.change(input, { target: { value: "alert" } });
@@ -215,7 +342,7 @@ describe("OmniSearch", () => {
       onShowAll: vi.fn(),
     };
     const onSearch = vi.fn(async (request) => request.kind === "all"
-      ? { ...page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }]), hasMore: { conversation: false, message: false, contact: true } }
+      ? { ...page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend", phones: [], phoneCount: 0 }]), hasMore: { conversation: false, message: false, contact: true } }
       : page(request.query));
     const { rerender } = render(<OmniSearch sessionKey="one" onSearch={onSearch} onActivate={() => {}} notificationResults={notifications} />);
     const input = screen.getByRole("combobox");
@@ -299,7 +426,7 @@ describe("OmniSearch", () => {
   it("resets a category on scope entry and exits focused scope into all results", async () => {
     vi.useFakeTimers();
     const onSearch = vi.fn(async (request) => request.kind === "all"
-      ? { ...page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }]), hasMore: { conversation: false, message: false, contact: true } }
+      ? { ...page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend", phones: [], phoneCount: 0 }]), hasMore: { conversation: false, message: false, contact: true } }
       : page(request.query));
     const notifications: OmniNotificationResults = { search: () => ({ hits: [{ key: "one", appName: "Slack", title: [{ text: "Alert", match: false }], snippet: [] }], total: 1 }), onActivate: vi.fn(), onShowAll: vi.fn() };
     const scope: OmniSearchScope = { label: "Notifications", placeholder: "Search notifications", query: "alert", onQueryChange: vi.fn(), onExit: vi.fn() };
@@ -393,7 +520,7 @@ describe("OmniSearch", () => {
     let resolveOld: (value: ReturnType<typeof page>) => void = () => {};
     const onSearch = vi.fn((request) => request.query === "a"
       ? new Promise<ReturnType<typeof page>>((resolve) => { resolveOld = resolve; })
-      : Promise.resolve(page("au", [{ kind: "contact", bookId: "b", contactId: "new", title: "Current", subtitle: "Contact" }])));
+      : Promise.resolve(page("au", [{ kind: "contact", bookId: "b", contactId: "new", title: "Current", subtitle: "Contact", phones: [], phoneCount: 0 }])));
     const onActivate = vi.fn();
     render(<OmniSearch sessionKey="one" onSearch={onSearch} onActivate={onActivate} />);
     const input = screen.getByRole("combobox", { name: "Search Peppy" });
@@ -977,7 +1104,7 @@ describe("OmniSearch", () => {
     vi.useFakeTimers();
     const resolveContactNumbers = vi.fn(async () => [{ address: "stored-address", display: "(415) 555-2671" }]);
     const onStartConversation = vi.fn(async () => false);
-    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }])} resolveContactNumbers={resolveContactNumbers} onStartConversation={onStartConversation} />);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend", phones: [], phoneCount: 0 }])} resolveContactNumbers={resolveContactNumbers} onStartConversation={onStartConversation} />);
     const input = screen.getByRole("combobox", { name: "Search Peppy" });
     fireEvent.change(input, { target: { value: "ada" } });
     await act(async () => { vi.advanceTimersByTime(100); });
@@ -991,7 +1118,7 @@ describe("OmniSearch", () => {
   it("shows a chooser for contacts with multiple phone numbers and returns to search on Escape", async () => {
     vi.useFakeTimers();
     const onStartConversation = vi.fn(async () => false);
-    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }])} resolveContactNumbers={async () => [{ address: "+14155552671", display: "Mobile" }, { address: "+14155552672", display: "Work" }]} onStartConversation={onStartConversation} />);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend", phones: [], phoneCount: 0 }])} resolveContactNumbers={async () => [{ address: "+14155552671", display: "Mobile" }, { address: "+14155552672", display: "Work" }]} onStartConversation={onStartConversation} />);
     const input = screen.getByRole("combobox", { name: "Search Peppy" });
     fireEvent.change(input, { target: { value: "ada" } });
     await act(async () => { vi.advanceTimersByTime(100); });
@@ -999,13 +1126,13 @@ describe("OmniSearch", () => {
     await act(async () => { await Promise.resolve(); });
     expect(screen.getByRole("option", { name: "Mobile" })).toBeInTheDocument();
     fireEvent.keyDown(input, { key: "Escape" });
-    expect(screen.getByRole("option", { name: "Ada Friend" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Ada" })).toBeInTheDocument();
   });
 
   it("keeps stored contact addresses unchanged and reports contacts without phone numbers", async () => {
     vi.useFakeTimers();
     const onStartConversation = vi.fn(async () => false);
-    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }])} resolveContactNumbers={async () => []} onStartConversation={onStartConversation} />);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend", phones: [], phoneCount: 0 }])} resolveContactNumbers={async () => []} onStartConversation={onStartConversation} />);
     const input = screen.getByRole("combobox", { name: "Search Peppy" });
     fireEvent.change(input, { target: { value: "ada" } });
     await act(async () => { vi.advanceTimersByTime(100); });
@@ -1063,7 +1190,7 @@ describe("OmniSearch", () => {
   it("retries a rejected chooser selection with the keyboard", async () => {
     vi.useFakeTimers();
     const onStartConversation = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(false);
-    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }])} resolveContactNumbers={async () => [{ address: "12345", display: "Short code" }, { address: "+14155552672", display: "Work" }]} onStartConversation={onStartConversation} />);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend", phones: [], phoneCount: 0 }])} resolveContactNumbers={async () => [{ address: "12345", display: "Short code" }, { address: "+14155552672", display: "Work" }]} onStartConversation={onStartConversation} />);
     const input = screen.getByRole("combobox", { name: "Search Peppy" });
     fireEvent.change(input, { target: { value: "ada" } });
     await act(async () => { vi.advanceTimersByTime(100); });
@@ -1079,7 +1206,7 @@ describe("OmniSearch", () => {
 
   it("does not render an orphan typed-number candidate in a category drill-in", async () => {
     vi.useFakeTimers();
-    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => request.kind === "all" ? { ...page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }]), hasMore: { conversation: false, message: false, contact: true } } : page(request.query, [])} onStartConversation={async () => false} />);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => request.kind === "all" ? { ...page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend", phones: [], phoneCount: 0 }]), hasMore: { conversation: false, message: false, contact: true } } : page(request.query, [])} onStartConversation={async () => false} />);
     const input = screen.getByRole("combobox", { name: "Search Peppy" });
     fireEvent.change(input, { target: { value: "4155552671" } });
     await act(async () => { vi.advanceTimersByTime(100); });
@@ -1090,7 +1217,7 @@ describe("OmniSearch", () => {
 
   it("preserves a selected contact action through an indexing refresh", async () => {
     vi.useFakeTimers();
-    const contact = { kind: "contact" as const, bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" };
+    const contact = { kind: "contact" as const, bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend", phones: [], phoneCount: 0 };
     const { rerender } = render(<OmniSearch sessionKey="one" refreshKey={0} onActivate={() => {}} onSearch={async (request) => indexingPage(request.query, [contact])} resolveContactNumbers={async () => []} onStartConversation={async () => false} />);
     const input = screen.getByRole("combobox", { name: "Search Peppy" });
     fireEvent.change(input, { target: { value: "ada" } });
@@ -1103,7 +1230,7 @@ describe("OmniSearch", () => {
 
   it("shows distinct inline contact lookup errors with a retry action", async () => {
     vi.useFakeTimers();
-    const contact = { kind: "contact" as const, bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" };
+    const contact = { kind: "contact" as const, bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend", phones: [], phoneCount: 0 };
     const resolveContactNumbers = vi.fn().mockRejectedValueOnce({ code: "contact-unavailable" }).mockRejectedValueOnce({ code: "contact-oversized" });
     render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [contact])} resolveContactNumbers={resolveContactNumbers} onStartConversation={async () => false} />);
     const input = screen.getByRole("combobox", { name: "Search Peppy" });
@@ -1120,7 +1247,7 @@ describe("OmniSearch", () => {
   it("filters blank phones and encodes stored raw addresses in chooser IDs", async () => {
     vi.useFakeTimers();
     const onStartConversation = vi.fn(async () => false);
-    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }])} resolveContactNumbers={async () => [{ address: " ", display: "Blank" }, { address: "short code / one", display: "Short code" }, { address: "work two", display: "Work" }]} onStartConversation={onStartConversation} />);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend", phones: [], phoneCount: 0 }])} resolveContactNumbers={async () => [{ address: " ", display: "Blank" }, { address: "short code / one", display: "Short code" }, { address: "work two", display: "Work" }]} onStartConversation={onStartConversation} />);
     const input = screen.getByRole("combobox", { name: "Search Peppy" });
     fireEvent.change(input, { target: { value: "ada" } });
     await act(async () => { vi.advanceTimersByTime(100); });
@@ -1135,7 +1262,7 @@ describe("OmniSearch", () => {
 
   it("keeps the selected chooser number through a background indexing refresh", async () => {
     vi.useFakeTimers();
-    const contact = { kind: "contact" as const, bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" };
+    const contact = { kind: "contact" as const, bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend", phones: [], phoneCount: 0 };
     const { rerender } = render(<OmniSearch sessionKey="one" refreshKey={0} onActivate={() => {}} onSearch={async (request) => indexingPage(request.query, [contact])} resolveContactNumbers={async () => [{ address: "one", display: "One" }, { address: "two", display: "Two" }]} onStartConversation={async () => false} />);
     const input = screen.getByRole("combobox", { name: "Search Peppy" });
     fireEvent.change(input, { target: { value: "ada" } });
@@ -1350,5 +1477,97 @@ describe("OmniSearch", () => {
     fireEvent.keyDown(input, { key: "Escape" });
     expect(onOpenChange).toHaveBeenLastCalledWith(false);
     expect(onOpenChange).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe("OmniSearch contact rows", () => {
+  it("renders a photo avatar when the hit carries one", async () => {
+    const row = await openContactResults(contactHit({ avatarUrl: "data:image/png;base64,photo" }));
+    const avatar = row.querySelector(".contact-avatar");
+    expect(avatar).toHaveAttribute("data-avatar-kind", "photo");
+    expect(avatar?.querySelector("img")).toHaveAttribute("src", "data:image/png;base64,photo");
+    expect(avatar).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("falls back to initials when the hit has no photo", async () => {
+    const row = await openContactResults(contactHit());
+    expect(row.querySelector(".contact-avatar")).toHaveAttribute("data-avatar-kind", "initials");
+    expect(row.querySelector(".contact-avatar")).toHaveTextContent(/^A$/);
+  });
+
+  it("formats the first phone and summarizes the rest for screen readers", async () => {
+    const row = await openContactResults(contactHit({ phones: ["+14155552671", "+14155552672", "+14155552673"], phoneCount: 3 }));
+    expect(row.querySelector("[data-omni-contact-phone]")).toHaveTextContent("(415) 555-2671");
+    expect(row.querySelector("[data-omni-contact-more]")).toHaveTextContent("+2 more");
+    expect(row.querySelector("[data-omni-contact-more] .sr-only")).toHaveTextContent("and 2 more numbers");
+    expect(row).toHaveAttribute("aria-label", "Ada Lovelace, (415) 555-2671, and 2 more numbers");
+  });
+
+  it("shows the organization on the copy line when it is not the title", async () => {
+    const row = await openContactResults(contactHit({ organization: "Analytical Engines" }));
+    expect(row.querySelector("[data-omni-contact-org]")).toHaveTextContent("Analytical Engines");
+    expect(row).toHaveAttribute("aria-label", "Ada Lovelace, Analytical Engines");
+  });
+
+  it("shows the device label only when the search asks for contact books", async () => {
+    const row = await openContactResults(contactHit({ bookLabel: "Pixel 8" }));
+    expect(row.querySelector("[data-omni-contact-book]")).toBeNull();
+    expect(row.getAttribute("aria-label")).not.toContain("Pixel 8");
+    cleanup();
+
+    const withBook = await openContactResults(contactHit({ bookLabel: "Pixel 8" }), { showContactBook: true });
+    expect(withBook.querySelector("[data-omni-contact-book]")).toHaveTextContent("Pixel 8");
+    expect(withBook).toHaveAttribute("aria-label", "Ada Lovelace, Pixel 8");
+  });
+
+  it("shows the matched field and highlights the query instead of organization and extra numbers", async () => {
+    const row = await openContactResults(contactHit({
+      phones: ["+14155552671", "+14155552672", "+14155552673"],
+      phoneCount: 3,
+      organization: "Analytical Engines",
+      matchField: "Email",
+      matchSnippet: "ada@example.com",
+    }), {}, "example");
+    expect(row.querySelector("[data-omni-match-field]")).toHaveTextContent("Email");
+    expect(row.querySelector("[data-omni-match-snippet] mark")).toHaveTextContent("example");
+    expect(row.querySelector("[data-omni-contact-org]")).toBeNull();
+    expect(row.querySelector("[data-omni-contact-more]")).toBeNull();
+    expect(row).toHaveAttribute("aria-label", "Ada Lovelace, (415) 555-2671, Email: ada@example.com");
+  });
+
+  it.each([
+    { title: "", organization: "Analytical Engines", phones: [], expected: "Analytical Engines" },
+    { title: "", organization: undefined, phones: ["+14155552671"], expected: "(415) 555-2671" },
+    { title: "", organization: undefined, phones: [], expected: "Unnamed contact" },
+  ])("uses the title fallback $expected", async ({ title, organization, phones, expected }) => {
+    const row = await openContactResults(contactHit({ title, organization, phones, phoneCount: phones.length }));
+    expect(row.querySelector("b")).toHaveTextContent(expected);
+    expect(row.querySelector("[data-omni-contact-phone]")).toBeNull();
+  });
+
+  it("labels the chooser and start action with the fallback title for an untitled contact", async () => {
+    vi.useFakeTimers();
+    const onStartConversation = vi.fn(async () => false);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "", subtitle: "Friend", phones: ["+14155552671"], phoneCount: 2 }])} resolveContactNumbers={async () => [{ address: "+14155552671", display: "Mobile" }, { address: "+14155552672", display: "Work" }]} onStartConversation={onStartConversation} />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value: "ada" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    const start = screen.getByRole("option", { name: "Start conversation with (415) 555-2671" });
+    expect(start).toHaveAttribute("title", "Start conversation with (415) 555-2671");
+    fireEvent.click(start);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByRole("group", { name: "Choose a number for (415) 555-2671" })).toBeInTheDocument();
+    const labels = [...document.querySelectorAll("[aria-label], [title]")].flatMap((element) => [element.getAttribute("aria-label"), element.getAttribute("title")]).filter(Boolean);
+    expect(labels.filter((label) => /\b(for|with)\s*$/.test(label ?? ""))).toEqual([]);
+  });
+
+  it("never renders the subtitle or raw book and contact ids", async () => {
+    const row = await openContactResults(contactHit({
+      bookId: "78d7ad7e-4f2a-4c1b-9d3e-5a6b7c8d9e0f",
+      contactId: "c0ffee00-1111-2222-3333-444455556666",
+      subtitle: "78d7ad7e-4f2a-4c1b-9d3e-5a6b7c8d9e0f",
+    }));
+    expect(row.textContent).not.toMatch(/78d7ad7e|c0ffee00|Legacy subtitle/);
+    expect(row.getAttribute("aria-label")).not.toMatch(/78d7ad7e|c0ffee00|Legacy subtitle/);
+    expect(screen.queryByText(/78d7ad7e/)).toBeNull();
   });
 });

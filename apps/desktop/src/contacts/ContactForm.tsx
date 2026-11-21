@@ -12,9 +12,6 @@ import {
 import { useContactPhotoChange } from "./useContactPhotoChange";
 import "./contact-form.css";
 
-// The crop dialog moved to its own module; re-exported so existing importers keep working.
-export { PhotoCropDialog } from "./useContactPhotoChange";
-
 export interface ContactEditDraft {
   givenName?: string;
   familyName?: string;

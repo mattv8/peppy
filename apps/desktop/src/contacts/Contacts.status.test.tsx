@@ -19,7 +19,7 @@ describe("ContactsView status slot priority", () => {
 
   it("shows a load error before the removed-book strip", async () => {
     vi.mocked(bridge.list_contact_books).mockResolvedValue([removedBook, mockContactBook]);
-    vi.mocked(bridge.list_contacts).mockRejectedValue(new Error("boom"));
+    vi.mocked(bridge.list_contacts_page).mockRejectedValue(new Error("boom"));
     render(<ContactsView />);
     await waitFor(() => expect(document.querySelector("#contacts-status")).toHaveAttribute("data-status-kind", "error"));
     expect(document.querySelector("#contacts-error")).toBeInTheDocument();
@@ -88,6 +88,13 @@ describe("ContactsView status slot priority", () => {
     await waitFor(() => expect(container.querySelector("#contacts-status")).toHaveAttribute("data-status-kind", "sync"));
     await waitFor(() => expect(container.querySelector("#contacts-sync-status")).toHaveTextContent("The phone finished its scan. Contacts are still being repaired locally."));
     expect(container.querySelector("#contacts-scan-status")).not.toBeInTheDocument();
+  });
+
+  it("still shows the repair strip when there are no contact books", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([]);
+    const { container } = render(<ContactsView sync={{ repairRequired: true, projection: { state: "rebuilding" } }} />);
+    await waitFor(() => expect(container.querySelector("#contacts-status")).toHaveAttribute("data-status-kind", "sync"));
+    expect(container.querySelector("#contacts-no-books")).toBeInTheDocument();
   });
 
   it("renders no status slot when nothing persistent applies", async () => {

@@ -72,6 +72,7 @@ import type {
   MediaPageItem,
   MediaPage,
   MediaOpen,
+  LocalSearchHit,
   LocalSearchRequest,
   LocalSearchPage,
   SearchIndexProgress,
@@ -282,7 +283,6 @@ const fixtureDevices: ManagedDeviceView[] = [
   { id: "device-old-iphone", name: "Old iPhone", kind: "ios", role: "owner", revoked: true },
 ];
 const fixtureScanStatuses = new Map<string, ContactScanStatus>();
-const fixtureContactBooks: ContactBookView[] = [{ id: "book-pixel8", deviceName: "Pixel 8", state: "active", capabilities: { canWrite: true, canDelete: true, canRestore: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true, canSync: true }, ownerDeviceId: "device-pixel8", contactCount: 3, defaultAccountLabel: "Google · aurora@example.com", lastSyncAt: "Just now", pendingEditCount: 1 }, { id: "book-iphone-retired", deviceName: "iPhone", state: "retired", capabilities: { canWrite: false, canDelete: false, supportsNotes: false, supportsPhoto: true, canSync: false }, sourceRevoked: true, ownerDeviceId: "device-old-iphone", contactCount: 0, lastSyncAt: "3 days ago", pendingEditCount: 0 }];
 const fixtureLookupExcludedBookIds = new Set<string>();
 const fixtureNameCandidates: Array<ContactNameCandidate & { address: string }> = [
   { address: "+12025550123", bookId: "book-pixel8", contactId: "contact-aurora", displayName: "Aurora Chen" },
@@ -360,11 +360,102 @@ let fixtureWebhookSequence = 4;
 const fixtureWebhookSecrets = new Map(fixtureWebhooks.map((webhook) => [webhook.id, `whsec_fixture_${webhook.id.replaceAll("-", "")}`]));
 const fixtureWebhook = (input: WebhookInput, id: string): WebhookView => ({ id, name: input.name?.trim() || new URL(input.url).hostname.replace(/^www\./, ""), nameIsDerived: !input.name?.trim(), url: input.url, events: [...input.events], filterMode: input.filterMode, filter: input.filter.map(entry => ({ ...entry })), paused: input.paused, createdAt: "2026-11-07T12:00:00Z", lastDeliveryState: "never", lastDeliveryAt: null, lastStatusCode: null, lastError: null, pendingDeliveries: 0 });
 const fixtureError = (code: string, message: string): BridgeError => ({ code, message });
-const fixtureSearchContacts = [
-  { id: "contact-aurora", bookId: "book-pixel8", title: "Aurora Chen", subtitle: "+12025550123" },
-  { id: "contact-river", bookId: "book-pixel8", title: "River Park", subtitle: "+12025550124" },
-  { id: "contact-mina", bookId: "book-pixel8", title: "Mina Torres", subtitle: "+12025550125" },
-];
+const FIXTURE_CONTACT_PAGE_SIZE = 200;
+const FIXTURE_CONTACT_THROUGH_MAX = 2_000;
+/** Browser-only pause so contact loading states show in screenshots; tests stay fast. */
+const fixtureContactLatency = async () => {
+  if (import.meta.env.MODE !== "test") await new Promise(resolve => setTimeout(resolve, 600));
+};
+const fixtureNamedContacts = (bookId: string): ContactView[] => [{ id: "contact-aurora", bookId, revision: "1", displayName: "Aurora Chen", givenName: "Aurora", familyName: "Chen", phones: [{ label: "mobile", number: "+12025550123" }], emails: [{ label: "work", address: "aurora@example.com" }], addresses: [], organization: "Northstar", title: "Director", notes: "Prefers SMS", pendingEditId: "edit-aurora", pendingEditState: "pending", pendingEditSummary: "Phone number update" }, { id: "contact-river", bookId, revision: "1", displayName: "River Park", givenName: "River", familyName: "Park", phones: [{ label: "mobile", number: "+12025550124" }], emails: [], addresses: [] }, { id: "contact-mina", bookId, revision: "1", displayName: "Mina Torres", givenName: "Mina", familyName: "Torres", phones: [{ label: "work", number: "+12025550125" }], emails: [], addresses: [] }];
+const fixtureFirstNames = ["Ava", "Benjamin", "Chloe", "Diego", "Elena", "Farid", "Grace", "Hiroshi", "Isla", "Jamal", "Keiko", "Liam", "Maya", "Noah", "Olivia", "Priya", "Quentin", "Rosa", "Samir", "Tessa", "Uma", "Victor", "Wren", "Ximena", "Yusuf", "Zoe", "Émile", "Ingrid", "Mateo", "Ngozi"];
+const fixtureLastNames = ["Abbott", "Bianchi", "Carver", "Delgado", "Eriksen", "Fontaine", "Gallagher", "Haddad", "Ishikawa", "Jensen", "Kowalski", "Lindqvist", "Moreau", "Nakamura", "Okafor", "Patel", "Quinn", "Rossi", "Schmidt", "Tanaka", "Underwood", "Vasquez", "Whitfield", "Yamamoto", "Zimmer", "Ångström", "Brandt", "Costa", "Dubois", "Fernandes"];
+const fixtureNicknames = ["Coach", "Bean", "Sparky", "Mags", "Doc", "Juno"];
+const fixtureOrganizations = ["Brightline Dental", "Northwind Plumbing", "Juniper Bakery", "Halcyon Gym", "Summit Auto Care", "Pinecrest Vet"];
+const fixturePhotoColors = ["#4f7cff", "#e4572e", "#29a19c", "#f3a712", "#8e5ea2", "#17bebb"];
+/** A tiny inline person silhouette on a coloured tile; `<img>` renders SVG data URLs. */
+const fixturePhotoDataUrl = (index: number) => `data:image/svg+xml;utf8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="${fixturePhotoColors[index % fixturePhotoColors.length]}"/><circle cx="32" cy="25" r="11" fill="#fff" fill-opacity=".9"/><path d="M12 60c3-13 13-19 20-19s17 6 20 19z" fill="#fff" fill-opacity=".9"/></svg>`)}`;
+const fixtureAsciiSlug = (value: string) => value.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
+/**
+ * Deterministic generated contact `index` of a fixture book. Names are a pair walk over the two name arrays, so
+ * every name pair is distinct; a few index classes become organization, nickname, team, or given-name-only contacts.
+ */
+const fixtureGeneratedContact = (bookId: string, index: number, phonePrefix: string): ContactView => {
+  const id = `contact-${bookId.replace("book-", "")}-${String(index).padStart(3, "0")}`;
+  const given = fixtureFirstNames[index % fixtureFirstNames.length];
+  const family = fixtureLastNames[(index * 7 + Math.floor(index / fixtureFirstNames.length)) % fixtureLastNames.length];
+  const phoneCount = [1, 1, 2, 1, 3, 1, 2, 1, 1, 4][index % 10];
+  const phones = Array.from({ length: phoneCount }, (_, slot) => ({ label: ["mobile", "work", "home", "other"][slot], number: `${phonePrefix}${(slot + 1) * 1000 + index}` }));
+  const shared: ContactView = { id, bookId, revision: "1", displayName: given, phones, emails: [], addresses: [], ...(index % 6 === 0 ? { photoDataUrl: fixturePhotoDataUrl(index) } : {}) };
+  if (index % 17 === 4) {
+    const organization = fixtureOrganizations[index % fixtureOrganizations.length];
+    return { ...shared, displayName: organization, organization };
+  }
+  if (index % 19 === 6) {
+    const nickname = fixtureNicknames[index % fixtureNicknames.length];
+    return { ...shared, displayName: nickname, nickname };
+  }
+  if (index % 31 === 9) {
+    const organization = fixtureOrganizations[(index + 1) % fixtureOrganizations.length];
+    return { ...shared, displayName: `${organization} (Team)`, organization };
+  }
+  if (index % 11 === 3) return { ...shared, displayName: given, givenName: given };
+  const organization = index % 6 === 1 ? fixtureOrganizations[index % fixtureOrganizations.length] : undefined;
+  const emails = index % 5 === 0 ? [{ label: "work", address: `${fixtureAsciiSlug(given)}.${fixtureAsciiSlug(family)}@example.com` }] : [];
+  return { ...shared, displayName: `${given} ${family}`, givenName: given, familyName: family, emails, ...(organization ? { organization } : {}) };
+};
+const fixtureContactRowsByBook = new Map<string, ContactView[]>([
+  ["book-pixel8", [...fixtureNamedContacts("book-pixel8"), ...Array.from({ length: 427 }, (_, index) => fixtureGeneratedContact("book-pixel8", index, "+1801555"))]],
+  ["book-phone-retired", Array.from({ length: 25 }, (_, index) => fixtureGeneratedContact("book-phone-retired", index, "+1206555"))],
+]);
+const fixtureContactRows = (bookId: string): ContactView[] => fixtureContactRowsByBook.get(bookId) ?? [];
+const fixtureContactBooks: ContactBookView[] = [{ id: "book-pixel8", deviceName: "Android phone", state: "active", capabilities: { canWrite: true, canDelete: true, canRestore: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true, canSync: true }, ownerDeviceId: "device-pixel8", contactCount: fixtureContactRows("book-pixel8").length, defaultAccountLabel: "Google, aurora@example.com", lastSyncAt: "Just now", pendingEditCount: 1 }, { id: "book-phone-retired", deviceName: "Phone", state: "retired", capabilities: { canWrite: false, canDelete: false, supportsNotes: false, supportsPhoto: true, canSync: false }, sourceRevoked: true, ownerDeviceId: "device-old-iphone", contactCount: fixtureContactRows("book-phone-retired").length, lastSyncAt: "3 days ago", pendingEditCount: 0 }];
+/** The fixture book's contacts in the requested order; `list_contacts` and `list_contacts_page` share it. */
+const sortedFixtureContacts = (bookId: string, query: string, sort: ContactSort): ContactView[] => {
+  const contacts = fixtureContactRows(bookId);
+  const sortKey: "givenName" | "familyName" = sort.key === "given" ? "givenName" : "familyName";
+  const otherSortKey: "givenName" | "familyName" = sort.key === "given" ? "familyName" : "givenName";
+  const direction = sort.direction === "desc" ? -1 : 1;
+  const compareText = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0;
+  const sortParts = (contact: ContactView) => {
+    const selected = (contact[sortKey] ?? "").trim().toLowerCase();
+    const other = (contact[otherSortKey] ?? "").trim().toLowerCase();
+    const display = contact.displayName.trim().toLowerCase();
+    return { selected, other, display, primary: selected || other || display };
+  };
+  return contacts.filter(contact => !query || `${contact.displayName} ${contact.phones.map(phone => phone.number).join(" ")}`.toLowerCase().includes(query.toLowerCase())).sort((left, right) => {
+    const leftParts = sortParts(left);
+    const rightParts = sortParts(right);
+    if (!leftParts.primary || !rightParts.primary) return !leftParts.primary && !rightParts.primary ? compareText(left.id, right.id) : !leftParts.primary ? 1 : -1;
+    return direction * (compareText(leftParts.primary, rightParts.primary) || compareText(leftParts.other, rightParts.other) || compareText(leftParts.display, rightParts.display)) || compareText(left.id, right.id);
+  });
+};
+/** Opaque to callers; the fixture encodes the row offset of the next page. */
+const encodeFixtureContactCursor = (offset: number) => btoa(`fixture-offset:${offset}`);
+const decodeFixtureContactCursor = (cursor: string | undefined): number => {
+  if (cursor === undefined) return 0;
+  const match = /^fixture-offset:(\d+)$/.exec(atob(cursor));
+  if (!match) throw fixtureError("invalid-cursor", "The contact page cursor is invalid.");
+  return Number(match[1]);
+};
+/** Every live fixture contact, for local contact search. */
+const fixtureSearchContacts = () => [...fixtureContactRowsByBook].flatMap(([bookId, rows]) => rows.map(row => ({ id: row.id, bookId, title: row.displayName, phones: row.phones.map(phone => phone.number), organization: row.organization })));
+const fixtureSearchContactHit = (contact: ReturnType<typeof fixtureSearchContacts>[number], query: string): LocalSearchHit & { kind: "contact" } => {
+  const bookLabel = fixtureContactBooks.find(book => book.id === contact.bookId)?.deviceName;
+  const matchSnippet = contact.phones.find(phone => phone.toLowerCase().includes(query));
+  const phoneMatch = !contact.title.toLowerCase().includes(query) && matchSnippet !== undefined ? { matchField: "Phone", matchSnippet } : {};
+  return {
+    kind: "contact",
+    bookId: contact.bookId,
+    contactId: contact.id,
+    title: contact.title,
+    subtitle: contact.phones[0] ?? "",
+    phones: contact.phones.slice(0, 3),
+    phoneCount: contact.phones.length,
+    ...(contact.organization ? { organization: contact.organization } : {}),
+    ...(bookLabel ? { bookLabel } : {}),
+    ...phoneMatch,
+  };
+};
 const fixtureSearch = (input: LocalSearchRequest): LocalSearchPage => {
   const query = input.query.trim().toLocaleLowerCase();
   if (!query) return { query: input.query, items: [], indexState: "ready", hasMore: { conversation: false, message: false, contact: false } };
@@ -372,7 +463,7 @@ const fixtureSearch = (input: LocalSearchRequest): LocalSearchPage => {
   const accepts = (kind: "conversation" | "message" | "contact") => !input.kind || input.kind === "all" || input.kind === kind;
   const conversations = fixtureSnapshot.conversations.filter(item => `${item.name} ${item.participants?.join(" ") ?? ""}`.toLocaleLowerCase().includes(query)).map(item => ({ kind: "conversation" as const, conversationId: item.id, title: item.name, subtitle: item.preview })).slice(0, limit);
   const messages = fixtureSnapshot.conversations.flatMap(conversation => conversation.messages.filter(message => `${message.body} ${message.subject ?? ""}`.toLocaleLowerCase().includes(query)).map(message => ({ kind: "message" as const, conversationId: conversation.id, messageId: message.id, title: conversation.name, snippet: message.body, timestamp: message.timestamp }))).slice(0, limit);
-  const contacts = fixtureSearchContacts.filter(contact => `${contact.title} ${contact.subtitle}`.toLocaleLowerCase().includes(query)).map(contact => ({ kind: "contact" as const, bookId: contact.bookId, contactId: contact.id, title: contact.title, subtitle: contact.subtitle })).slice(0, limit);
+  const contacts = fixtureSearchContacts().filter(contact => `${contact.title} ${contact.phones.join(" ")}`.toLocaleLowerCase().includes(query)).map(contact => fixtureSearchContactHit(contact, query)).slice(0, limit);
   const items = [...(accepts("conversation") ? conversations : []), ...(accepts("message") ? messages : []), ...(accepts("contact") ? contacts : [])];
   return { query: input.query, items, indexState: "ready", hasMore: { conversation: false, message: false, contact: false } };
 };
@@ -746,7 +837,13 @@ export const fixtureBridge: DesktopBridge = {
   mcp_approve_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },
   mcp_deny_authorization: async () => { throw fixtureError("unsupported", "MCP authorization is unavailable."); },
   list_contact_books: async () => fixtureContactBooks.map(book => ({ ...book, lookupExcluded: fixtureLookupExcludedBookIds.has(book.id) })),
-  forget_contact_book: async () => undefined,
+  forget_contact_book: async bookId => {
+    const index = fixtureContactBooks.findIndex(book => book.id === bookId);
+    if (index < 0) throw fixtureError("not-found", "Contact book not found.");
+    fixtureContactBooks.splice(index, 1);
+    fixtureContactRowsByBook.delete(bookId);
+    fixtureLookupExcludedBookIds.delete(bookId);
+  },
   set_contact_book_lookup: async (bookId, enabled) => {
     if (!fixtureContactBooks.some(book => book.id === bookId)) throw fixtureError("not-found", "Contact book not found.");
     if (enabled) fixtureLookupExcludedBookIds.delete(bookId);
@@ -764,23 +861,24 @@ export const fixtureBridge: DesktopBridge = {
   },
   clear_contact_name_pin: async address => { fixtureNamePins.delete(address); },
   list_contacts: async (bookId, query = "", offset = 0, sort = { key: "family" as const, direction: "asc" as const }) => {
-    const contacts = [{ id: "contact-aurora", bookId, revision: "1", displayName: "Aurora Chen", givenName: "Aurora", familyName: "Chen", phones: [{ label: "mobile", number: "+12025550123" }], emails: [{ label: "work", address: "aurora@example.com" }], addresses: [], organization: "Northstar", title: "Director", notes: "Prefers SMS", pendingEditId: "edit-aurora", pendingEditState: "pending" as const, pendingEditSummary: "Phone number update" }, { id: "contact-river", bookId, revision: "1", displayName: "River Park", givenName: "River", familyName: "Park", phones: [{ label: "mobile", number: "+12025550124" }], emails: [], addresses: [] }, { id: "contact-mina", bookId, revision: "1", displayName: "Mina Torres", givenName: "Mina", familyName: "Torres", phones: [{ label: "work", number: "+12025550125" }], emails: [], addresses: [] }];
-    const sortKey: "givenName" | "familyName" = sort.key === "given" ? "givenName" : "familyName";
-    const otherSortKey: "givenName" | "familyName" = sort.key === "given" ? "familyName" : "givenName";
-    const direction = sort.direction === "desc" ? -1 : 1;
-    const compareText = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0;
-    const sortParts = (contact: ContactView) => {
-      const selected = (contact[sortKey] ?? "").trim().toLowerCase();
-      const other = (contact[otherSortKey] ?? "").trim().toLowerCase();
-      const display = contact.displayName.trim().toLowerCase();
-      return { selected, other, display, primary: selected || other || display };
+    await fixtureContactLatency();
+    return sortedFixtureContacts(bookId, query, sort).slice(offset, offset + FIXTURE_CONTACT_PAGE_SIZE);
+  },
+  list_contacts_page: async (bookId, request) => {
+    await fixtureContactLatency();
+    const sorted = sortedFixtureContacts(bookId, request.query?.trim() ?? "", request.sort ?? { key: "family", direction: "asc" });
+    const start = decodeFixtureContactCursor(request.cursor);
+    // Mirrors core: `through` extends the page to include the target, at most 2,000 rows from the start.
+    const throughIndex = request.through === undefined ? -1 : sorted.findIndex(contact => contact.id === request.through);
+    const found = throughIndex >= start && throughIndex - start < FIXTURE_CONTACT_THROUGH_MAX;
+    const count = found ? Math.max(FIXTURE_CONTACT_PAGE_SIZE, throughIndex - start + 1) : FIXTURE_CONTACT_PAGE_SIZE;
+    const pageEnd = Math.min(sorted.length, start + count);
+    return {
+      contacts: sorted.slice(start, pageEnd),
+      total: sorted.length,
+      ...(pageEnd < sorted.length ? { nextCursor: encodeFixtureContactCursor(pageEnd) } : {}),
+      ...(request.through === undefined ? {} : { throughFound: found }),
     };
-    return contacts.filter(contact => !query || `${contact.displayName} ${contact.phones.map(phone => phone.number).join(" ")}`.toLowerCase().includes(query.toLowerCase())).sort((left, right) => {
-      const leftParts = sortParts(left);
-      const rightParts = sortParts(right);
-      if (!leftParts.primary || !rightParts.primary) return !leftParts.primary && !rightParts.primary ? compareText(left.id, right.id) : !leftParts.primary ? 1 : -1;
-      return direction * (compareText(leftParts.primary, rightParts.primary) || compareText(leftParts.other, rightParts.other) || compareText(leftParts.display, rightParts.display)) || compareText(left.id, right.id);
-    }).slice(offset, offset + 200);
   },
   submit_contact_edit: async () => ({ state: "pending", requestId: `fixture-${Date.now()}` }),
   list_contact_edits: async bookId => [{ requestId: "edit-aurora", bookId: bookId ?? "book-pixel8", state: "pending" }],
@@ -956,7 +1054,7 @@ export const tauriBridge: DesktopBridge = {
   attachment_retention_state: attachmentId => invoke("attachment_retention_state", { attachmentId }),
   retryRcsMediaDownload: (messageId, attachmentIndex) => invoke("retry_rcs_media_download", { messageId, attachmentIndex }),
   load_state: (conversationId, historyFromMessageId, options) => invoke("load_state", { conversationId, historyFromMessageId, metadataOnly: options?.metadataOnly }), search_local: input => invoke("search_local", { input }), advance_search_index: input => invoke("advance_search_index", { input }), get_history_search: () => invoke("get_history_search"), start_history_search: ({ operationId }) => invoke("start_history_search", { input: { operationId } }), cancel_history_search: ({ attemptId }) => invoke("cancel_history_search", { input: { attemptId } }), load_message_window: input => invoke("load_message_window", { input }), open_external_url: url => invoke("open_external_url", { url }), load_history: (conversationId, beforeMessageId) => invoke("load_history", { conversationId, beforeMessageId }), configure_server: origin => invoke("configure_server", { origin }), unlock_sync: () => invoke("unlock_sync"), get_app_lock_status: () => invoke("get_app_lock_status"), retry_app_lock_check: () => invoke("retry_app_lock_check"), set_app_lock: enabled => invoke("set_app_lock", { enabled }), unlock_app: () => invoke("unlock_app"), save_draft: input => invoke("save_draft", { input }), discard_draft: input => invoke("discard_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), copy_one_time_code: target => invoke("copy_one_time_code", { target }), mark_all_read: () => invoke("mark_all_read"), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), open_notification_settings: () => invoke("open_notification_settings"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), retry_snapshot_import: async () => undefined, save_attachment: id => invoke("save_attachment", { id }), request_attachment_download: id => invoke("request_attachment_download", { id }), media_page: (conversationId, cursor, limit) => invoke("media_page", { conversationId, cursor, limit }), open_media: id => invoke("open_media", { id }), close_media: (id, url) => invoke("close_media", { id, url }), load_media: id => invoke("load_media", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), set_maximize_button_region: region => invoke("set_maximize_button_region", { region }), subscribe: listener => subscribeEvent("peppy://state", () => listener(), listener), subscribe_maximize_button_hover: listener => subscribeWindowEvent("peppy://maximize-button-hover", payload => { if (typeof payload === "boolean") listener(payload); }), subscribe_drafts: listener => subscribeWindowEvent("peppy://draft", payload => { if (isDraft(payload)) listener(payload); }), subscribe_typing: listener => subscribeWindowEvent("peppy://typing", payload => { if (isTypingSignal(payload)) listener(payload); }), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
-   list_devices: () => invoke("list_devices"), revoke_device: deviceId => invoke("revoke_device", { deviceId }), list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), set_contact_book_lookup: (bookId, enabled) => invoke("set_contact_book_lookup", { bookId, enabled }), list_contact_name_candidates: (address, sourceDeviceId) => invoke("list_contact_name_candidates", { address, sourceDeviceId }), set_contact_name_pin: (address, bookId, contactId, sourceDeviceId) => invoke("set_contact_name_pin", { address, sourceDeviceId, bookId, contactId }), clear_contact_name_pin: (address, sourceDeviceId) => invoke("clear_contact_name_pin", { address, sourceDeviceId }), list_contacts: (bookId, query, offset, sort) => invoke("list_contacts", { bookId, query, offset, sort }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), request_contact_sync: bookId => invoke("request_contact_sync", { bookId }), get_contact_sync_request: bookId => invoke("get_contact_sync_request", { bookId }), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_origin_url: () => invoke("hosted_origin_url"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), billing_summary: () => invoke("billing_summary"), enrollment_discover: discoverEnrollment, enrollment_start_over: () => invoke("enrollment_start_over"), enrollment_create_owner: input => invoke("enrollment_create_owner", { input }), enrollment_sign_in: input => invoke("enrollment_sign_in", { input }), enrollment_connect_shared_secret: input => invoke("enrollment_connect_shared_secret", { input }), enrollment_begin_vault_request: input => invoke("enrollment_begin_vault_request", { input }), enrollment_vault_request_status: () => invoke("enrollment_vault_request_status"), enrollment_create_vault: input => invoke("enrollment_create_vault", { input }), enrollment_add_phone: method => invoke("enrollment_add_phone", { method }), enrollment_rotate_phone: method => invoke("enrollment_rotate_phone", { method }), enrollment_cancel_phone: () => invoke("enrollment_cancel_phone"), reveal_vault_secret: () => invoke("reveal_vault_secret"), enrollment_status: () => invoke("enrollment_status"), enrollment_approve: () => invoke("enrollment_approve"), enrollment_cancel: () => invoke("enrollment_cancel"), enrollment_sign_out: () => invoke("enrollment_sign_out"),
+   list_devices: () => invoke("list_devices"), revoke_device: deviceId => invoke("revoke_device", { deviceId }), list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), set_contact_book_lookup: (bookId, enabled) => invoke("set_contact_book_lookup", { bookId, enabled }), list_contact_name_candidates: (address, sourceDeviceId) => invoke("list_contact_name_candidates", { address, sourceDeviceId }), set_contact_name_pin: (address, bookId, contactId, sourceDeviceId) => invoke("set_contact_name_pin", { address, sourceDeviceId, bookId, contactId }), clear_contact_name_pin: (address, sourceDeviceId) => invoke("clear_contact_name_pin", { address, sourceDeviceId }), list_contacts: (bookId, query, offset, sort) => invoke("list_contacts", { bookId, query, offset, sort }), list_contacts_page: (bookId, request) => invoke("list_contacts_page", { bookId, request }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), request_contact_sync: bookId => invoke("request_contact_sync", { bookId }), get_contact_sync_request: bookId => invoke("get_contact_sync_request", { bookId }), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_origin_url: () => invoke("hosted_origin_url"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), billing_summary: () => invoke("billing_summary"), enrollment_discover: discoverEnrollment, enrollment_start_over: () => invoke("enrollment_start_over"), enrollment_create_owner: input => invoke("enrollment_create_owner", { input }), enrollment_sign_in: input => invoke("enrollment_sign_in", { input }), enrollment_connect_shared_secret: input => invoke("enrollment_connect_shared_secret", { input }), enrollment_begin_vault_request: input => invoke("enrollment_begin_vault_request", { input }), enrollment_vault_request_status: () => invoke("enrollment_vault_request_status"), enrollment_create_vault: input => invoke("enrollment_create_vault", { input }), enrollment_add_phone: method => invoke("enrollment_add_phone", { method }), enrollment_rotate_phone: method => invoke("enrollment_rotate_phone", { method }), enrollment_cancel_phone: () => invoke("enrollment_cancel_phone"), reveal_vault_secret: () => invoke("reveal_vault_secret"), enrollment_status: () => invoke("enrollment_status"), enrollment_approve: () => invoke("enrollment_approve"), enrollment_cancel: () => invoke("enrollment_cancel"), enrollment_sign_out: () => invoke("enrollment_sign_out"),
   open_mcp_oauth_redirect: url => invoke("open_mcp_oauth_redirect", { url }),
   mcp_status: () => invoke("mcp_status"),
   mcp_enable: () => invoke("mcp_enable"),

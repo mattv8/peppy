@@ -552,6 +552,49 @@ describe("fixture draft saves", () => {
     expect((await fixtureBridge.load_state()).toneOverrides).toEqual({});
   });
 
+  it("sends cursor page requests with the book and request arguments", async () => {
+    const request = { cursor: "cursor-token", through: "contact-id", sort: { key: "given" as const, direction: "desc" as const } };
+    await tauriBridge.list_contacts_page("book-id", request);
+
+    expect(invokeMock).toHaveBeenCalledWith("list_contacts_page", { bookId: "book-id", request });
+  });
+
+  it("pages fixture contacts in list order and resumes from an opaque cursor", async () => {
+    const listed = await fixtureBridge.list_contacts("book-pixel8", "", 0);
+    const first = await fixtureBridge.list_contacts_page("book-pixel8", {});
+    expect(first.contacts).toEqual(listed);
+    expect(first.total).toBeGreaterThan(listed.length);
+    expect(first.nextCursor).toBe(btoa("fixture-offset:200"));
+
+    const resumed = await fixtureBridge.list_contacts_page("book-pixel8", { cursor: btoa("fixture-offset:1") });
+    expect(resumed.contacts).toEqual(await fixtureBridge.list_contacts("book-pixel8", "", 1));
+    expect(resumed.total).toBe(first.total);
+
+    const tail = await fixtureBridge.list_contacts_page("book-pixel8", { cursor: btoa("fixture-offset:400") });
+    expect(tail.contacts).toHaveLength(first.total - 400);
+    expect(tail).not.toHaveProperty("nextCursor");
+
+    const givenDesc = { key: "given" as const, direction: "desc" as const };
+    expect((await fixtureBridge.list_contacts_page("book-pixel8", { sort: givenDesc })).contacts).toEqual(await fixtureBridge.list_contacts("book-pixel8", "", 0, givenDesc));
+  });
+
+  it("returns fixture contacts through a requested contact, and reports whether it was found", async () => {
+    const listed = await fixtureBridge.list_contacts("book-pixel8", "", 0);
+    const first = await fixtureBridge.list_contacts_page("book-pixel8", {});
+    expect(await fixtureBridge.list_contacts_page("book-pixel8", { through: listed[4].id })).toEqual({ contacts: listed, total: first.total, nextCursor: btoa("fixture-offset:200"), throughFound: true });
+    expect(await fixtureBridge.list_contacts_page("book-pixel8", { through: "contact-missing" })).toEqual({ contacts: listed, total: first.total, nextCursor: btoa("fixture-offset:200"), throughFound: false });
+    const all = [...listed, ...await fixtureBridge.list_contacts("book-pixel8", "", 200), ...await fixtureBridge.list_contacts("book-pixel8", "", 400)];
+    const deep = await fixtureBridge.list_contacts_page("book-pixel8", { through: all[300].id });
+    expect(deep.contacts).toEqual(all.slice(0, 301));
+    expect(deep.throughFound).toBe(true);
+    expect(deep.nextCursor).toBe(btoa("fixture-offset:301"));
+  });
+
+  it("fills fixture contact search hits with phones and match context when the name did not match", async () => {
+    const page = await fixtureBridge.search_local({ query: "2025550124", kind: "contact" } as never);
+    expect(page.items).toEqual([{ kind: "contact", bookId: "book-pixel8", contactId: "contact-river", title: "River Park", subtitle: "+12025550124", phones: ["+12025550124"], phoneCount: 1, bookLabel: "Android phone", matchField: "Phone", matchSnippet: "+12025550124" }]);
+  });
+
   it("hides a fixture book from names until restored, and honors a pin only for a current candidate", async () => {
     await fixtureBridge.set_contact_book_lookup("book-pixel8", false);
     expect((await fixtureBridge.list_contact_books()).find(book => book.id === "book-pixel8")?.lookupExcluded).toBe(true);
