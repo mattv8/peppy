@@ -4,6 +4,7 @@ import { bridge, type ContactBookView } from "../bridge/bridge";
 import { errorCode } from "../bridge/bridgeErrors";
 import { IsolatedText } from "../notices/IsolatedText";
 import { deleteRefusalText } from "./book-delete-copy";
+import { bookContactCountText } from "./contact-labels";
 
 function deleteFailureText(code: string | undefined): string {
   switch (code) {
@@ -68,7 +69,7 @@ export function DeleteBookDialog({ book, opener, disabledReason, onDismiss, onDe
     </button>
   </>}>
     <ul>
-      <li>Deletes the saved copy of {book.contactCount} contacts from every device in your vault.</li>
+      <li>Deletes the saved copy of {bookContactCountText(book.contactCount)} from every device in your vault.</li>
       <li>Devices that are offline remove it when they next connect.</li>
       <li>Names from this book stop showing in conversations on all your devices.</li>
       <li><strong>This can't be undone.</strong> Contacts on the phone itself aren't touched.</li>

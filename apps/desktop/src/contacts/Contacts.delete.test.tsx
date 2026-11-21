@@ -50,7 +50,7 @@ describe("removed book delete actions", () => {
   });
 
   it("lists remove and delete in the row menu, separated, with delete in the error colour", () => {
-    render(<BookRail books={[mockContactBook, removedBook]} bookId={mockContactBook.id} width={220} panelRef={{ current: null }} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onDeleteRequest={vi.fn()} onNotice={vi.fn()} />);
+    render(<BookRail books={[mockContactBook, removedBook]} loading={false} bookId={mockContactBook.id} width={220} panelRef={{ current: null }} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onDeleteRequest={vi.fn()} onNotice={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "More actions for iPhone" }));
     const menu = document.getElementById("contacts-book-menu")!;
     const separator = within(menu).getByRole("separator");
