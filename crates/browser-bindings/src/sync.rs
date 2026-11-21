@@ -1184,11 +1184,8 @@ mod tests {
         .unwrap();
         assert_eq!(progress(&mut fixture.core)["historyBlock"], "repairing");
 
-        db.execute(
-            "DELETE FROM metadata WHERE k='contact_repair_required'",
-            [],
-        )
-        .unwrap();
+        db.execute("DELETE FROM metadata WHERE k='contact_repair_required'", [])
+            .unwrap();
         db.execute(
             "INSERT INTO projection_generations(generation,high_water,state) VALUES(1,1,'failed')",
             [],
