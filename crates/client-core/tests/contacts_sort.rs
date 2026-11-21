@@ -310,3 +310,35 @@ fn through_beyond_cap_returns_only_first_page() {
     assert_eq!(output["contacts"].as_array().unwrap().len(), 2);
     assert_eq!(output["through_found"], false);
 }
+
+#[test]
+fn malformed_after_cursors_are_invalid_requests_never_panics() {
+    use base64::Engine as _;
+    let fixture = client_with(vec![
+        contact("a", Some("Ada"), None, "Ada"),
+        contact("b", Some("Bea"), None, "Bea"),
+    ]);
+    let encode = |text: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text);
+    let oversized = "A".repeat(32_769);
+    let not_json = encode("not json at all");
+    let wrong_version =
+        encode(&json!({"v": 2, "s": "given-asc", "k": ["Ada", "", "Ada"], "id": "a"}).to_string());
+    for cursor in [
+        oversized.as_str(),
+        not_json.as_str(),
+        wrong_version.as_str(),
+    ] {
+        let input = json!({
+            "book_id": BOOK,
+            "limit": 1,
+            "sort": {"key": "given", "direction": "asc"},
+            "after": cursor
+        });
+        assert_eq!(
+            fixture.client.contact_book_view(&input.to_string()),
+            Err(Error::InvalidRequest("invalid contact request")),
+            "cursor of {} bytes",
+            cursor.len()
+        );
+    }
+}
