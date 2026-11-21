@@ -101,12 +101,13 @@ export class LiveTypingEngine {
     if (!this.isCurrent(incarnation, expectedGeneration) || decimal(outcome.generation) !== expectedGeneration) return;
     this.applySessionUpdate(outcome.sessionUpdate);
     this.publishAction(outcome.action, incarnation, expectedGeneration);
-    if (typeof outcome.replyFrameJson === "string" && this.isCurrent(incarnation, expectedGeneration)) {
-      this.transport.transmit(outcome.replyFrameJson);
+    if (typeof outcome.replyFrameJson === "string") {
+      if (!this.isCurrent(incarnation, expectedGeneration) || !this.transport.transmit(outcome.replyFrameJson)) return;
     }
     if (Array.isArray(outcome.followUpFramesJson)) {
       for (const frame of outcome.followUpFramesJson) {
-        if (typeof frame === "string" && this.isCurrent(incarnation, expectedGeneration)) this.transport.transmit(frame);
+        if (typeof frame !== "string") continue;
+        if (!this.isCurrent(incarnation, expectedGeneration) || !this.transport.transmit(frame)) break;
       }
     }
   }
