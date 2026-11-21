@@ -120,9 +120,74 @@ Reading a capture, by the first boundary reached:
 - Typing from a computer: expect 325 (session confirmation), then 57. 336 on every frame: the core dropped each frame. 59: the adapter did not admit the intent. 280: no link-owned Google conversation. 328 to 333: the effect was refused, by cause.
 - Live host: 49 or 50, then 53 or 55, with no later 52 or 54: the live host stopped (authentication or protocol). 334 shows a later restart. 52, then 322 to 324: the typing enable failed. 335 shows the retries. 54: the typing enable succeeded.
 
+### Getting both logs
+
+Turn on the logs before the test. Both apps keep a retained log, and turning recording off keeps it.
+
+- Phone: **Settings → Advanced → Diagnostics**, turn on **Verbose sync logging**, reproduce the problem, then **Share log**. The share sheet sends a `diagnostics-<uuid>.log.txt` snapshot.
+- Desktop: **Settings → Diagnostics**, turn on **Verbose logging**, reproduce the problem, then **Export log** and save the `peppy-diagnostics-YYYYMMDDTHHMMSSZ.log.txt` file. Paths and limits are in [desktop diagnostics](../apps/desktop.md#diagnostics).
+
+Both apps read the typing core counters only while Diagnostics is on. On the phone, the first read after the typing bridge is created, or after a read while Diagnostics was off, sets a baseline. On the desktop, the first read after a session starts, or after a read while recording was off, does the same. A baseline records nothing, so a cause that rose before it is absent from the log. The phone reads after enable, open, and seal. The desktop reads at a typing send, a live-typing context change (enable or disable), and an inbound typing frame, so a rise appears at the next of those reads.
+
+### Event 29: typing cause counters
+
+Each app writes event 29 when a typing cause counter rises: `event=29`, field `29` is the cause code, and field `19` is the increase since the previous record for that cause. It is not the total. The counters belong to the typing core, count from the start of the core client, live in memory only, and never count errors. The header of each export lists the names in `live_typing_causes=<code>:<name>,...`. The phone omits that table when the binding cannot be read.
+
+On the phone, a count that drops below its last read means the core client was replaced. The phone counts the new value from zero, so the whole value is new. On the desktop a typing actor keeps one core client for its whole life, so a count cannot drop. A new session starts a new actor, and its first read sets a new baseline, so a cause counted before that read is absent.
+
+Cause codes, from `LiveTypingCause` in [ephemeral_v2.rs](../../crates/client-core/src/ephemeral_v2.rs). Seal causes (1 to 6, 35) count on the device that seals a typing frame. Decode and receive causes (10 to 20) count on the device that opens one.
+
+| Code | Name | Meaning |
+| --- | --- | --- |
+| 1 | `seal_started` | A Started frame was sealed, including a re-send |
+| 2 | `seal_stopped` | A Stopped frame was sealed |
+| 3 | `seal_sharing_off` | Not sealed: outbound vault typing sharing is off |
+| 4 | `seal_participant_not_member` | Not sealed: the group participant is not confirmed in the roster |
+| 5 | `seal_not_eligible` | Not sealed: the conversation or gateway is not eligible |
+| 6 | `seal_budget` | Not sealed: the sender's budget is spent |
+| 10 | `frame_received` | An inbound frame reached the core's receive path. It rises together with the cause that says what became of the frame, so 10 alone does not mean the frame opened |
+| 11 | `ingress_refused` | An inbound frame was refused by the ingress budget before decoding |
+| 12 | `decode_malformed` | The roster, header, envelope, plaintext, or JSON was malformed, or the JSON frame was oversize |
+| 13 | `decode_expired` | The frame expired at or before the effective time |
+| 14 | `decode_future` | The sent time is beyond the future tolerance |
+| 15 | `decode_unknown_sender` | The sender is this device or is not in the roster |
+| 16 | `decode_key_unavailable` | The epoch key is not available |
+| 17 | `decode_crypto` | Authenticated decryption failed |
+| 18 | `decode_not_addressed` | The authenticated destination or session does not match |
+| 19 | `origin_ignored` | The authenticated origin is not routed locally |
+| 20 | `not_eligible` | The receiving conversation or gateway is not eligible |
+| 21 | `session_challenged` | An unconfirmed session was challenged |
+| 22 | `session_challenge_suppressed` | A challenge was blocked by the session or control budget |
+| 23 | `sequence_stale` | The sequence is at or below the accepted floor |
+| 24 | `start_suppressed` | A start was prevented by the receiver quota or record capacity |
+| 25 | `stop_without_active` | A stop had no live display, or no record capacity |
+| 26 | `display` | A display action was emitted |
+| 27 | `gateway_intent` | A gateway intent was emitted |
+| 28 | `challenge_answered` | A session acknowledgement was sealed |
+| 29 | `challenge_answer_refused` | The control budget refused the acknowledgement |
+| 30 | `ack_accepted` | An acknowledgement installed or renewed the session |
+| 31 | `ack_ignored` | No pending acknowledgement matched |
+| 32 | `resend_sent` | A follow-up start was sealed after an acknowledgement |
+| 33 | `resend_skipped` | A candidate follow-up was filtered out, refused by the replay budget, or sealed to nothing |
+| 34 | `renewal_challenged` | A session renewal challenge was sealed |
+| 35 | `seal_expired` | The replay expiry cap elapsed before the seal |
+
+Session causes (21 to 34) count on the challenger (21, 22, 30, 31, 34) or on the device that answers (28, 29, 32, 33). Causes 23 to 27 count on the device that receives the frame.
+
+### Symptoms and the causes to check
+
+These pairings come from the count sites in the core and the desktop record sites. None has been observed on a phone or a rendered desktop app. Use them to choose what to check, not as a diagnosis.
+
+| Symptom | Check first |
+| --- | --- |
+| Contact typing never shows on the desktop | On the phone, 1 or 2 should rise after the contact types. If 4 to 6 or 35 rise instead, the phone did not seal the frame. On the desktop, 10 should rise when the frame arrives. 11 to 18 and 20 name why it was not accepted. 24 shows a suppressed start and 25 a stop with no active display. Desktop event 30 (reason 2 or 5) shows the socket state, and event 32 (outcome 5 or 6) shows an inbound frame with nothing displayed. |
+| Desktop typing never reaches Google Messages | Desktop event 31: outcome 1 means sealed, and 2 to 5 name the refusal. On the phone, 12 to 18 and 20 show whether the frame was opened. The Google-side reasons 59, 280, and 328 to 333 are in the table above. |
+| The first typing after a cold start, or after the socket reopens, is lost | 21 counts challenges this device sent, and 22 a challenge the budget held back. 30 and 31 count acknowledgements received for its challenges: 30 when one installed a session, 31 when none matched. 28 counts acknowledgements the device sent and 29 one the control budget refused. After the device sends an acknowledgement, its 32 counts the re-sent starts and its 33 the ones not sent. Desktop event 30 shows the connecting and hello sequence. The existing re-send bounds are in the notes above. |
+| Typing stops after a while | 23 counts stale sequences, 24 starts suppressed by the receiver quota or capacity, 25 stops with no active display, and 34 renewal challenges. Desktop event 30 (reason 5 `closed` or 11 `suspend_detected`) shows socket drops and sleep, and event 31 outcome 5 shows a send that was no longer current. The 15-second contact burst limit and the phone's 60-second socket close are not counted here. They are in the notes above. |
+
 ## Reading the link's diagnostics
 
-Diagnostics are off unless enabled in **Settings → Advanced → Diagnostics**. When on, each link event also goes to logcat as `PeppyRcsDiagnostics: reason=<n>`, with `n` from the append-only table in [GoogleMessagesLinkDiagnostics.kt](../../apps/android/app/src/main/java/dev/peppy/mobile/diagnostics/GoogleMessagesLinkDiagnostics.kt). Other diagnostic events, including provider-capture reasons from `SyncDiagnosticReason`, appear only in the exported file.
+On the phone, diagnostics are off unless enabled in **Settings → Advanced → Diagnostics**. Event 29 and the desktop events are in the [typing indicators](#typing-indicators) section, and they are written to the export file, not logcat. When on, each link event also goes to logcat as `PeppyRcsDiagnostics: reason=<n>`, with `n` from the append-only table in [GoogleMessagesLinkDiagnostics.kt](../../apps/android/app/src/main/java/dev/peppy/mobile/diagnostics/GoogleMessagesLinkDiagnostics.kt). Other diagnostic events, including provider-capture reasons from `SyncDiagnosticReason`, appear only in the exported file.
 
 | Pattern | Meaning |
 | --- | --- |
