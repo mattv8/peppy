@@ -402,7 +402,7 @@ internal fun MmsSettings(
                     Text(it.text(), Modifier.testTag("mms-health-note"), style = MaterialTheme.typography.bodySmall)
                 }
             }
-            RestrictedMessageAccessControls(
+            if (restrictedMessageAccessVisible()) RestrictedMessageAccessControls(
                 context = context,
                 refresh = refresh,
                 access = restrictedAccess,
@@ -546,9 +546,9 @@ internal fun RestrictedMessageAccessControls(
 }
 
 @Composable
-internal fun RestrictedMessageAccessStatus(access: RestrictedMessageAccess, statusResId: Int? = null) {
+internal fun RestrictedMessageAccessStatus(access: RestrictedMessageAccess) {
     val title = stringResource(R.string.peppy_mms_restricted_title)
-    val status = if (statusResId != null) stringResource(statusResId) else when (access) {
+    val status = when (access) {
         RestrictedMessageAccess.ALLOWED -> stringResource(R.string.peppy_mms_restricted_status_allowed)
         RestrictedMessageAccess.NOT_ALLOWED -> stringResource(R.string.peppy_mms_restricted_status_not_allowed)
         RestrictedMessageAccess.UNSUPPORTED -> stringResource(R.string.peppy_mms_restricted_status_unsupported)
