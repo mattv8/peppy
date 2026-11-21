@@ -948,7 +948,7 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func observeContactScan(inputJson: String) throws  -> String
     
     /**
-     * Records the first server replay watermark observed by the host.
+     * Records the server watermark after each replay page has been ingested.
      */
     func observeServerHighWater(highWaterCursor: String) throws 
     
@@ -2602,7 +2602,7 @@ open func observeContactScan(inputJson: String)throws  -> String  {
 }
     
     /**
-     * Records the first server replay watermark observed by the host.
+     * Records the server watermark after each replay page has been ingested.
      */
 open func observeServerHighWater(highWaterCursor: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -21254,7 +21254,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_contact_scan() != 7624) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_server_high_water() != 10269) {
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_server_high_water() != 23619) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_history_import_gate() != 17220) {
