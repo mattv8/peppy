@@ -294,6 +294,7 @@ notification previews and floating heads.
 - The remote contact's typing state is a trailing synthetic row in `#message-list-content` (`#typing-indicator`, an `aria-hidden` incoming bubble with three animated dots), after real messages and queued sends. It is never in the composer and never part of the message timeline or sender runs. One-to-one rows show no avatar, so the real message lands in the same place. Groups show the typer's avatar and tone for one typer, a neutral bubble for several, and the typing label beneath.
 - The row renders only when the list ends at the live tail: not in detached history, empty threads, read-only groups, loading, or other tabs. The existing near-bottom stick reveals it above the composer overlay and never moves a reader of older history.
 - Typing announcements stay in the sr-only `#typing-announcer` outside the log. The composer toolbar keeps only its spacer and the `data-typing-send` attribute for the user's own typing.
+- Floating heads (macOS and Windows; Linux has no heads) show typing in the unread badge slot. A three-dot pill replaces the count while a contact types in that conversation, and the count returns afterward. Only conversations whose typing arrives through the Google Messages link show it. Groups show the pill with no typer identity. The head stays one element: its label and tooltip gain ", typing" after the name, with one wording for groups and one-to-one. Nothing is announced, and the pill is not a separate element. Reduced motion shows static dots at 0.7 opacity, or full opacity under Increase Contrast or High Contrast. Timing belongs to [heads_runtime.rs](../apps/desktop/src-tauri/src/heads_runtime.rs). The head's bounce differs from the in-conversation dots, which pulse opacity only, on purpose. Unit-tested only; not seen running on macOS or Windows (see Native and fixture limits).
 
 ## Message reactions
 
@@ -354,6 +355,9 @@ notification previews and floating heads.
   preview preferences stay distinct from encrypted-sync state.
 - Floating-head behavior needs native input-region and focus integration. Keep
   the main-window and composer fallbacks; do not infer native behavior from browser CSS.
+- The head typing pill needs the same native runtime evidence. Its drawing is
+  covered by unit tests only: the macOS drawing has not been seen running, and the
+  Windows drawing has not been compiled or run on Windows.
 - Browser inspection and builds cover CSS and layout only. Native window behavior
   needs macOS runtime evidence (cold start, bright and dark themes, resizing,
   and fullscreen). Report missing evidence as unverified.

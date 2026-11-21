@@ -126,6 +126,24 @@ Nonsecret notification display preferences use a separate `IndexedDbNotification
 record and are persisted to encrypted IndexedDB before success is reported; encrypted
 message/domain state remains Rust-owned.
 
+## Typing controller
+
+`TypingController` ([typing-controller.ts](../../packages/browser-runtime/src/typing-controller.ts)) runs live typing in the SharedWorker. The worker has one controller, one `/v1/live` socket, and one engine. The socket retries with backoff from 1 second to 30 seconds. Until its first successful connection, the cap is 5 minutes.
+
+Lifecycle:
+
+- It starts with the network.
+- It stops on lock, observed revocation, fatal error, owner release, and teardown. Account sign-out does not stop it.
+- The engine enables when the core reports a typing context key (`_worker_typing_context_key`). It re-enables only when the key changes. Epoch unlock and a poll status that is not revoked refresh the key.
+
+Read path: typing core commands (`_worker_typing_*`) go through `session.query`, the serialized read path. It does not checkpoint, so a frame does not commit the database. Those commands must stay read-only on SQLite. The core derives the typing context in Rust from the verified server context, and the worker passes none. Typing failures use hyphenated codes, so the worker treats them as handled rejections.
+
+Renderer RPCs: `send_typing` (`conversationId`, `state` of `started` or `stopped`) and `set_typing_sharing` (`enabled`) are host-handled and validated in [host.ts](../../packages/browser-runtime/src/host.ts). The worker posts `{ event: "typing", signal }` to every attached tab. A signal carries `conversationId`, `state`, `expiresAtMs` for a start, and `participant` in groups.
+
+With several tabs, a stop is forwarded only when no other tab is still typing in that conversation.
+
+Not verified in a real browser: socket start, worker reloads, and the multi-tab stop rule. The TypeScript tests use a fake core and supervisor.
+
 ## Failure modes and recovery
 
 Worker poisoning occurs on WASM traps, malformed responses, or `core-poisoned`

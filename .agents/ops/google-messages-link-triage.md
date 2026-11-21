@@ -93,6 +93,33 @@ Not fixed: the watermark advances only to a projected record. A chat whose new t
 
 A page entirely below the floor is still offered to `core.invalidate` for protocol-switch signals before the walk ends; deeper pages no longer are. The 1,081 signals the measured walks offered were all older than 24 hours and all skipped.
 
+## Typing indicators
+
+A contact's typing arrives as a Google typing record. The link projects it ([typing.go](../../apps/android/googlemessages/gmlink/typing.go)), the core seals it to the vault, and the phone sends it on its `/v1/live` socket ([TypingBridge.kt](../../apps/android/app/src/gmlink/java/dev/peppy/mobile/googlemessages/TypingBridge.kt)). Typing from a computer arrives on that socket. The core opens and admits it, and the host forwards each admitted start to Google Messages ([LiveTypingAdapter.kt](../../apps/android/app/src/gmlink/java/dev/peppy/mobile/googlemessages/LiveTypingAdapter.kt)).
+
+A receiver shows a peer's typing only from a session it has confirmed. It challenges the peer, and the peer's SessionAck confirms the session. Frames from an unconfirmed session trigger a challenge and are dropped. To recover the first frames, the device that answers a challenge re-sends its still-active typing starts as ordinary frames after the ack. The bounds are two re-sends per ack, no re-send of the same start within 3 seconds, no re-send of a start with under 1 second left, and six re-sends per minute per device ([ephemeral_v2.rs](../../crates/client-core/src/ephemeral_v2.rs), [MAX_REPLAYS_PER_MINUTE](../../crates/client-core/src/ephemeral_v2_control.rs)). A re-send keeps the original expiry, so it never extends typing. Contact starts re-send to any challenger. A vault-device start re-sends only to its gateway, and sharing off suppresses those.
+
+Still lost:
+
+- A start whose Challenge or SessionAck is lost. After three unanswered challenges to one peer, the next challenge waits 60 seconds ([ephemeral_v2_session.rs](../../crates/client-core/src/ephemeral_v2_session.rs)).
+- Typing that happens while the phone's `/v1/live` socket is closed. The phone closes it 60 seconds after no other non-Android device of the vault is connected.
+- A contact burst longer than 15 seconds when Google sends only one start. The dots drop at 15 seconds.
+
+Recovery:
+
+- After a protocol fuse (`PROTOCOL_ERROR`), the bridge restarts the live host on the next service update once a cooldown has passed. The cooldown starts at 5 minutes and doubles at each restart, up to 60 minutes. A stop or a new gateway session resets it. Reason 334 marks each restart.
+- Authentication failure and membership revocation are terminal. The host does not restart until the gateway session changes or the bridge is stopped and started.
+- A failed core enable is retried on a membership renewal, at most once per 60 seconds (335).
+
+Google Messages has a setting that shows typing indicators. When the link sees its value change, it reports 312 (on) or 311 (off). The link only reports this value. It does not gate typing, and what Google does with the setting is not established.
+
+Reading a capture, by the first boundary reached:
+
+- Contact typing: expect 309, then 56, then 310 and 56 at the stop. 307 or 308 with no 309: the link did not project the record. 313 to 320 name the Kotlin gate that dropped it. 321: the socket refused the frame.
+- Contact typing and a computer challenge: when a computer challenges the phone, expect 338, then 325. The re-sent frames record no 56 of their own. When a contact is typing, a 325 with no 338 means nothing was re-sent: no active start, under 1 second left, re-sent within 3 seconds, or the six-per-minute budget was spent. A 325 with no 338 is normal when the computer is the one typing.
+- Typing from a computer: expect 325 (session confirmation), then 57. 336 on every frame: the core dropped each frame. 59: the adapter did not admit the intent. 280: no link-owned Google conversation. 328 to 333: the effect was refused, by cause.
+- Live host: 49 or 50, then 53 or 55, with no later 52 or 54: the live host stopped (authentication or protocol). 334 shows a later restart. 52, then 322 to 324: the typing enable failed. 335 shows the retries. 54: the typing enable succeeded.
+
 ## Reading the link's diagnostics
 
 Diagnostics are off unless enabled in **Settings → Advanced → Diagnostics**. When on, each link event also goes to logcat as `PeppyRcsDiagnostics: reason=<n>`, with `n` from the append-only table in [GoogleMessagesLinkDiagnostics.kt](../../apps/android/app/src/main/java/dev/peppy/mobile/diagnostics/GoogleMessagesLinkDiagnostics.kt). Other diagnostic events, including provider-capture reasons from `SyncDiagnosticReason`, appear only in the exported file.
@@ -118,11 +145,28 @@ Diagnostics are off unless enabled in **Settings → Advanced → Diagnostics**.
 | 227, 228 | The row predates the receive claim (claim time minus 15 minutes) or falls in the 120-second guard band after it; the capture takes it. |
 | 190 in bulk | Bootstrap could not bind a chat for receive, for example no recorded own number for the SIM or a thread that also holds a group. Those chats arrive only as provider copies. |
 | 44, 45 | History recovery aborted or incomplete for a chat. |
-| 59 on every desktop typing refresh with no 57 | The frame could not be opened, replied to, or admitted as a typing intent, so nothing was forwarded. Check that the native client is available, that the desktop peer passed session validation (a failed handshake, for example from clock skew beyond the tolerance, leaves it unvalidated), and that the conversation is eligible. A future timestamp often yields an empty result rather than an exception. |
+| 309 and 310 | Google delivered a typing start or stop for a burst, and the link projected it. This is not host acceptance: 56 records that. |
+| 307 and 308 | 307: the record was ignored (unknown typing type, no sender number, or a sender who is not a visible participant). 308: the conversation is unknown or its ID is empty. With no 307, 308, or 309, the link dropped the event silently (closed, stale stream, or no receive verification). |
+| 311 and 312 | Google Messages' typing indicators setting went off (311) or on (312). Reported when the value changes. The link only reports this value. It does not gate typing, and what Google does with the setting is not established. |
+| 313 to 317 | Contact typing dropped before it was sealed. 313: LinkRuntime rejected the callback (handle, generation, revision, or stream epoch). 314: no typing sink. 315: native client or local device ID missing. 316: record unparsable, no Google ID, or unknown state. 317: no receive context, or the conversation is not link-owned. |
+| 318 to 320 | Contact typing sealed but not sent. 318: the core refused the seal (not eligible, participant not in roster, or budget). 319: the seal threw. 320: the sealed frame was not sent because generation, incarnation, or publication moved. |
+| 56 | The host accepted a contact's sealed typing frame for sending. |
+| 321 | The host could not hand a frame to the socket: no socket, oversize, stale publication, or the socket refused the enqueue. |
+| 325 on a desktop start, with no 57 | Expected during session confirmation: the phone answered with only a handshake reply or session update. |
+| 338 | The phone answered a peer's session challenge and sent at least one re-sent typing start after the ack. Recorded once per frame, before that frame's 325. A refused or stale send in the same batch also records 321 or 327. No 338 follows a refused or stale reply. It shows a re-send went out, not that the peer displayed it. |
+| 336 on every frame | The core dropped each peer frame: not addressed to this device, not eligible, over budget, or malformed. Ordinary on the vault fan-out. Check eligibility and addressing for a computer that types. A frame with a future timestamp can also produce this. |
+| 59 | The adapter did not admit a typing intent: wrong session, sequence not newer than the last one, not a start, or past its deadline. Also fires when an admitted intent is no longer current, or is past its deadline, when it is published. Expected at every stop from a computer. 59 on a start with no 57 is the failure signal. |
+| 58 | A start was not forwarded because the last forwarded start for that conversation is still valid. |
 | 57 | A desktop typing start was forwarded to Google Messages. |
-| 56 | A contact's typing was sealed to the vault. |
-| 280 | An admitted typing intent was not forwarded: the native client was unavailable, the conversation has no link-owned Google conversation ID, or the lookup threw. |
-| 281 | The Google typing forwarder refused the effect (`typing_unavailable`, `typing_stale`, `typing_expired`, or `typing_failed`); no suppression window opened. LinkRuntime can reject locally, so this does not always mean Google Messages refused it. |
+| 280 | The intent's conversation has no link-owned Google conversation ID, or the lookup threw. Nothing was forwarded. |
+| 328 to 333 | The typing effect was refused or failed before or at the Google call, by cause. 328: unavailable. 329: stale. 330: expired or deadline. 331: failed or cancelled. 332: invalid or stopped. 333: no usable conversation (unknown, not one-to-one, no SIM payload, or a group chat without group verification). The Google call itself can fail as 331 (error or cancelled) or as a deadline in 330. 331 can also be a native-call exception in LinkRuntime. 328, 329, 332, and 333 are refusals before the call. |
+| 281 | An unrecognized setTyping result. Known results use 328 to 333. |
+| 322 to 324 | Typing enable failed. 322: native client unavailable. 323: core enable threw. 324: sharing reapply failed. |
+| 335 | A failed enable was retried on membership renewal, at most once per 60 seconds. |
+| 334 | The bridge restarted the live host after a protocol-fuse cooldown. |
+| 326, 327, 337 | 326: core open threw, or client missing. 327: a reply or re-sent frame was not sent because authority moved. 337: an opened outcome belonged to an older generation or incarnation. |
+| 49, 50, 52, 53 | Live host state. 49: authentication refused. 50: protocol fatal. 52: live host enabled. 53: live host disabled. |
+| 54, 55 | Typing state. 54: typing enabled. 55: typing disabled. |
 
 ## Phone access traps
 
@@ -161,3 +205,8 @@ Not established:
 - Whether Google redelivers a conversation event sent during a reopen of a few seconds.
 - Row shapes on other devices, Android versions, carriers, or Google Messages versions.
 - Why pictures that had been waiting for hours left the queue after a reboot with no outgoing row in the provider. The log for that period was lost.
+- Typing, end to end. Nothing in the typing path was observed on a phone, in a browser, or in a running desktop floating head. The Windows head drawing has not been compiled or run. Unit and integration tests cover the logic only.
+- Whether a re-send after a challenge recovers the first typing frame on a device. 338 records the send, not the display.
+- Whether Google sends one STARTED per typing burst or repeats it. Reasons 309 and 310 exist to measure it.
+- Whether the confirm-then-resend bounds, the 60-second peer close, and the fuse cooldowns behave as written on a device.
+- Whether Google Messages reports the typing indicators setting (311 and 312) on a device.
