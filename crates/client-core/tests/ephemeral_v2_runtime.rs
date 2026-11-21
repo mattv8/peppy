@@ -12,6 +12,26 @@ use peppy_protocol::{
 };
 use std::collections::BTreeMap;
 
+fn assert_counter_delta<T>(
+    client: &Client,
+    expected: &[(peppy_client_core::LiveTypingCause, u64)],
+    operation: impl FnOnce() -> T,
+) -> T {
+    let before = client.live_typing_counters().unwrap();
+    let result = operation();
+    let after = client.live_typing_counters().unwrap();
+    assert_eq!(before.len(), after.len());
+    for ((cause, old), (new_cause, new)) in before.into_iter().zip(after) {
+        assert_eq!(cause, new_cause);
+        let delta = expected
+            .iter()
+            .find(|(item, _)| *item == cause)
+            .map_or(0, |(_, value)| *value);
+        assert_eq!(new - old, delta, "unexpected delta for {}", cause.name());
+    }
+    result
+}
+
 fn publish_eligible(client: &Client, gateway: DeviceId, conversation_id: ConversationId) {
     publish_eligible_at(client, gateway, conversation_id, 1, 1_000);
 }
@@ -250,6 +270,136 @@ fn v2_is_disabled_until_a_trusted_context_enables_and_then_seals_a_real_frame() 
 }
 
 #[test]
+fn receive_counter_deltas_distinguish_quota_stale_stop_and_renewal() {
+    use peppy_client_core::LiveTypingCause as Cause;
+    for contact in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::new();
+        let gateway_config = config(&directory, "delta-gateway", &vault);
+        let desktop_config = config(&directory, "delta-desktop", &vault);
+        let gateway = unlocked(&gateway_config, &vault);
+        let desktop = unlocked(&desktop_config, &vault);
+        let conversation = ConversationId::new();
+        publish_pair_eligibility(
+            &desktop,
+            &gateway,
+            gateway_config.device_id,
+            conversation,
+            1_000,
+        );
+        let clock = |time: i64| LiveClock {
+            wall_ms: time,
+            mono_ms: time as u64,
+        };
+        enable_pair(
+            &desktop,
+            desktop_config.device_id,
+            &gateway,
+            gateway_config.device_id,
+            clock(1_000),
+            clock(1_000),
+        );
+        let (sender, receiver, origin) = if contact {
+            (&gateway, &desktop, TypingOriginV2::GoogleContact)
+        } else {
+            (&desktop, &gateway, TypingOriginV2::VaultDevice)
+        };
+        let make = |state, time| {
+            sender
+                .seal_typing_signal_v2(
+                    conversation,
+                    gateway_config.device_id,
+                    origin,
+                    None,
+                    state,
+                    clock(time),
+                )
+                .unwrap()
+                .unwrap()
+                .signal
+        };
+        let first = make(TypingStateV2::Started, 1_001);
+        let challenge = assert_counter_delta(
+            receiver,
+            &[(Cause::FrameReceived, 1), (Cause::SessionChallenged, 1)],
+            || {
+                receiver
+                    .open_typing_signal_v2(&first, clock(1_001))
+                    .unwrap()
+            },
+        )
+        .reply
+        .unwrap();
+        let answer = sender
+            .open_typing_signal_v2(&challenge, clock(1_002))
+            .unwrap();
+        receiver
+            .open_typing_signal_v2(&answer.reply.unwrap(), clock(1_003))
+            .unwrap();
+        receiver
+            .open_typing_signal_v2(&answer.follow_ups[0], clock(1_004))
+            .unwrap();
+
+        let fresh = make(TypingStateV2::Started, 4_001);
+        assert_counter_delta(
+            receiver,
+            &[(Cause::FrameReceived, 1), (Cause::StartSuppressed, 1)],
+            || {
+                receiver
+                    .open_typing_signal_v2(&fresh, clock(4_001))
+                    .unwrap()
+            },
+        );
+        assert_counter_delta(
+            receiver,
+            &[(Cause::FrameReceived, 1), (Cause::SequenceStale, 1)],
+            || {
+                receiver
+                    .open_typing_signal_v2(&fresh, clock(4_002))
+                    .unwrap()
+            },
+        );
+
+        let stop = make(TypingStateV2::Stopped, 4_003);
+        receiver.open_typing_signal_v2(&stop, clock(4_003)).unwrap();
+        make(TypingStateV2::Started, 7_002);
+        let no_active = make(TypingStateV2::Stopped, 7_003);
+        assert_counter_delta(
+            receiver,
+            &[(Cause::FrameReceived, 1), (Cause::StopWithoutActive, 1)],
+            || {
+                receiver
+                    .open_typing_signal_v2(&no_active, clock(7_003))
+                    .unwrap()
+            },
+        );
+
+        let renewal = make(TypingStateV2::Started, 11_001);
+        let outcome = assert_counter_delta(
+            receiver,
+            &[
+                (Cause::FrameReceived, 1),
+                (
+                    if contact {
+                        Cause::Display
+                    } else {
+                        Cause::GatewayIntent
+                    },
+                    1,
+                ),
+                (Cause::RenewalChallenged, 1),
+            ],
+            || {
+                receiver
+                    .open_typing_signal_v2(&renewal, clock(11_001))
+                    .unwrap()
+            },
+        );
+        assert!(outcome.action.is_some() && outcome.reply.is_some());
+    }
+}
+
+#[test]
 fn cold_start_replays_after_ack_in_both_directions() {
     for contact_origin in [false, true] {
         let directory = tempfile::tempdir().unwrap();
@@ -295,19 +445,53 @@ fn cold_start_replays_after_ack_in_both_directions() {
             .unwrap()
             .unwrap()
             .signal;
-        let first = receiver
-            .open_typing_signal_v2(&initial, clock(1_001))
-            .unwrap();
+        use peppy_client_core::LiveTypingCause as Cause;
+        let first = assert_counter_delta(
+            receiver,
+            &[(Cause::FrameReceived, 1), (Cause::SessionChallenged, 1)],
+            || {
+                receiver
+                    .open_typing_signal_v2(&initial, clock(1_001))
+                    .unwrap()
+            },
+        );
         assert!(first.action.is_none());
+        let count = |client: &Client, cause| {
+            client
+                .live_typing_counters()
+                .unwrap()
+                .into_iter()
+                .find(|(candidate, _)| *candidate == cause)
+                .unwrap()
+                .1
+        };
+        assert_eq!(count(receiver, Cause::FrameReceived), 1);
+        assert_eq!(count(receiver, Cause::SessionChallenged), 1);
+        assert_counter_delta(
+            receiver,
+            &[
+                (Cause::FrameReceived, 1),
+                (Cause::SessionChallengeSuppressed, 1),
+            ],
+            || {
+                receiver
+                    .open_typing_signal_v2(&initial, clock(1_001))
+                    .unwrap()
+            },
+        );
+        assert_eq!(count(receiver, Cause::SessionChallengeSuppressed), 1);
         let response = sender
             .open_typing_signal_v2(&first.reply.unwrap(), clock(1_002))
             .unwrap();
         let ack = response.reply.unwrap();
         assert_eq!(response.follow_ups.len(), 1);
+        assert_eq!(count(sender, Cause::ChallengeAnswered), 1);
+        assert_eq!(count(sender, Cause::ResendSent), 1);
         let follow_up = &response.follow_ups[0];
         assert!(follow_up.sequence.parse::<u64>().unwrap() > ack.sequence.parse::<u64>().unwrap());
         assert_eq!(follow_up.expires_at_ms, initial.expires_at_ms);
         receiver.open_typing_signal_v2(&ack, clock(1_003)).unwrap();
+        assert_eq!(count(receiver, Cause::AckAccepted), 1);
         let outcome = receiver
             .open_typing_signal_v2(follow_up, clock(1_004))
             .unwrap();
@@ -333,6 +517,21 @@ fn cold_start_replays_after_ack_in_both_directions() {
             }
             other => panic!("unexpected action: {other:?}"),
         };
+        assert_eq!(
+            count(
+                receiver,
+                if contact_origin {
+                    Cause::Display
+                } else {
+                    Cause::GatewayIntent
+                }
+            ),
+            1
+        );
+        receiver
+            .open_typing_signal_v2(follow_up, clock(2_005))
+            .unwrap();
+        assert_eq!(count(receiver, Cause::SequenceStale), 1);
         assert!(deadline <= initial.expires_at_ms.parse().unwrap());
     }
 }

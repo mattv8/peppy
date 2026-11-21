@@ -100,7 +100,7 @@ pub use ephemeral::{
 };
 pub use ephemeral_v2::{
     LiveAction, LiveClock, LiveEnableContext, LiveEnableGeneration, LiveError, LiveExecutor,
-    LiveOutbound, LiveOutcome, PeerSessionUpdate,
+    LiveOutbound, LiveOutcome, LiveTypingCause, PeerSessionUpdate,
 };
 mod mcp_commands;
 pub use draft_sync::{
@@ -3411,6 +3411,15 @@ impl Client {
     pub fn disable_live_typing(&self) -> Result<(), Error> {
         self.lock()?.ephemeral_v2.disable();
         Ok(())
+    }
+
+    /// Returns all cumulative, memory-only cause counters, including zero counts.
+    pub fn live_typing_counters(&self) -> Result<Vec<(LiveTypingCause, u64)>, Error> {
+        let store = self.lock()?;
+        Ok(LiveTypingCause::ALL
+            .iter()
+            .map(|&cause| (cause, store.ephemeral_v2.counters[cause as usize]))
+            .collect())
     }
 
     /// Enables or suppresses outbound live typing frames for this enabled incarnation.

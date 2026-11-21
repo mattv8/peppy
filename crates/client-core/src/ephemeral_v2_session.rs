@@ -105,6 +105,26 @@ pub(crate) struct SessionTransition {
     pub(crate) session_update: Option<PeerSessionUpdate>,
     pub(crate) action: Option<SessionAction>,
     pub(crate) challenge: Option<ChallengeIntent>,
+    pub(crate) drop: Option<SessionDrop>,
+    pub(crate) renewal: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionDrop {
+    ChallengeSuppressed,
+    SequenceStale,
+    StartSuppressed,
+    StopWithoutActive,
+    AckIgnored,
+}
+
+impl SessionTransition {
+    fn dropped(reason: SessionDrop) -> Self {
+        Self {
+            drop: Some(reason),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -187,7 +207,10 @@ impl EphemeralV2SessionState {
         let key = (input.peer, input.conversation, input.participant.clone());
         let is_new = !self.records.contains_key(&key);
         if is_new && !self.has_record_capacity(input.peer) {
-            return Ok(SessionTransition::default());
+            return Ok(SessionTransition::dropped(match input.state {
+                SessionTypingState::Started => SessionDrop::StartSuppressed,
+                SessionTypingState::Stopped => SessionDrop::StopWithoutActive,
+            }));
         }
         let record = self.records.entry(key).or_default();
         if record.session != Some(input.session) {
@@ -196,7 +219,7 @@ impl EphemeralV2SessionState {
             record.active_deadline_mono_ms = None;
         }
         if input.sequence.0 <= validated.floor.max(record.high_water) {
-            return Ok(SessionTransition::default());
+            return Ok(SessionTransition::dropped(SessionDrop::SequenceStale));
         }
         // Order is deliberately consumed before quota evaluation.
         record.high_water = input.sequence.0;
@@ -247,6 +270,15 @@ impl EphemeralV2SessionState {
             };
         Ok(SessionTransition {
             session_update: None,
+            drop: if action.is_none() {
+                Some(match input.state {
+                    SessionTypingState::Started => SessionDrop::StartSuppressed,
+                    SessionTypingState::Stopped => SessionDrop::StopWithoutActive,
+                })
+            } else {
+                None
+            },
+            renewal: challenge.is_some(),
             action,
             challenge,
         })
@@ -288,10 +320,10 @@ impl EphemeralV2SessionState {
     ) -> Result<SessionTransition, SessionError> {
         self.prune(input.received_mono_ms.0);
         if input.challenger_session != self.local_session {
-            return Ok(SessionTransition::default());
+            return Ok(SessionTransition::dropped(SessionDrop::AckIgnored));
         }
         let Some(pending) = self.pending.get(&input.peer).copied() else {
-            return Ok(SessionTransition::default());
+            return Ok(SessionTransition::dropped(SessionDrop::AckIgnored));
         };
         if input.nonce != pending.nonce
             || input
@@ -300,7 +332,7 @@ impl EphemeralV2SessionState {
                 .saturating_sub(pending.issued_mono_ms)
                 >= CHALLENGE_TIMEOUT_MS
         {
-            return Ok(SessionTransition::default());
+            return Ok(SessionTransition::dropped(SessionDrop::AckIgnored));
         }
         let lease_deadline_mono_ms = pending
             .issued_mono_ms
@@ -366,7 +398,7 @@ impl EphemeralV2SessionState {
     ) -> Result<SessionTransition, SessionError> {
         if let Some(pending) = self.pending.get(&peer) {
             if now_ms.saturating_sub(pending.issued_mono_ms) < CHALLENGE_TIMEOUT_MS {
-                return Ok(SessionTransition::default());
+                return Ok(SessionTransition::dropped(SessionDrop::ChallengeSuppressed));
             }
             self.pending.remove(&peer);
         }
@@ -375,7 +407,7 @@ impl EphemeralV2SessionState {
             .cooldown_until_mono_ms
             .is_some_and(|until| now_ms < until)
         {
-            return Ok(SessionTransition::default());
+            return Ok(SessionTransition::dropped(SessionDrop::ChallengeSuppressed));
         }
         if episode.cooldown_until_mono_ms.is_some() {
             *episode = Episode::default();
@@ -386,14 +418,14 @@ impl EphemeralV2SessionState {
                     .checked_add(CHALLENGE_COOLDOWN_MS)
                     .ok_or(SessionError::CounterExhausted)?,
             );
-            return Ok(SessionTransition::default());
+            return Ok(SessionTransition::dropped(SessionDrop::ChallengeSuppressed));
         }
         if episode
             .last_issue_mono_ms
             .is_some_and(|last| now_ms.saturating_sub(last) < CHALLENGE_SPACING_MS)
             || self.pending.len() >= MAX_PENDING
         {
-            return Ok(SessionTransition::default());
+            return Ok(SessionTransition::dropped(SessionDrop::ChallengeSuppressed));
         }
         Ok(SessionTransition {
             challenge: Some(ChallengeIntent {
@@ -531,6 +563,55 @@ mod tests {
     }
 
     #[test]
+    fn transitions_explain_suppressed_and_stale_typing() {
+        let peer = device(1);
+        let peer_session = session(2);
+        let mut state = EphemeralV2SessionState::new(session(9));
+        let first = typing(
+            peer,
+            peer_session,
+            conversation(1),
+            1,
+            SessionTypingState::Started,
+            0,
+        );
+        let intent = state
+            .observe_typing(first.clone())
+            .unwrap()
+            .challenge
+            .unwrap();
+        state.record_challenge(intent, nonce(1)).unwrap();
+        assert_eq!(
+            state.observe_typing(first).unwrap().drop,
+            Some(SessionDrop::ChallengeSuppressed)
+        );
+        state
+            .accept_ack(AuthenticatedAck {
+                peer,
+                session: peer_session,
+                challenger_session: session(9),
+                nonce: nonce(1),
+                sequence_floor: AuthenticatedSequence(100),
+                received_mono_ms: MonoTime(1),
+            })
+            .unwrap();
+        assert_eq!(
+            state
+                .observe_typing(typing(
+                    peer,
+                    peer_session,
+                    conversation(1),
+                    100,
+                    SessionTypingState::Started,
+                    2
+                ))
+                .unwrap()
+                .drop,
+            Some(SessionDrop::SequenceStale),
+        );
+    }
+
+    #[test]
     fn delayed_ack_keeps_high_water_and_rejects_replay() {
         let peer = device(1);
         let peer_session = session(2);
@@ -594,7 +675,7 @@ mod tests {
                     10_003
                 ))
                 .unwrap(),
-            SessionTransition::default()
+            SessionTransition::dropped(SessionDrop::SequenceStale)
         );
     }
 
@@ -807,7 +888,10 @@ mod tests {
                 received_mono_ms: MonoTime(1),
             },
         ] {
-            assert_eq!(state.accept_ack(ack).unwrap(), SessionTransition::default());
+            assert_eq!(
+                state.accept_ack(ack).unwrap(),
+                SessionTransition::dropped(SessionDrop::AckIgnored)
+            );
         }
         assert!(
             state
