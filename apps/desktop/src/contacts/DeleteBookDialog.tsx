@@ -25,7 +25,15 @@ export function DeleteBookDialog({ book, opener, onDismiss, onDeleted, onBooksCh
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
   const inFlight = useRef(false);
+  const ackRef = useRef<HTMLInputElement>(null);
   const blocked = !acknowledged || busy;
+  const activateDelete = () => {
+    if (!acknowledged) {
+      ackRef.current?.focus();
+      return;
+    }
+    void remove();
+  };
   const remove = async () => {
     if (blocked || inFlight.current) return;
     inFlight.current = true;
@@ -49,8 +57,9 @@ export function DeleteBookDialog({ book, opener, onDismiss, onDeleted, onBooksCh
       type="button"
       className="destructive-button"
       aria-disabled={blocked || undefined}
+      aria-describedby={blocked ? "contacts-book-delete-ack" : undefined}
       aria-busy={busy || undefined}
-      onClick={() => void remove()}
+      onClick={activateDelete}
     >
       {busy ? "Deleting…" : "Delete for all devices"}
     </button>
@@ -59,10 +68,10 @@ export function DeleteBookDialog({ book, opener, onDismiss, onDeleted, onBooksCh
       <li>Deletes the saved copy of {book.contactCount} contacts from every device in your vault.</li>
       <li>Devices that are offline remove it when they next connect.</li>
       <li>Names from this book stop showing in conversations on all your devices.</li>
-      <li>This can't be undone. Contacts on the phone itself aren't touched.</li>
+      <li><strong>This can't be undone.</strong> Contacts on the phone itself aren't touched.</li>
     </ul>
     <label className="contacts-book-delete-ack">
-      <input id="contacts-book-delete-ack" type="checkbox" checked={acknowledged} disabled={busy} onChange={event => setAcknowledged(event.target.checked)} />
+      <input ref={ackRef} id="contacts-book-delete-ack" type="checkbox" checked={acknowledged} disabled={busy} onChange={event => setAcknowledged(event.target.checked)} />
       I understand this can't be undone.
     </label>
     {failure && <p id="contacts-book-delete-error" role="alert">{failure}</p>}

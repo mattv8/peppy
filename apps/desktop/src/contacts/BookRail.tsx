@@ -61,6 +61,7 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
   deleteDisabledReason?: string;
   railRef: RefObject<HTMLElement | null>;
   onNotice: PostContactActionNotice;
+  /** Some row in the rail has a ⋯ button, so rows without one keep an empty slot and the switches align. */
 }) {
   const hintId = `contacts-book-use-hint-${item.id}`;
   const use = item.lookupExcluded ? "excluded" : "included";

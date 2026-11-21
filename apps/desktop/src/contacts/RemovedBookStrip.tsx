@@ -19,6 +19,7 @@ export function RemovedBookStrip({ book, onRemoveRequest, onDeleteRequest, delet
       <div className="contacts-strip-text">
         <strong>This phone was removed.</strong>
         <p>Peppy keeps a read-only copy of its contacts. You can browse them, but you can't change them or ask the phone to sync.</p>
+        {deleteDisabledReason && <p id="contacts-book-delete-reason">{deleteDisabledReason}</p>}
       </div>
       <div className="contacts-strip-actions">
         <button ref={removeOpener} type="button" className="secondary-button" data-action="remove-book-local" onClick={() => onRemoveRequest(book, removeOpener)}>Remove from this computer</button>
@@ -28,6 +29,7 @@ export function RemovedBookStrip({ book, onRemoveRequest, onDeleteRequest, delet
           className="destructive-button"
           data-action="delete-book-everywhere"
           aria-disabled={deleteDisabledReason ? true : undefined}
+          aria-describedby={deleteDisabledReason ? "contacts-book-delete-reason" : undefined}
           title={deleteDisabledReason}
           onClick={() => { if (!deleteDisabledReason) onDeleteRequest(book, deleteOpener); }}
         >

@@ -196,19 +196,53 @@
   background: var(--peppy-border);
 }
 
-/* Locked: the destructive button stays readable and says why through its title, instead of going inert. */
+/* Locked: the destructive button reads as disabled, with no hover change, and keeps its reason in title and description. */
 .destructive-button[aria-disabled="true"] {
-  cursor: default;
-  opacity: 1;
-  border-style: dashed;
+  background: transparent;
+  color: var(--peppy-text-secondary);
+  border: 1px dashed var(--peppy-border-strong);
+  cursor: not-allowed;
+}
+
+.destructive-button[aria-disabled="true"]:hover {
+  background: transparent;
+}
+
+@media (forced-colors: active) {
+  .destructive-button[aria-disabled="true"] {
+    color: GrayText;
+    border-color: GrayText;
+  }
+}
+
+#contacts-book-delete-dialog ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
 }
 
 .contacts-book-delete-ack {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 12px;
+  margin-top: 0;
   font-size: 13px;
+}
+
+.contacts-book-delete-ack input {
+  accent-color: var(--peppy-accent);
+}
+
+.contacts-book-delete-ack input:focus-visible {
+  outline: 2px solid var(--peppy-focus-ring);
+  outline-offset: 2px;
+}
+
+#contacts-book-delete-reason {
+  margin: 2px 0 0;
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
 }
 
 /* Compact lookup strip (rail hidden). With the list header's book select it is one row plus its hint; the title line shows only when no select does. */

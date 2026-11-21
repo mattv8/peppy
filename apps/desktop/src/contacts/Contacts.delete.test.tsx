@@ -73,8 +73,18 @@ describe("removed book delete actions", () => {
     const button = await screen.findByRole("button", { name: "Delete for all devices…" });
     expect(button).toHaveAttribute("aria-disabled", "true");
     expect(button).toHaveAttribute("title", UNLOCK_REASON);
+    expect(button).toHaveAttribute("aria-describedby", "contacts-book-delete-reason");
+    expect(document.getElementById("contacts-book-delete-reason")).toHaveTextContent(UNLOCK_REASON);
     fireEvent.click(button);
     expect(deleteDialog()).not.toBeInTheDocument();
+  });
+
+  it("shows no reason line and no description while sync is unlocked", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([removedBook, mockContactBook]);
+    render(<ContactsView />);
+    const button = await screen.findByRole("button", { name: "Delete for all devices…" });
+    expect(button).not.toHaveAttribute("aria-describedby");
+    expect(document.getElementById("contacts-book-delete-reason")).not.toBeInTheDocument();
   });
 
   it("shows the unlock reason on the locked menu item and does not open the dialog", async () => {
@@ -106,6 +116,23 @@ describe("delete for all devices dialog", () => {
       "This can't be undone. Contacts on the phone itself aren't touched.",
     ]);
     expect(within(deleteDialog()!).getByLabelText("I understand this can't be undone.")).toBe(ackBox());
+  });
+
+  it("moves focus to the acknowledgement when the blocked action is activated", async () => {
+    await openDeleteDialogFromStrip();
+    expect(dialogDeleteButton()).toHaveAttribute("aria-describedby", "contacts-book-delete-ack");
+    fireEvent.click(dialogDeleteButton());
+    expect(ackBox()).toHaveFocus();
+    expect(bridge.delete_contact_book).not.toHaveBeenCalled();
+
+    fireEvent.click(ackBox());
+    expect(dialogDeleteButton()).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("emphasises the irreversible sentence and wraps the acknowledgement label", async () => {
+    await openDeleteDialogFromStrip();
+    expect(ackBox().closest("label")).toHaveClass("contacts-book-delete-ack");
+    expect(within(deleteDialog()!).getByText("This can't be undone.").tagName).toBe("STRONG");
   });
 
   it("keeps the destructive action inert until the acknowledgement is checked", async () => {
