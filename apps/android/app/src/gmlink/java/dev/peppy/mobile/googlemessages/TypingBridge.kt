@@ -189,7 +189,7 @@ internal class TypingBridge(
                     var canSendFollowUps = true
                     outcome.replyFrameJson?.let { reply ->
                         when (sendIfCurrent(reply, outcome.generation, frameIncarnation)) {
-                            SendResult.SENT -> Unit
+                            SendResult.QUEUED -> Unit
                             SendResult.NOT_CURRENT -> {
                                 canSendFollowUps = false
                                 recordGoogleMessagesLinkEvent("typing", "reply_not_current", 0)
@@ -204,7 +204,7 @@ internal class TypingBridge(
                     if (canSendFollowUps) {
                         for (frame in outcome.followUpFramesJson) {
                             when (sendIfCurrent(frame, outcome.generation, frameIncarnation)) {
-                                SendResult.SENT -> replayed = true
+                                SendResult.QUEUED -> replayed = true
                                 SendResult.NOT_CURRENT -> {
                                     recordGoogleMessagesLinkEvent("typing", "reply_not_current", 0)
                                     break
@@ -241,7 +241,7 @@ internal class TypingBridge(
             val receive = runCatching { current.receiveContext(googleId) }.getOrNull()
                 ?.takeIf { it.linkOwned }
                 ?: return@execute recordGoogleMessagesLinkEvent("typing", "inbound_not_owned", 0)
-            // Go sends `participant` only for a group conversation; core confirms it is a live roster member.
+            // Go sends a non-empty `participant` only for a group conversation (one-to-one is ""); core confirms it is a live roster member.
             val participant = record.optString("participant").takeIf(String::isNotEmpty)
             val result = runCatching {
                 current.seal(
@@ -256,7 +256,7 @@ internal class TypingBridge(
             val frame = result.getOrNull()
                 ?: return@execute recordGoogleMessagesLinkEvent("typing", "inbound_seal_refused", 0)
             when (sendIfCurrent(frame.frameJson, frame.generation, frameIncarnation)) {
-                SendResult.SENT -> recordGoogleMessagesLinkEvent("typing", "inbound_sealed", 0)
+                SendResult.QUEUED -> recordGoogleMessagesLinkEvent("typing", "inbound_sealed", 0)
                 SendResult.NOT_CURRENT -> recordGoogleMessagesLinkEvent("typing", "inbound_not_current", 0)
                 SendResult.REFUSED -> recordGoogleMessagesLinkEvent("live", "send_refused", 0)
             }
@@ -289,12 +289,12 @@ internal class TypingBridge(
         }
     }
 
-    private enum class SendResult { SENT, NOT_CURRENT, REFUSED }
+    private enum class SendResult { QUEUED, NOT_CURRENT, REFUSED }
 
     private fun sendIfCurrent(frameJson: String, generation: ULong, frameIncarnation: Long): SendResult {
         val publication = enabledPublication
         if (publication == null || !isCurrent(generation, frameIncarnation)) return SendResult.NOT_CURRENT
-        return if (host.send(frameJson, publication)) SendResult.SENT else SendResult.REFUSED
+        return if (host.send(frameJson, publication)) SendResult.QUEUED else SendResult.REFUSED
     }
 
     private fun isCurrent(generation: ULong, frameIncarnation: Long): Boolean =

@@ -46,6 +46,17 @@ func TestTypingProjectionAttributesVisibleGroupMember(t *testing.T) {
 	}
 }
 
+func TestTypingProjectionOmitsParticipantForOneToOne(t *testing.T) {
+	result := projectTypingData(&gmproto.TypingData{
+		ConversationID: "synthetic-conversation",
+		User:           &gmproto.User{Number: "synthetic-participant"},
+		Type:           gmproto.TypingTypes_STARTED_TYPING,
+	}, false, []*gmproto.Conversation{typingConversation("synthetic-conversation", true)})
+	if result.Code != "ok" || result.Record == nil || result.Record.Participant != "" {
+		t.Fatalf("projection = %+v", result)
+	}
+}
+
 func TestTypingProjectionRefusesOldUnknownAndInvisibleParticipants(t *testing.T) {
 	data := &gmproto.TypingData{ConversationID: "synthetic-conversation", User: &gmproto.User{Number: "synthetic-participant"}, Type: gmproto.TypingTypes_STARTED_TYPING}
 	for _, test := range []struct {
@@ -171,7 +182,7 @@ func TestLinkProjectsIncomingTypingForCurrentOwner(t *testing.T) {
 	link.queueEventFor(7, typingData())
 	drainQueuedEvents(link)
 
-	if len(host.typingRecords) != 1 || host.typingRecords[0] != `{"google_conversation_id":"synthetic-conversation","state":"started","participant":"synthetic-participant"}` {
+	if len(host.typingRecords) != 1 || host.typingRecords[0] != `{"google_conversation_id":"synthetic-conversation","state":"started","participant":""}` {
 		t.Fatalf("records = %v", host.typingRecords)
 	}
 }
