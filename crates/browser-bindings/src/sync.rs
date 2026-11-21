@@ -1163,6 +1163,48 @@ mod tests {
     }
 
     #[test]
+    fn sync_progress_reports_history_block_only_for_a_blocked_gap() {
+        let mut fixture = open_core();
+        let db = rusqlite::Connection::open(fixture._root.path().join("client.db")).unwrap();
+        db.execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";
+             INSERT INTO journal(cursor,key_epoch,wire,status,reason,historical)
+             VALUES(1,1,X'00','pending','snapshot_rcs_isolated',1);
+             INSERT OR REPLACE INTO metadata(k,v) VALUES('receive_cursor','1'),('processed_cursor','0');",
+        )
+        .unwrap();
+        let progress =
+            |core: &mut BrowserCore| response(core, "sync_progress", json!({}))["value"].clone();
+        assert_eq!(progress(&mut fixture.core)["historyBlock"], "withheld");
+
+        db.execute(
+            "INSERT INTO metadata(k,v) VALUES('contact_repair_required','1')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(progress(&mut fixture.core)["historyBlock"], "repairing");
+
+        db.execute(
+            "DELETE FROM metadata WHERE k='contact_repair_required'",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO projection_generations(generation,high_water,state) VALUES(1,1,'failed')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(progress(&mut fixture.core)["historyBlock"], "failed");
+
+        db.execute("UPDATE journal SET reason=NULL WHERE cursor=1", [])
+            .unwrap();
+        assert!(progress(&mut fixture.core).get("historyBlock").is_none());
+        db.execute("UPDATE metadata SET v='1' WHERE k='processed_cursor'", [])
+            .unwrap();
+        assert!(progress(&mut fixture.core).get("historyBlock").is_none());
+    }
+
+    #[test]
     fn stages_raw_snapshot_records_and_preserves_restore_guard_on_rejection() {
         let mut fixture = open_core();
         let core = &mut fixture.core;

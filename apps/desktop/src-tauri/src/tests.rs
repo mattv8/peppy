@@ -2194,6 +2194,8 @@ mod real_server {
         for _ in 0..10 { receiver.sync().await; }
         let books: Value = serde_json::from_str(&receiver.client.list_contact_books_json().unwrap()).unwrap();
         assert!(books["books"].as_array().unwrap().iter().all(|book| book["id"] != book_id));
+        while receiver.client.seal_pending_batch(1000).unwrap() > 0 {}
+        // The deleter covered every contact held by this receiver; it must not enqueue duplicates.
         assert!(receiver.client.pending_outbox().unwrap().is_empty());
         let (fresh_id, fresh_token) = server.add_test_device("device").await;
         let fresh = make_peer(fresh_id, fresh_token);
