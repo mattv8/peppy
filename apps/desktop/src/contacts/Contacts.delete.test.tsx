@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bridge, type ContactBookView } from "../bridge/bridge";
 import { ContactsView } from "./Contacts";
+import { DeleteBookDialog } from "./DeleteBookDialog";
 import { BookRail } from "./BookRail";
 import { RemovedBookStrip } from "./RemovedBookStrip";
 import { deferred, mockContactBook, resetContactBridgeMocks, restoreContactDomGlobals } from "./contacts-test-utils";
@@ -167,6 +168,17 @@ describe("delete for all devices dialog", () => {
       "This can't be undone. Contacts on the phone itself aren't touched.",
     ]);
     expect(within(deleteDialog()!).getByLabelText("I understand this can't be undone.")).toBe(ackBox());
+  });
+
+  it("counts the book's contacts with a singular form for one and grouped digits", () => {
+    const firstItemFor = (contactCount: number) => {
+      const view = render(<DeleteBookDialog book={{ ...removedBook, contactCount }} opener={{ current: null }} onDismiss={vi.fn()} onDeleted={vi.fn()} onBooksChanged={vi.fn()} />);
+      const text = deleteDialog()!.querySelector("ul > li")!.textContent;
+      view.unmount();
+      return text;
+    };
+    expect(firstItemFor(1)).toBe("Deletes the saved copy of 1 contact from every device in your vault.");
+    expect(firstItemFor(1803)).toBe(`Deletes the saved copy of ${new Intl.NumberFormat().format(1803)} contacts from every device in your vault.`);
   });
 
   it("moves focus to the acknowledgement when the blocked action is activated", async () => {
