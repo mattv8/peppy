@@ -495,6 +495,8 @@ pub struct Session {
     pub(crate) refuse_snapshot_append: Mutex<Option<crate::sync::AppendKind>>,
     /// Refused snapshot begin, shared by every snapshot path (see `sync::SnapshotTooLargeGate`).
     pub(crate) snapshot_too_large: Mutex<crate::sync::SnapshotTooLargeGate>,
+    /// Replay-head requests made for owed contact-deletion members, shared by every socket and pass.
+    pub(crate) replay_head_asks: Mutex<crate::sync::ReplayHeadAsks>,
     /// Prevents duplicate standalone search-index maintenance loops for one session.
     pub index_driver_running: AtomicBool,
     /// Latches completed search-index maintenance for this session.
@@ -939,6 +941,7 @@ pub(crate) fn open_session_with_progress(
         repair_attempted: AtomicBool::new(false),
         repair_finished: AtomicBool::new(false),
         snapshot_too_large: Mutex::new(crate::sync::SnapshotTooLargeGate::default()),
+        replay_head_asks: Mutex::new(crate::sync::ReplayHeadAsks::default()),
         #[cfg(test)]
         refuse_snapshot_append: Mutex::new(None),
         index_driver_running: AtomicBool::new(false),

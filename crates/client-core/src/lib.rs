@@ -22,6 +22,7 @@
 mod attachment_retention;
 mod compose_create;
 mod contact_book_deletion;
+pub use contact_book_deletion::CompletionReplayNeed;
 mod contact_media;
 mod contact_photos;
 mod contact_queries;
@@ -5383,12 +5384,19 @@ impl Client {
     }
 
     /// Whether owed contact-deletion members wait only for a newer replay head. A host that receives
-    /// records over a live socket requests one HTTP replay when this is true, then stops asking until
-    /// new records arrive. Owed work is not reported as pending apply for this, so hosts cannot spin.
+    /// records over a live socket requests one HTTP replay when this is true. Owed work is not
+    /// reported as pending apply for this, so hosts cannot spin. See `completion_replay_need`.
     pub fn completion_needs_replay_head(&self) -> Result<bool, Error> {
+        Ok(self.completion_replay_need()?.is_some())
+    }
+
+    /// The replay head that owed contact-deletion members wait for, with the gate it must reach, or
+    /// `None` when nothing waits for one. A host compares the reported head with the last request it
+    /// made for the same need, so an unresolved need is not asked for again on every frame.
+    pub fn completion_replay_need(&self) -> Result<Option<CompletionReplayNeed>, Error> {
         let mut store = self.lock()?;
         let (conn, ctx) = store.parts();
-        contact_book_deletion::completion_needs_replay_head(conn, &ctx)
+        contact_book_deletion::completion_replay_need(conn, &ctx)
     }
 
     /// Whether replay and the message-origin backfill have reached the initial server watermark.
@@ -13500,6 +13508,7 @@ fn apply_record(
                 &producer.to_string(),
                 historical,
                 envelope.key_epoch,
+                to_i64(envelope.producer_sequence.0)?,
                 &payload,
             )? {
                 return Ok(Some(Q::InvalidPayload));

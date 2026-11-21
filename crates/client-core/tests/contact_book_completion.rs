@@ -1,6 +1,8 @@
 //! Receiver completion of a vault-wide book deletion. A device that applies a book fence queues one
 //! terminal member for each covered contact it still holds, unless a terminal member for that
-//! contact is already known. The owner device never queues one, and nothing is queued while locked.
+//! contact is already known. A covered publication that arrives after the fence owes its own member
+//! while it is still uncovered (on the compaction frontier), even when a member is already known. The
+//! owner device never queues one, and nothing is queued while locked.
 use crate::common::*;
 use peppy_crypto::{
     EncryptedEnvelope, KeyPurpose, decrypt, derive_purpose_key, derive_root_key, encrypt,
@@ -67,7 +69,22 @@ fn ingest_and_apply(envelopes: &[Envelope], client: &Client) -> ApplyReport {
 }
 
 fn seal(vault: &Vault, producer: DeviceId, sequence: u64, payload: &PrivatePayload) -> Envelope {
-    let plain = serde_json::to_vec(payload).unwrap();
+    seal_with_compaction(vault, producer, sequence, payload, None)
+}
+
+/// Seals `payload` with `compaction`, which is authenticated inside the plaintext next to the payload.
+fn seal_with_compaction(
+    vault: &Vault,
+    producer: DeviceId,
+    sequence: u64,
+    payload: &PrivatePayload,
+    compaction: Option<CompactionMetadata>,
+) -> Envelope {
+    let mut value = serde_json::to_value(payload).unwrap();
+    if let Some(compaction) = &compaction {
+        value["compaction"] = serde_json::to_value(compaction).unwrap();
+    }
+    let plain = serde_json::to_vec(&value).unwrap();
     let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
     let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
     let mut envelope = Envelope {
@@ -82,7 +99,7 @@ fn seal(vault: &Vault, producer: DeviceId, sequence: u64, payload: &PrivatePaylo
         profile_fingerprint: vault.profile.fingerprint().unwrap(),
         purpose: EnvelopePurpose::Event,
         route: None,
-        compaction: None,
+        compaction,
         origin_tag: None,
         ciphertext: Vec::new(),
     };
@@ -146,6 +163,39 @@ fn member(
             owner_device_id: owner.to_string(),
             generation: "1".into(),
         },
+    )
+}
+
+/// A member that names `superseded` (producer and sequence) in its compaction metadata, as a deleter
+/// that knew that publication sends it. Compaction metadata is outside the sealed AAD.
+fn member_superseding(
+    vault: &Vault,
+    producer: DeviceId,
+    sequence: u64,
+    owner: DeviceId,
+    contact: &str,
+    superseded: (DeviceId, u64),
+) -> Envelope {
+    let compaction = CompactionMetadata {
+        key: vec![7; 32],
+        terminal: true,
+        supersedes: vec![CompactionReference {
+            producer_device_id: superseded.0,
+            producer_sequence: SourceSequence(superseded.1),
+        }],
+        checkpoint: false,
+    };
+    seal_with_compaction(
+        vault,
+        producer,
+        sequence,
+        &PrivatePayload::ContactBookDeletedMember {
+            book_id: BOOK.into(),
+            contact_id: contact.into(),
+            owner_device_id: owner.to_string(),
+            generation: "1".into(),
+        },
+        Some(compaction),
     )
 }
 
@@ -1014,7 +1064,7 @@ fn a_live_tombstone_after_the_fence_owes_a_member_for_the_contact_the_deleter_mi
 }
 
 #[test]
-fn a_covered_upsert_whose_member_is_already_known_queues_nothing() {
+fn a_known_member_with_no_later_publication_queues_nothing() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
     let owner = DeviceId::new();
@@ -1030,14 +1080,48 @@ fn a_covered_upsert_whose_member_is_already_known_queues_nothing() {
         &client,
     );
 
-    ingest_and_apply(&[live_upsert(&vault, owner, 4, "c2", "1")], &client);
-
     assert!(queued_members(&client, &vault).is_empty());
     assert_eq!(owed(&config.database_path), 0);
 }
 
 #[test]
-fn a_member_arriving_after_a_covered_live_upsert_settles_it_without_a_second_member() {
+fn a_covered_upsert_after_a_known_member_queues_one_more_member() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let owner = DeviceId::new();
+    let (config, client) = receiver(&dir, &vault, "receiver");
+    ingest_and_apply(&owners_book(&vault, owner, &[("c1", "1")]), &client);
+    let deleter = DeviceId::new();
+    ingest_and_apply(
+        &[
+            fence(&vault, deleter, 1, owner),
+            member(&vault, deleter, 2, owner, "c1"),
+            member(&vault, deleter, 3, owner, "c2"),
+        ],
+        &client,
+    );
+
+    // The known member for c2 does not name this later publication, so it is still uncovered.
+    ingest_and_apply(&[live_upsert(&vault, owner, 4, "c2", "1")], &client);
+
+    assert_eq!(queued_members(&client, &vault), vec!["c2"]);
+    assert_eq!(owed(&config.database_path), 0);
+    let (member, _) = queued_payloads(&client, &vault)
+        .into_iter()
+        .find(|(_, payload)| matches!(payload, PrivatePayload::ContactBookDeletedMember { .. }))
+        .unwrap();
+    let supersedes = member.compaction.unwrap().supersedes;
+    assert!(
+        supersedes.iter().any(|reference| {
+            reference.producer_device_id == owner
+                && reference.producer_sequence == SourceSequence(4)
+        }),
+        "the new member supersedes the late publication"
+    );
+}
+
+#[test]
+fn a_member_arriving_after_a_covered_live_upsert_that_it_does_not_supersede_queues_one_member() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
     let owner = DeviceId::new();
@@ -1056,9 +1140,46 @@ fn a_member_arriving_after_a_covered_live_upsert_settles_it_without_a_second_mem
     client.apply_pending(100).unwrap();
     assert_eq!(owed(&config.database_path), 1);
 
-    // The deleter's own member for c2 reaches this device before a head covers the upsert.
+    // The deleter's member for c2 does not name the upsert, so the upsert stays on the frontier.
     ingest_and_apply(&[member(&vault, deleter, 4, owner, "c2")], &client);
 
+    assert_eq!(queued_members(&client, &vault), vec!["c2"]);
+    assert_eq!(owed(&config.database_path), 0);
+}
+
+#[test]
+fn a_member_superseding_a_covered_live_upsert_settles_it_without_a_second_member() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let owner = DeviceId::new();
+    let (config, client) = receiver(&dir, &vault, "receiver");
+    ingest_and_apply(&owners_book(&vault, owner, &[("c1", "1")]), &client);
+    let deleter = DeviceId::new();
+    ingest_and_apply(
+        &[
+            fence(&vault, deleter, 1, owner),
+            member(&vault, deleter, 2, owner, "c1"),
+        ],
+        &client,
+    );
+    ingest_only(&[live_upsert(&vault, owner, 3, "c2", "1")], &client);
+    client.apply_pending(100).unwrap();
+    assert_eq!(owed(&config.database_path), 1);
+
+    // The deleter's member for c2 names the upsert as superseded, so nothing is left uncovered.
+    let report = ingest_and_apply(
+        &[member_superseding(
+            &vault,
+            deleter,
+            4,
+            owner,
+            "c2",
+            (owner, 3),
+        )],
+        &client,
+    );
+
+    assert_eq!(report.quarantined, 0);
     assert!(queued_members(&client, &vault).is_empty());
     assert_eq!(owed(&config.database_path), 0);
 }
@@ -1107,6 +1228,9 @@ fn a_fence_received_over_a_socket_without_a_head_waits_for_one_replay() {
     client.apply_pending(100).unwrap();
     assert!(queued_members(&client, &vault).is_empty());
     assert!(client.completion_needs_replay_head().unwrap());
+    // The head reported before the fence is below the gate the fence's capture set.
+    let need = client.completion_replay_need().unwrap().unwrap();
+    assert!(need.replay_head.is_some_and(|head| head < need.gate));
     assert!(!client.sync_work_status().unwrap().pending_apply);
 
     // The one replay a live host requests reports the head; nothing else is needed.
