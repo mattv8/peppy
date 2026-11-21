@@ -296,7 +296,7 @@ private class StrictJsonParser(private val input: String) {
 }
 
 internal data class LiveMembershipSnapshot(val connectionId: String, val version: Long, val activeRoster: List<MembershipDevice>)
-internal interface LiveCore { fun enable(snapshot: LiveMembershipSnapshot); fun disable() }
+internal interface LiveCore { fun enable(snapshot: LiveMembershipSnapshot); fun disable(); fun renewed() {} }
 
 /** One coordinator per captured native client. It never calls client code under a connection lock. */
 internal class LiveIncarnationCoordinator {
@@ -410,6 +410,7 @@ internal class LiveConnection(
     fun response(control: MembershipControl.Response): Boolean {
         var publicationToRetire: LivePublication? = null
         var publicationToEnable: LivePublication? = null
+        var renewed = false
         synchronized(state) {
             val now = clock.elapsedRealtime(); val expected = pending ?: return false
             if (!fresh(now) || now > expected.responseDeadline || control.connectionId != connectionId || control.challengeId != expected.nonce ||
@@ -426,9 +427,8 @@ internal class LiveConnection(
             if (current != null && control.membershipVersion == current.snapshot.version) {
                 leaseDeadline = deadline
                 current.renew(deadline)
-                return true
-            }
-            if (current != null) {
+                renewed = true
+            } else if (current != null) {
                 publication = null
                 leaseDeadline = Long.MIN_VALUE
                 publicationToRetire = current
@@ -437,6 +437,10 @@ internal class LiveConnection(
                 publicationToEnable = LivePublication(core, LiveMembershipSnapshot(control.connectionId, control.membershipVersion, roster), clock, deadline)
                 publication = publicationToEnable
             }
+        }
+        if (renewed) {
+            core.renewed()
+            return true
         }
         publicationToRetire?.let {
             it.close(coordinator)

@@ -132,7 +132,3 @@ internal object NoOpRcsReceiveSink : RcsReceiveSink {
 internal fun interface TypingReceiveSink {
     fun receive(recordJson: String)
 }
-
-internal object NoOpTypingReceiveSink : TypingReceiveSink {
-    override fun receive(recordJson: String) = Unit
-}

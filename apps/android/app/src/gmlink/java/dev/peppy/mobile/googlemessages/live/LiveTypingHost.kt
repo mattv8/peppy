@@ -32,6 +32,7 @@ data class LiveTypingEnableContext(
 
 interface LiveTypingListener {
     fun onEnabled(context: LiveTypingEnableContext)
+    fun onMembershipRenewed() {}
     fun onFrame(json: String)
     fun onDisabled(reason: LiveTypingDisabledReason)
 }
@@ -102,7 +103,9 @@ class LiveTypingHost private constructor(
         val capturedSocket = socket
         if (capturedSocket == null || !isOutboundFrame(frameJson) || !isPublicationCurrent(publication)) return false
         executor.execute {
-            if (!stopped && socket === capturedSocket && isPublicationCurrent(publication)) capturedSocket.send(frameJson)
+            if (stopped || socket !== capturedSocket || !isPublicationCurrent(publication) || !capturedSocket.send(frameJson)) {
+                recordGoogleMessagesLinkEvent("live", "send_refused", 0)
+            }
         }
         return true
     }
@@ -118,6 +121,10 @@ class LiveTypingHost private constructor(
 
             override fun disable() {
                 if (isCurrent(token)) markDisabled(LiveTypingDisabledReason.MEMBERSHIP_REVOKED)
+            }
+
+            override fun renewed() {
+                if (isCurrent(token)) listener?.onMembershipRenewed()
             }
         }
         connection = LiveConnection(clock, core, currentCredentials.localDeviceId)

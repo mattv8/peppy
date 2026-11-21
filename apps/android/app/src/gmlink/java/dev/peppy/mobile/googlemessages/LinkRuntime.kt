@@ -305,8 +305,13 @@ object LinkRuntime {
 
         override fun typingEventOwned(recordJson: String, ownerGeneration: Long, ownerRevision: Long, streamEpoch: Long) {
             callbackExecutor().execute {
-                if (!acceptsStreamCallback(generation, ownerGeneration, ownerRevision, streamEpoch)) return@execute
-                (LinkRuntimeTestHooks.typingReceiveSink ?: TypingReceiveSinkRegistry.sink ?: NoOpTypingReceiveSink).receive(recordJson)
+                if (!acceptsStreamCallback(generation, ownerGeneration, ownerRevision, streamEpoch)) {
+                    recordGoogleMessagesLinkEvent("typing", "inbound_fenced", 0)
+                    return@execute
+                }
+                val sink = LinkRuntimeTestHooks.typingReceiveSink ?: TypingReceiveSinkRegistry.sink
+                if (sink == null) recordGoogleMessagesLinkEvent("typing", "inbound_no_sink", 0)
+                else sink.receive(recordJson)
             }
         }
 
