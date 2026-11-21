@@ -4,6 +4,7 @@ import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DevicesSettings } from "./DevicesSettings";
 import { bridge, type DeviceRosterView } from "../bridge/bridge";
+import { peppyCopy } from "../generated/peppyCopy";
 
 vi.mock("../bridge/bridge", { spy: true });
 
@@ -385,13 +386,13 @@ describe("DevicesSettings", () => {
     await screen.findByText("Pixel 8");
 
     fireEvent.click(screen.getByRole("button", { name: "Remove Pixel 8" }));
-    expect(await screen.findByText("Texts waiting to be sent from this phone will show as not confirmed. You can send them again.")).toBeInTheDocument();
+    expect(await screen.findByText(peppyCopy.devices_remove_gateway_note)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(screen.queryByText("Texts waiting to be sent from this phone will show as not confirmed. You can send them again.")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText(peppyCopy.devices_remove_gateway_note)).not.toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: "Remove Old tablet" }));
     expect(await screen.findByRole("dialog", { name: "Remove Old tablet?" })).toBeInTheDocument();
-    expect(screen.queryByText("Texts waiting to be sent from this phone will show as not confirmed. You can send them again.")).not.toBeInTheDocument();
+    expect(screen.queryByText(peppyCopy.devices_remove_gateway_note)).not.toBeInTheDocument();
   });
 
   it("shows current and unknown device details as separate badges", async () => {

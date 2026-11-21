@@ -16,6 +16,7 @@ import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.peppy.mobile.R
@@ -44,8 +45,8 @@ class DiagnosticsSettingsSmokeTest {
             )
         }
 
-        compose.onNodeWithTag("diagnostics-verbose-sync-logging-switch").assertIsOff().performClick()
-        compose.onNodeWithTag("diagnostics-verbose-sync-logging-switch").assertIsOn()
+        compose.onNodeWithTag("diagnostics-verbose-sync-logging").assertIsOff().performClick()
+        compose.onNodeWithTag("diagnostics-verbose-sync-logging").assertIsOn()
         compose.onNodeWithTag("diagnostics-share-log").assertIsEnabled()
         compose.onNodeWithTag("diagnostics-clear-logs").assertIsEnabled()
         assertEquals(true, requestedEnabled)
@@ -63,8 +64,8 @@ class DiagnosticsSettingsSmokeTest {
             )
         }
 
-        compose.onNodeWithTag("diagnostics-verbose-sync-logging-switch")
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.ContentDescription, listOf(label)))
+        compose.onNodeWithTag("diagnostics-verbose-sync-logging")
+            .assert(hasText(label))
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Switch))
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.ToggleableState, ToggleableState.Off))
     }
@@ -80,7 +81,7 @@ class DiagnosticsSettingsSmokeTest {
             )
         }
 
-        compose.onNodeWithTag("diagnostics-verbose-sync-logging-switch").assertIsNotEnabled()
+        compose.onNodeWithTag("diagnostics-verbose-sync-logging").assertIsNotEnabled()
         compose.onNodeWithTag("diagnostics-share-log").assertIsNotEnabled()
         compose.onNodeWithTag("diagnostics-clear-logs").assertIsNotEnabled()
         compose.onNodeWithTag("diagnostics-busy").assertIsDisplayed()

@@ -19,7 +19,6 @@ class DiagnosticsSettingsStateTest {
     fun disabledDiagnosticsRetainsExistingLogActions() {
         val actions = diagnosticsActions(DiagnosticsState(enabled = false, bytes = 128, dropped = 3))
 
-        assertFalse(actions.recording)
         assertTrue(actions.canShare)
         assertTrue(actions.canClear)
         assertEquals("128 B", diagnosticsSize(128))

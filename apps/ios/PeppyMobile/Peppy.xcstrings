@@ -4181,16 +4181,6 @@
         }
       }
     },
-    "peppy.remote_messaging_status_label": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Connection"
-          }
-        }
-      }
-    },
     "peppy.remote_messaging_status_connected": {
       "localizations": {
         "en": {
@@ -7281,16 +7271,6 @@
         }
       }
     },
-    "peppy.account_delete_section": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Delete Peppy account"
-          }
-        }
-      }
-    },
     "peppy.account_delete_row": {
       "localizations": {
         "en": {
@@ -7377,16 +7357,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Your Google Play subscription stays active until you cancel it in Google Play."
-          }
-        }
-      }
-    },
-    "peppy.account_delete_vault_distinct": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "To delete only the vault on this phone's server, use Delete vault in Settings."
           }
         }
       }
@@ -8031,42 +8001,12 @@
         }
       }
     },
-    "peppy.diagnostics_active": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Active"
-          }
-        }
-      }
-    },
-    "peppy.diagnostics_off_retained": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Off — retained logs remain available"
-          }
-        }
-      }
-    },
     "peppy.diagnostics_retained_size": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "Retained log size"
-          }
-        }
-      }
-    },
-    "peppy.diagnostics_retained_size_limit": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Maximum 4 MiB"
           }
         }
       }
@@ -10407,6 +10347,716 @@
           "stringUnit": {
             "state": "translated",
             "value": "Too large for this version"
+          }
+        }
+      }
+    },
+    "peppy.account_group_plan": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Plan and storage"
+          }
+        }
+      }
+    },
+    "peppy.account_group_app": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App"
+          }
+        }
+      }
+    },
+    "peppy.account_devices_active": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d active"
+          }
+        }
+      }
+    },
+    "peppy.account_storage_row": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Attachment storage"
+          }
+        }
+      }
+    },
+    "peppy.account_owner_required_short": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only an owner device can add or remove devices."
+          }
+        }
+      }
+    },
+    "peppy.account_attention_action_needed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Action needed"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_included_only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ included with your plan"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_refresh": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh storage"
+          }
+        }
+      }
+    },
+    "peppy.devices_owner_required_help": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only an owner device can add phones and computers or remove devices. Gateway phones can rename devices but can't add or remove them."
+          }
+        }
+      }
+    },
+    "peppy.devices_role_unknown": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unknown role"
+          }
+        }
+      }
+    },
+    "peppy.devices_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No devices enrolled."
+          }
+        }
+      }
+    },
+    "peppy.devices_this_device": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device"
+          }
+        }
+      }
+    },
+    "peppy.devices_role_owner": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Owner"
+          }
+        }
+      }
+    },
+    "peppy.devices_role_gateway": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone gateway"
+          }
+        }
+      }
+    },
+    "peppy.devices_role_device": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Device"
+          }
+        }
+      }
+    },
+    "peppy.devices_kind_android": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android"
+          }
+        }
+      }
+    },
+    "peppy.devices_kind_ios": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iPhone or iPad"
+          }
+        }
+      }
+    },
+    "peppy.devices_kind_desktop": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Desktop"
+          }
+        }
+      }
+    },
+    "peppy.devices_kind_browser": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Browser"
+          }
+        }
+      }
+    },
+    "peppy.devices_unnamed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unnamed device"
+          }
+        }
+      }
+    },
+    "peppy.devices_presence_connected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connected"
+          }
+        }
+      }
+    },
+    "peppy.devices_presence_never": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Never connected"
+          }
+        }
+      }
+    },
+    "peppy.devices_presence_unknown": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Status unknown"
+          }
+        }
+      }
+    },
+    "peppy.devices_presence_seen_now": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last seen just now"
+          }
+        }
+      }
+    },
+    "peppy.devices_presence_seen_minutes": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last seen %1$d min ago"
+          }
+        }
+      }
+    },
+    "peppy.devices_presence_seen_hours": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last seen %1$d hr ago"
+          }
+        }
+      }
+    },
+    "peppy.devices_badges_more": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "+%1$d"
+          }
+        }
+      }
+    },
+    "peppy.devices_more_options": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "More options for %1$@"
+          }
+        }
+      }
+    },
+    "peppy.devices_refresh": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh devices"
+          }
+        }
+      }
+    },
+    "peppy.devices_rename": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rename"
+          }
+        }
+      }
+    },
+    "peppy.devices_rename_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rename device"
+          }
+        }
+      }
+    },
+    "peppy.devices_rename_field": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Device name"
+          }
+        }
+      }
+    },
+    "peppy.devices_rename_save": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save"
+          }
+        }
+      }
+    },
+    "peppy.devices_rename_invalid": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use a shorter name with no line breaks."
+          }
+        }
+      }
+    },
+    "peppy.devices_rename_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't rename the device. Check your connection and try again."
+          }
+        }
+      }
+    },
+    "peppy.devices_remove": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove"
+          }
+        }
+      }
+    },
+    "peppy.devices_remove_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove %1$@?"
+          }
+        }
+      }
+    },
+    "peppy.devices_remove_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device will lose access to the Peppy server."
+          }
+        }
+      }
+    },
+    "peppy.devices_remove_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't remove the device. It may still have access. Check your connection and try again."
+          }
+        }
+      }
+    },
+    "peppy.devices_disconnect": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Disconnect"
+          }
+        }
+      }
+    },
+    "peppy.devices_disconnect_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Disconnect this phone?"
+          }
+        }
+      }
+    },
+    "peppy.devices_disconnect_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone stops using Peppy. If Peppy can't reach the server now, this phone's access stays active until an owner device removes it."
+          }
+        }
+      }
+    },
+    "peppy.devices_disconnect_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't disconnect from the server. This phone still works with Peppy, and its server access is still active."
+          }
+        }
+      }
+    },
+    "peppy.devices_previously_removed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Previously removed (%1$d)"
+          }
+        }
+      }
+    },
+    "peppy.devices_load_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't load devices. Unlock Peppy or check the server connection."
+          }
+        }
+      }
+    },
+    "peppy.settings_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off"
+          }
+        }
+      }
+    },
+    "peppy.settings_notifications_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notifications are off"
+          }
+        }
+      }
+    },
+    "peppy.settings_advanced": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Advanced"
+          }
+        }
+      }
+    },
+    "peppy.settings_advanced_summary": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server, diagnostics"
+          }
+        }
+      }
+    },
+    "peppy.settings_advanced_summary_relay": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server, diagnostics, custom relay"
+          }
+        }
+      }
+    },
+    "peppy.settings_group_plan": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Plan"
+          }
+        }
+      }
+    },
+    "peppy.settings_delete_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete"
+          }
+        }
+      }
+    },
+    "peppy.settings_delete_account_consequence": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deletes your Peppy account and its hosted data. You finish in your browser."
+          }
+        }
+      }
+    },
+    "peppy.vault_delete_row": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete vault"
+          }
+        }
+      }
+    },
+    "peppy.vault_delete_consequence": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Permanently deletes this vault and everything synced to it from the server, including attachments. Every device loses access. This can't be undone."
+          }
+        }
+      }
+    },
+    "peppy.vault_delete_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete vault?"
+          }
+        }
+      }
+    },
+    "peppy.vault_delete_confirm_field": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Type ERASE to confirm"
+          }
+        }
+      }
+    },
+    "peppy.vault_delete_keep": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep vault"
+          }
+        }
+      }
+    },
+    "peppy.vault_delete_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't reach the server. The vault was not deleted."
+          }
+        }
+      }
+    },
+    "peppy.advanced_group_connection": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection"
+          }
+        }
+      }
+    },
+    "peppy.advanced_not_enrolled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not enrolled"
+          }
+        }
+      }
+    },
+    "peppy.advanced_group_relay": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Custom relay"
+          }
+        }
+      }
+    },
+    "peppy.wake_relay_origin_field": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Relay HTTPS origin"
+          }
+        }
+      }
+    },
+    "peppy.wake_relay_enable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enable custom relay"
+          }
+        }
+      }
+    },
+    "peppy.wake_relay_origin_invalid": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter a relay address that starts with https:// and has no path."
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_retained_of_limit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ of 4 MiB"
+          }
+        }
+      }
+    },
+    "peppy.lock_screen_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter the existing encryption passphrase you already use on your other devices. This phone does not create a new passphrase."
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_used_of_limit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ of %2$@ used"
+          }
+        }
+      }
+    },
+    "peppy.attachment_storage_included_plus_addon": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ included + %2$@ add-on storage"
+          }
+        }
+      }
+    },
+    "peppy.devices_remove_gateway_note": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Texts waiting to be sent from that phone will show as not confirmed. You can send them again."
+          }
+        }
+      }
+    },
+    "peppy.account_storage_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Storage"
           }
         }
       }

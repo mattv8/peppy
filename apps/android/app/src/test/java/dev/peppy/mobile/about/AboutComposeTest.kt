@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
@@ -18,14 +19,19 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import dev.peppy.mobile.R
 import dev.peppy.mobile.gateway.GatewayAccountDevice
 import dev.peppy.mobile.gateway.GatewayAccountSettings
 import dev.peppy.mobile.gateway.GatewayAccountState
 import dev.peppy.mobile.gateway.GatewayStatus
 import dev.peppy.mobile.testing.ComposeTestActivityRule
+import dev.peppy.mobile.ui.LocalPageChromeHost
+import dev.peppy.mobile.ui.PageChromeHost
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -45,17 +51,17 @@ class AboutComposeTest {
         renderAccount(account = account(), notices = null)
         compose.waitUntil { compose.onAllNodesWithTag("account-about-row").fetchSemanticsNodes().isNotEmpty() }
         val rows = compose.onAllNodes(
-            hasTestTag("account-privacy-policy-row")
+            hasTestTag("account-settings-row")
                 .or(hasTestTag("account-guides-row"))
                 .or(hasTestTag("account-about-row")),
         ).fetchSemanticsNodes().map { it.config[SemanticsProperties.TestTag] }
-        assertEquals(listOf("account-privacy-policy-row", "account-guides-row", "account-about-row"), rows)
+        assertEquals(listOf("account-settings-row", "account-guides-row", "account-about-row"), rows)
     }
 
     @Test fun offlineAccountAlsoShowsAboutLast() {
         renderAccount(account = null, notices = null)
         compose.waitUntil { compose.onAllNodesWithTag("account-about-row").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("account-privacy-policy-row").fetchSemanticsNode()
+        compose.onNodeWithTag("account-settings-row").fetchSemanticsNode()
         compose.onNodeWithTag("account-guides-row").fetchSemanticsNode()
         compose.onNodeWithTag("account-about-row").fetchSemanticsNode()
     }
@@ -64,40 +70,52 @@ class AboutComposeTest {
         renderAccount(account(), FakeNotices())
         compose.waitUntil { compose.onAllNodesWithTag("account-about-row").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("account-about-row").performScrollTo().performClick()
-        compose.waitUntil { compose.onAllNodesWithTag("about-screen").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil { compose.onAllNodesWithTag("about-body").fetchSemanticsNodes().isNotEmpty() }
         compose.waitUntil { compose.onAllNodesWithTag("about-licenses-row").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("about-licenses-row").performScrollTo().performClick()
         compose.waitUntil { compose.onAllNodesWithTag("license-row-BoringSSL-LICENSE").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("license-row-BoringSSL-LICENSE").performScrollTo().performClick()
-        compose.waitUntil { compose.onAllNodesWithTag("license-screen").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("license-back-button").performScrollTo().performClick()
-        compose.waitUntil { compose.onAllNodesWithTag("licenses-screen").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("licenses-back-button").performScrollTo().performClick()
-        compose.waitUntil { compose.onAllNodesWithTag("about-screen").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("about-back-button").performScrollTo().performClick()
-        compose.waitUntil { compose.onAllNodesWithTag("account-tab-screen").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil { compose.onAllNodesWithTag("license-body").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("license-back").performScrollTo().performClick()
+        compose.waitUntil { compose.onAllNodesWithTag("licenses-body").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("licenses-back").performScrollTo().performClick()
+        compose.waitUntil { compose.onAllNodesWithTag("about-body").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("about-back").performScrollTo().performClick()
+        assertAccountRootShown()
     }
 
     @Test fun systemBackNavigatesFromLicenseToAccount() {
-        renderAccount(account(), FakeNotices())
+        val host = PageChromeHost()
+        renderAccount(account(), FakeNotices(), chromeHost = host)
         compose.waitUntil { compose.onAllNodesWithTag("account-about-row").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("account-about-row").performScrollTo().performClick()
         compose.waitUntil { compose.onAllNodesWithTag("about-licenses-row").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("about-licenses-row").performScrollTo().performClick()
         compose.waitUntil { compose.onAllNodesWithTag("license-row-BoringSSL-LICENSE").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("license-row-BoringSSL-LICENSE").performScrollTo().performClick()
-        compose.waitUntil { compose.onAllNodesWithTag("license-screen").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil { compose.onAllNodesWithTag("license-body").fetchSemanticsNodes().isNotEmpty() }
 
-        repeat(3) { compose.runOnIdle { activity.onBackPressedDispatcher.onBackPressed() } }
+        compose.runOnIdle { activity.onBackPressedDispatcher.onBackPressed() }
+        compose.waitUntil { compose.onAllNodesWithTag("licenses-body").fetchSemanticsNodes().isNotEmpty() }
+        compose.runOnIdle { activity.onBackPressedDispatcher.onBackPressed() }
+        compose.waitUntil { compose.onAllNodesWithTag("about-body").fetchSemanticsNodes().isNotEmpty() }
+        compose.runOnIdle { activity.onBackPressedDispatcher.onBackPressed() }
+        assertAccountRootShown(host)
+    }
 
-        compose.waitUntil { compose.onAllNodesWithTag("account-tab-screen").fetchSemanticsNodes().isNotEmpty() }
+    private fun assertAccountRootShown(host: PageChromeHost? = null) {
+        compose.waitUntil { compose.onAllNodesWithTag("account-body").fetchSemanticsNodes().isNotEmpty() }
+        assertTrue(compose.onAllNodesWithTag("about-body").fetchSemanticsNodes().isEmpty())
+        assertTrue(compose.onAllNodesWithTag("licenses-body").fetchSemanticsNodes().isEmpty())
+        assertTrue(compose.onAllNodesWithTag("license-body").fetchSemanticsNodes().isEmpty())
+        host?.let { assertNull(it.current) }
     }
 
     @Test fun licensesRowIsAbsentWhenLoaderReturnsNull() {
         renderAccount(account(), null)
         compose.waitUntil { compose.onAllNodesWithTag("account-about-row").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("account-about-row").performScrollTo().performClick()
-        compose.waitUntil { compose.onAllNodesWithTag("about-screen").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil { compose.onAllNodesWithTag("about-body").fetchSemanticsNodes().isNotEmpty() }
         assertTrue(compose.onAllNodesWithTag("about-licenses-row").fetchSemanticsNodes().isEmpty())
     }
 
@@ -122,22 +140,15 @@ class AboutComposeTest {
         renderAccount(account = null, notices = null)
         compose.waitUntil { compose.onAllNodesWithTag("devices-loading").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("account-about-row").performScrollTo().performClick()
-        compose.waitUntil { compose.onAllNodesWithTag("about-screen").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("about-back-button").performScrollTo().performClick()
+        compose.waitUntil { compose.onAllNodesWithTag("about-body").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("about-back").performScrollTo().performClick()
         compose.waitUntil { compose.onAllNodesWithTag("account-offline-body").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("devices-loading").assert(SemanticsMatcher.expectValue(SemanticsProperties.Text, listOf(androidx.compose.ui.text.AnnotatedString("Could not load devices. Unlock or check the server connection."))))
+        compose.onNodeWithTag("devices-loading").assert(SemanticsMatcher.expectValue(SemanticsProperties.Text, listOf(androidx.compose.ui.text.AnnotatedString(activity.getString(R.string.peppy_devices_load_failed)))))
     }
 
     @Test fun aboutRendersBuildInfoAndExternalLinksOpenExactUris() {
         var opened = ""
-        compose.setContent {
-            MaterialTheme {
-                activity = requireNotNull(LocalActivity.current) as ComponentActivity
-                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                    AboutScreen(AboutBuildInfo("1.2.3", 42, "a".repeat(40), "true"), {}, { opened = it }, {}, false)
-                }
-            }
-        }
+        renderAbout(buildInfo = AboutBuildInfo("1.2.3", 42, "a".repeat(40), "true"), onOpenLink = { opened = it })
         compose.onNodeWithTag("about-version-name").fetchSemanticsNode()
         compose.onNodeWithTag("about-version-code").fetchSemanticsNode()
         compose.onNodeWithTag("about-source-commit").fetchSemanticsNode()
@@ -145,10 +156,18 @@ class AboutComposeTest {
         compose.onNodeWithTag("about-title").assert(SemanticsMatcher.expectValue(SemanticsProperties.Heading, Unit))
         compose.onNodeWithTag("about-privacy-row").performScrollTo().performClick()
         compose.runOnIdle { assertEquals(PRIVACY_URL, opened) }
-        compose.onNodeWithTag("about-guides-row").performScrollTo().performClick()
-        compose.runOnIdle { assertEquals("https://peppy.pro/docs", opened) }
         compose.onNodeWithTag("about-source-row").performScrollTo().performClick()
         compose.runOnIdle { assertEquals(SOURCE_URL, opened) }
+        assertTrue(compose.onAllNodesWithTag("about-guides-row").fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test fun privacyInfoButtonShowsScopeWithoutOpeningPolicy() {
+        var opened = ""
+        renderAbout(licensesAvailable = true, onOpenLink = { opened = it })
+        compose.onNodeWithTag("info-about-privacy").performScrollTo().performClick()
+        compose.waitUntil { compose.onAllNodesWithTag("info-about-privacy-dialog").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText(activity.getString(R.string.peppy_privacy_policy_scope)).fetchSemanticsNode()
+        compose.runOnIdle { assertEquals("", opened) }
     }
 
     @Test fun licenseListShowsEveryFileAndLicenseTextHandlesContentAndFailure() {
@@ -168,17 +187,41 @@ class AboutComposeTest {
         compose.waitUntil { compose.onAllNodesWithTag("license-error").fetchSemanticsNodes().isNotEmpty() }
     }
 
-    private fun renderAccount(account: GatewayAccountState?, notices: ThirdPartyNotices?) {
+    @Test fun licenseTextRepeatsTitleAsHeading() {
+        val notices = FakeNotices()
+        compose.setContent { MaterialTheme { LicenseTextScreen(notices, notices.entries().first(), {}) } }
+        compose.waitUntil { compose.onAllNodesWithTag("license-text").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("license-name").assert(SemanticsMatcher.expectValue(SemanticsProperties.Heading, Unit))
+    }
+
+    private fun renderAbout(
+        buildInfo: AboutBuildInfo = AboutBuildInfo("1.2.3", 42, "a".repeat(40), "false"),
+        licensesAvailable: Boolean = false,
+        onOpenLink: (String) -> Unit = {},
+    ) {
         compose.setContent {
             MaterialTheme {
                 activity = requireNotNull(LocalActivity.current) as ComponentActivity
                 Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                    GatewayAccountSettings(
-                        onChanged = {},
-                        accountLoader = { account },
-                        gatewayStatusLoader = { GatewayStatus(true, "https://vault.example", false, false) },
-                        thirdPartyNoticesLoader = { notices },
-                    )
+                    AboutScreen(buildInfo, {}, onOpenLink, {}, licensesAvailable)
+                }
+            }
+        }
+    }
+
+    private fun renderAccount(account: GatewayAccountState?, notices: ThirdPartyNotices?, chromeHost: PageChromeHost? = null) {
+        compose.setContent {
+            MaterialTheme {
+                activity = requireNotNull(LocalActivity.current) as ComponentActivity
+                CompositionLocalProvider(LocalPageChromeHost provides chromeHost) {
+                    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                        GatewayAccountSettings(
+                            onChanged = {},
+                            accountLoader = { account },
+                            gatewayStatusLoader = { GatewayStatus(true, "https://vault.example", false, false) },
+                            thirdPartyNoticesLoader = { notices },
+                        )
+                    }
                 }
             }
         }
