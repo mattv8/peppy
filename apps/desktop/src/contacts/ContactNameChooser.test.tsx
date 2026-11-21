@@ -66,9 +66,9 @@ describe("ContactNameChooser", () => {
     bridge.list_contact_name_candidates.mockRejectedValueOnce(new Error("failed"));
     render(<ContactNameChooser state="conflict" address="+18015551234" books={books} bridge={bridge} onClose={vi.fn()} onRefresh={vi.fn()} onOpenContact={vi.fn()} />);
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Couldn't load contacts. Try again."));
-    expect(screen.getByRole("heading")).toHaveFocus();
+    await waitFor(() => expect(screen.getByRole("heading")).toHaveFocus());
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("radio")).toHaveFocus();
+    await waitFor(() => expect(screen.getByRole("radio")).toHaveFocus());
     expect(bridge.list_contact_name_candidates).toHaveBeenCalledTimes(2);
   });
 
@@ -77,10 +77,10 @@ describe("ContactNameChooser", () => {
     bridge.list_contact_name_candidates.mockResolvedValueOnce({ candidates: [], pinned: null, moreIndexing: true });
     render(<ContactNameChooser state="consensus" address="+18015551234" books={books} bridge={bridge} onClose={vi.fn()} onRefresh={vi.fn()} onOpenContact={vi.fn()} />);
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Contacts are still being indexed. Try again in a moment."));
-    expect(screen.getByRole("heading", { name: "Contact sources" })).toHaveFocus();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Contact sources" })).toHaveFocus());
     expect(screen.queryByText("No contacts available.")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("radio")).toHaveFocus();
+    await waitFor(() => expect(screen.getByRole("radio")).toHaveFocus());
   });
 
   it("focuses the pinned radio and respects an already handled Escape", async () => {
@@ -89,7 +89,7 @@ describe("ContactNameChooser", () => {
     const onClose = vi.fn();
     render(<ContactNameChooser state="pinned" address="+18015551234" books={books} bridge={bridge} onClose={onClose} onRefresh={vi.fn()} onOpenContact={vi.fn()} />);
     const radio = await screen.findByRole("radio");
-    expect(radio).toHaveFocus();
+    await waitFor(() => expect(radio).toHaveFocus());
     const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
     event.preventDefault();
     radio.dispatchEvent(event);
