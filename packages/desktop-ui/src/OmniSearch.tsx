@@ -318,6 +318,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
       : null,
     [category, chooser, composing, disabled, notificationResults, scope, trimmedQuery],
   );
+  const resultsRef = useRef<HTMLDivElement>(null);
   const notificationSearchRef = useRef(notificationSearch);
   notificationSearchRef.current = notificationSearch;
   const candidate = onStartConversation ? normalizePhoneNumber(trimmedQuery) : null;
@@ -574,6 +575,11 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
     if (activeIndex >= items.length) setActiveIndex(Math.max(0, items.length - 1));
   }, [activeIndex, items.length]);
 
+  // A new scope or query starts its results at the top; active-option changes never reach this effect.
+  useLayoutEffect(() => {
+    if (resultsRef.current) resultsRef.current.scrollTop = 0;
+  }, [Boolean(scope), resultsScope, trimmedQuery]);
+
   const close = (restoreFocus = false) => {
     reset();
     setOpen(false);
@@ -772,6 +778,8 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
     }
     reset(); setCategory(null); setQuery(nextQuery); setQueryRevision((value) => value + 1); setOpen(true);
   };
+  // A results scope has no contact hits, so a number candidate row is the only other row it can show.
+  const emptyResultsText = resultsScope && candidate && !category ? "No conversations or messages match." : "No matches.";
   const actionId = (action: SearchAction) => action.kind === "more" ? `more-${action.category}` : action.kind === "retry" ? "retry-search" : action.kind === "return" ? "back-all" : action.kind;
   const selectedId = items[activeIndex]?.kind === "hit" ? `${componentId}-${hitKey(items[activeIndex].hit)}`
     : items[activeIndex]?.kind === "contact-action" ? `${componentId}-start-${hitKey(items[activeIndex].hit)}`
@@ -842,6 +850,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
       onClick={clearQuery}
     ><X size={12} strokeWidth={1.75} aria-hidden /></button>}
     {open && !filterScope && <div
+      ref={resultsRef}
       className="omni-search-results"
       data-omni-search-results
       style={popoverStyle}
@@ -853,7 +862,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
       {recipientError && <p role="alert">{recipientError}</p>}
       {!historyEnabled && page?.indexState === "indexing" && <p>Search index is updating; results may be incomplete.</p>}
       {error && <p>Search could not be completed. Choose Retry search.</p>}
-      {!historyEnabled && !loading && !error && (!candidate || category) && trimmedQuery && page && !page.items.length && (notificationSearch?.hits.length ?? 0) === 0 && <p>No matches.</p>}
+      {!historyEnabled && !loading && !error && (!candidate || category || resultsScope) && trimmedQuery && page && !page.items.length && (notificationSearch?.hits.length ?? 0) === 0 && <p>{emptyResultsText}</p>}
       <div
         id={listId}
         role="listbox"

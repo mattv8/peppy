@@ -104,6 +104,59 @@ it("scopes dropdown results to conversations and restores everything on exit", a
   expect(screen.getByText("Alert")).toBeInTheDocument();
 });
 
+it("resets the results scroll to the top when the query changes", async () => {
+  vi.useFakeTimers();
+  render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, conversationHits(12))} />);
+  const input = screen.getByRole("combobox", { name: "Search Peppy" });
+  fireEvent.change(input, { target: { value: "conv" } });
+  await act(async () => { vi.advanceTimersByTime(100); });
+  const results = document.querySelector<HTMLElement>("[data-omni-search-results]")!;
+  results.scrollTop = 120;
+  fireEvent.change(input, { target: { value: "conversation" } });
+  expect(results.scrollTop).toBe(0);
+});
+
+it("starts the results at the top after exiting a scope chip", async () => {
+  vi.useFakeTimers();
+  const onSearch = async (request: { query: string }) => page(request.query, conversationHits(12));
+  const scope = { mode: "results" as const, label: "Conversations", placeholder: "Search conversations and messages", onExit: vi.fn() };
+  const { rerender } = render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={onSearch} />);
+  const input = screen.getByRole("combobox", { name: "Search Peppy" });
+  fireEvent.change(input, { target: { value: "conv" } });
+  await act(async () => { vi.advanceTimersByTime(100); });
+  document.querySelector<HTMLElement>("[data-omni-search-results]")!.scrollTop = 120;
+
+  rerender(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={onSearch} scope={scope} />);
+  input.focus();
+  rerender(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={onSearch} />);
+
+  const results = document.querySelector<HTMLElement>("[data-omni-search-results]");
+  expect(results).not.toBeNull();
+  expect(results!.scrollTop).toBe(0);
+});
+
+it("says no conversations or messages match in a results scope that shows only a number candidate", async () => {
+  vi.useFakeTimers();
+  const props = {
+    sessionKey: "one",
+    onActivate: () => {},
+    onSearch: async (request: { query: string }) => page(request.query, []),
+    onStartConversation: async () => true,
+  };
+  const scope = { mode: "results" as const, label: "Conversations", placeholder: "Search conversations and messages", onExit: vi.fn() };
+  const { rerender } = render(<OmniSearch {...props} scope={scope} />);
+  fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value: "+14155552671" } });
+  await act(async () => { vi.advanceTimersByTime(100); });
+  expect(screen.getByRole("option", { name: /Start conversation with/ })).toBeInTheDocument();
+  expect(screen.getByText("No conversations or messages match.")).toBeInTheDocument();
+  expect(screen.queryByText("No matches.")).not.toBeInTheDocument();
+
+  rerender(<OmniSearch {...props} />);
+  await act(async () => { vi.advanceTimersByTime(100); });
+  expect(screen.queryByText("No conversations or messages match.")).not.toBeInTheDocument();
+  expect(screen.queryByText("No matches.")).not.toBeInTheDocument();
+});
+
 it("exits a results scope with Backspace on empty", () => {
   const onExit = vi.fn();
   render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async request => page(request.query)} scope={{ mode: "results", label: "Conversations", placeholder: "Search conversations and messages", onExit }} />);

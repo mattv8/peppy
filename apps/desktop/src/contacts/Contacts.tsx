@@ -7,7 +7,7 @@ import { findContactTarget } from "./contact-target";
 import { ContactList } from "./ContactList";
 import { useContactPages } from "./useContactPages";
 import { canCreateContactInBook } from "./conversation-contact";
-import { contactErrorText, scanStatusText } from "./contact-labels";
+import { bookLabels, contactErrorText, scanStatusText } from "./contact-labels";
 import type { ContactActionNotice } from "./contact-action-notice";
 import { BookLookupStrip, BookRail } from "./BookRail";
 import { ContactListHeader } from "./ContactListHeader";
@@ -1071,6 +1071,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
             loadFailed={pages.loadFailed}
             contactCount={pages.total ?? book?.contactCount}
             deviceName={book?.deviceName}
+            deviceLabel={book && bookLabels(books).label(book)}
             canWrite={Boolean(book?.capabilities.canWrite)}
             emptyFailed={contactsRepairState === "failed" || contactsRepairState === "repairWaiting"}
             nameFormat={nameFormat}

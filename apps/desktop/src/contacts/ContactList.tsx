@@ -23,6 +23,8 @@ export type ContactListProps = {
   loadFailed: boolean;
   contactCount?: number;
   deviceName?: string;
+  /** The selected book's label from `bookLabels`, adding its ID when another book shares the device name. */
+  deviceLabel?: string;
   canWrite: boolean;
   /** The local projection is failed or waiting for repair; the empty list says so. */
   emptyFailed: boolean;
@@ -93,9 +95,10 @@ function ContactSkeleton() {
  * a single tab stop with roving focus, and the polite announcer for loads the user triggers from the keyboard.
  */
 export function ContactList({
-  contacts, loading, loadingMore, loadMoreError, hasMore, loadFailed, contactCount, deviceName, canWrite, emptyFailed,
+  contacts, loading, loadingMore, loadMoreError, hasMore, loadFailed, contactCount, deviceName, deviceLabel, canWrite, emptyFailed,
   nameFormat, selectedId, query, onSelect, onLoadMore, onRetryLoadMore, onRetryFirstPage, onClearQuery,
 }: ContactListProps) {
+  const searchedBook = deviceLabel ?? deviceName ?? "this book";
   const listRef = useRef<HTMLUListElement>(null);
   const sentinelRef = useRef<HTMLLIElement>(null);
   const pendingFocusIndex = useRef<number | undefined>(undefined);
@@ -231,7 +234,7 @@ export function ContactList({
         <li id="contacts-list-sentinel" ref={sentinelRef} aria-hidden="true" />
       </ul>
       {!loading && contacts.length === 0 && !loadFailed && query && (
-        <SearchNoMatch id="contacts-no-match" noun="contacts" query={query} hint="Search covers names, phone numbers, email addresses and organizations." onClearQuery={onClearQuery} />
+        <SearchNoMatch id="contacts-no-match" noun="contacts" query={query} hint={`Searching ${searchedBook} only. Search covers names, phone numbers, email addresses and organizations.`} onClearQuery={onClearQuery} />
       )}
       <p id="contacts-announcer" className="visually-hidden" role="status" aria-live="polite">{announcement}</p>
     </>

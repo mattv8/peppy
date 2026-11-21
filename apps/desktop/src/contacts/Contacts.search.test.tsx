@@ -59,7 +59,7 @@ describe("ContactsView search", () => {
     });
     expect(noMatch).toHaveAttribute("data-empty-state", "no-match");
     expect(noMatch.querySelector("h2")).toHaveTextContent("No contacts match “zzz”");
-    expect(noMatch).toHaveTextContent("Search covers names, phone numbers, email addresses and organizations.");
+    expect(noMatch).toHaveTextContent("Searching Pixel 8 only. Search covers names, phone numbers, email addresses and organizations.");
     expect(document.getElementById("contacts-empty-state")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
