@@ -4,14 +4,14 @@ import type { ContactBookView } from "../bridge/bridge";
 import type { PostContactActionNotice } from "./contact-action-notice";
 import { bookContactCountText, bookLabels, bookStateText, bookSummaryText } from "./contact-labels";
 import { BookRowMenu, pointerMenuPoint, underButtonPoint, type BookMenuItem, type BookMenuPoint } from "./BookRowMenu";
-import { bookUseSwitchId, useBookLookup, type BookLookup } from "./useBookLookup";
+import { bookUseSwitchId, useBookLookup, type BookLookup, type LookupFailure } from "./useBookLookup";
 import "./book-rail.css";
 
 const BOOK_USE_HINT = "This computer only. Contacts stay here to browse.";
 const BOOK_SKELETON_ROWS = 3;
 
 /** The contact-book column shown above ≈700px. Each row carries its own lookup switch when the switch applies. */
-export function BookRail({ books, loading, bookId, width, panelRef, onSelect, onBooksChanged, onRemoveRequest, onNotice }: {
+export function BookRail({ books, loading, bookId, width, panelRef, onSelect, onBooksChanged, onRemoveRequest, onNotice, lookupFailure }: {
   books: ContactBookView[];
   /** The book list has not loaded yet: placeholder rows stand in for it. */
   loading: boolean;
@@ -22,8 +22,9 @@ export function BookRail({ books, loading, bookId, width, panelRef, onSelect, on
   onBooksChanged(): void;
   onRemoveRequest(book: ContactBookView, opener: RefObject<HTMLElement | null>): void;
   onNotice: PostContactActionNotice;
+  lookupFailure?: LookupFailure;
 }) {
-  const lookup = useBookLookup({ books, bookId, onBooksChanged, onNotice });
+  const lookup = useBookLookup({ books, bookId, onBooksChanged, onNotice, failure: lookupFailure });
   const { suffix } = bookLabels(books);
   const railStyle = { "--contacts-book-width": `${width}px` } as CSSProperties;
   return (
@@ -167,13 +168,14 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
 }
 
 /** Full-width lookup strip used when the rail is hidden. */
-export function BookLookupStrip({ book, books, onBooksChanged, onNotice }: {
+export function BookLookupStrip({ book, books, onBooksChanged, onNotice, lookupFailure }: {
   book: ContactBookView;
   books: ContactBookView[];
   onBooksChanged(): void;
   onNotice: PostContactActionNotice;
+  lookupFailure?: LookupFailure;
 }) {
-  const lookup = useBookLookup({ books, bookId: book.id, onBooksChanged, onNotice });
+  const lookup = useBookLookup({ books, bookId: book.id, onBooksChanged, onNotice, failure: lookupFailure });
   const { suffix } = bookLabels(books);
   const switchId = bookUseSwitchId(book.id);
   return (

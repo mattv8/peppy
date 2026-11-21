@@ -3179,7 +3179,11 @@ fn recover_phone_handoff_after_fetch(
         return Err(enrollment_error());
     }
     match session.client.unlock(profile, header, secret) {
-        Ok(()) => Ok(true),
+        Ok(()) => {
+            session.request_replay();
+            session.notify();
+            Ok(true)
+        }
         Err(
             peppy_client_core::Error::WrongPassphrase | peppy_client_core::Error::InvalidPassphrase,
         ) => Err(vault_secret_mismatch()),
@@ -5165,6 +5169,7 @@ mod owner_retry_tests {
             RECOVERY_SECRET,
         )
         .unwrap());
+        assert!(futures_util::FutureExt::now_or_never(session.replay_wake.notified()).is_some());
         assert_eq!(
             session.client.key_status().unwrap().active_epoch,
             Some(profile.key_epoch)

@@ -1,3 +1,6 @@
+import { UPDATE_SEND_FAILURE, UPDATE_SEND_REASON, UPDATE_STATUS_TERM } from "@peppy/desktop-ui";
+import { UPDATE_PAUSED_DESCRIPTION } from "@peppy/desktop-ui";
+import { isWritesPaused, useDelayedWritesPaused } from "./shell/updatePaused";
 import {
   Component,
   useContext,
@@ -986,6 +989,7 @@ function MessageList({
   senderLocked,
   resolution,
   showReactions,
+  writesPaused,
   actorName,
   onOpenReactionTarget,
   pendingReactionId,
@@ -1051,6 +1055,7 @@ function MessageList({
   senderLocked: boolean;
   resolution: ContactResolutionMap;
   showReactions: boolean;
+  writesPaused: boolean;
   actorName: ActorName;
   onOpenReactionTarget(reaction: MessageView, notice: ReactionNoticeInfo): void;
   pendingReactionId?: string;
@@ -1141,12 +1146,14 @@ function MessageList({
       chipRef={chipRef}
       placement={placement}
       onOwnChip={(badge) => { if (badge.own?.source === "native") pickFor(message.id, null); }}
-      onRetry={(_requestId, emoji) => pickFor(message.id, emoji)}
+      writesPaused={writesPaused}
+      onRetry={(_requestId, emoji) => { if (!writesPaused) pickFor(message.id, emoji); }}
       onDismiss={(requestId) => { void dismissRequest(requestId); }}
     />;
   };
   /** Sends a pick from a chip (retry, or removing an own chip), with its polite line. */
   const pickFor = (messageId: string, emoji: string | null) => {
+    if (writesPaused) return;
     const message = messagesById.get(messageId);
     const selected = message ? nativeSelection(message) : undefined;
     announceReaction(pickAnnouncement({ route: "native", emoji: emoji ?? selected ?? "", selected, removing: emoji === null }));
@@ -1157,6 +1164,7 @@ function MessageList({
    * request is held only from an accepted call, and only until the snapshot catches up.
    */
   const submitReaction = async (messageId: string, emoji: string | null): Promise<ReactionSubmitView | undefined> => {
+    if (writesPaused) return undefined;
     const message = messagesById.get(messageId);
     const previousEmoji = message ? nativeSelection(message) ?? null : null;
     const startedAt = snapshotSeq.current;
@@ -1623,6 +1631,7 @@ function MessageList({
       messages={messagesById}
       reactionSupport={conversation.reactionSupport}
       routeOffline={reactionRouteOffline}
+      writesPaused={writesPaused}
       nameOf={(candidate) => actorName({ sender: candidate.sender, senderAddress: candidate.senderAddress })}
       announce={announceReaction}
       openPicker={bridge.open_emoji_picker}
@@ -1704,6 +1713,8 @@ function SettingsView({
   onPermission,
   onOpenSettings,
   headsSupported,
+  writesPaused,
+  pauseNoticeVisible,
   onLock,
   appLock,
   onAppLock,
@@ -1760,6 +1771,8 @@ function SettingsView({
   onPermission(): Promise<NotificationCheck | void>;
   onOpenSettings(): Promise<void>;
   headsSupported: boolean;
+  writesPaused: boolean;
+  pauseNoticeVisible: boolean;
   onLock?: () => Promise<void>;
   appLock: AppLockStatus | null;
   onAppLock(enabled: boolean): Promise<boolean>;
@@ -2012,6 +2025,8 @@ function SettingsView({
         onOpenSettings={onOpenSettings}
         headsSupported={headsSupported}
         locked={encryption !== "unlocked" || Boolean(appLock?.locked)}
+        writesPaused={writesPaused}
+        pauseNoticeVisible={pauseNoticeVisible}
         soundSettings={!browserHost && bridge.get_notification_sound && bridge.set_notification_sound
           ? { load: bridge.get_notification_sound, save: bridge.set_notification_sound } : undefined}
         persistenceSettings={persistenceSettings}
@@ -2201,7 +2216,7 @@ function StatusDetails({
       </div>
       {history && <div className="status-details-row" data-disclosure="history" data-history-phase={history.phase}>
         <History size={14} aria-hidden />
-        <dl className="status-details-pair"><dt>History</dt><dd>{history.value}</dd></dl>
+        <dl className="status-details-pair"><dt>{history.phase === "updating" ? UPDATE_STATUS_TERM : "History"}</dt><dd>{history.value}</dd></dl>
       </div>}
       <div className="status-details-row" data-disclosure="carrier-sms" title="Carrier SMS/MMS not end-to-end encrypted">
         <ShieldAlert size={14} aria-hidden />
@@ -2330,6 +2345,29 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   useMaximizeButtonRegion({ bridge, enabled: !browserHost && platform === "windows" && !composerConversation });
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
+  const { visibleNotice: updateNoticeVisible } = useDelayedWritesPaused(isWritesPaused(snapshot));
+  const lastFocusedControl = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const rememberFocus = (event: FocusEvent) => {
+      if (event.target instanceof HTMLElement && event.target !== document.body) lastFocusedControl.current = event.target;
+    };
+    document.addEventListener("focusin", rememberFocus);
+    return () => document.removeEventListener("focusin", rememberFocus);
+  }, []);
+  useLayoutEffect(() => {
+    if (!isWritesPaused(snapshot)) return;
+    const previous = lastFocusedControl.current;
+    if (!(previous instanceof HTMLButtonElement || previous instanceof HTMLInputElement) || !previous.disabled) return;
+    if (document.activeElement !== document.body && document.activeElement !== previous) return;
+    const owner = previous.closest("#composer-area") ? document.getElementById("composer-textarea") : previous.closest<HTMLElement>("[data-conversation-row]")?.querySelector<HTMLElement>(".conversation-select")
+      ?? previous.closest<HTMLElement>("[role='dialog']")?.querySelector<HTMLElement>("button:not(:disabled)")
+      ?? document.getElementById("thread-pane-header")?.querySelector<HTMLElement>("h1")
+      ?? mainRef.current;
+    if (owner) {
+      if (!owner.hasAttribute("tabindex") && owner.tagName === "H1") owner.tabIndex = -1;
+      owner.focus();
+    }
+  }, [isWritesPaused(snapshot)]);
   const [nameChooser, setNameChooser] = useState<{ address: string; conversationId: string; returnFocus: HTMLElement | null }>();
   const [pendingSends, setPendingSends] = useState<PendingSend[]>([]);
   const [cancelledSendRestore, setCancelledSendRestore] = useState<CancelledSendRestore>();
@@ -2602,7 +2640,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     document.getElementById(`notif-${notificationTuple(sourceDeviceId, notificationKey, lifetime)}`)?.focus();
   };
   const runNotificationMute = (filter: AppFilter, label: string, muted: boolean) => {
-    if (notificationsLocked || appLock?.locked || notificationMutePendingRef.current) return;
+    if (isWritesPaused(snapshotRef.current) || notificationsLocked || appLock?.locked || notificationMutePendingRef.current) return;
     const generation = notificationMuteGenerationRef.current;
     notificationMutePendingRef.current = true;
     setNotificationMutePending(true);
@@ -2615,8 +2653,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         const refreshed = refresh();
         void refreshed.catch(reportRefresh("Could not refresh notifications. "));
         if (!muted) void refreshed.then(() => requestAnimationFrame(() => focusRestoredNotification(filter)), () => undefined);
-      } catch {
+      } catch (error) {
         if (generation !== notificationMuteGenerationRef.current) return;
+        if (errorCode(error) === "update-in-progress") {
+          reportAction("Notification settings not changed: ")(error);
+          return;
+        }
         setNotificationMuteNotice({ kind: "error", filter, label });
       } finally {
         if (generation !== notificationMuteGenerationRef.current) return;
@@ -3208,8 +3250,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setComposerFeedback(message ? { key, message, severity, kind } : undefined);
   const reportRefresh = (prefix: string) => (error: unknown) =>
     setRefreshNotice(`${prefix}${errorText(error)}`);
-  const reportAction = (prefix: string) => (error: unknown) =>
-    setNotice(`${prefix}${errorText(error)}`);
+  const reportAction = (prefix: string) => (error: unknown) => {
+    const paused = errorCode(error) === "update-in-progress";
+    setNotice(`${prefix}${errorText(error)}`, paused ? "warning" : "error");
+    if (paused) void refresh().catch(reportRefresh(""));
+  };
   const prepareFocusRestore = (owner: HTMLElement | null = document.activeElement instanceof HTMLElement ? document.activeElement : null) => {
     focusRestorePendingRef.current = Boolean(owner?.closest("#app-notice-banner"));
   };
@@ -4783,6 +4828,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
 
   const send = async (options: GroupSendOptions = {}) => {
     if (sendingRef.current || !slotKey || groupLeft) return;
+    if (isWritesPaused(snapshotRef.current)) {
+      setComposerNotice(slotKey, UPDATE_SEND_FAILURE, "warning");
+      return;
+    }
     autoAcknowledgeDraftSyncNotice();
     const session = currentSearchSessionKey();
     sendingRef.current = true;
@@ -4836,6 +4885,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         return setComposerNotice(current.key, `Not sent: ${reason}.`);
       }
       const sendContent = { ...current.content, recipientIds: [...current.content.recipientIds], attachmentIds: [...current.content.attachmentIds] };
+      if (isWritesPaused(snapshotRef.current))
+        return setComposerNotice(current.key, UPDATE_SEND_FAILURE, "warning");
       const groupSend = sendContent.recipientIds.length > 1 || (latestConversation?.participants?.length ?? 0) > 1;
       // The composer's revision: the caller's (a resend after a refusal), else the latest snapshot's.
       const reviewedRevision = groupNotice?.kind === "members-changed" && groupNotice.key === current.key ? groupNotice.memberRevision : undefined;
@@ -4966,6 +5017,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           }
         }
         await restoreUnsent();
+        if (errorCode(error) === "update-in-progress") {
+          void refresh().catch(reportRefresh(""));
+          return setComposerNotice(current.key, UPDATE_SEND_FAILURE, "warning");
+        }
         return setComposerNotice(current.key, `Send failed: ${errorText(error)}`);
       }
       await refresh(current.conversationId).catch(reportRefresh(""));
@@ -5119,7 +5174,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
   };
   const toggleConversationPin = async (conversationId: string, pinned: boolean) => {
-    if (pendingPinId || snapshotRef.current?.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
+    if (pendingPinId || isWritesPaused(snapshotRef.current) || snapshotRef.current?.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
     const origin = document.activeElement;
     if (origin instanceof HTMLElement && origin.dataset.pinConversationId === conversationId) {
       pinFocusRestoreRef.current?.dispose();
@@ -5148,7 +5203,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       try {
         await bridge.set_conversation_pinned(conversationId, pinned);
       } catch (error) {
-        setNotice(`Conversation pin not changed: ${errorText(error)}`);
+        const paused = errorCode(error) === "update-in-progress";
+        setNotice(`Conversation pin not changed: ${errorText(error)}`, paused ? "warning" : "error");
+        if (paused) void refresh().catch(reportRefresh(""));
         return;
       }
       try {
@@ -5199,7 +5256,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }, FOLDER_SETTLE_MS);
   };
   const applyFolderChange = async (conversationId: string, from: ConversationFolder, to: ConversationFolder, trigger?: HTMLButtonElement) => {
-    if (folderChangeInFlightRef.current || snapshotRef.current?.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
+    if (folderChangeInFlightRef.current || isWritesPaused(snapshotRef.current) || snapshotRef.current?.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
     folderChangeInFlightRef.current = true;
     const name = conversationFolderName(conversationId);
     const leavesCurrentView = from === folderView && to !== folderView;
@@ -5214,7 +5271,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     try {
       try {
         await bridge.set_conversation_folder(conversationId, to);
-      } catch {
+      } catch (error) {
+        if (errorCode(error) === "update-in-progress") {
+          reportAction("Conversation folder not changed: ")(error);
+          return;
+        }
         nextNotice = { kind: "error", conversationId, name, from, to };
         await restoreFolderFocus(conversationId, fallbackConversationId, trigger);
         return;
@@ -5242,7 +5303,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
   };
   const requestFolderChange = (conversationId: string, to: ConversationFolder, trigger: HTMLButtonElement) => {
-    if (folderChangeInFlightRef.current || snapshotRef.current?.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
+    if (folderChangeInFlightRef.current || isWritesPaused(snapshotRef.current) || snapshotRef.current?.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
     const conversation = snapshotRef.current?.conversations.find((item) => item.id === conversationId);
     const from = conversation?.folder ?? "inbox";
     if (to === "inbox" && from === "spam" && conversation?.folderReason === "blocked") {
@@ -5261,7 +5322,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setFolderConfirmation({ id: conversationId, name: conversationFolderName(conversationId), from, to, trigger });
   };
   const requestSenderUnblock = async (conversationId: string, name: string, trigger?: HTMLButtonElement) => {
-    if (pendingSenderUnblockId || snapshotRef.current?.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
+    if (pendingSenderUnblockId || isWritesPaused(snapshotRef.current) || snapshotRef.current?.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
     setPendingSenderUnblockId(conversationId);
     try {
       await bridge.request_sender_unblock(conversationId);
@@ -5275,7 +5336,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       setSenderUnblockNotice({ kind: "success", id: conversationId, name });
       // Keep the selected conversation open so its pending unblock notice remains visible.
       await restoreFolderFocus(conversationId, conversations.find((conversation) => conversation.id !== conversationId)?.id, trigger);
-    } catch {
+    } catch (error) {
+      if (errorCode(error) === "update-in-progress") {
+        reportAction("Unblock not requested: ")(error);
+        return;
+      }
       setSenderUnblockConfirmation(undefined);
       setFolderNotice(undefined);
       setSenderUnblockNotice({ kind: "error", id: conversationId, name });
@@ -5591,7 +5656,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const toneOverrides = snapshot?.toneOverrides ?? {};
   const saveTone = async (seed: string, paletteIndex: number | null) => {
     const current = snapshotRef.current;
-    if (!mountedRef.current || !current || current.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
+    if (!mountedRef.current || !current || isWritesPaused(current) || current.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
     if (toneOperationRef.current.has(seed)) return;
     const operation = ++toneOperationSequence.current;
     const session = currentSearchSessionKey();
@@ -5616,7 +5681,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       } catch {
         if (mountedRef.current && toneOperationRef.current.get(seed) === operation && session === currentSearchSessionKey()) setToneErrors((errors) => ({ ...errors, [seed]: "Color saved; waiting for the latest state." }));
       }
-    } catch {
+    } catch (error) {
+      if (errorCode(error) === "update-in-progress") {
+        reportAction("Color not changed: ")(error);
+        return;
+      }
       if (mountedRef.current && toneOperationRef.current.get(seed) === operation && session === currentSearchSessionKey()) setToneErrors((errors) => ({ ...errors, [seed]: "Couldn't save the color. Try again." }));
     } finally {
       if (toneOperationRef.current.get(seed) !== operation) return;
@@ -5859,6 +5928,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     displayName: (address) => displayAddressName(address, resolution),
     canResend: active?.group?.state === "live" || active?.group?.state === "paused",
     checking: active?.group?.state === "paused",
+    writesPaused: isWritesPaused(snapshot),
     onResend: () => void send({ expectedMemberRevision: composerGroupNotice?.kind === "members-changed" ? composerGroupNotice.memberRevision : undefined }),
     onReview: () => setGroupDetailsOpen(true),
     onCreateAgain: () => void send({ groupCreateConfirmDuplicate: true }),
@@ -5871,6 +5941,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     : syncedOffline ? "offline" as const
     : undefined;
   const statusItems: InlineStatusItem[] = composerStatusItems({
+    writesPaused: isWritesPaused(snapshot),
+    showUpdateNotice: updateNoticeVisible,
     pendingRecipientReason: effectivePendingRecipient ? pendingRecipientReason : undefined,
     groupLeft,
     draftSendBlock,
@@ -6025,10 +6097,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       <Composer
         draft={content.text}
         attachments={attachments}
-        sendSupported={Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending && !resolvingDraftConflict}
+        sendSupported={Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending && !resolvingDraftConflict && !isWritesPaused(snapshot)}
         hideSmsCounter={rcsRoute.current || rcsBlock.kind !== "none"}
         typingSendState={typingSender.state}
-        unavailableReason={resolvingDraftConflict ? "resolving draft conflict…" : sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
+        unavailableReason={isWritesPaused(snapshot) ? UPDATE_SEND_REASON : resolvingDraftConflict ? "resolving draft conflict…" : sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
         readOnly={composerReadOnly || resolvingDraftConflict || groupLeft}
         placeholder={composerReadOnly ? "Loading draft…" : undefined}
         onDraftChange={(text) => { typingSender.noteInput(text); edit({ text }); }}
@@ -6231,6 +6303,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       showReactions={showReactions}
       actorName={actorName}
       onOpenReactionTarget={(reaction, notice) => { void openReactionTarget(reaction, notice); }}
+      writesPaused={isWritesPaused(snapshot)}
       pendingReactionId={pendingReactionId}
       reactionFeedback={reactionFeedback}
       seenReactions={seenReactions}
@@ -6334,10 +6407,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         className={`theme-${theme}${headPanel ? " head-panel-shell" : ""}`}
         data-accent={accentAttribute(accentColor)}
         data-bridge-mode={snapshot?.mode ?? "unavailable"}
+        data-writes-paused={isWritesPaused(snapshot) || undefined}
         data-platform={platform}
         inert={lifecyclePending ? true : undefined}
         aria-busy={lifecyclePending ? "true" : undefined}
       >
+        {isWritesPaused(snapshot) && <p id="update-paused-description" className="sr-only">{UPDATE_PAUSED_DESCRIPTION}</p>}
         <section
           id="conversation-pane"
           className="conversation-pane"
@@ -6367,7 +6442,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             style={overlayHeight === null ? undefined : { "--composer-overlay-height": `${overlayHeight}px` } as CSSProperties}
           >
             {revoked ? <p id="composer-recovery-notice" role="status">Reconnect this computer in the main Peppy window.</p> : <>
-              <SendAgainHost conversation={active} gateways={gateways} routeLabel={sendAgainRouteLabel(gateways, accountReadOnly)} serverOffline={serverOffline} onGoToLatest={goToLatest}>{messages}</SendAgainHost>
+              <SendAgainHost conversation={active} gateways={gateways} routeLabel={sendAgainRouteLabel(gateways, accountReadOnly)} serverOffline={serverOffline} writesPaused={isWritesPaused(snapshot)} onUpdateInProgress={reportAction("Message not sent: ")} onGoToLatest={goToLatest}>{messages}</SendAgainHost>
               {recipientRail}
               {composer}
             </>}
@@ -6403,6 +6478,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       className={`theme-${theme}`}
       data-accent={accentAttribute(accentColor)}
       data-bridge-mode={snapshot?.mode ?? "unavailable"}
+      data-writes-paused={isWritesPaused(snapshot) || undefined}
       data-platform={platform}
       data-navigation={navigationPosition}
       data-browser-setup={browserHost && showSetup ? "true" : undefined}
@@ -6410,6 +6486,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       inert={lifecyclePending ? true : undefined}
       aria-busy={lifecyclePending ? "true" : undefined}
     >
+      {isWritesPaused(snapshot) && <p id="update-paused-description" className="sr-only">{UPDATE_PAUSED_DESCRIPTION}</p>}
       <AppTitlebar
         onMinimize={browserHost ? undefined : () => void bridge.window("minimize")}
         onMaximize={browserHost ? undefined : () => void bridge.window("maximize")}
@@ -6524,6 +6601,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             />
             <ConversationList
             conversations={conversations}
+            actionsPaused={isWritesPaused(snapshot)}
             selectedId={slotKey}
             onSelect={select}
               onPopout={id => void popoutConversation(id)}
@@ -6547,6 +6625,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               name={folderConfirmation.name}
               trigger={folderConfirmation.trigger}
               pending={Boolean(pendingFolderId)}
+              writesPaused={isWritesPaused(snapshot)}
+              pauseNoticeVisible={updateNoticeVisible}
               onConfirm={() => {
                 void applyFolderChange(folderConfirmation.id, folderConfirmation.from, folderConfirmation.to, folderConfirmation.trigger);
               }}
@@ -6555,6 +6635,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             {folderNotice && <ConversationFolderNotice
               notice={folderNotice}
               pending={Boolean(pendingFolderId)}
+              writesPaused={isWritesPaused(snapshot)}
               toastHost={threadListToastHost}
               onUndo={() => void applyFolderChange(folderNotice.conversationId, folderNotice.to, folderNotice.from)}
               onRetry={() => void applyFolderChange(folderNotice.conversationId, folderNotice.from, folderNotice.to)}
@@ -6562,6 +6643,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             />}
             <SenderUnblockNotice
               notice={senderUnblockNotice}
+              writesPaused={isWritesPaused(snapshot)}
               pending={Boolean(pendingSenderUnblockId) || snapshot?.encryption.state !== "unlocked" || Boolean(appLock?.locked)}
               toastHost={threadListToastHost}
               onRetry={() => senderUnblockNotice && void requestSenderUnblock(senderUnblockNotice.id, senderUnblockNotice.name)}
@@ -6599,7 +6681,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         >
           {activeView === "conversations" && <header id="thread-pane-header">
             {activeDisplay && (
-              <TonePicker id="thread-tone-picker" seed={activeDisplay.avatar.seed} value={toneOverrides[activeDisplay.avatar.seed]} automaticIndex={paletteIndex(activeDisplay.avatar.seed)} disabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pending={Boolean(pendingToneSeeds[activeDisplay.avatar.seed])} error={toneErrors[activeDisplay.avatar.seed]} onSelect={(index) => { void saveTone(activeDisplay.avatar.seed, index); }} renderTrigger={(props) => <button {...props} id="thread-contact-avatar" aria-label="Change conversation color"><ContactAvatar {...activeDisplay.avatar} toneOverrides={toneOverrides} size={36} /></button>} />
+              <TonePicker id="thread-tone-picker" seed={activeDisplay.avatar.seed} value={toneOverrides[activeDisplay.avatar.seed]} automaticIndex={paletteIndex(activeDisplay.avatar.seed)} disabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked) || isWritesPaused(snapshot)} disabledReason={isWritesPaused(snapshot) ? UPDATE_PAUSED_DESCRIPTION : undefined} describedBy={isWritesPaused(snapshot) ? "update-paused-description" : undefined} pending={Boolean(pendingToneSeeds[activeDisplay.avatar.seed])} error={toneErrors[activeDisplay.avatar.seed]} onSelect={(index) => { void saveTone(activeDisplay.avatar.seed, index); }} renderTrigger={(props) => <button {...props} id="thread-contact-avatar" aria-label="Change conversation color"><ContactAvatar {...activeDisplay.avatar} toneOverrides={toneOverrides} size={36} /></button>} />
             )}
             <div className="header-copy">
               <div className="header-copy-details">
@@ -6638,7 +6720,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               >
                 <UserPlus size={16} aria-hidden />
               </button>}
-              {active?.folder === "spam" && <button id="header-not-spam" aria-label="Not spam" title={snapshot?.encryption.state !== "unlocked" || appLock?.locked ? "Unavailable while locked" : active.folderReason === "blocked" ? "Not spam (unblocks this number on your phone)" : "Not spam"} aria-haspopup={active.folderReason === "blocked" ? "dialog" : undefined} aria-expanded={active.folderReason === "blocked" ? senderUnblockConfirmation?.id === active.id : undefined} aria-controls={active.folderReason === "blocked" && senderUnblockConfirmation?.id === active.id ? "sender-unblock-confirmation" : undefined} disabled={snapshot?.encryption.state !== "unlocked" || Boolean(appLock?.locked) || Boolean(pendingSenderUnblockId) || Boolean(pendingFolderId)} onClick={event => requestFolderChange(active.id, "inbox", event.currentTarget)}><ShieldCheck size={16} aria-hidden /></button>}
+              {active?.folder === "spam" && <button id="header-not-spam" aria-label="Not spam" title={isWritesPaused(snapshot) ? UPDATE_PAUSED_DESCRIPTION : snapshot?.encryption.state !== "unlocked" || appLock?.locked ? "Unavailable while locked" : active.folderReason === "blocked" ? "Not spam (unblocks this number on your phone)" : "Not spam"} aria-haspopup={active.folderReason === "blocked" ? "dialog" : undefined} aria-expanded={active.folderReason === "blocked" ? senderUnblockConfirmation?.id === active.id : undefined} aria-controls={active.folderReason === "blocked" && senderUnblockConfirmation?.id === active.id ? "sender-unblock-confirmation" : undefined} aria-describedby={isWritesPaused(snapshot) ? "update-paused-description" : undefined} disabled={isWritesPaused(snapshot) || snapshot?.encryption.state !== "unlocked" || Boolean(appLock?.locked) || Boolean(pendingSenderUnblockId) || Boolean(pendingFolderId)} onClick={event => requestFolderChange(active.id, "inbox", event.currentTarget)}><ShieldCheck size={16} aria-hidden /></button>}
               {!browserHost && conversationLoaded && (
                 <button id="header-popout-conversation"
                   aria-label={popoutMode === "bubble" ? "Open as chat bubble" : "Open in new window"}
@@ -6684,6 +6766,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             canUnblock={senderUnblockConfirmation.canUnblock}
             trigger={senderUnblockConfirmation.trigger}
             pending={pendingSenderUnblockId === senderUnblockConfirmation.id}
+            writesPaused={isWritesPaused(snapshot)}
+            pauseNoticeVisible={updateNoticeVisible}
             onConfirm={() => void requestSenderUnblock(senderUnblockConfirmation.id, senderUnblockConfirmation.name, senderUnblockConfirmation.trigger)}
             onCancel={() => setSenderUnblockConfirmation(undefined)}
           />}
@@ -6691,6 +6775,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           <NotificationMuteNotice
             notice={notificationMuteNotice}
             pending={notificationMutePending}
+            writesPaused={isWritesPaused(snapshot)}
             errorAction={notificationMuteRetryRef.current}
             onUndo={() => {
               if (notificationMuteNotice) runNotificationMute(notificationMuteNotice.filter, notificationMuteNotice.label, false);
@@ -6740,11 +6825,19 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               filters={snapshot?.appFilters ?? []}
               sources={snapshot?.gateways ?? []}
               preferences={snapshot?.notificationPreferences ?? { messageBanners: true, mirroredBanners: true, preview: "full", muteWithHeads: true }}
-              onPreferences={async preferences => { await bridge.set_notification_preferences(preferences); await refresh(); }}
-               onMute={async filter => { await bridge.set_app_muted(filter.sourceDeviceId, filter.packageName, filter.appName, filter.muted); await refresh(); }}
+              onPreferences={async preferences => {
+                try { await bridge.set_notification_preferences(preferences); await refresh(); }
+                catch (error) { if (errorCode(error) === "update-in-progress") reportAction("Notification settings not changed: ")(error); throw error; }
+              }}
+               onMute={async filter => {
+                try { await bridge.set_app_muted(filter.sourceDeviceId, filter.packageName, filter.appName, filter.muted); await refresh(); }
+                catch (error) { if (errorCode(error) === "update-in-progress") reportAction("Notification settings not changed: ")(error); throw error; }
+              }}
               onPermission={() => bridge.request_notification_permission()}
               onOpenSettings={() => bridge.open_notification_settings()}
               headsSupported={snapshot?.head.enabled === true}
+              writesPaused={isWritesPaused(snapshot)}
+              pauseNoticeVisible={updateNoticeVisible}
                onLock={browserHost ? lockSync : undefined}
                appLock={appLock}
                onAppLock={changeAppLock}
@@ -6774,6 +6867,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               filters={snapshot?.appFilters ?? []}
               sources={snapshot?.gateways ?? []}
               locked={notificationsLocked}
+              writesPaused={isWritesPaused(snapshot)}
               dismissAll={{ label: dismissibleNotificationsCount > 100 ? "Dismiss up to 100" : "Dismiss all", disabled: !dismissibleNotificationsCount || dismissingNotifications, onDismissAll: dismissAllNotifications }}
               onDismiss={target => {
                 setNotificationActionNotice("");
@@ -6826,7 +6920,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onAppFilter={setNotificationAppFilter}
             />
           ) : contactsOpen ? (
-            <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} toneOverrides={toneOverrides} toneDisabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pendingToneSeeds={pendingToneSeeds} toneErrors={toneErrors} onSelectTone={(seed, index) => { void saveTone(seed, index); }} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} bookCollapsed={contactsBookCollapsed} onBookCollapsedChange={setContactsBookCollapsedPersisted} query={contactQuery} onClearQuery={() => setContactQuery("")} />
+            <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} writesPaused={isWritesPaused(snapshot)} pauseNoticeVisible={updateNoticeVisible} onUpdateInProgress={() => { void refresh().catch(reportRefresh("")); }} toneOverrides={toneOverrides} toneDisabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked) || isWritesPaused(snapshot)} pendingToneSeeds={pendingToneSeeds} toneErrors={toneErrors} onSelectTone={(seed, index) => { void saveTone(seed, index); }} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} bookCollapsed={contactsBookCollapsed} onBookCollapsedChange={setContactsBookCollapsedPersisted} query={contactQuery} onClearQuery={() => setContactQuery("")} />
           ) : (
             <>
               {reenrolRequired && !revoked ? (
@@ -6880,7 +6974,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                           : { "--composer-overlay-height": `${overlayHeight}px` } as CSSProperties
                     }
                   >
-                    <SendAgainHost conversation={active} gateways={gateways} routeLabel={sendAgainRouteLabel(gateways, accountReadOnly)} serverOffline={serverOffline} onGoToLatest={goToLatest}>{messages}</SendAgainHost>
+                    <SendAgainHost conversation={active} gateways={gateways} routeLabel={sendAgainRouteLabel(gateways, accountReadOnly)} serverOffline={serverOffline} writesPaused={isWritesPaused(snapshot)} onUpdateInProgress={reportAction("Message not sent: ")} onGoToLatest={goToLatest}>{messages}</SendAgainHost>
                     {recipientRail}
                     {slotKey && composer}
                   </div>

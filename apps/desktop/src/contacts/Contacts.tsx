@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { Check, Clock, ListFilter, ResizeHandle, RotateCw, UserPlus, X, contactSeed, seedKey } from "@peppy/desktop-ui";
+import { Check, Clock, ListFilter, ResizeHandle, RotateCw, UPDATE_CONTACTS_NOTE, UPDATE_ERROR, UPDATE_PAUSED_DESCRIPTION, UserPlus, X, contactSeed, seedKey } from "@peppy/desktop-ui";
 import { bridge, type ContactBookView, type ContactScanStatus, type ContactSort, type ContactSyncStatus, type ContactView, type RestorableContact } from "../bridge/bridge";
+import { errorCode, errorText } from "../bridge/bridgeErrors";
 import { ContactForm, type ContactEditDraft } from "./ContactForm";
 import { findContactTarget } from "./contact-target";
 import { ContactList } from "./ContactList";
@@ -21,6 +22,7 @@ import { persistLayoutPatch, readContactsBookCollapsed, readContactsBookWidth, r
 import { IsolatedText } from "../notices/IsolatedText";
 import { ContactDetail } from "./ContactDetail";
 import { RestorePanel } from "./RestorePanel";
+import { defaultLookupFailure, type LookupFailure } from "./useBookLookup";
 import "./contacts.css";
 
 /** Core returns at most this many contacts per page (search runs before paging). */
@@ -58,7 +60,7 @@ function isCreateEditing(editing: ContactView | null | CreateContactEditing): ed
   return editing === "create" || (editing !== null && "createPrefill" in editing);
 }
 
-export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard, target, onTargetConsumed, toneOverrides = {}, toneDisabled = false, pendingToneSeeds = {}, toneErrors = {}, onSelectTone, bookCollapsed: bookCollapsedProp, onBookCollapsedChange, query = "", onClearQuery }: {
+export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard, target, onTargetConsumed, toneOverrides = {}, toneDisabled = false, writesPaused = false, pauseNoticeVisible = writesPaused, onUpdateInProgress, pendingToneSeeds = {}, toneErrors = {}, onSelectTone, bookCollapsed: bookCollapsedProp, onBookCollapsedChange, query = "", onClearQuery }: {
   books?: ContactBookView[];
   sync?: ContactSyncStatus;
   onNavigationGuard?(guard: ContactNavigationGuard | null): void;
@@ -69,6 +71,9 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   onClearQuery?(): void;
   toneOverrides?: Record<string, number>;
   toneDisabled?: boolean;
+  writesPaused?: boolean;
+  pauseNoticeVisible?: boolean;
+  onUpdateInProgress?(error: unknown): void;
   pendingToneSeeds?: Record<string, true>;
   toneErrors?: Record<string, string>;
   onSelectTone?(seed: string, index: number | null): void;
@@ -76,6 +81,18 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   bookCollapsed?: boolean;
   onBookCollapsedChange?(collapsed: boolean): void;
 }) {
+  // An update-in-progress rejection tells App to refresh the snapshot and shows the warning copy.
+  const contactFailure = (error: unknown) => {
+    if (errorCode(error) === "update-in-progress") {
+      onUpdateInProgress?.(error);
+      return errorText(error);
+    }
+    return contactErrorText(error);
+  };
+  // The lookup switch keeps its own toast: only an update-in-progress rejection changes its text, and a retry would fail the same way.
+  const lookupFailure: LookupFailure = error => errorCode(error) === "update-in-progress"
+    ? { message: contactFailure(error), retryable: false }
+    : defaultLookupFailure(error);
   const contactsRepairState = sync?.projection?.state === "rebuilding" ? "rebuilding"
     : sync?.projection?.state === "failed" ? (sync.repairRequired ? "repairWaiting" : "failed")
     : sync?.repairRequired ? "needsRepair" : undefined;
@@ -466,7 +483,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
         pending.action();
       }
     } catch (e) {
-      const message = contactErrorText(e);
+      const message = contactFailure(e);
       setError(message);
       setValidationError(message);
     } finally {
@@ -513,7 +530,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       setNotice(outcome.state === "pending" ? <span>Delete sent to <IsolatedText text={book.deviceName} />. Waiting for the phone.</span> : "");
       pages.refresh();
     } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
+      setError(contactFailure(e));
     } finally {
       deleteInFlight.current = false;
       setBusy(false);
@@ -791,6 +808,9 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   // Books have loaded and there are none: no rail, no book-scoped actions, and no "select a book" wording.
   const noBooks = booksLoaded && books.length === 0;
   const noBooksTitle = "Connect a phone to see its contacts.";
+  // Title precedence: no books > paused > the rest. With no books nothing can be acted on, so the no-books reason wins.
+  const pausedTitle = writesPaused && !noBooks ? UPDATE_PAUSED_DESCRIPTION : undefined;
+  const pausedDescribedBy = pausedTitle ? "update-paused-description" : undefined;
   const syncDisabledReason = !book
     ? (booksLoaded && !noBooks ? "Select a contact book to request a scan." : undefined)
     : book.sourceRevoked ? "Can't sync a removed phone"
@@ -815,7 +835,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
         }
       })
       .catch(error => {
-        if (mountedRef.current && action === syncActionRef.current && currentBookRef.current === requestedBook) setError(contactErrorText(error));
+        if (mountedRef.current && action === syncActionRef.current && currentBookRef.current === requestedBook) setError(contactFailure(error));
       })
       .finally(() => {
         if (mountedRef.current && action === syncActionRef.current && currentBookRef.current === requestedBook) setSyncing(false);
@@ -941,7 +961,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     </p>
   );
   const visibleError = error || loadError;
-  const errorBanner = !editing && visibleError && <p id="contacts-error" role="alert" data-banner-state="error">{visibleError}<button aria-label="Dismiss" onClick={() => { setError(""); setLoadError(""); }}><X size={12} /></button></p>;
+  const errorBanner = !editing && visibleError && <p id="contacts-error" role={visibleError === UPDATE_ERROR ? "status" : "alert"} data-banner-state={visibleError === UPDATE_ERROR ? "warning" : "error"}>{visibleError}<button aria-label="Dismiss" onClick={() => { setError(""); setLoadError(""); }}><X size={12} /></button></p>;
   const targetStatus = targetError && <p id="contacts-target-error" role="status" data-target-state="error">{targetError}</p>;
   const targetLoadingStatus = targetLoading && (
     <p id="contacts-target-status" role="status" data-target-state="loading">
@@ -978,8 +998,8 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
         <button ref={sortButtonRef} type="button" aria-label={viewLabel} title={noBooks ? noBooksTitle : "View options"} disabled={noBooks} aria-haspopup="menu" aria-expanded={sortOpen} aria-controls="contacts-sort-menu" onClick={() => setSortOpen(open => !open)} onKeyDown={event => { if (event.key === "ArrowDown") { event.preventDefault(); setSortOpen(true); } }}><ListFilter size={16} aria-hidden /></button>
       </div>
       <button ref={restoreTriggerRef} type="button" aria-label="Recently deleted contacts" title={noBooks ? noBooksTitle : !book ? selectBookTitle : detailOverlay || editing ? closeDetailTitle : "Recently deleted"} disabled={!book || detailOverlay || Boolean(editing)} onClick={openRecentlyDeleted}><Clock size={16} aria-hidden /></button>
-      <button id="contacts-sync-now" type="button" aria-label={syncing ? "Requesting…" : "Sync now"} title={noBooks ? noBooksTitle : syncDisabledReason ?? "Sync now"} aria-busy={syncing} aria-describedby={activeStatus?.kind === "unavailable" ? "contacts-sync-unavailable" : undefined} disabled={!book || Boolean(syncDisabledReason) || syncing} onClick={requestSync}><RotateCw className={syncing ? "contacts-sync-icon" : undefined} size={16} aria-hidden /></button>
-      <button ref={newContactTriggerRef} type="button" data-action="create-contact" aria-label="New contact" title={noBooks ? noBooksTitle : book ? "New contact" : selectBookTitle} disabled={!book} onClick={() => handleEditStart()}><UserPlus size={16} strokeWidth={1.75} aria-hidden /></button>
+      <button id="contacts-sync-now" type="button" aria-label={syncing ? "Requesting…" : "Sync now"} title={noBooks ? noBooksTitle : pausedTitle ?? syncDisabledReason ?? "Sync now"} aria-busy={syncing} aria-describedby={pausedDescribedBy ?? (activeStatus?.kind === "unavailable" ? "contacts-sync-unavailable" : undefined)} disabled={!book || writesPaused || Boolean(syncDisabledReason) || syncing} onClick={requestSync}><RotateCw className={syncing ? "contacts-sync-icon" : undefined} size={16} aria-hidden /></button>
+      <button ref={newContactTriggerRef} type="button" data-action="create-contact" aria-label="New contact" title={noBooks ? noBooksTitle : pausedTitle ?? (book ? "New contact" : selectBookTitle)} aria-describedby={pausedDescribedBy} disabled={!book || writesPaused} onClick={() => handleEditStart()}><UserPlus size={16} strokeWidth={1.75} aria-hidden /></button>
     </div>
   );
 
@@ -1005,6 +1025,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
           onBooksChanged={loadBooks}
           onRemoveRequest={requestRemoveBook}
           onNotice={setActionNotice}
+          lookupFailure={lookupFailure}
         />
       )}
       {!compactBookList && !noBooks && (
@@ -1032,16 +1053,18 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
           {headerActions}
         </ContactListHeader>
         {!railVisible && book && (books.length >= 2 || book.lookupExcluded) && (
-          <BookLookupStrip book={book} books={books} onBooksChanged={loadBooks} onNotice={setActionNotice} />
+          <BookLookupStrip book={book} books={books} onBooksChanged={loadBooks} onNotice={setActionNotice} lookupFailure={lookupFailure} />
         )}
         {!detailOverlay && !restore && noticeBanner}
         {!detailOverlay && targetStatus}
         {!detailOverlay && targetLoadingStatus}
+        {pauseNoticeVisible && <p id="contacts-update-paused" role="status">{UPDATE_CONTACTS_NOTE}</p>}
         <ContactsStatus strips={statusStrips} />
 
         {restore ? (
           <RestorePanel
             list={restore.items}
+            writesPaused={writesPaused}
             canRestore={Boolean(books.find(candidate => candidate.id === restore.bookId)?.capabilities.canRestore)}
             notice={noticeBanner}
             error={errorBanner}
@@ -1061,7 +1084,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
                   pages.refresh();
                 }
               } catch (e) {
-                setError(contactErrorText(e));
+                setError(contactFailure(e));
               }
             }}
           />
@@ -1118,6 +1141,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
                 busy={busy}
                 bookCapabilities={books.find(candidate => candidate.id === editorBookId)?.capabilities}
                 saveDisabled={!books.some(candidate => candidate.id === editorBookId)}
+                writesPaused={writesPaused}
                 toneControl={isCreateEditing(editing) ? undefined : (() => {
                   return { value: editorToneSeed ? toneOverrides[editorToneSeed] : undefined, pending: Boolean(editorToneSeed && pendingToneSeeds[editorToneSeed]), error: editorToneSeed ? toneErrors[editorToneSeed] : undefined, disabled: toneDisabled, onSelect: (index: number | null) => { if (editorToneSeed) onSelectTone?.(editorToneSeed, index); } };
                 })()}
@@ -1132,6 +1156,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
                   nameFormat={nameFormat}
                   book={books.find(candidate => candidate.id === selected.bookId)}
                   photoLocked={toneDisabled || sync?.readiness?.state === "needs_unlock"}
+                  writesPaused={writesPaused}
                   onPhotoSubmitted={() => pages.refresh()}
                   busy={busy}
                   confirm={confirmDelete}

@@ -14,6 +14,7 @@ export type GroupComposerStatusInput = {
   displayName(address: string): string;
   canResend: boolean;
   checking: boolean;
+  writesPaused?: boolean;
   onResend(): void;
   onReview(): void;
   onCreateAgain(): void;
@@ -56,7 +57,8 @@ export function groupComposerStatusItems(input: GroupComposerStatusInput): Inlin
           id: "group-send-updated",
           label: input.checking ? peppyCopy.composer_status_group_checking : peppyCopy.composer_status_group_resend,
           ariaLabel: peppyCopy.composer_status_group_resend_label,
-          disabled: input.checking,
+          disabled: input.checking || input.writesPaused,
+          describedBy: input.writesPaused ? "update-paused-description" : undefined,
           onAction: input.onResend,
         }] : []),
         {
@@ -81,6 +83,8 @@ export function groupComposerStatusItems(input: GroupComposerStatusInput): Inlin
       actions: [{
         id: "group-create-again",
         label: peppyCopy.composer_status_create_again,
+        disabled: input.writesPaused,
+        describedBy: input.writesPaused ? "update-paused-description" : undefined,
         onAction: input.onCreateAgain,
         confirm: {
           title: peppyCopy.composer_status_create_again_title,

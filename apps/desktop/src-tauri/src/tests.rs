@@ -119,6 +119,16 @@ pub(crate) fn fixture_at(origin: &str) -> Fixture {
 }
 
 pub(crate) fn open(f: &Fixture, binding: &Binding, epochs: &[u32]) -> Session {
+    let session = open_deferred(f, binding, epochs);
+    session
+        .client
+        .set_decoder_recovery_mode(peppy_client_core::DecoderRecoveryMode::Inline)
+        .unwrap();
+    while session.client.recover_decoder_page(256).unwrap().is_some() {}
+    session
+}
+
+pub(crate) fn open_deferred(f: &Fixture, binding: &Binding, epochs: &[u32]) -> Session {
     open_session(f.dir.path(), &f.store, binding, epochs, noop()).unwrap()
 }
 
@@ -597,6 +607,10 @@ pub(crate) fn unlock(session: &Session, fixture: &Fixture) {
         .client
         .unlock(&fixture.profile, &fixture.header, PHRASE)
         .unwrap();
+}
+
+pub(crate) fn finish_decoder_recovery(session: &Session) {
+    while session.client.recover_decoder_page(256).unwrap().is_some() {}
 }
 
 fn completed_mms(

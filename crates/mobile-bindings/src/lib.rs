@@ -1010,6 +1010,8 @@ impl From<CoreError> for MobileBindingsError {
             CoreError::MmsMediaQuota => Self::MmsMediaQuota,
             CoreError::SmsCapacity => Self::SmsCapacity,
             CoreError::GroupMembersChanged => Self::GroupMembersChanged,
+            // Native hosts never select the deferred recovery mode, so this is not reached there.
+            CoreError::RecoveryPending => Self::Conflict,
         }
     }
 }

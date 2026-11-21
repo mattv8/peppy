@@ -10,7 +10,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
-import { conversationAvatar, formatDateTime, isoDateTime, paletteIndex } from "@peppy/desktop-ui";
+import { UPDATE_SEND_FAILURE, conversationAvatar, formatDateTime, isoDateTime, paletteIndex } from "@peppy/desktop-ui";
 import { App, DraftStore, nextComposerDraftIdentity, searchRecipientSuggestions, visiblePendingSends, type PendingSend } from "./App";
 import { peppyCopy } from "./generated/peppyCopy";
 import { UPDATE_STATUS_SERDE_FIXTURE } from "./updates/update-contract";
@@ -1114,7 +1114,7 @@ function createHost() {
           recipientlessDraft: d.recipientIds.length === 0,
         }));
       return {
-        version: "1",
+        writesPaused: false, version: "1",
         mode: "native",
         connection: host.connection,
         encryption: host.encryption,
@@ -2642,6 +2642,63 @@ describe("lazy conversation history", () => {
 });
 
 describe("conversation pinning", () => {
+  it("does not pause controls when the snapshot omits writesPaused", async () => {
+    vi.mocked(bridge.load_state).mockImplementation(async id => {
+      const { writesPaused: _writesPaused, ...state } = host.load(id);
+      return state;
+    });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    expect(document.querySelector("[data-pin-conversation-id='aurora']")).toBeEnabled();
+    expect(document.querySelector("[data-send-block='update']")).not.toBeInTheDocument();
+  });
+
+  it("refreshes and warns if pinning races an update", async () => {
+    vi.spyOn(bridge, "set_conversation_pinned").mockRejectedValueOnce({ code: "update-in-progress" });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    const before = vi.mocked(bridge.load_state).mock.calls.length;
+    fireEvent.click(document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='aurora']")!);
+    expect(await screen.findByText(/Peppy is updating your messages. Try again/)).toBeInTheDocument();
+    await waitFor(() => expect(vi.mocked(bridge.load_state).mock.calls.length).toBeGreaterThan(before));
+    expect(document.querySelector("[data-app-notice-severity='warning']")).toBeInTheDocument();
+  });
+
+  it("disables sending and pinning while keeping the draft editable during updates", async () => {
+    vi.mocked(bridge.load_state).mockImplementation(async id => ({ ...host.load(id), writesPaused: true }));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(message()).not.toHaveAttribute("readonly");
+    await waitFor(() => expect(document.querySelector("[data-send-block='update']")).toBeInTheDocument());
+    expect(document.querySelector("[data-pin-conversation-id='aurora']")).toBeDisabled();
+  });
+
+  it.each([
+    { view: "Settings", region: "Settings" },
+    { view: "Contacts", region: "Contacts browser" },
+  ])("keeps the update-pause description in the DOM on $view while paused", async ({ view, region }) => {
+    vi.mocked(bridge.load_state).mockImplementation(async id => ({ ...host.load(id), writesPaused: true }));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: view }));
+    await screen.findByRole("region", { name: region });
+    expect(document.getElementById("update-paused-description")).toHaveTextContent("Paused while Peppy updates your messages.");
+  });
+
+  it("moves focus to the row when an update disables its pin action", async () => {
+    let paused = false;
+    vi.mocked(bridge.load_state).mockImplementation(async id => ({ ...host.load(id), writesPaused: paused }));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    const pin = document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='aurora']")!;
+    pin.focus();
+    paused = true;
+    act(() => broadcastHint());
+    await waitFor(() => expect(pin).toBeDisabled());
+    expect(document.querySelector("[data-conversation-id='aurora']")).toHaveFocus();
+  });
+
   it("renders remotely pinned conversations first without changing the recency-selected conversation", async () => {
     host.conversations[1] = { ...host.conversations[1], pinned: true } as ConversationView;
 
@@ -3501,6 +3558,20 @@ describe("conversation selection", () => {
 });
 
 describe("draft durability", () => {
+  it("restores the draft when an update races a send", async () => {
+    vi.mocked(bridge.send_draft).mockRejectedValueOnce({ code: "update-in-progress" });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("Keep this message");
+    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("Keep this message"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(bridge.send_draft).toHaveBeenCalled());
+    await waitFor(() => expect(message()).toHaveValue("Keep this message"));
+    expect(await screen.findByText(UPDATE_SEND_FAILURE)).toBeInTheDocument();
+  });
+
   it("clears to a fresh message buffer before an accepted send finishes", async () => {
     const response = delayAcceptedSend();
     render(<App />);

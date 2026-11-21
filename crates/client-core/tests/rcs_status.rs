@@ -883,6 +883,186 @@ fn import_snapshot(client: &Client, high_water: u64, generation: u64, records: &
     client.finish_snapshot(session.generation).unwrap();
 }
 
+fn metadata_backfill_fixture(prefix: u64) -> (tempfile::TempDir, Client, ConversationId, u64) {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let restored = unlocked(&config(&directory, "metadata-backfill", &vault), &vault);
+    let producer = DeviceId::new();
+    let conversation = ConversationId::new();
+    let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
+    let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    let seal = |sequence: u64, payload: PrivatePayload| {
+        let compaction = CompactionMetadata {
+            key: vec![7; 32],
+            terminal: false,
+            supersedes: vec![],
+            checkpoint: false,
+        };
+        let mut envelope = Envelope {
+            protocol_version: 1,
+            envelope_id: EnvelopeId::new(),
+            command_id: None,
+            vault_id: vault.id,
+            producer_device_id: producer,
+            producer_sequence: SourceSequence(sequence),
+            key_epoch: 1,
+            crypto_suite: vault.profile.crypto_suite,
+            profile_fingerprint: vault.profile.fingerprint().unwrap(),
+            purpose: EnvelopePurpose::Event,
+            route: None,
+            compaction: Some(compaction.clone()),
+            origin_tag: None,
+            ciphertext: Vec::new(),
+        };
+        let mut plain = serde_json::to_value(payload).unwrap();
+        plain["compaction"] = serde_json::to_value(compaction).unwrap();
+        let encrypted = encrypt(
+            &key,
+            &envelope.aad_bytes().unwrap(),
+            &serde_json::to_vec(&plain).unwrap(),
+        )
+        .unwrap();
+        envelope.ciphertext = [encrypted.nonce.as_slice(), &encrypted.ciphertext].concat();
+        envelope
+    };
+    let metadata = |revision, encrypted| {
+        PrivatePayload::RcsConversationMetadata(RcsConversationMetadata {
+            conversation_id: conversation,
+            transport: RcsConversationTransport::Rcs,
+            rcs_encryption: Some(encrypted),
+            rcs_history_gap: false,
+            logical_revision: revision,
+            writer_device_id: producer.to_string(),
+        })
+    };
+    let mut records = Vec::new();
+    for cursor in 1..=prefix {
+        records.push(SnapshotRecord {
+            cursor: Cursor(cursor),
+            envelope: seal(
+                cursor,
+                PrivatePayload::RcsMessageStatus {
+                    message_id: MessageId::new(),
+                    status: RcsMessageStatus::Read,
+                    rcs_reported: true,
+                },
+            ),
+        });
+    }
+    let old_cursor = prefix + 1;
+    records.push(SnapshotRecord {
+        cursor: Cursor(old_cursor),
+        envelope: seal(old_cursor, metadata(1, false)),
+    });
+    let mut invalid = seal(prefix + 2, metadata(1, false));
+    invalid.ciphertext[0] ^= 1;
+    records.push(SnapshotRecord {
+        cursor: Cursor(prefix + 2),
+        envelope: invalid,
+    });
+    import_snapshot(&restored, prefix + 2, 201, &records);
+    for _ in 0..(2 * (prefix + 2) + 5) {
+        restored.apply_pending(1).unwrap();
+        if restored
+            .snapshot_projection_status()
+            .unwrap()
+            .is_some_and(|status| status.state == SnapshotProjectionState::Failed)
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        restored
+            .snapshot_projection_status()
+            .unwrap()
+            .unwrap()
+            .state,
+        SnapshotProjectionState::Failed
+    );
+    let high_water = prefix + 3;
+    import_snapshot(
+        &restored,
+        high_water,
+        202,
+        &[SnapshotRecord {
+            cursor: Cursor(high_water),
+            envelope: seal(high_water, metadata(2, true)),
+        }],
+    );
+    (directory, restored, conversation, high_water)
+}
+
+#[test]
+fn apply_pending_supersedes_omitted_metadata_and_advances_frontier() {
+    let (_directory, client, conversation, high_water) = metadata_backfill_fixture(0);
+    let mut superseded = 0;
+    for _ in 0..8 {
+        superseded += client.apply_pending(1).unwrap().superseded;
+    }
+    assert_eq!(superseded, 1);
+    let progress = client.replay_progress().unwrap();
+    assert_eq!(progress.received_through, Cursor(high_water));
+    assert_eq!(progress.processed_through, progress.received_through);
+    let live = client
+        .rcs_conversation_metadata(conversation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.logical_revision, 2);
+    assert_eq!(live.rcs_encryption, Some(true));
+    for _ in 0..3 {
+        let report = client.apply_pending(1).unwrap();
+        assert_eq!(
+            (
+                report.applied,
+                report.quarantined,
+                report.drained,
+                report.superseded
+            ),
+            (0, 0, 0, 0)
+        );
+    }
+}
+
+#[test]
+fn apply_pending_crosses_fenced_status_prefix_in_bounded_calls() {
+    let (_directory, client, conversation, high_water) = metadata_backfill_fixture(13);
+    let mut superseded = 0;
+    let mut calls = 0;
+    while superseded == 0 && calls < 8 {
+        superseded += client.apply_pending(1).unwrap().superseded;
+        calls += 1;
+    }
+    assert_eq!(superseded, 1);
+    assert!(calls > 1 && calls <= 8);
+    assert_eq!(
+        client.replay_progress().unwrap().received_through,
+        Cursor(high_water)
+    );
+    assert!(client.replay_progress().unwrap().processed_through.0 < high_water);
+    assert_eq!(
+        client.history_block().unwrap(),
+        Some(HistoryBlock::Withheld)
+    );
+    let live = client
+        .rcs_conversation_metadata(conversation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.logical_revision, 2);
+    assert_eq!(live.rcs_encryption, Some(true));
+    for _ in 0..3 {
+        let report = client.apply_pending(1).unwrap();
+        assert_eq!(
+            (
+                report.applied,
+                report.quarantined,
+                report.drained,
+                report.superseded
+            ),
+            (0, 0, 0, 0)
+        );
+    }
+}
+
 fn metadata_marker(config: &ClientConfig, key: &str) -> Option<String> {
     database(config)
         .query_row("SELECT v FROM metadata WHERE k=?", [key], |row| row.get(0))
@@ -1263,6 +1443,10 @@ fn newer_snapshot_omitting_old_isolated_cursor_does_not_release_or_starve_ordina
     );
     drop(restored);
     let restored = common::unlocked(&restored_config, &vault);
+    // The key install resets the supersede scan, so its unfinished work is visible until one pass
+    // completes it; the held row stays fenced either way.
+    assert!(restored.sync_work_status().unwrap().pending_apply);
+    restored.apply_pending(1).unwrap();
     assert!(!restored.sync_work_status().unwrap().pending_apply);
     let (_, held_status, held_reason, held_origin) = journal_lifecycle(&restored_config, Cursor(1));
     assert_eq!(

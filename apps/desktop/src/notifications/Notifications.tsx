@@ -41,7 +41,7 @@ export function dismissibleNotifications(notifications: MirroredNotification[], 
 }
 
 export function NotificationsView({
-  notifications, filters, sources, locked, onDismiss, onMute, onSeen, onCopyOneTimeCode, onSettings, onManageApps,
+  notifications, filters, sources, locked, writesPaused = false, onDismiss, onMute, onSeen, onCopyOneTimeCode, onSettings, onManageApps,
   onDismissMany, query, onClearQuery, appFilter, onAppFilter, focusRequest, onFocusResult, displayTitle, dismissAll,
 }: {
   notifications: MirroredNotification[];
@@ -50,6 +50,7 @@ export function NotificationsView({
   locked: boolean;
   onDismiss(target: NotificationTarget): void;
   onMute(filter: AppFilter): void;
+  writesPaused?: boolean;
   onSeen(targets: NotificationTarget[]): Promise<void>;
   onCopyOneTimeCode(target: OneTimeCodeTarget, code: string): Promise<void>;
   onSettings(): void;
@@ -222,7 +223,7 @@ export function NotificationsView({
 
   const filtersByApp = new Map(filters.map(filter => [notificationMuteKey(filter.sourceDeviceId, filter.packageName), filter]));
   const chips = notificationFilterChips(queryMatches, labels.appName);
-  const feedProps = { labels, filtersByApp, newKeys: newKeys.current, showPhone, query, onDismiss, onMute, onCopy: onCopyOneTimeCode, onAction: rememberNeighbor };
+  const feedProps = { labels, filtersByApp, newKeys: newKeys.current, showPhone, query, writesPaused, onDismiss, onMute, onCopy: onCopyOneTimeCode, onAction: rememberNeighbor };
   return <section id="notifications-view" role="region" aria-label="Notifications">
     <h1 className="visually-hidden">Notifications</h1>
     <NotificationFilterBar chips={chips} appFilter={appFilter} onAppFilter={onAppFilter} arrangement={arrangement} onArrangement={setArrangement} dismissAll={dismissAll} />

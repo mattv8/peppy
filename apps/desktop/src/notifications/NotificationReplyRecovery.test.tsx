@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, expect, it, vi } from "vitest";
 import { peppyCopy } from "../generated/peppyCopy";
 import { NotificationReplyRecovery } from "./NotificationReplyRecovery";
+import { UPDATE_REPLY_REASON } from "@peppy/desktop-ui";
 
 afterEach(cleanup);
 
@@ -14,6 +15,14 @@ const bridge = () => ({
   release: vi.fn().mockResolvedValue(undefined),
   acknowledge: vi.fn().mockResolvedValue(undefined),
   discard: vi.fn().mockResolvedValue(undefined),
+});
+
+it("explains an unsent reply interrupted by an update", async () => {
+  const native = bridge();
+  native.load.mockResolvedValue({ sessionGeneration: "generation-1", items: [{ ...recovery, reason: "update-in-progress" }] });
+  render(<NotificationReplyRecovery bridge={native} conversationId="conversation-1" sessionKey="session-1" unlocked draftText="" onAppend={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Unsent replies (1)" }));
+  expect(screen.getByText(UPDATE_REPLY_REASON)).toBeInTheDocument();
 });
 
 it("adds a claimed reply once and preserves the existing draft text", async () => {

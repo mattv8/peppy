@@ -37,6 +37,16 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+it("guards an open emoji capture when sending becomes paused", () => {
+  const onCommit = vi.fn();
+  const { rerender } = render(<ReactionCapture route="native" platform="linux" coarse={false} onCommit={onCommit} onBack={vi.fn()} announce={vi.fn()} />);
+  rerender(<ReactionCapture route="native" platform="linux" coarse={false} writesPaused onCommit={onCommit} onBack={vi.fn()} announce={vi.fn()} />);
+  const input = screen.getByRole("textbox", { name: "Emoji reaction" });
+  expect(input).toHaveAttribute("aria-disabled", "true");
+  fireEvent.input(input, { target: { value: "👍" } });
+  expect(onCommit).not.toHaveBeenCalled();
+});
+
 describe("emoji contract (shared fixture)", () => {
   it.each(contract.accept)("accepts %s as one emoji", (emoji) => {
     expect(isSingleEmojiValue(emoji)).toBe(true);

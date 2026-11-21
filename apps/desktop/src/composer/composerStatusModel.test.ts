@@ -8,6 +8,24 @@ const input = () => ({
 });
 
 describe("composerStatusItems", () => {
+  it("keeps a screen-reader blocker without a visible pause item during the delay", () => {
+    const [item] = composerStatusItems({ ...input(), writesPaused: true, showUpdateNotice: false });
+    expect(item).toMatchObject({ key: "update-paused", id: "unavailable-hint", srOnly: true });
+  });
+  it("prioritizes the update pause as the send blocker", () => {
+    const items = composerStatusItems({
+      ...input(),
+      writesPaused: true,
+      pendingRecipientReason: "finish adding the recipient",
+    });
+    expect(items[0]).toMatchObject({
+      key: "update-paused",
+      id: "unavailable-hint",
+      hooks: { "data-send-block": "update" },
+    });
+    expect(composerStatusItems(input()).some((item) => item.key === "update-paused")).toBe(false);
+  });
+
   it("orders refusals before send blockers and gives the first blocker the unavailable hint id", () => {
     const items = composerStatusItems({
       ...input(),

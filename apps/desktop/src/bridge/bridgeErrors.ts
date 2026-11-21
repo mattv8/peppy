@@ -1,8 +1,11 @@
+import { UPDATE_ERROR } from "@peppy/desktop-ui";
 export const FALLBACK_ERROR =
   "The native operation failed. Your edits remain in this window.";
 
 export const errorText = (error: unknown): string =>
-  typeof error === "object" &&
+  errorCode(error) === "update-in-progress"
+    ? UPDATE_ERROR
+    : typeof error === "object" &&
   error !== null &&
   "message" in error &&
   typeof error.message === "string" &&

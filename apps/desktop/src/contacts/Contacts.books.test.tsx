@@ -263,6 +263,25 @@ describe("ContactsView book lookup", () => {
     expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
   });
 
+  it("keeps the local lookup switch available while writes are paused", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, otherBook]);
+    render(<ContactsView writesPaused />);
+    const control = await screen.findByRole("switch", { name: "Use Pixel 8 for names and recipient search" });
+    expect(control).toBeEnabled();
+  });
+
+  it("reports an update-in-progress lookup failure as the update warning without a retry", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, otherBook]);
+    vi.mocked(bridge.set_contact_book_lookup).mockRejectedValueOnce({ code: "update-in-progress" });
+    const onUpdateInProgress = vi.fn();
+    render(<ContactsView onUpdateInProgress={onUpdateInProgress} />);
+    fireEvent.click(await screen.findByRole("switch", { name: "Use Pixel 8 for names and recipient search" }));
+    expect(await screen.findByText("Peppy is updating your messages. Try again when it finishes.")).toBeInTheDocument();
+    expect(screen.queryByText("Couldn't save this change. Try again.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    expect(onUpdateInProgress).toHaveBeenCalledTimes(1);
+  });
+
   it("shows the compact selector and lookup strip instead of the rail at 700px", async () => {
     vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
       matches: query === "(max-width: 700px)", media: query,

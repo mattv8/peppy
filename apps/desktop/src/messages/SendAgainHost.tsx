@@ -12,6 +12,8 @@ export type SendAgainHostProps = {
   gateways: GatewayView[];
   routeLabel: SendAgainRouteLabeler;
   serverOffline: boolean;
+  writesPaused?: boolean;
+  onUpdateInProgress?(error: unknown): void;
   /** The conversation's "jump to latest" action, used when a sent-again row is not rendered. */
   onGoToLatest(): void;
   children: ReactNode;
@@ -21,7 +23,7 @@ export type SendAgainHostProps = {
  * Owns the Send again popover and the store behind it. The store is React state and refs in this component
  * (no module state), so it lives exactly as long as the conversation view that renders it.
  */
-export function SendAgainHost({ conversation, gateways, routeLabel, serverOffline, onGoToLatest, children }: SendAgainHostProps) {
+export function SendAgainHost({ conversation, gateways, routeLabel, serverOffline, writesPaused = false, onUpdateInProgress, onGoToLatest, children }: SendAgainHostProps) {
   const [open, setOpen] = useState<OpenState>();
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
   const inFlight = useRef(new Set<string>());
@@ -55,6 +57,8 @@ export function SendAgainHost({ conversation, gateways, routeLabel, serverOfflin
   }, []);
 
   const store = useMemo<SendAgainStore>(() => ({
+    writesPaused,
+    onUpdateInProgress,
     open: (message, trigger) => {
       // A call in flight holds the host: no other popover opens, and the pending popover is not toggled shut.
       if (inFlight.current.size > 0) return;
@@ -99,7 +103,7 @@ export function SendAgainHost({ conversation, gateways, routeLabel, serverOfflin
       doneFocus.current = undefined;
       return true;
     },
-  }), [pending, errors, sentAgain, onGoToLatest]);
+  }), [pending, errors, sentAgain, onGoToLatest, writesPaused, onUpdateInProgress]);
 
   return <SendAgainStoreContext.Provider value={store}>
     {children}

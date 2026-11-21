@@ -1,10 +1,11 @@
 import { useEffect, useRef, type ReactNode } from "react";
-import { ContactAvatar, contactSeed } from "@peppy/desktop-ui";
+import { ContactAvatar, UPDATE_PAUSED_DESCRIPTION, contactSeed } from "@peppy/desktop-ui";
 import type { RestorableContact } from "../bridge/bridge";
 
 export function RestorePanel({
   list,
   canRestore,
+  writesPaused = false,
   notice,
   error,
   onClose,
@@ -13,6 +14,7 @@ export function RestorePanel({
   list: RestorableContact[];
   onClose(): void;
   canRestore: boolean;
+  writesPaused?: boolean;
   notice: ReactNode;
   error: ReactNode;
   onRestore(item: RestorableContact): void;
@@ -57,6 +59,9 @@ export function RestorePanel({
                 <button
                   data-action="restore-contact"
                   aria-label={`Restore ${item.displayName}`}
+                  disabled={writesPaused}
+                  title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined}
+                  aria-describedby={writesPaused ? "update-paused-description" : undefined}
                   onClick={() => onRestore(item)}
                 >
                   Restore
