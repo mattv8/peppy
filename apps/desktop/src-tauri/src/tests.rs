@@ -2083,6 +2083,135 @@ mod real_server {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires TEST_DATABASE_URL and S3; see notes"]
+    async fn real_server_contact_book_paging_search_and_delete_for_all_devices() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let server = start().await;
+        let (phone_id, phone_token) = server.add_test_device("gateway").await;
+        let (laptop_id, laptop_token) = server.add_test_device("device").await;
+        let (receiver_id, receiver_token) = server.add_test_device("device").await;
+        let make_peer = |id, token| {
+            let dir = tempfile::tempdir().unwrap();
+            let client = Client::open(
+                ClientConfig {
+                    database_path: dir.path().join("client.db"),
+                    vault_id: server.vault,
+                    device_id: id,
+                },
+                DatabaseKey::new(&[5; 32]).unwrap(),
+            )
+            .unwrap();
+            client.unlock(&server.profile, &server.header, PHRASE).unwrap();
+            Gateway { client, token, url: server.url.clone(), _dir: dir }
+        };
+        let phone = make_peer(phone_id, phone_token);
+        let receiver = make_peer(receiver_id, receiver_token);
+        for peer in [&phone, &receiver] {
+            let snapshot: Value = reqwest::Client::new()
+                .get(format!("{}/v1/snapshot", server.url))
+                .bearer_auth(&peer.token).send().await.unwrap().error_for_status().unwrap()
+                .json().await.unwrap();
+            peer.client.set_server_compaction_state(
+                snapshot["compaction_supported"].as_bool().unwrap(),
+                snapshot["compaction_active"].as_bool().unwrap(),
+            ).unwrap();
+        }
+        let book_id = "real-server-contact-book";
+        let contacts: Vec<Value> = (0..450)
+            .map(|n| json!({
+                "id": format!("contact-{n:03}"), "book_id": book_id, "revision": "1",
+                "display_name": format!("Person {n:03}"),
+                "name": {"given": format!("Person {n:03}"), "family": "Example"},
+                "phones": [{"id": "phone", "value": format!("+1555000{n:04}")}],
+                "emails": if n == 1 { json!([{"id":"email","value":"person@example.test"}]) } else { json!([]) },
+                "organization": if n == 2 { "Example Organization" } else { "" },
+                "addresses": [], "provenance": {"source_id": format!("source-{n:03}"), "read_only": false}
+            }))
+            .collect();
+        phone.client.capture_contact_book(&json!({
+            "schema_version": 1,
+            "book": {"id": book_id, "owner_device_id": phone_id.to_string(), "generation": "1", "state": "active", "region": "US"},
+            "contacts": contacts
+        }).to_string()).unwrap();
+        while phone.client.seal_pending_batch(1000).unwrap() > 0 {}
+        phone.sync().await;
+
+        for _ in 0..5 {
+            receiver.sync().await;
+        }
+        let (_root, state, laptop) = desktop(&server, laptop_id, &laptop_token).await;
+        until("all contact rows on laptop", 60, || {
+            crate::contacts::list_books(&laptop).ok().is_some_and(|books| {
+                books.iter().any(|book| book["id"] == book_id && book["contactCount"] == 450)
+            })
+        }).await;
+        let receiver_books: Value = serde_json::from_str(&receiver.client.list_contact_books_json().unwrap()).unwrap();
+        assert_eq!(receiver_books["books"][0]["contact_count"], 450);
+
+        let mut ids = Vec::new();
+        let mut request = json!({});
+        for expected in [200, 200, 50] {
+            let page = crate::contacts::list_contacts_page(&laptop, book_id, &request).unwrap();
+            assert_eq!(page["total"], 450);
+            let rows = page["contacts"].as_array().unwrap();
+            assert_eq!(rows.len(), expected);
+            ids.extend(rows.iter().map(|row| row["id"].as_str().unwrap().to_owned()));
+            request = json!({"cursor": page["nextCursor"]});
+        }
+        assert!(request["cursor"].is_null());
+        assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(), 450);
+        let through = crate::contacts::list_contacts_page(&laptop, book_id, &json!({"through": ids[299]})).unwrap();
+        assert_eq!(through["throughFound"], true);
+        assert_eq!(through["contacts"].as_array().unwrap().len(), 300);
+        let search = laptop.client.search_local(peppy_client_core::LocalSearchRequest {
+            query: "Person 123".into(), kind: Some(peppy_client_core::SearchKind::Contact), cursor: None, limit: None,
+        }).unwrap();
+        let search = serde_json::to_value(crate::contacts::search_page_view(&laptop, search).unwrap()).unwrap();
+        let hit = &search["items"][0];
+        assert_eq!(hit["kind"], "contact");
+        assert!(!hit["phones"].as_array().unwrap().is_empty());
+        for field in ["title", "subtitle", "bookLabel"] {
+            assert_ne!(hit[field].as_str(), Some(book_id));
+        }
+
+        reqwest::Client::new().post(format!("{}/v1/devices/{}/revoke", server.url, phone_id.0))
+            .bearer_auth(&server.owner).send().await.unwrap().error_for_status().unwrap();
+        until("revoked phone roster", 60, || laptop.revoked_devices().contains(&phone_id.to_string())).await;
+        until("laptop current", 60, || laptop.sync_current().unwrap_or(false)).await;
+        assert_eq!(
+            laptop.client.delete_contact_book(&json!({"book_id": book_id, "revoked_device_ids": [phone_id.to_string()], "sync_current": false}).to_string()),
+            Err(peppy_client_core::Error::InvalidRequest("contact book deletion needs an up-to-date sync"))
+        );
+        let deleted = crate::contacts::delete_book(&laptop, book_id).unwrap();
+        assert_eq!(deleted["contacts"], 450);
+        until("laptop delete uploaded", 60, || laptop.client.pending_outbox().unwrap().is_empty()).await;
+        assert!(crate::contacts::list_books(&laptop).unwrap().iter().all(|book| book["id"] != book_id));
+        for _ in 0..10 { receiver.sync().await; }
+        let books: Value = serde_json::from_str(&receiver.client.list_contact_books_json().unwrap()).unwrap();
+        assert!(books["books"].as_array().unwrap().iter().all(|book| book["id"] != book_id));
+        assert!(receiver.client.pending_outbox().unwrap().is_empty());
+        let (fresh_id, fresh_token) = server.add_test_device("device").await;
+        let fresh = make_peer(fresh_id, fresh_token);
+        let snapshot: Value = reqwest::Client::new()
+            .get(format!("{}/v1/snapshot", server.url))
+            .bearer_auth(&fresh.token).send().await.unwrap().error_for_status().unwrap()
+            .json().await.unwrap();
+        fresh.client.set_server_compaction_state(
+            snapshot["compaction_supported"].as_bool().unwrap(),
+            snapshot["compaction_active"].as_bool().unwrap(),
+        ).unwrap();
+        for _ in 0..10 { fresh.sync().await; }
+        let books: Value = serde_json::from_str(&fresh.client.list_contact_books_json().unwrap()).unwrap();
+        assert!(books["books"].as_array().unwrap().iter().all(|book| book["id"] != book_id));
+        let search = fresh.client.search_local(peppy_client_core::LocalSearchRequest {
+            query: "Person".into(), kind: Some(peppy_client_core::SearchKind::Contact), cursor: None, limit: None,
+        }).unwrap();
+        assert!(search.items.is_empty());
+        state.close_session().await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "requires TEST_DATABASE_URL (local PostgreSQL); run with --include-ignored, see reports/DU-final.md"]
     async fn real_server_import_unlock_ws_send_status_and_incoming() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
