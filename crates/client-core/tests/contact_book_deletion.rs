@@ -431,7 +431,7 @@ fn two_contacts() -> Vec<Value> {
 }
 
 fn delete_input(revoked: &[String]) -> String {
-    json!({"book_id": BOOK, "revoked_device_ids": revoked}).to_string()
+    json!({"book_id": BOOK, "revoked_device_ids": revoked, "sync_current": true}).to_string()
 }
 
 /// The decrypted payload of a sealed Event envelope.
@@ -570,7 +570,8 @@ fn delete_refusals_each_carry_their_own_reason() {
     assert_eq!(
         refusal(
             &fixture.observer,
-            json!({"book_id": "missing", "revoked_device_ids": [owner]}).to_string()
+            json!({"book_id": "missing", "revoked_device_ids": [owner], "sync_current": true})
+                .to_string()
         ),
         Error::InvalidRequest("contact book is not on this device")
     );
@@ -1864,4 +1865,324 @@ fn a_failed_seal_rolls_back_the_whole_delete() {
     assert_eq!(count(path, "SELECT COUNT(*) FROM deleted_contact_books"), 0);
     assert_eq!(count(path, "SELECT COUNT(*) FROM outbox"), outbox_before);
     assert!(observer.pending_outbox().unwrap().is_empty());
+}
+
+const NOT_CURRENT: &str = "contact book deletion needs an up-to-date sync";
+
+fn delete_json(owner: &str, sync_current: Option<bool>) -> String {
+    let mut input = json!({"book_id": BOOK, "revoked_device_ids": [owner]});
+    if let Some(current) = sync_current {
+        input["sync_current"] = json!(current);
+    }
+    input.to_string()
+}
+
+/// Appends the records of the owner's log to the observer as a snapshot above its live cursor,
+/// without draining it. The snapshot stays published (received, not drained).
+fn publish_full_history(fixture: &Captured, generation: u64, corrupt: Option<usize>) {
+    let above = fixture.server.log.len();
+    let mut records: Vec<SnapshotRecord> = fixture
+        .server
+        .log
+        .iter()
+        .enumerate()
+        .map(|(index, envelope)| SnapshotRecord {
+            cursor: Cursor((above + index + 1) as u64),
+            envelope: envelope.clone(),
+        })
+        .collect();
+    if let Some(position) = corrupt {
+        records[position].envelope.ciphertext[0] ^= 0x55;
+    }
+    let session = fixture
+        .observer
+        .begin_snapshot_with_compaction(
+            Cursor((above + records.len()) as u64),
+            records.len() as u64,
+            SnapshotPurpose::Resync,
+            Some(generation),
+        )
+        .unwrap();
+    fixture
+        .observer
+        .append_snapshot_page(session.generation, &records)
+        .unwrap();
+    fixture
+        .observer
+        .finish_snapshot(session.generation)
+        .unwrap();
+}
+
+#[test]
+fn delete_needs_sync_current_and_a_missing_flag_counts_as_false() {
+    let dir = TempDir::new().unwrap();
+    let fixture = captured(&dir, two_contacts());
+    let owner = fixture.owner_config.device_id.to_string();
+    let path = fixture.observer_config.database_path.clone();
+
+    for input in [delete_json(&owner, None), delete_json(&owner, Some(false))] {
+        assert_eq!(
+            fixture.observer.delete_contact_book(&input).unwrap_err(),
+            Error::InvalidRequest(NOT_CURRENT)
+        );
+    }
+    assert_eq!(
+        count(&path, "SELECT COUNT(*) FROM contacts"),
+        2,
+        "a refused delete changes nothing"
+    );
+
+    fixture
+        .observer
+        .delete_contact_book(&delete_json(&owner, Some(true)))
+        .unwrap();
+    assert!(book_ids(&fixture.observer).is_empty());
+}
+
+#[test]
+fn refusal_order_is_input_then_lock_then_sync_then_book() {
+    let dir = TempDir::new().unwrap();
+    let fixture = captured(&dir, two_contacts());
+    let owner = fixture.owner_config.device_id.to_string();
+    let config = fixture.observer_config.clone();
+
+    // Invalid input wins over an out-of-date sync.
+    assert_eq!(
+        fixture
+            .observer
+            .delete_contact_book(&json!({"book_id": BOOK}).to_string())
+            .unwrap_err(),
+        Error::InvalidRequest("contact book deletion input is invalid")
+    );
+    // A locked vault reports keys before the sync gate speaks.
+    drop(fixture.observer);
+    let locked = open(&config);
+    assert_eq!(
+        locked
+            .delete_contact_book(&delete_json(&owner, Some(false)))
+            .unwrap_err(),
+        Error::KeysUnavailable
+    );
+    drop(locked);
+    // Not current beats the book checks: an owner that was not removed is still a sync refusal.
+    let unlocked_again = unlocked(&config, &fixture.vault);
+    assert_eq!(
+        unlocked_again
+            .delete_contact_book(&delete_json("someone-else", Some(false)))
+            .unwrap_err(),
+        Error::InvalidRequest(NOT_CURRENT)
+    );
+    assert_eq!(
+        unlocked_again
+            .delete_contact_book(&delete_json("someone-else", Some(true)))
+            .unwrap_err(),
+        Error::InvalidRequest("contact book owner is not a removed device")
+    );
+}
+
+#[test]
+fn pending_inbound_work_refuses_until_apply_pending_clears_it() {
+    let dir = TempDir::new().unwrap();
+    let fixture = captured(&dir, two_contacts());
+    let owner = fixture.owner_config.device_id.to_string();
+    let path = fixture.observer_config.database_path.clone();
+    let next = fixture.observer.receive_cursor().unwrap().0 + 1;
+    fixture
+        .observer
+        .ingest(
+            &seal_plain(
+                &fixture.vault,
+                DeviceId::new(),
+                900,
+                br#"{"kind":"future_unknown_event"}"#,
+            ),
+            Cursor(next),
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .observer
+            .delete_contact_book(&delete_json(&owner, Some(true)))
+            .unwrap_err(),
+        Error::InvalidRequest(NOT_CURRENT),
+        "an applicable pending row means local sync is not current"
+    );
+
+    fixture.observer.apply_pending(100).unwrap();
+    fixture
+        .observer
+        .delete_contact_book(&delete_json(&owner, Some(true)))
+        .unwrap();
+    assert_eq!(count(&path, "SELECT COUNT(*) FROM contacts"), 0);
+}
+
+#[test]
+fn pending_rows_of_a_locked_epoch_are_not_a_sync_refusal() {
+    let dir = TempDir::new().unwrap();
+    let fixture = captured(&dir, two_contacts());
+    let owner = fixture.owner_config.device_id.to_string();
+    let path = fixture.observer_config.database_path.clone();
+    let next = fixture.observer.receive_cursor().unwrap().0 + 1;
+    fixture
+        .observer
+        .ingest(
+            &seal_plain(
+                &fixture.vault,
+                DeviceId::new(),
+                901,
+                br#"{"kind":"future_unknown_event"}"#,
+            ),
+            Cursor(next),
+        )
+        .unwrap();
+    // The row waits for an epoch this device has not unlocked, so apply_pending cannot apply it.
+    sqlcipher(&path)
+        .execute("UPDATE journal SET key_epoch=7 WHERE status='pending'", [])
+        .unwrap();
+
+    // The sync gate does not count it, so it is not a sync refusal. The member publication then
+    // hits the existing compaction rule: a contact record may not start while an unreadable
+    // record of a locked epoch exists (`KeysUnavailable`). That rule is unchanged here.
+    assert_eq!(
+        fixture
+            .observer
+            .delete_contact_book(&delete_json(&owner, Some(true)))
+            .unwrap_err(),
+        Error::KeysUnavailable
+    );
+    assert_eq!(
+        count(&path, "SELECT COUNT(*) FROM contacts"),
+        2,
+        "nothing changed"
+    );
+}
+
+#[test]
+fn an_undrained_published_snapshot_refuses_the_delete() {
+    let dir = TempDir::new().unwrap();
+    let fixture = captured(&dir, two_contacts());
+    let owner = fixture.owner_config.device_id.to_string();
+    publish_full_history(&fixture, 9, None);
+
+    assert_eq!(
+        fixture
+            .observer
+            .delete_contact_book(&delete_json(&owner, Some(true)))
+            .unwrap_err(),
+        Error::InvalidRequest(NOT_CURRENT)
+    );
+
+    crate::snapshot_projection::settle(&fixture.observer);
+    fixture
+        .observer
+        .delete_contact_book(&delete_json(&owner, Some(true)))
+        .unwrap();
+}
+
+#[test]
+fn a_draining_or_staging_projection_refuses_the_delete() {
+    let dir = TempDir::new().unwrap();
+    let fixture = captured(&dir, two_contacts());
+    let owner = fixture.owner_config.device_id.to_string();
+    publish_full_history(&fixture, 9, None);
+
+    let mut refused_mid_projection = false;
+    for _ in 0..200 {
+        let state = fixture
+            .observer
+            .snapshot_projection_status()
+            .unwrap()
+            .map(|status| status.state);
+        if matches!(
+            state,
+            Some(SnapshotProjectionState::Draining | SnapshotProjectionState::Staging)
+        ) {
+            assert_eq!(
+                fixture
+                    .observer
+                    .delete_contact_book(&delete_json(&owner, Some(true)))
+                    .unwrap_err(),
+                Error::InvalidRequest(NOT_CURRENT)
+            );
+            refused_mid_projection = true;
+            break;
+        }
+        fixture.observer.apply_pending(1).unwrap();
+    }
+    assert!(
+        refused_mid_projection,
+        "the projection passed through draining or staging"
+    );
+    crate::snapshot_projection::settle(&fixture.observer);
+}
+
+#[test]
+fn a_failed_projection_refuses_the_delete() {
+    let dir = TempDir::new().unwrap();
+    let fixture = captured(&dir, two_contacts());
+    let owner = fixture.owner_config.device_id.to_string();
+    let upsert = fixture
+        .server
+        .log
+        .iter()
+        .position(|envelope| {
+            matches!(
+                opened(&fixture.vault, envelope),
+                PrivatePayload::ContactUpserted { .. }
+            )
+        })
+        .unwrap();
+    publish_full_history(&fixture, 9, Some(upsert));
+
+    for _ in 0..200 {
+        if matches!(
+            fixture
+                .observer
+                .snapshot_projection_status()
+                .unwrap()
+                .map(|status| status.state),
+            Some(SnapshotProjectionState::Failed)
+        ) {
+            break;
+        }
+        fixture.observer.apply_pending(1).unwrap();
+    }
+    assert_eq!(
+        fixture
+            .observer
+            .snapshot_projection_status()
+            .unwrap()
+            .map(|status| status.state),
+        Some(SnapshotProjectionState::Failed)
+    );
+    assert_eq!(
+        fixture
+            .observer
+            .delete_contact_book(&delete_json(&owner, Some(true)))
+            .unwrap_err(),
+        Error::InvalidRequest(NOT_CURRENT)
+    );
+}
+
+#[test]
+fn a_latched_contact_repair_refuses_the_delete() {
+    let dir = TempDir::new().unwrap();
+    let fixture = captured(&dir, two_contacts());
+    let owner = fixture.owner_config.device_id.to_string();
+    fixture.observer.request_contact_repair().unwrap();
+
+    assert_eq!(
+        fixture
+            .observer
+            .delete_contact_book(&delete_json(&owner, Some(true)))
+            .unwrap_err(),
+        Error::InvalidRequest(NOT_CURRENT)
+    );
+    assert_eq!(
+        count(
+            &fixture.observer_config.database_path,
+            "SELECT COUNT(*) FROM contacts"
+        ),
+        2
+    );
 }

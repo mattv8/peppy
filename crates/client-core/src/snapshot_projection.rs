@@ -68,7 +68,7 @@ const SNAPSHOT_IMPORT_ORIGIN_UPPER_BOUND: &str = "snapshot_import_origin;";
 
 /// Metadata latch: this device's contact/notification projection must be rebuilt from an
 /// authoritative compaction snapshot. Value is the reason (`upgrade` or `requested`).
-const REPAIR_LATCH: &str = "contact_repair_required";
+pub(crate) const REPAIR_LATCH: &str = "contact_repair_required";
 /// Failure reason of an in-flight projection that drained before legacy provenance existed.
 const LEGACY_PROVENANCE_MISSING: &str = "legacy_provenance_missing";
 
@@ -1388,6 +1388,13 @@ fn promote_deletions(conn: &Connection, generation: i64, me: &str) -> Result<(),
         .query_map([generation], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<Result<_, _>>()?;
     for (book_id, owner, book_generation) in covered {
+        contact_book_deletion::capture_completion(
+            conn,
+            &book_id,
+            &owner,
+            book_generation,
+            Some(generation),
+        )?;
         contact_book_deletion::remove_covered_contacts(conn, &book_id, &owner, book_generation)?;
     }
     let books: Vec<String> = conn

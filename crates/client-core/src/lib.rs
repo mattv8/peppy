@@ -2741,12 +2741,16 @@ impl Client {
         contact_sync_requests::request(conn, &ctx, input)
     }
     /// Deletes a removed device's synced contact book for every device in the vault. Input is
-    /// `{"book_id", "revoked_device_ids"}`; the revoked list is the host's trusted fact. Refusals
-    /// are `Error::InvalidRequest` with a static reason: "contact book deletion input is invalid",
-    /// "contact book is not on this device", "contact book was already deleted for all devices",
-    /// "contact book owner is not a removed device", "contact book belongs to this device" and
-    /// "contact book owner was succeeded by another device". A locked vault returns
-    /// `KeysUnavailable`. Success returns `{"status":"deleted","book_id","contacts"}`.
+    /// `{"book_id", "revoked_device_ids", "sync_current"}`; the revoked list and `sync_current` are
+    /// the host's trusted facts (a missing `sync_current` is false). Refusals are
+    /// `Error::InvalidRequest` with a static reason: "contact book deletion input is invalid",
+    /// "contact book deletion needs an up-to-date sync" (`sync_current` is false, or this device
+    /// holds pending inbound work, a snapshot not yet drained, a projection draining, staging or
+    /// failed, or a latched contact repair), "contact book is not on this device", "contact book
+    /// was already deleted for all devices", "contact book owner is not a removed device", "contact
+    /// book belongs to this device" and "contact book owner was succeeded by another device". A
+    /// locked vault returns `KeysUnavailable`, checked before the sync gate. Success returns
+    /// `{"status":"deleted","book_id","contacts"}`.
     pub fn delete_contact_book(&self, input: &str) -> Result<String, Error> {
         let mut store = self.lock()?;
         let (conn, ctx) = store.parts();
@@ -5582,6 +5586,8 @@ impl Client {
             |r| r.get(0),
         )?;
         report.waiting_for_keys = usize::try_from(waiting).map_err(|_| Error::Database)?;
+        // After every row and any promotion above: fences applied here owe their members.
+        contact_book_deletion::drain_completion(&mut tx, &ctx)?;
         advance_processed_frontier(&tx)?;
         attachment_retention::complete_processed_restores(&tx)?;
         tx.commit()?;
@@ -5596,7 +5602,16 @@ impl Client {
     /// Reports whether `seal_pending_batch` or `apply_pending` can make durable progress without
     /// opening a write transaction. Pending records for locked epochs intentionally do not count.
     pub fn sync_work_status(&self) -> Result<SyncWorkStatus, Error> {
-        let store = self.lock()?;
+        let mut store = self.lock()?;
+        // Owed deletion members count only when the drain can enqueue them now.
+        let owed_members = {
+            let (conn, ctx) = store.parts();
+            contact_book_deletion::completion_ready(conn, &ctx)?
+                && exists(
+                    conn,
+                    "SELECT 1 FROM contact_book_deletion_completion_contacts LIMIT 1",
+                )?
+        };
         let pending_seal = store
             .active_epoch
             .is_some_and(|epoch| store.keys.contains_key(&epoch))
@@ -5633,6 +5648,7 @@ impl Client {
             pending_apply: pending_snapshot
                 || projection_work
                 || pending_journal
+                || owed_members
                 || conversation_merge::has_work(&store.conn)?,
             pending_snapshot,
         })

@@ -1497,7 +1497,7 @@ fn deleted_by_another_device(p: &mut Pair) {
     p.server.sync(&deleter);
     call(
         deleter.delete_contact_book(
-            &json!({"book_id": BOOK, "revoked_device_ids": [p.owner_cfg.device_id.to_string()]})
+            &json!({"book_id": BOOK, "revoked_device_ids": [p.owner_cfg.device_id.to_string()], "sync_current": true})
                 .to_string(),
         ),
     );
@@ -1631,7 +1631,7 @@ fn different_owners_fences_survive_compaction_and_reconstruction() {
     call(
         p.peer.delete_contact_book(
             &json!({
-                "book_id": BOOK, "revoked_device_ids": [p.owner_cfg.device_id.to_string()]
+                "book_id": BOOK, "revoked_device_ids": [p.owner_cfg.device_id.to_string()], "sync_current": true
             })
             .to_string(),
         ),
@@ -1655,7 +1655,7 @@ fn different_owners_fences_survive_compaction_and_reconstruction() {
     call(
         p.peer.delete_contact_book(
             &json!({
-                "book_id": BOOK, "revoked_device_ids": [owner_b_cfg.device_id.to_string()]
+                "book_id": BOOK, "revoked_device_ids": [owner_b_cfg.device_id.to_string()], "sync_current": true
             })
             .to_string(),
         ),

@@ -7,12 +7,12 @@
 //! same book at or below the fenced generation is a no-op, so replays and delayed records never
 //! resurrect deleted data, while higher generations are unaffected.
 use crate::contact_media;
-use crate::contacts::{canonical_decimal, invalid};
+use crate::contacts::{canonical_decimal, invalid, require_unlocked};
 use crate::{
-    Ctx, EnvelopePurpose, Error, MAX_SEAL_BATCH, PrivatePayload, enqueue_without_sealing,
+    Ctx, EnvelopePurpose, Error, MAX_SEAL_BATCH, PrivatePayload, enqueue_without_sealing, get_meta,
     seal_pending,
 };
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,6 +24,7 @@ pub(crate) const DELETE_OWNER_NOT_REMOVED: &str = "contact book owner is not a r
 pub(crate) const DELETE_OWNER_IS_THIS_DEVICE: &str = "contact book belongs to this device";
 pub(crate) const DELETE_OWNER_SUCCEEDED: &str =
     "contact book owner was succeeded by another device";
+pub(crate) const DELETE_NOT_CURRENT: &str = "contact book deletion needs an up-to-date sync";
 
 /// Book-keyed local state removed with a deleted book. Scan children are deleted before their
 /// scans. Every statement binds the book id as `?1`.
@@ -82,6 +83,9 @@ pub(crate) fn apply(conn: &Connection, payload: &PrivatePayload) -> Result<bool,
                 return Ok(true);
             }
             store_fence(conn, book_id, owner_device_id, generation, *deleted_at_ms)?;
+            // Captured before the member rows below go: a terminal member already received is what
+            // settles a contact, so it must still be visible here.
+            capture_completion(conn, book_id, owner_device_id, generation, None)?;
             conn.execute(
                 "DELETE FROM deleted_contact_members WHERE book_id=? AND owner_device_id=? AND generation<=?",
                 params![book_id, owner_device_id, generation],
@@ -108,6 +112,8 @@ pub(crate) fn apply(conn: &Connection, payload: &PrivatePayload) -> Result<bool,
             if stored_under_other_owner(conn, book_id, owner_device_id)? {
                 return Ok(true);
             }
+            // A terminal record from elsewhere settles this device's own obligation for the contact.
+            cancel_completion(conn, book_id, owner_device_id, contact_id, generation)?;
             if !covers(conn, book_id, owner_device_id, Some(generation))? {
                 conn.execute(
                     "INSERT INTO deleted_contact_members(book_id,contact_id,owner_device_id,generation) VALUES(?,?,?,?) ON CONFLICT(book_id,contact_id,owner_device_id) DO UPDATE SET generation=MAX(generation,excluded.generation)",
@@ -157,12 +163,203 @@ pub(crate) fn remove_covered_contacts(
     Ok(())
 }
 
+/// Whether this device knows its synced state is not current, so a deletion must wait. Work that
+/// `apply_pending` would apply now counts: a pending journal row (not parked as a snapshot isolate)
+/// under an unlocked epoch. Rows of locked epochs wait for their key and do not block. Also not
+/// current: a published snapshot not yet drained, a projection draining, staging or failed, and a
+/// latched contact repair.
+fn sync_not_current(conn: &Connection, ctx: &Ctx<'_>) -> Result<bool, Error> {
+    let epochs = ctx
+        .keys
+        .keys()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let pending_inbound: bool = conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM journal INDEXED BY journal_apply_eligible WHERE status='pending' AND reason IS NOT 'snapshot_rcs_isolated' AND key_epoch IN ({epochs}))"
+        ),
+        [],
+        |row| row.get(0),
+    )?;
+    if pending_inbound {
+        return Ok(true);
+    }
+    let undrained: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM snapshot_generations WHERE state='published' AND received>drained)",
+        [],
+        |row| row.get(0),
+    )?;
+    if undrained {
+        return Ok(true);
+    }
+    let projection: Option<String> = conn
+        .query_row(
+            "SELECT state FROM projection_generations WHERE state!='superseded' ORDER BY generation DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if matches!(
+        projection.as_deref(),
+        Some("draining" | "staging" | "failed")
+    ) {
+        return Ok(true);
+    }
+    Ok(get_meta(conn, crate::snapshot_projection::REPAIR_LATCH)?.is_some())
+}
+
+/// Records the contacts this device holds that a fence of `owner` covers, before their rows are
+/// removed. A contact without a known terminal member becomes owed work, so this device publishes
+/// the member itself. Known means a member at or above `generation` in `deleted_contact_members`,
+/// or, while promoting snapshot generation `staged`, one staged in `projection_deleted_members`
+/// (those reach the live table only after this capture). Covered contacts include tombstones.
+pub(crate) fn capture_completion(
+    conn: &Connection,
+    book_id: &str,
+    owner: &str,
+    generation: i64,
+    staged: Option<i64>,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO contact_book_deletion_completion(book_id,owner_device_id,generation) VALUES(?,?,?) ON CONFLICT(book_id,owner_device_id) DO UPDATE SET generation=MAX(generation,excluded.generation)",
+        params![book_id, owner, generation],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO contact_book_deletion_completion_contacts(book_id,owner_device_id,contact_id) SELECT c.book_id,?2,c.id FROM contacts c JOIN contact_books b ON b.id=c.book_id WHERE c.book_id=?1 AND COALESCE(c.publication_owner,b.owner_device_id)=?2 AND COALESCE(c.publication_generation,b.generation)<=?3 AND NOT EXISTS(SELECT 1 FROM deleted_contact_members m WHERE m.book_id=c.book_id AND m.contact_id=c.id AND m.owner_device_id=?2 AND m.generation>=?3)",
+        params![book_id, owner, generation],
+    )?;
+    // A member staged by the snapshot being promoted is not in `deleted_contact_members` yet, so
+    // it settles its contact here. Only promotion has a stage, so the live path never reads it.
+    if let Some(staged) = staged {
+        conn.execute(
+            "DELETE FROM contact_book_deletion_completion_contacts WHERE book_id=?1 AND owner_device_id=?2 AND EXISTS(SELECT 1 FROM projection_deleted_members p WHERE p.generation=?3 AND p.book_id=contact_book_deletion_completion_contacts.book_id AND p.contact_id=contact_book_deletion_completion_contacts.contact_id AND p.owner_device_id=contact_book_deletion_completion_contacts.owner_device_id AND p.book_generation>=?4)",
+            params![book_id, owner, staged, generation],
+        )?;
+    }
+    Ok(())
+}
+
+/// Settles this device's owed member for one contact, once a terminal member at or above the
+/// fence generation is known (received, or enqueued by this device). A lower-generation member
+/// does not settle it.
+fn cancel_completion(
+    conn: &Connection,
+    book_id: &str,
+    owner: &str,
+    contact_id: &str,
+    generation: i64,
+) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM contact_book_deletion_completion_contacts WHERE book_id=?1 AND owner_device_id=?2 AND contact_id=?3 AND ?4>=(SELECT generation FROM contact_book_deletion_completion w WHERE w.book_id=?1 AND w.owner_device_id=?2)",
+        params![book_id, owner, contact_id, generation],
+    )?;
+    Ok(())
+}
+
+/// Drops every owed member of one fence.
+fn forget_completion(conn: &Connection, book_id: &str, owner: &str) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM contact_book_deletion_completion_contacts WHERE book_id=? AND owner_device_id=?",
+        params![book_id, owner],
+    )?;
+    conn.execute(
+        "DELETE FROM contact_book_deletion_completion WHERE book_id=? AND owner_device_id=?",
+        params![book_id, owner],
+    )?;
+    Ok(())
+}
+
+/// Whether `drain_completion` can enqueue now. It needs an unlocked vault, and compaction must be
+/// supported, complete and fully readable: the conditions `compaction_plan` checks before any
+/// contact record may start. Work waits otherwise, and it is not reported as pending either.
+pub(crate) fn completion_ready(conn: &Connection, ctx: &Ctx<'_>) -> Result<bool, Error> {
+    if require_unlocked(ctx).is_err() {
+        return Ok(false);
+    }
+    Ok(
+        get_meta(conn, "server_compaction_supported")?.as_deref() == Some("1")
+            && get_meta(conn, "compaction_backfill_complete")?.as_deref() == Some("1")
+            && crate::backfill_unreadable(conn, ctx)? == 0,
+    )
+}
+
+/// Publishes the member records still owed by fences this device applied, at most `MAX_SEAL_BATCH`
+/// per pass. The caller runs it at the end of `apply_pending`, inside the batch transaction and
+/// after every row of the batch and any snapshot promotion, so in-batch order does not matter.
+/// Only an unlocked device emits, and only when `completion_ready`. Work for a book this device
+/// owns, or whose owner was succeeded, is dropped because those records are never applied. A
+/// database error fails the batch.
+pub(crate) fn drain_completion(tx: &mut Transaction<'_>, ctx: &Ctx<'_>) -> Result<(), Error> {
+    // Work with nothing left owed is finished, whatever the lock or compaction state.
+    tx.execute(
+        "DELETE FROM contact_book_deletion_completion WHERE NOT EXISTS(SELECT 1 FROM contact_book_deletion_completion_contacts p WHERE p.book_id=contact_book_deletion_completion.book_id AND p.owner_device_id=contact_book_deletion_completion.owner_device_id)",
+        [],
+    )?;
+    // The readiness check reads compaction state, so it runs only when something is owed.
+    let owed: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM contact_book_deletion_completion_contacts)",
+        [],
+        |row| row.get(0),
+    )?;
+    if !owed || !completion_ready(tx, ctx)? {
+        return Ok(());
+    }
+    let me = ctx.device_id.to_string();
+    let owners: Vec<(String, String)> = tx
+        .prepare("SELECT book_id,owner_device_id FROM contact_book_deletion_completion")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    for (book_id, owner) in owners {
+        if owner == me || has_successor(tx, &owner)? {
+            forget_completion(tx, &book_id, &owner)?;
+        }
+    }
+    let batch: Vec<(String, String, i64, String)> = tx
+        .prepare(
+            "SELECT p.book_id,p.owner_device_id,w.generation,p.contact_id FROM contact_book_deletion_completion_contacts p JOIN contact_book_deletion_completion w ON w.book_id=p.book_id AND w.owner_device_id=p.owner_device_id ORDER BY p.rowid LIMIT ?1",
+        )?
+        .query_map(params![MAX_SEAL_BATCH as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut enqueued = false;
+    for (book_id, owner, generation, contact_id) in batch {
+        if member_covers(tx, &book_id, &contact_id, &owner, generation)? {
+            cancel_completion(tx, &book_id, &owner, &contact_id, generation)?;
+            continue;
+        }
+        let member = PrivatePayload::ContactBookDeletedMember {
+            book_id: book_id.clone(),
+            contact_id: contact_id.clone(),
+            owner_device_id: owner.clone(),
+            generation: generation.to_string(),
+        };
+        let savepoint = tx.savepoint()?;
+        match enqueue_without_sealing(&savepoint, ctx, EnvelopePurpose::Event, None, None, &member)
+        {
+            Ok(_) => savepoint.commit()?,
+            Err(error @ Error::Database) => return Err(error),
+            // Compaction is not ready to take a compactable record; keep the rest for later.
+            Err(_) => break,
+        }
+        enqueued = true;
+        cancel_completion(tx, &book_id, &owner, &contact_id, generation)?;
+    }
+    if enqueued {
+        seal_pending(tx, ctx, MAX_SEAL_BATCH)?;
+    }
+    Ok(())
+}
+
 /// Deletes a removed device's contact book for the whole vault. `input` is
-/// `{"book_id", "revoked_device_ids"}`, where the revoked list is the host's trusted fact. One
-/// transaction enqueues the book fence and one member record per stored contact (compaction
+/// `{"book_id", "revoked_device_ids", "sync_current"}`. The revoked list and `sync_current` are the
+/// host's trusted facts; a missing `sync_current` is false. Refusals are checked in this order:
+/// invalid input, locked vault (`KeysUnavailable`), then `DELETE_NOT_CURRENT` unless
+/// `sync_current` is true and `sync_not_current` finds nothing outstanding, then the book checks.
+/// One transaction enqueues the book fence and one member record per stored contact (compaction
 /// metadata is captured before any local projection), seals them, then applies the fence here.
 pub(crate) fn delete(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Result<String, Error> {
-    crate::contacts::require_unlocked(ctx)?;
     let input: Value =
         serde_json::from_str(input).map_err(|_| Error::InvalidRequest(DELETE_INPUT))?;
     let book_id = text(&input, "book_id")?;
@@ -173,7 +370,15 @@ pub(crate) fn delete(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Resul
         .iter()
         .map(|id| id.as_str().ok_or(Error::InvalidRequest(DELETE_INPUT)))
         .collect::<Result<Vec<&str>, _>>()?;
+    let sync_current = input
+        .get("sync_current")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    require_unlocked(ctx)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if !sync_current || sync_not_current(&tx, ctx)? {
+        return Err(Error::InvalidRequest(DELETE_NOT_CURRENT));
+    }
     let Some((owner, generation)) = stored_book(&tx, book_id)? else {
         // The local book is gone. A fence for this id means the deletion already ran (a re-run).
         let refusal = if has_fence(&tx, book_id)? {
@@ -205,6 +410,7 @@ pub(crate) fn delete(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Resul
         [book_id],
         |row| row.get(0),
     )?;
+    let book_generation = generation;
     let generation = generation.to_string();
     let fence = PrivatePayload::ContactBookDeleted {
         book_id: book_id.to_owned(),
@@ -213,10 +419,10 @@ pub(crate) fn delete(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Resul
         deleted_at_ms: now_ms(),
     };
     enqueue_without_sealing(&tx, ctx, EnvelopePurpose::Event, None, None, &fence)?;
-    for contact_id in members {
+    for contact_id in &members {
         let member = PrivatePayload::ContactBookDeletedMember {
             book_id: book_id.to_owned(),
-            contact_id,
+            contact_id: contact_id.clone(),
             owner_device_id: owner.clone(),
             generation: generation.clone(),
         };
@@ -228,6 +434,11 @@ pub(crate) fn delete(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Resul
         }
     }
     apply(&tx, &fence)?;
+    // Every stored contact already has this device's member above, so the fence's capture of
+    // them is settled here and must not emit a second record.
+    for contact_id in &members {
+        cancel_completion(&tx, book_id, &owner, contact_id, book_generation)?;
+    }
     tx.commit()?;
     Ok(json!({"status": "deleted", "book_id": book_id, "contacts": live}).to_string())
 }
@@ -414,6 +625,20 @@ mod tests {
         assert!(targets_own_book(&fence, "me"));
         assert!(targets_own_book(&member, "me"));
         assert!(!targets_own_book(&fence, "other"));
+    }
+
+    #[test]
+    fn a_member_record_keys_its_compaction_identity_by_book_and_contact() {
+        let member = PrivatePayload::ContactBookDeletedMember {
+            book_id: "b1".into(),
+            contact_id: "c2".into(),
+            owner_device_id: "owner".into(),
+            generation: "1".into(),
+        };
+        assert_eq!(
+            crate::compaction_identity(&member).as_deref(),
+            Some("contact:b1:c2")
+        );
     }
 
     #[test]
