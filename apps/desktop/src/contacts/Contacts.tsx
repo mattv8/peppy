@@ -792,7 +792,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const noBooks = booksLoaded && books.length === 0;
   const noBooksTitle = "Connect a phone to see its contacts.";
   const syncDisabledReason = !book
-    ? (noBooks ? undefined : "Select a contact book to request a scan.")
+    ? (booksLoaded && !noBooks ? "Select a contact book to request a scan." : undefined)
     : book.sourceRevoked ? "Can't sync a removed phone"
       : book.state === "retired" ? "This book is retired."
         : book.state === "limited" ? "This phone has limited contact access and cannot complete an authoritative scan."
@@ -997,6 +997,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       {railVisible && !noBooks && (
         <BookRail
           books={books}
+          loading={!booksLoaded}
           bookId={bookId}
           width={bookWidth}
           panelRef={booksPanelRef}
