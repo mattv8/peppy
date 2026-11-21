@@ -47,6 +47,23 @@ describe("ContactsView", () => {
     expect(bridge.request_contact_repair).not.toHaveBeenCalled();
   });
 
+  it("pauses contact changes while retaining an open editor", async () => {
+    const { rerender } = render(<ContactsView />);
+    fireEvent.click(await screen.findByLabelText("New contact"));
+    fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Unsaved" } });
+    const save = screen.getByRole("button", { name: /save/i });
+    expect(save).toBeEnabled();
+    rerender(<ContactsView writesPaused />);
+    expect(save).toBeDisabled();
+    expect(save).toHaveAttribute("aria-describedby", "update-paused-description");
+    expect(screen.getByLabelText("Given name")).toHaveValue("Unsaved");
+    expect(screen.getByLabelText("New contact")).toBeDisabled();
+    expect(document.getElementById("contacts-sync-now")).toBeDisabled();
+    expect(document.getElementById("contacts-update-paused")).toBeInTheDocument();
+    // A direct child of the row layout would become its own full-height column.
+    expect(document.getElementById("contacts-center-pane")).toContainElement(document.getElementById("contacts-update-paused"));
+  });
+
   it("does not confirm a crop until the current image has drawn on a white canvas", () => {
     class DeferredImage {
       static current: DeferredImage | undefined;
@@ -415,6 +432,20 @@ describe("ContactsView", () => {
       expect(await screen.findByRole("alert")).toHaveTextContent("A contact value is too long.");
       expect(container.querySelector('[data-form-disclosure="organization"]')).toHaveAttribute("open");
       expect(document.activeElement).not.toBe(screen.getByLabelText("Organization"));
+    });
+
+    it("keeps a rejected update edit inline as a warning and requests refresh", async () => {
+      vi.mocked(bridge.submit_contact_edit).mockRejectedValue({ code: "update-in-progress" });
+      const onUpdateInProgress = vi.fn();
+      render(<ContactsView onUpdateInProgress={onUpdateInProgress} />);
+      fireEvent.click(await screen.findByLabelText("New contact"));
+      fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Avery" } });
+      fireEvent.click(screen.getByText("Save"));
+      const warning = await screen.findByText("Peppy is updating your messages. Try again when it finishes.");
+      expect(warning).toHaveAttribute("role", "status");
+      expect(warning).toHaveAttribute("data-tone", "warning");
+      expect(onUpdateInProgress).toHaveBeenCalledTimes(1);
+      expect(screen.getByLabelText("Given name")).toHaveValue("Avery");
     });
 
     it("opens create form on new contact button", async () => {
@@ -1945,6 +1976,19 @@ describe("ContactsView", () => {
       expect(bridge.restore_contact).toHaveBeenCalledWith("book-pixel8", "deleted-pixel");
       expect(bridge.restore_contact).not.toHaveBeenCalledWith("book-iphone", expect.anything());
       expect(container.querySelector("#contacts-error")).toBeNull();
+    });
+
+    it("disables Restore while writes are paused and keeps the panel open", async () => {
+      vi.mocked(bridge.list_restorable_contacts).mockResolvedValueOnce([deletedFromPixel]);
+      const { rerender } = render(<ContactsView />);
+      await screen.findByRole("button", { name: /Aurora Chen/ });
+      fireEvent.click(screen.getByLabelText("Recently deleted contacts"));
+      const restore = await screen.findByRole("button", { name: "Restore Old Friend" });
+      rerender(<ContactsView writesPaused />);
+      expect(restore).toBeDisabled();
+      expect(restore).toHaveAttribute("title", "Paused while Peppy updates your messages.");
+      expect(restore).toHaveAttribute("aria-describedby", "update-paused-description");
+      expect(screen.getByRole("dialog", { name: "Recently deleted contacts" })).toBeInTheDocument();
     });
 
     it("shows a rejected delete outside the editor as an alert", async () => {

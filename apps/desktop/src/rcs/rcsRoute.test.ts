@@ -4,7 +4,7 @@ import { currentRcsRoute, knownRcsChat, rcsDownloadRetryBlock, rcsSendBlock } fr
 
 function snapshot(): DesktopSnapshot {
   return {
-    version: "1",
+    writesPaused: false, version: "1",
     mode: "native",
     connection: { state: "connected" },
     encryption: { state: "unlocked" },

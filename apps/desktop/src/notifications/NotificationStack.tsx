@@ -1,4 +1,4 @@
-import { BellOff, formatElapsedShort, isoDateTime } from "@peppy/desktop-ui";
+import { BellOff, UPDATE_PAUSED_DESCRIPTION, formatElapsedShort, isoDateTime } from "@peppy/desktop-ui";
 import type { AppFilter, MirroredNotification, NotificationTarget } from "../bridge/bridge";
 import type { OneTimeCodeTarget } from "@peppy/desktop-ui/bridge-contracts";
 import { notificationMuteKey } from "./notificationIdentity";
@@ -11,6 +11,7 @@ type FeedProps = {
   newKeys: ReadonlySet<string>;
   showPhone: boolean;
   query: string;
+  writesPaused?: boolean;
   onDismiss: NotificationRowProps["onDismiss"];
   onMute: NotificationRowProps["onMute"];
   onCopy: (target: OneTimeCodeTarget, code: string) => Promise<void>;
@@ -41,6 +42,7 @@ export function NotificationSections({ notifications, ...props }: FeedProps & { 
       unread={props.newKeys.has(notificationKey(notification.target))}
       showPhone={showPhone}
       query={props.query}
+      writesPaused={props.writesPaused}
       onDismiss={props.onDismiss}
       onMute={props.onMute}
       onCopy={props.onCopy}
@@ -78,7 +80,7 @@ export function NotificationStacks({
         </div>
         <div className="notification-stack-actions">
           <time className="notif-row-time" dateTime={isoDateTime(first.postedAt)}>{formatElapsedShort(first.postedAt)}</time>
-          <button type="button" className="notif-inline-action" aria-label={`Mute ${appName}${showPhone ? ` on ${props.labels.sourceName(first)}` : ""}`} onClick={() => { props.onAction(stack.items.map(item => notificationKey(item.target))); props.onMute(filter); }}><BellOff size={14} aria-hidden /></button>
+          <button type="button" className="notif-inline-action" aria-label={`Mute ${appName}${showPhone ? ` on ${props.labels.sourceName(first)}` : ""}`} disabled={props.writesPaused} title={props.writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined} aria-describedby={props.writesPaused ? "update-paused-description" : undefined} onClick={() => { props.onAction(stack.items.map(item => notificationKey(item.target))); props.onMute(filter); }}><BellOff size={14} aria-hidden /></button>
           <button type="button" className="notif-stack-dismiss-btn" disabled={!dismissible.length} onClick={() => { props.onAction(dismissible.map(notificationKey)); void onDismissMany(dismissible); }}>
             {dismissible.length > 100 ? "Dismiss up to 100" : `Dismiss ${dismissible.length}`}
           </button>
@@ -91,6 +93,7 @@ export function NotificationStacks({
         unread={props.newKeys.has(notificationKey(notification.target))}
         showPhone={showPhone && stack.items.length === 1}
         query={props.query}
+        writesPaused={props.writesPaused}
         onDismiss={props.onDismiss}
         onMute={props.onMute}
         onCopy={props.onCopy}

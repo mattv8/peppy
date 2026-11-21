@@ -2,9 +2,10 @@ import { createPortal } from "react-dom";
 import type { CSSProperties, KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Info, TriangleAlert, XCircle } from "lucide-react";
+import { UPDATE_PAUSED_DESCRIPTION } from "./updatePausedCopy";
 
 export type InlineStatusTone = "info" | "warning" | "error";
-export type InlineStatusAction = { id: string; label: string; onAction(): void; disabled?: boolean; ariaLabel?: string; confirm?: { title: string; body: string; confirmLabel: string; cancelLabel?: string } };
+export type InlineStatusAction = { id: string; label: string; onAction(): void; disabled?: boolean; describedBy?: string; ariaLabel?: string; confirm?: { title: string; body: string; confirmLabel: string; cancelLabel?: string } };
 export type InlineStatusItem = { key: string; tone: InlineStatusTone; message: string; detail?: string; detailItems?: string[]; role?: "status" | "alert"; id?: string; hooks?: Record<`data-${string}`, string | undefined>; actions?: InlineStatusAction[]; srOnly?: boolean };
 export type InlineStatusLabels = { more?(count: number): string; dialog?: string };
 
@@ -47,6 +48,8 @@ export function InlineStatus({ items, idPrefix = "inline-status", labels }: { it
   const visibleItems = items.filter((item) => !item.srOnly);
   const primary = visibleItems[0];
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const messageRef = useRef<HTMLSpanElement>(null);
+  const heldFocusRef = useRef(false);
   const popoverRef = useRef<HTMLDivElement>(null);
   const hoverTimer = useRef<number | undefined>(undefined);
   const animationFrame = useRef<number | undefined>(undefined);
@@ -99,7 +102,7 @@ export function InlineStatus({ items, idPrefix = "inline-status", labels }: { it
     close();
     setConfirming({ itemKey, actionId: action.id });
   };
-  const actionButton = (itemKey: string, action: InlineStatusAction, id: string) => <button key={id} id={id} type="button" data-inline-status-action={action.id} aria-label={action.ariaLabel} aria-disabled={action.disabled || undefined} onClick={(event) => {
+  const actionButton = (itemKey: string, action: InlineStatusAction, id: string) => <button key={id} id={id} type="button" data-inline-status-action={action.id} aria-label={action.ariaLabel} aria-disabled={action.disabled || undefined} aria-describedby={action.describedBy} title={action.describedBy ? UPDATE_PAUSED_DESCRIPTION : undefined} onClick={(event) => {
     if (action.disabled) return;
     if (action.confirm) openConfirmation(itemKey, action, event.currentTarget);
     else {
@@ -127,13 +130,25 @@ export function InlineStatus({ items, idPrefix = "inline-status", labels }: { it
     return () => window.removeEventListener("resize", updatePosition);
   }, [open, confirmationAction?.id, primary?.key, visibleItems.length]);
   useEffect(() => {
-    const trigger = triggerRef.current;
-    if (!trigger || !primary || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => setTruncated(trigger.scrollWidth > trigger.clientWidth));
-    observer.observe(trigger);
-    setTruncated(trigger.scrollWidth > trigger.clientWidth);
+    const message = messageRef.current;
+    if (!message || !primary || typeof ResizeObserver === "undefined") return;
+    const measure = () => {
+      const cutOff = message.scrollWidth > message.clientWidth;
+      const focused = document.activeElement;
+      // A status that fits again may drop its trigger and popover; note whether they hold focus.
+      if (!cutOff && focused && (focused === triggerRef.current || popoverRef.current?.contains(focused))) heldFocusRef.current = true;
+      setTruncated(cutOff);
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(message);
+    measure();
     return () => observer.disconnect();
-  }, [primary?.key, primary?.message]);
+  }, [primary?.key, primary?.message, needsPopover]);
+  useEffect(() => {
+    if (!heldFocusRef.current) return;
+    heldFocusRef.current = false;
+    if (!needsPopover) focusIfConnected(document.getElementById("composer-textarea"));
+  }, [needsPopover, truncated]);
   useEffect(() => {
     if (open && !needsPopover) close();
     if (confirming && !confirmationAction) setConfirming(null);
@@ -187,7 +202,7 @@ export function InlineStatus({ items, idPrefix = "inline-status", labels }: { it
               event.stopPropagation();
               close(true);
             }
-          }} onClick={(event) => toggle(event.detail === 0)}><span data-inline-status-message>{primary.message}</span>{moreCount > 0 ? <span data-inline-status-more data-count={moreCount} aria-hidden /> : null}</button> : <span data-inline-status-message>{primary.message}</span>}
+          }} onClick={(event) => toggle(event.detail === 0)}><span ref={messageRef} data-inline-status-message>{primary.message}</span>{moreCount > 0 ? <span data-inline-status-more data-count={moreCount} aria-hidden /> : null}</button> : <span ref={messageRef} data-inline-status-message>{primary.message}</span>}
         </div>
         {moreCount > 0 ? <span id={moreId} className="sr-only">{moreLabel(moreCount)}</span> : null}
         {primary.actions?.map((action) => actionButton(primary.key, action, action.id))}
@@ -216,5 +231,5 @@ function Confirmation({ action, position, onCancel, onConfirm }: { action: Inlin
       event.stopPropagation();
       onCancel();
     }
-  }}><strong id={`${action.id}-confirm-title`}>{confirm.title}</strong><p id={`${action.id}-confirm-body`}>{confirm.body}</p><div data-inline-status-confirmation-actions><button ref={cancelRef} type="button" onClick={onCancel}>{confirm.cancelLabel ?? "Cancel"}</button><button type="button" data-inline-status-tone="warning" onClick={onConfirm}>{confirm.confirmLabel}</button></div></div>;
+  }}><strong id={`${action.id}-confirm-title`}>{confirm.title}</strong><p id={`${action.id}-confirm-body`}>{confirm.body}</p><div data-inline-status-confirmation-actions><button ref={cancelRef} type="button" onClick={onCancel}>{confirm.cancelLabel ?? "Cancel"}</button><button type="button" data-inline-status-tone="warning" aria-describedby={action.describedBy} title={action.describedBy ? UPDATE_PAUSED_DESCRIPTION : undefined} aria-disabled={action.disabled || undefined} onClick={() => { if (!action.disabled) onConfirm(); }}>{confirm.confirmLabel}</button></div></div>;
 }

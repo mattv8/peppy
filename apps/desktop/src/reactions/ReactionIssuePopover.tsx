@@ -1,3 +1,4 @@
+import { UPDATE_PAUSED_DESCRIPTION } from "@peppy/desktop-ui";
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { TriangleAlert, X } from "@peppy/desktop-ui";
@@ -54,10 +55,11 @@ export function issueCopy(badge: MergedReactionBadge): IssueCopy | undefined {
   return undefined;
 }
 
-export function ReactionIssuePopover({ messageId, badge, anchor, onRetry, onDismiss, onClose }: {
+export function ReactionIssuePopover({ messageId, badge, anchor, writesPaused = false, onRetry, onDismiss, onClose }: {
   messageId: string;
   badge: MergedReactionBadge;
   anchor: HTMLElement;
+  writesPaused?: boolean;
   onRetry?(requestId: string, emoji: string | null): void;
   onDismiss?(requestId: string): void;
   onClose(focus: IssueFocus): void;
@@ -112,6 +114,7 @@ export function ReactionIssuePopover({ messageId, badge, anchor, onRetry, onDism
 
   if (!copy || typeof document === "undefined") return null;
   const run = (action: IssueAction) => {
+    if (action === "retry" && writesPaused) return;
     if (requestId && action === "retry") onRetry?.(requestId, badge.own?.intent === "remove" ? null : badge.emoji);
     else if (requestId) onDismiss?.(requestId);
     onClose("article");
@@ -124,7 +127,7 @@ export function ReactionIssuePopover({ messageId, badge, anchor, onRetry, onDism
     <p id={titleId} className="reaction-issue-title"><Icon size={12} strokeWidth={2} aria-hidden /><span>{copy.title}</span></p>
     <p id={bodyId} className="reaction-issue-body">{copy.body}</p>
     <div className="reaction-issue-actions">
-      {copy.actions.map(({ action, label, primary }) => <button key={action} type="button" className={primary ? "reaction-issue-action reaction-issue-action-primary" : "reaction-issue-action"} data-reaction-action={action} onClick={() => run(action)}>{label}</button>)}
+      {copy.actions.map(({ action, label, primary }) => <button key={action} type="button" className={primary ? "reaction-issue-action reaction-issue-action-primary" : "reaction-issue-action"} data-reaction-action={action} aria-disabled={action === "retry" && writesPaused || undefined} aria-describedby={action === "retry" && writesPaused ? "update-paused-description" : undefined} title={action === "retry" && writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined} onClick={() => run(action)}>{label}</button>)}
     </div>
   </div>, document.body);
 }

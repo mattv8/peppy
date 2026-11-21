@@ -1,3 +1,4 @@
+import { UPDATE_PAUSED_DESCRIPTION } from "@peppy/desktop-ui";
 import { useMemo, useState, type ReactElement } from "react";
 import type { AppFilter, MirroredNotification } from "../bridge/bridge";
 import { notificationAppName, notificationSourceName, notificationTuple } from "./Notifications";
@@ -7,6 +8,8 @@ type NotificationSettingsAppsProps = {
   notifications: MirroredNotification[];
   sources: { id: string; name: string }[];
   busy: boolean;
+  writesPaused?: boolean;
+  pauseNoticeVisible?: boolean;
   onMute(filter: AppFilter): void;
 };
 
@@ -18,11 +21,13 @@ function AppIcon({ appName, icon }: { appName: string; icon?: string }): ReactEl
   return <span className="notif-app-letter-avatar" aria-hidden>{appName.slice(0, 1).toUpperCase()}</span>;
 }
 
-function AppRow({ filter, phone, notification, busy, onMute }: {
+function AppRow({ filter, phone, notification, busy, writesPaused, pauseNoticeVisible, onMute }: {
   filter: AppFilter;
   phone: string;
   notification?: MirroredNotification;
   busy: boolean;
+  writesPaused?: boolean;
+  pauseNoticeVisible?: boolean;
   onMute(filter: AppFilter): void;
 }): ReactElement {
   const id = notificationTuple(filter.sourceDeviceId, filter.packageName);
@@ -31,7 +36,7 @@ function AppRow({ filter, phone, notification, busy, onMute }: {
     <AppIcon appName={appName} icon={notification?.appIconPngBase64} />
     <span className="notif-app-filter-label"><b>{appName}</b><small>{phone}</small></span>
     <span className="settings-switch">
-      <input id={`filter-${id}`} type="checkbox" role="switch" disabled={busy}
+      <input id={`filter-${id}`} type="checkbox" role="switch" disabled={busy || writesPaused} title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined} aria-describedby={writesPaused ? pauseNoticeVisible ? "notification-update-note" : "update-paused-description" : undefined}
         aria-label={`Mirror ${appName} from ${phone}`} checked={!filter.muted} aria-checked={!filter.muted}
         onChange={event => onMute({ ...filter, muted: !event.target.checked })} />
       <span aria-hidden />
@@ -39,7 +44,7 @@ function AppRow({ filter, phone, notification, busy, onMute }: {
   </li>;
 }
 
-export function NotificationSettingsApps({ apps, notifications, sources, busy, onMute }: NotificationSettingsAppsProps): ReactElement {
+export function NotificationSettingsApps({ apps, notifications, sources, busy, writesPaused, pauseNoticeVisible, onMute }: NotificationSettingsAppsProps): ReactElement {
   const [query, setQuery] = useState("");
   const sourceIds = apps.map(app => app.sourceDeviceId);
   const mutedApps = apps.filter(app => app.muted);
@@ -61,7 +66,7 @@ export function NotificationSettingsApps({ apps, notifications, sources, busy, o
   };
   const visibleApps = unmutedApps.filter(app => apps.length <= 8 || matchesQuery(app));
   const renderRow = (app: AppFilter) => <AppRow key={notificationTuple(app.sourceDeviceId, app.packageName)} filter={app} phone={phoneName(app)}
-    notification={newestNotifications.get(notificationTuple(app.sourceDeviceId, app.packageName))} busy={busy} onMute={onMute} />;
+    notification={newestNotifications.get(notificationTuple(app.sourceDeviceId, app.packageName))} busy={busy} writesPaused={writesPaused} pauseNoticeVisible={pauseNoticeVisible} onMute={onMute} />;
 
   return <>
     {mutedApps.length > 0 && <section id="notification-muted-app-list" aria-label="Muted">

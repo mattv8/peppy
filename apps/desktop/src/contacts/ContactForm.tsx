@@ -1,3 +1,5 @@
+import { UPDATE_PAUSED_DESCRIPTION } from "@peppy/desktop-ui";
+import { UPDATE_ERROR } from "@peppy/desktop-ui";
 import { useEffect, useRef, useState } from "react";
 import { ContactAvatar, Plus, TonePicker, X, contactSeed, paletteIndex, seedKey } from "@peppy/desktop-ui";
 import {
@@ -78,6 +80,7 @@ export function ContactForm({
   toneControl,
   savedToneSeed,
   saveDisabled = false,
+  writesPaused = false,
   createPrefill,
 }: {
   initial?: ContactView;
@@ -91,6 +94,7 @@ export function ContactForm({
   toneControl?: { value?: number; pending?: boolean; error?: string; disabled?: boolean; onSelect(index: number | null): void };
   savedToneSeed?: string;
   saveDisabled?: boolean;
+  writesPaused?: boolean;
   createPrefill?: { phone: string };
 }) {
   const rowSequence = useRef(0);
@@ -279,7 +283,9 @@ export function ContactForm({
         <button
           data-action="save-edit"
           className="primary-button"
-          disabled={!displayName.trim() || displayName === "#" || busy || fieldReadOnly || saveDisabled}
+          disabled={!displayName.trim() || displayName === "#" || busy || fieldReadOnly || saveDisabled || writesPaused}
+          aria-describedby={writesPaused ? "update-paused-description" : undefined}
+          title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined}
           onClick={() => onSave({
             ...draft,
             phones: draft.phones.map(({ editorKey: _key, ...value }) => value),
@@ -291,7 +297,7 @@ export function ContactForm({
         </button>
       </header>
       {error && (
-        <p role="alert" id="contact-form-error">
+        <p role={error === UPDATE_ERROR ? "status" : "alert"} data-tone={error === UPDATE_ERROR ? "warning" : undefined} id="contact-form-error">
           {error}
         </p>
       )}
@@ -509,7 +515,7 @@ export function ContactForm({
         </section>
         <section data-form-section="tone">
           <header id="contact-form-tone-header"><h3>Conversation color</h3></header>
-          <TonePicker id="contact-form-tone-picker" variant="field" seed={savedToneSeed ?? `contact:${initial?.id ?? "new"}`} value={toneControl?.value} automaticIndex={paletteIndex(savedToneSeed ?? `contact:${initial?.id ?? "new"}`)} disabled={!savedToneSeed || !toneControl || toneControl.disabled} disabledReason={!savedToneSeed ? "Save a phone number to choose a color." : undefined} pending={toneControl?.pending} error={toneControl?.error} describedBy="contact-form-tone-note" onSelect={(index) => toneControl?.onSelect(index)} />
+          <TonePicker id="contact-form-tone-picker" variant="field" seed={savedToneSeed ?? `contact:${initial?.id ?? "new"}`} value={toneControl?.value} automaticIndex={paletteIndex(savedToneSeed ?? `contact:${initial?.id ?? "new"}`)} disabled={!savedToneSeed || !toneControl || toneControl.disabled || writesPaused} disabledReason={writesPaused ? UPDATE_PAUSED_DESCRIPTION : !savedToneSeed ? "Save a phone number to choose a color." : undefined} pending={toneControl?.pending} error={toneControl?.error} describedBy={writesPaused ? "contact-form-tone-note update-paused-description" : "contact-form-tone-note"} onSelect={(index) => toneControl?.onSelect(index)} />
           <p id="contact-form-tone-note">{savedPhone && savedToneSeed ? <>Saved immediately for {savedPhone.number}. Contact Save and Cancel don&apos;t affect it.{draftPrimarySeed && seedKey(draftPrimarySeed) !== savedToneSeed && <><br />Tied to the saved number, not the number being edited.</>}</> : "Save a phone number to choose a color."}</p>
         </section>
 

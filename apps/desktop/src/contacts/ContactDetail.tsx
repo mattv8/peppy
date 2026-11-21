@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Clock, ContactAvatar, Pencil, TriangleAlert, X, contactSeed, formatPhoneNumber } from "@peppy/desktop-ui";
+import { Clock, ContactAvatar, Pencil, TriangleAlert, UPDATE_PAUSED_DESCRIPTION, X, contactSeed, formatPhoneNumber } from "@peppy/desktop-ui";
 import { bridge, type ContactBookView, type ContactEditOutcome, type ContactView } from "../bridge/bridge";
 import { contactErrorText, editStateLabel } from "./contact-labels";
 import { formatContactName, type ContactNameFormat } from "./contact-name-format";
@@ -30,6 +30,7 @@ export type ContactDetailProps = {
   /** The contact's own book; the photo button needs it to know whether photos can be changed. */
   book?: ContactBookView;
   canWrite: boolean;
+  writesPaused?: boolean;
   confirm: boolean;
   nameFormat: ContactNameFormat;
   /** Sync is locked (encryption or app lock, or sync needs unlock): the photo button shows why it is disabled. */
@@ -46,6 +47,7 @@ export function ContactDetail({
   contact,
   book,
   canWrite,
+  writesPaused = false,
   confirm,
   nameFormat,
   photoLocked = false,
@@ -59,6 +61,8 @@ export function ContactDetail({
   const photoButtonRef = useRef<HTMLButtonElement>(null);
   const photoWrapRef = useRef<HTMLDivElement>(null);
   const photoMenuRef = useRef<HTMLDivElement>(null);
+  const writesPausedRef = useRef(writesPaused);
+  writesPausedRef.current = writesPaused;
   const previousPendingState = useRef(contact.pendingEditState);
   const [menuOpen, setMenuOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -69,6 +73,11 @@ export function ContactDetail({
   const name = formatContactName(contact, nameFormat);
 
   const sendPhoto = async (photo: PhotoChange) => {
+    // A crop can finish after a pause began; it must not reach the phone's queue.
+    if (writesPausedRef.current) {
+      setPhotoError(UPDATE_PAUSED_DESCRIPTION);
+      return;
+    }
     setSubmitting(true);
     setPhotoError("");
     try {
@@ -101,7 +110,7 @@ export function ContactDetail({
   const photoEditable = Boolean(book && canWrite && book.capabilities.supportsPhoto && !book.sourceRevoked && book.state !== "retired");
   const photoPending = isPendingEdit(contact.pendingEditState);
   const photoFailed = isFailedEdit(contact.pendingEditState) && photoSent !== null;
-  const photoDisabledReason = photoPending ? PHOTO_PENDING_REASON : photoLocked ? PHOTO_LOCKED_REASON : undefined;
+  const photoDisabledReason = writesPaused ? UPDATE_PAUSED_DESCRIPTION : photoPending ? PHOTO_PENDING_REASON : photoLocked ? PHOTO_LOCKED_REASON : undefined;
   const photoChangePending = photoPending && photoSent !== null;
   const photoState = photoFailed ? "error" : photoChangePending ? "pending" : "idle";
   const hasPhoto = Boolean(contact.photoDataUrl);
@@ -143,6 +152,7 @@ export function ContactDetail({
   };
 
   const startPick = () => {
+    if (writesPaused) return;
     setPhotoError("");
     void choosePhoto(photoButtonRef.current);
   };
@@ -229,6 +239,9 @@ export function ContactDetail({
               <button
                 data-action="edit-contact"
                 aria-label="Edit contact"
+                disabled={writesPaused}
+                title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined}
+                aria-describedby={writesPaused ? "update-paused-description" : undefined}
                 onClick={onEdit}
               >
                 Edit
@@ -237,6 +250,9 @@ export function ContactDetail({
                 data-action="delete-contact"
                 data-confirm-delete={confirm ? "pending" : undefined}
                 aria-label={confirm ? "Confirm delete" : "Delete contact"}
+                disabled={writesPaused}
+                title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined}
+                aria-describedby={writesPaused ? "update-paused-description" : undefined}
                 onKeyDown={e => { if (e.key === "Escape" && confirm) { e.preventDefault(); onCancelConfirm(); } }}
                 onBlur={confirm ? onCancelConfirm : undefined}
                 onClick={onDelete}

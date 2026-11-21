@@ -116,6 +116,7 @@ impl Client {
     ) -> Result<(), Error> {
         let preferences = normalize(preferences);
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let (conn, ctx) = guard.parts();
         if ctx
             .active_epoch
@@ -153,6 +154,8 @@ impl Client {
             return Ok(false);
         }
         let mut guard = self.lock()?;
+        // An unrecovered historical preference would make the empty-state check below wrong.
+        ensure_recovery_complete(&guard)?;
         let (conn, ctx) = guard.parts();
         if ctx
             .active_epoch

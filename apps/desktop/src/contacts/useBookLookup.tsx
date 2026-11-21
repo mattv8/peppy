@@ -8,15 +8,21 @@ export const bookUseSwitchId = (bookId: string) => `contacts-book-use-switch-${b
 
 export type BookLookup = ReturnType<typeof useBookLookup>;
 
+/** Toast text for a failed lookup save; `retryable` false leaves Retry off, since the same save would fail again. */
+export type LookupFailure = (error: unknown) => { message: string; retryable: boolean };
+
+export const defaultLookupFailure: LookupFailure = () => ({ message: "Couldn't save this change. Try again.", retryable: true });
+
 /**
  * Lookup switch state for the contact books: one save at a time, the inline confirmation before turning off
  * the last included book, and focus restoration to the switch. Results are reported through `onNotice`.
  */
-export function useBookLookup({ books, bookId, onBooksChanged, onNotice }: {
+export function useBookLookup({ books, bookId, onBooksChanged, onNotice, failure = defaultLookupFailure }: {
   books: ContactBookView[];
   bookId: string;
   onBooksChanged(): void;
   onNotice: PostContactActionNotice;
+  failure?: LookupFailure;
 }) {
   const [busy, setBusy] = useState(false);
   const [confirmBookId, setConfirmBookId] = useState<string | null>(null);
@@ -56,9 +62,10 @@ export function useBookLookup({ books, bookId, onBooksChanged, onNotice }: {
           ? <>{name} is used again for names and recipient search.</>
           : <>Names and recipient search no longer use {name}. Its contacts are unchanged.</>,
       });
-    } catch {
+    } catch (error) {
       if (mountedRef.current) {
-        onNotice({ kind: "error", message: "Couldn't save this change. Try again.", retry: () => void saveLookup(item, enabled) });
+        const { message, retryable } = failure(error);
+        onNotice({ kind: "error", message, retry: retryable ? () => void saveLookup(item, enabled) : undefined });
       }
     } finally {
       if (mountedRef.current) setBusy(false);

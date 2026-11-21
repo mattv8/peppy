@@ -1563,6 +1563,7 @@ async fn snapshot_resync_notifies_during_record_staging() {
         .client
         .unlock(&f.profile, &f.header, PHRASE)
         .unwrap();
+    crate::tests::finish_decoder_recovery(&session);
     *log.lock().unwrap() = mock_records(&sealed_envelopes(&session, 3));
     notifications.store(0, Ordering::SeqCst);
 

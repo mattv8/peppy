@@ -35,6 +35,12 @@ async function openStatus() {
 describe("status history disclosure", () => {
   const progress = { phase: "receiving" as const, receivedThrough: "0", processedThrough: "0", snapshotReceived: "38400", snapshotExpected: "108708" };
 
+  it("labels the updating row as Messages update", async () => {
+    snapshot = { ...snapshot, syncProgress: { ...progress, phase: "updating" } };
+    const row = (await openStatus()).querySelector('[data-disclosure="history"]');
+    expect(row?.querySelector("dt")).toHaveTextContent("Messages update");
+  });
+
   it.each([
     [progress, "receiving", `Loading ${new Intl.NumberFormat().format(38400)} of ${new Intl.NumberFormat().format(108708)} items`],
     [{ ...progress, phase: "applying" as const }, "applying", "Organizing"],

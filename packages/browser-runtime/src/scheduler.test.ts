@@ -904,6 +904,31 @@ describe("BrowserScheduler", () => {
     expect(progress.at(-1)).toBe("current");
   });
 
+  it("continues draining after a superseded-only apply page", async () => {
+    let applyCalls = 0;
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "1" };
+        if (command === "sync_progress") return { receivedThrough: "1", processedThrough: "1", waitingForKeys: "0" };
+        if (command === "sync_work_status") return { pendingApply: false };
+        return [];
+      },
+      mutate: async (command: string) => {
+        if (command !== "apply_pending") return {};
+        applyCalls += 1;
+        return { applied: 0, quarantined: 0, drained: 0, superseded: applyCalls === 1 ? 1 : 0 };
+      },
+    };
+    await new BrowserScheduler(session, {
+      json: async path => path.startsWith("/v1/events") ? { events: [{ cursor: "1", envelope: {} }], high_water_cursor: "1", next_after: null } : {},
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    }).poll();
+    expect(applyCalls).toBeGreaterThanOrEqual(2);
+  });
+
   it("keeps the page applying while pending apply work remains, even when frontiers match the target", async () => {
     const progress: string[] = [];
     const session = {

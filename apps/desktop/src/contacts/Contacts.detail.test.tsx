@@ -108,6 +108,12 @@ describe("ContactsView detail panel", () => {
 
     expect(screen.getByRole("heading", { level: 2, name: "Lovelace, Ada" })).toBeInTheDocument();
   });
+  it("disables Edit and Delete while writes are paused", async () => {
+    render(<ContactsView writesPaused />);
+    fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+    expect(screen.getByRole("button", { name: "Edit contact" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete contact" })).toBeDisabled();
+  });
 });
 
 const picked = { dataUrl: "data:image/png;base64,transparent", naturalWidth: 256, naturalHeight: 256 };
@@ -119,7 +125,8 @@ function renderPhoto({
   contact = mockContactAurora,
   book = mockContactBook,
   photoLocked = false,
-}: { contact?: ContactView; book?: ContactBookView; photoLocked?: boolean } = {}) {
+  writesPaused = false,
+}: { contact?: ContactView; book?: ContactBookView; photoLocked?: boolean; writesPaused?: boolean } = {}) {
   const onPhotoSubmitted = vi.fn();
   const props = {
     book,
@@ -127,6 +134,7 @@ function renderPhoto({
     confirm: false,
     nameFormat: "first-last" as const,
     photoLocked,
+    writesPaused,
     onEdit: vi.fn(),
     onDelete: vi.fn(),
     onCancelConfirm: vi.fn(),
@@ -138,6 +146,7 @@ function renderPhoto({
     ...utils,
     onPhotoSubmitted,
     rerenderContact: (next: ContactView) => utils.rerender(<ContactDetail {...props} contact={next} />),
+    pause: () => utils.rerender(<ContactDetail {...props} contact={contact} writesPaused />),
   };
 }
 
@@ -221,6 +230,28 @@ describe("ContactDetail photo pencil", () => {
 
     await waitFor(() => expect(bridge.submit_contact_edit).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(vi.mocked(bridge.list_contacts).mock.calls.length).toBeGreaterThan(listCallsBefore));
+  });
+
+  it("disables the photo button with the update reason while writes are paused", () => {
+    const { container } = renderPhoto({ writesPaused: true });
+    const button = photoButton(container);
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).toHaveAttribute("title", "Paused while Peppy updates your messages.");
+    expect(button).toHaveAttribute("aria-describedby", "contacts-detail-photo-reason");
+    fireEvent.click(button);
+    expect(bridge.pick_contact_photo).not.toHaveBeenCalled();
+  });
+
+  it("does not send a crop that finishes after writes were paused", async () => {
+    const { container, pause, onPhotoSubmitted } = renderPhoto();
+    fireEvent.click(photoButton(container));
+    await waitFor(() => expect(bridge.pick_contact_photo).toHaveBeenCalledTimes(1));
+    pause();
+    await confirmCrop();
+
+    await waitFor(() => expect(document.getElementById("contacts-detail-photo-error")).toHaveTextContent("Paused while Peppy updates your messages."));
+    expect(bridge.submit_contact_edit).not.toHaveBeenCalled();
+    expect(onPhotoSubmitted).not.toHaveBeenCalled();
   });
 
   it("opens a menu with Choose photo and Remove photo when a photo exists", () => {

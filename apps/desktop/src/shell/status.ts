@@ -1,4 +1,4 @@
-import type { StatusTone } from "@peppy/desktop-ui";
+import { UPDATE_LABEL, updateCounts, type StatusTone } from "@peppy/desktop-ui";
 import type { DesktopSnapshot } from "../bridge/bridge";
 import { peppyCopy } from "../generated/peppyCopy";
 
@@ -51,7 +51,12 @@ export function syncStatusText(encryption: EncryptionState): string {
   return "Device sync not unlocked";
 }
 
-export function historyStatus(progress?: DesktopSnapshot["syncProgress"]): { phase: "receiving" | "applying" | "repairing" | "blocked"; value: string } | undefined {
+export function historyStatus(progress?: DesktopSnapshot["syncProgress"]): { phase: "updating" | "receiving" | "applying" | "repairing" | "blocked"; value: string } | undefined {
+  if (progress?.phase === "updating") {
+    const counts = updateCounts(progress);
+    const number = new Intl.NumberFormat();
+    return { phase: "updating", value: counts ? `${UPDATE_LABEL}: ${number.format(counts.done)} of ${number.format(counts.total)} items` : UPDATE_LABEL };
+  }
   if (progress?.phase === "applying") return { phase: "applying", value: "Organizing" };
   if (progress?.phase === "repairing") return { phase: "repairing", value: "History is incomplete; a repair is waiting to run" };
   if (progress?.phase === "blocked") return { phase: "blocked", value: "Couldn't finish loading history" };

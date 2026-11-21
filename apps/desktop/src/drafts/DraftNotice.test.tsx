@@ -33,6 +33,10 @@ function candidateOf(kind: DraftNoticeKind, sequence: number, options: RecoveryO
 describe("selectDraftNotice", () => {
   afterEach(cleanup);
 
+  it("does not duplicate an existing not-sent prefix", () => {
+    expect(draftNoticeView({ kind: "send-failed", sequence: 1, detail: "Not sent: draft kept." }).message).toBe("Not sent: draft kept.");
+  });
+
   it("returns nothing for a healthy draft", () => {
     expect(selectDraftNotice([])).toBeUndefined();
   });
