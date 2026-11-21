@@ -8,10 +8,13 @@ import { bookUseSwitchId, useBookLookup, type BookLookup } from "./useBookLookup
 import "./book-rail.css";
 
 const BOOK_USE_HINT = "This computer only. Contacts stay here to browse.";
+const BOOK_SKELETON_ROWS = 3;
 
 /** The contact-book column shown above ≈700px. Each row carries its own lookup switch when the switch applies. */
-export function BookRail({ books, bookId, width, panelRef, onSelect, onBooksChanged, onRemoveRequest, onDeleteRequest, deleteDisabledReason, onNotice }: {
+export function BookRail({ books, loading, bookId, width, panelRef, onSelect, onBooksChanged, onRemoveRequest, onDeleteRequest, deleteDisabledReason, onNotice }: {
   books: ContactBookView[];
+  /** The book list has not loaded yet: placeholder rows stand in for it. */
+  loading: boolean;
   bookId: string;
   width: number;
   panelRef: RefObject<HTMLElement | null>;
@@ -27,7 +30,13 @@ export function BookRail({ books, bookId, width, panelRef, onSelect, onBooksChan
   const railStyle = { "--contacts-book-width": `${width}px` } as CSSProperties;
   return (
     <aside ref={panelRef} id="contacts-book-list" aria-label="Contact books" style={railStyle}>
-      <ul id="contacts-books">
+      <ul id="contacts-books" aria-busy={loading}>
+        {loading && Array.from({ length: BOOK_SKELETON_ROWS }, (_, index) => (
+          <li key={index} data-book-skeleton aria-hidden="true">
+            <span className="contacts-skeleton-line contacts-skeleton-line-long" />
+            <span className="contacts-skeleton-line contacts-skeleton-line-short" />
+          </li>
+        ))}
         {books.map(item => (
           <BookRailItem
             key={item.id}
@@ -61,7 +70,6 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
   deleteDisabledReason?: string;
   railRef: RefObject<HTMLElement | null>;
   onNotice: PostContactActionNotice;
-  /** Some row in the rail has a ⋯ button, so rows without one keep an empty slot and the switches align. */
 }) {
   const hintId = `contacts-book-use-hint-${item.id}`;
   const use = item.lookupExcluded ? "excluded" : "included";

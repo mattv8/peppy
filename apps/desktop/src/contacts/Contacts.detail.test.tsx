@@ -346,6 +346,8 @@ describe("ContactDetail photo pencil", () => {
     const reason = "Waiting for the phone to apply your last change.";
 
     expect(button).toHaveAttribute("aria-disabled", "true");
+    // The pending edit is not a photo change this panel sent, so the photo keeps its idle look.
+    expect(button).toHaveAttribute("data-photo-state", "idle");
     expect(button).toHaveAttribute("title", reason);
     expect(document.getElementById(button.getAttribute("aria-describedby")!)).toHaveTextContent(reason);
     fireEvent.click(button);

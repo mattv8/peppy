@@ -27,7 +27,13 @@
   transition: background-color var(--peppy-duration-base, 150ms) var(--peppy-ease-out, ease-out);
 }
 
-#contacts-books > li:hover {
+#contacts-books > li[data-book-skeleton] {
+  display: grid;
+  gap: 6px;
+  padding: 12px 8px;
+}
+
+#contacts-books > li:hover:not([data-book-skeleton]) {
   background: var(--peppy-surface-hover);
 }
 

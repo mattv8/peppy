@@ -107,9 +107,10 @@ export function ContactDetail({
   const photoFailed = isFailedEdit(contact.pendingEditState) && photoSent !== null;
   const photoDisabledReason = photoPending ? PHOTO_PENDING_REASON : photoLocked ? PHOTO_LOCKED_REASON : undefined;
   const photoBusy = submitting || picking;
-  const photoState = photoFailed ? "error" : photoPending ? "pending" : "idle";
+  const photoChangePending = photoPending && photoSent !== null;
+  const photoState = photoFailed ? "error" : photoChangePending ? "pending" : "idle";
   const hasPhoto = Boolean(contact.photoDataUrl);
-  const shownPhoto = photoPending && photoSent ? photoSent.preview : contact.photoDataUrl;
+  const shownPhoto = photoChangePending ? photoSent.preview : contact.photoDataUrl;
   const photoAvatar = (
     <ContactAvatar
       seed={contactSeed(contact.phones, contact.id)}
@@ -120,7 +121,7 @@ export function ContactDetail({
   );
   const badgeIcon = photoFailed
     ? <TriangleAlert size={12} aria-hidden />
-    : photoPending
+    : photoChangePending
       ? <Clock size={12} aria-hidden />
       : <Pencil size={12} aria-hidden />;
 

@@ -63,8 +63,8 @@ describe("ContactsView status slot priority", () => {
 
   it("shows the unavailable line alone when no other strip applies", async () => {
     const { container } = render(<ContactsView sync={{ repairRequired: false, readiness: readyReadiness }} />);
-    await waitFor(() => expect(container.querySelector("#contacts-status")).toHaveAttribute("data-status-kind", "unavailable"));
-    expect(container.querySelector("#contacts-sync-unavailable")).toHaveTextContent("This phone does not support remote contact scans.");
+    await waitFor(() => expect(container.querySelector("#contacts-sync-unavailable")).toHaveTextContent("This phone does not support remote contact scans."));
+    expect(container.querySelector("#contacts-status")).toHaveAttribute("data-status-kind", "unavailable");
   });
 
   it("points the sync button at the unavailable line only while that line is the active strip", async () => {
@@ -100,7 +100,14 @@ describe("ContactsView status slot priority", () => {
   it("renders no status slot when nothing persistent applies", async () => {
     vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
     const { container } = render(<ContactsView sync={{ repairRequired: false, readiness: readyReadiness }} />);
-    await screen.findByLabelText("New contact");
+    await waitFor(() => expect(container.querySelector("#contacts-count")).toHaveAttribute("data-count-state", "known"));
+    expect(container.querySelector("#contacts-status")).toBeNull();
+  });
+
+  it("shows no select-a-book strip while the book list is still loading", () => {
+    vi.mocked(bridge.list_contact_books).mockReturnValue(new Promise(() => undefined));
+    const { container } = render(<ContactsView sync={{ repairRequired: false, readiness: readyReadiness }} />);
+    expect(container.querySelector("#contacts-count")).toHaveAttribute("data-count-state", "loading");
     expect(container.querySelector("#contacts-status")).toBeNull();
   });
 });
