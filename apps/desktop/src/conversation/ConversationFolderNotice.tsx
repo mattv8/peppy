@@ -1,12 +1,12 @@
 import type { JSX } from "react";
 import { createPortal } from "react-dom";
-import { X } from "@peppy/desktop-ui";
+import { UPDATE_PAUSED_DESCRIPTION, X } from "@peppy/desktop-ui";
 import type { ConversationFolder } from "@peppy/desktop-ui/bridge-contracts";
 import { useNoticeDismissal } from "../notices/useNoticeDismissal";
 
 export type FolderNotice = { kind: "success" | "error"; conversationId: string; name: string; from: ConversationFolder; to: ConversationFolder };
 
-type Props = { notice?: FolderNotice; pending: boolean; toastHost?: HTMLElement | null; onUndo(): void; onRetry(): void; onDismiss(): void };
+type Props = { notice?: FolderNotice; pending: boolean; writesPaused?: boolean; toastHost?: HTMLElement | null; onUndo(): void; onRetry(): void; onDismiss(): void };
 
 function actionCopy(notice: FolderNotice): string {
   if (notice.to === "archived") return notice.kind === "success" ? `Archived ${notice.name}.` : `Couldn't archive ${notice.name}.`;
@@ -16,10 +16,10 @@ function actionCopy(notice: FolderNotice): string {
   return movedFromSpam ? `Couldn't move ${notice.name} out of Spam.` : `Couldn't move ${notice.name} to Inbox.`;
 }
 
-export function ConversationFolderNotice({ notice, pending, toastHost, onUndo, onRetry, onDismiss }: Props): JSX.Element {
+export function ConversationFolderNotice({ notice, pending, writesPaused = false, toastHost, onUndo, onRetry, onDismiss }: Props): JSX.Element {
   const { toastRef, setHovered, setFocused, trackBlur } = useNoticeDismissal(notice, onDismiss);
   const isError = notice?.kind === "error";
   return createPortal(<div ref={toastRef} id="conversation-folder-notice" className="mark-all-read-toast" data-placement={toastHost ? "list" : "window"} role={isError ? "alert" : "status"} aria-live={isError ? undefined : "polite"} onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} onFocus={() => setFocused(true)} onBlur={trackBlur}>
-    {notice && <>{actionCopy(notice)} <button className="secondary-button" type="button" disabled={pending} onClick={notice.kind === "success" ? onUndo : onRetry}>{notice.kind === "success" ? "Undo" : "Retry"}</button><button className="mark-all-read-toast-dismiss" type="button" aria-label="Dismiss notification" disabled={pending} onClick={onDismiss}><X size={14} strokeWidth={1.75} aria-hidden /></button></>}
+    {notice && <>{actionCopy(notice)} <button className="secondary-button" type="button" disabled={pending || writesPaused} title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined} aria-describedby={writesPaused ? "update-paused-description" : undefined} onClick={notice.kind === "success" ? onUndo : onRetry}>{notice.kind === "success" ? "Undo" : "Retry"}</button><button className="mark-all-read-toast-dismiss" type="button" aria-label="Dismiss notification" disabled={pending} onClick={onDismiss}><X size={14} strokeWidth={1.75} aria-hidden /></button></>}
   </div>, toastHost ?? document.body);
 }

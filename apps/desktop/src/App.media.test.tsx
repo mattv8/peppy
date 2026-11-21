@@ -59,7 +59,7 @@ const ready = (url: string, attachment: AttachmentView): MediaOpen => ({
 
 function snapshot(messages: MessageView[], activeConversationId = "aurora"): DesktopSnapshot {
   return {
-    version: "1",
+    writesPaused: false, version: "1",
     mode: "native",
     connection: { state: "connected", origin: "https://example.test" },
     encryption: { state: "unlocked" },

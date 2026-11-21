@@ -1,14 +1,15 @@
+import { UPDATE_PAUSED_DESCRIPTION } from "@peppy/desktop-ui";
 import { useEffect, useLayoutEffect, useRef, type FocusEvent, type JSX, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 
-type Props = { name: string; canUnblock: boolean; trigger: HTMLButtonElement; pending: boolean; onConfirm(): void; onCancel(): void };
+type Props = { name: string; canUnblock: boolean; trigger: HTMLButtonElement; pending: boolean; writesPaused?: boolean; pauseNoticeVisible?: boolean; onConfirm(): void; onCancel(): void };
 
 const VIEWPORT_MARGIN = 8;
 const POPOVER_GAP = 6;
 const QUESTION_ID = "sender-unblock-confirmation-question";
 const NOTE_ID = "sender-unblock-confirmation-note";
 
-export function SenderUnblockConfirmation({ name, canUnblock, trigger, pending, onConfirm, onCancel }: Props): JSX.Element {
+export function SenderUnblockConfirmation({ name, canUnblock, trigger, pending, writesPaused = false, pauseNoticeVisible = writesPaused, onConfirm, onCancel }: Props): JSX.Element {
   const dialogRef = useRef<HTMLDivElement>(null);
   const primaryRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -45,7 +46,7 @@ export function SenderUnblockConfirmation({ name, canUnblock, trigger, pending, 
   const onBlur = (_event: FocusEvent<HTMLDivElement>) => {
     requestAnimationFrame(() => {
       const next = document.activeElement;
-      if (!pending && !(next instanceof Node && (dialogRef.current?.contains(next) || trigger.contains(next)))) cancel();
+      if (!pending && !writesPaused && !(next instanceof Node && (dialogRef.current?.contains(next) || trigger.contains(next)))) cancel();
     });
   };
   const onDialogKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -61,6 +62,7 @@ export function SenderUnblockConfirmation({ name, canUnblock, trigger, pending, 
   return createPortal(<div ref={dialogRef} id="sender-unblock-confirmation" role="dialog" aria-label="Confirm unblock" aria-labelledby={QUESTION_ID} aria-describedby={NOTE_ID} style={{ maxHeight: "calc(100vh - 16px)" }} onBlur={onBlur} onKeyDown={onDialogKeyDown}>
     <p id={QUESTION_ID}>{question}</p>
     <p id={NOTE_ID} className="conversation-folder-confirmation-note">{note}</p>
-    <div>{canUnblock && <button ref={primaryRef} className="primary-button" type="button" disabled={pending} onClick={onConfirm}>Unblock</button>}<button ref={canUnblock ? cancelRef : primaryRef} className="secondary-button" type="button" disabled={pending} onClick={() => cancel(true)}>{canUnblock ? "Cancel" : "Close"}</button></div>
+    {pauseNoticeVisible && <p role="status">{UPDATE_PAUSED_DESCRIPTION}</p>}
+    <div>{canUnblock && <button ref={primaryRef} className="primary-button" type="button" disabled={pending || writesPaused} title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined} aria-describedby={writesPaused && !pauseNoticeVisible ? "update-paused-description" : undefined} onClick={onConfirm}>Unblock</button>}<button ref={canUnblock ? cancelRef : primaryRef} className="secondary-button" type="button" disabled={pending} onClick={() => cancel(true)}>{canUnblock ? "Cancel" : "Close"}</button></div>
   </div>, document.body);
 }

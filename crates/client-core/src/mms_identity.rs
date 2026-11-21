@@ -30,6 +30,7 @@ impl Client {
         validate_own_address(address)?;
         validate_subscription_id(subscription_id)?;
         let mut guard = self.lock()?;
+        crate::ensure_recovery_complete(&guard)?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing = tx

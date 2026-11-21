@@ -58,7 +58,7 @@ export function useSendAgain({ message, gateways, serverOffline, store, onClose 
   const storedError = store.errorFor(id);
   const missingAttachments = storedError === "attachments-unavailable" || message.attachments.some((attachment) => attachment.localAvailable === false);
   // Offline is the live server state (not a latched error): confirm is blocked while the server is unreachable.
-  const blocked = missingAttachments || serverOffline || !sendable;
+  const blocked = missingAttachments || serverOffline || !sendable || Boolean(store.writesPaused);
   const confirmAriaDisabled = noRoute || needsChoice || blocked;
 
   const alert = missingAttachments ? peppyCopy.message_send_again_attachments_missing
@@ -113,6 +113,7 @@ export function useSendAgain({ message, gateways, serverOffline, store, onClose 
     } catch (failure) {
       callActiveRef.current = false;
       const code = errorCode(failure) ?? "failed";
+      if (code === "update-in-progress") store.onUpdateInProgress?.(failure);
       if (code === "already-sent-again") {
         store.settleCall(id, { kind: "already" });
         finish();

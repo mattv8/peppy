@@ -122,6 +122,21 @@ describe("ContactsView", () => {
     expect(document.getElementById("contacts-book-use")).not.toBeInTheDocument();
   });
 
+  it("pauses contact changes while retaining an open editor", async () => {
+    const { rerender } = render(<ContactsView />);
+    fireEvent.click(await screen.findByLabelText("New contact"));
+    fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Unsaved" } });
+    const save = screen.getByRole("button", { name: /save/i });
+    expect(save).toBeEnabled();
+    rerender(<ContactsView writesPaused />);
+    expect(save).toBeDisabled();
+    expect(screen.getByLabelText("Given name")).toHaveValue("Unsaved");
+    expect(screen.getByLabelText("New contact")).toBeDisabled();
+    expect(document.getElementById("contacts-update-paused")).toBeInTheDocument();
+    // A direct child of the row layout would become its own full-height column.
+    expect(document.getElementById("contacts-center-pane")).toContainElement(document.getElementById("contacts-update-paused"));
+  });
+
   it("hides a book from lookup and offers undo", async () => {
     let books = [mockContactBook, { ...mockContactBook, id: "book-other", deviceName: "Other" }];
     vi.mocked(bridge.list_contact_books).mockImplementation(async () => books);
@@ -136,6 +151,13 @@ describe("ContactsView", () => {
     expect(screen.getByText("Hidden from names")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(bridge.set_contact_book_lookup).toHaveBeenCalledWith("book-pixel8", true));
+  });
+
+  it("keeps the local book lookup switch available during updates", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, { ...mockContactBook, id: "book-other" }]);
+    render(<ContactsView writesPaused />);
+    const control = await screen.findByRole("switch", { name: "Use for names and recipient search" });
+    expect(control).toBeEnabled();
   });
 
   it("confirms before hiding the last included book and restores focus on cancel or Escape", async () => {
@@ -568,6 +590,20 @@ describe("ContactsView", () => {
       expect(await screen.findByRole("alert")).toHaveTextContent("A contact value is too long.");
       expect(container.querySelector('[data-form-disclosure="organization"]')).toHaveAttribute("open");
       expect(document.activeElement).not.toBe(screen.getByLabelText("Organization"));
+    });
+
+    it("keeps a rejected update edit inline as a warning and requests refresh", async () => {
+      vi.mocked(bridge.submit_contact_edit).mockRejectedValue({ code: "update-in-progress" });
+      const onUpdateInProgress = vi.fn();
+      render(<ContactsView onUpdateInProgress={onUpdateInProgress} />);
+      fireEvent.click(await screen.findByLabelText("New contact"));
+      fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Avery" } });
+      fireEvent.click(screen.getByText("Save"));
+      const warning = await screen.findByText("Peppy is updating your messages. Try again when it finishes.");
+      expect(warning).toHaveAttribute("role", "status");
+      expect(warning).toHaveAttribute("data-tone", "warning");
+      expect(onUpdateInProgress).toHaveBeenCalledTimes(1);
+      expect(screen.getByLabelText("Given name")).toHaveValue("Avery");
     });
 
     it("opens create form on new contact button", async () => {

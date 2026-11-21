@@ -306,6 +306,13 @@ function firePointer(target: Element, type: string, pointerId: number, clientX: 
 }
 
 describe("ConversationList interactions", () => {
+  it("keeps pin and folder actions visible but disabled during an update", () => {
+    const { rerender } = render(<ConversationList conversations={threads} selectedId="" onSelect={() => {}} onTogglePin={() => {}} onRequestFolderChange={() => {}} actionsPaused />);
+    expect(screen.getAllByRole("button", { name: "Pin conversation" })[0]).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: "Archive conversation" })[0]).toBeDisabled();
+    rerender(<ConversationList conversations={threads} selectedId="" onSelect={() => {}} onTogglePin={() => {}} onRequestFolderChange={() => {}} />);
+    expect(screen.getAllByRole("button", { name: "Pin conversation" })[0]).toBeEnabled();
+  });
   const threads = [
     { id: "conv-a", name: "Aurora", preview: "Hi", unread: 0 },
     { id: "conv-b", name: "Bravo", preview: "Yo", unread: 0 },

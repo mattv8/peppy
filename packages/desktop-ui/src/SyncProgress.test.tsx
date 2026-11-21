@@ -4,6 +4,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SyncProgress as SyncProgressSnapshot } from "./bridge-contracts";
 import { HIDE_LINGER_MS, SHOW_DELAY_MS, SyncProgress } from "./SyncProgress";
+import { UPDATE_COMPLETE_ANNOUNCEMENT } from "./updatePausedCopy";
 
 const HUGE_RECEIVED = "123456789012345678901234567890";
 const HUGE_PROCESSED = "123456789012345678901234567000";
@@ -35,6 +36,59 @@ afterEach(() => {
 });
 
 describe("SyncProgress", () => {
+  it("delays updating, displays valid counts and immediately announces completion", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress progress={progress({ phase: "updating", updateCompleted: "14592", updateTotal: "91652" })} />);
+    expect(banner()).toBeNull();
+    act(() => vi.advanceTimersByTime(SHOW_DELAY_MS));
+    expect(screen.getByRole("region", { name: "Messages update" })).toHaveAttribute("data-sync-phase", "updating");
+    expect(screen.getByRole("progressbar", { name: "Updating your messages" })).toHaveAttribute("value", "14592");
+    expect(document.querySelector("[data-sync-count]")).toHaveTextContent("14,592 of 91,652 items");
+    rerender(<SyncProgress progress={progress({ phase: "current" })} />);
+    expect(banner()).toHaveAttribute("data-sync-after", "updating");
+    expect(banner()).toHaveTextContent("Messages updated");
+    expect(announcement()).toHaveTextContent(UPDATE_COMPLETE_ANNOUNCEMENT);
+    act(() => vi.advanceTimersByTime(HIDE_LINGER_MS));
+    expect(banner()).toBeNull();
+  });
+
+  it.each([["1", "0"], ["2", "1"], ["-1", "10"], ["1e2", "100"], ["9007199254740992", "9007199254740992"]])(
+    "omits invalid update counts %s/%s", (updateCompleted, updateTotal) => {
+      vi.useFakeTimers();
+      render(<SyncProgress progress={progress({ phase: "updating", updateCompleted, updateTotal })} />);
+      act(() => vi.advanceTimersByTime(SHOW_DELAY_MS));
+      expect(screen.queryByRole("progressbar")).toBeNull();
+      expect(document.querySelector("[data-sync-count]")).toBeNull();
+    },
+  );
+
+  it("keeps short updates silent and switches directly to receiving", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress progress={progress({ phase: "updating" })} />);
+    rerender(<SyncProgress progress={progress({ phase: "current" })} />);
+    act(() => vi.advanceTimersByTime(SHOW_DELAY_MS));
+    expect(banner()).toBeNull();
+    expect(announcement()).toHaveTextContent("");
+    rerender(<SyncProgress progress={progress({ phase: "updating" })} />);
+    act(() => vi.advanceTimersByTime(SHOW_DELAY_MS));
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    rerender(<SyncProgress progress={progress({ phase: "receiving" })} />);
+    expect(region()).toHaveAttribute("data-sync-phase", "receiving");
+    expect(announcement()).toHaveTextContent("Loading your history.");
+  });
+
+  it("does not announce count changes and confirms an absent update immediately", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<SyncProgress progress={progress({ phase: "updating", updateCompleted: "0", updateTotal: "5" })} />);
+    act(() => vi.advanceTimersByTime(SHOW_DELAY_MS));
+    const announced = announcement()?.textContent;
+    rerender(<SyncProgress progress={progress({ phase: "updating", updateCompleted: "2", updateTotal: "5" })} />);
+    expect(announcement()?.textContent).toBe(announced);
+    rerender(<SyncProgress />);
+    expect(banner()).toHaveTextContent("Messages updated");
+    expect(announcement()).toHaveTextContent(UPDATE_COMPLETE_ANNOUNCEMENT);
+  });
+
   it("renders nothing visible when progress is absent or current", () => {
     const { rerender } = render(<SyncProgress />);
     expect(banner()).toBeNull();

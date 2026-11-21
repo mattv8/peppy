@@ -447,6 +447,8 @@ pub async fn mcp_enable(
                     .map_err(crate::error::core_error)
             })
             .await?;
+            session.request_replay();
+            session.notify();
             current(&state, &session).await?;
             current_account(&hosted, account_generation)?;
             owner_client

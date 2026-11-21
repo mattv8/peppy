@@ -41,6 +41,12 @@
   font-size: 12px;
 }
 
+#contact-form-error[data-tone="warning"] {
+  background: var(--peppy-warning-surface);
+  color: var(--peppy-warning-text);
+  border-color: var(--peppy-warning-border);
+}
+
 #contact-form-body {
   overflow: auto;
   flex: 1;
