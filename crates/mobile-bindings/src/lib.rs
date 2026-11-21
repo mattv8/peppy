@@ -3127,14 +3127,15 @@ impl NativeClient {
         })
     }
 
-    /// Records the first server replay watermark observed by the host.
+    /// Records the server watermark after each replay page has been ingested.
     pub fn observe_server_high_water(
         &self,
         high_water_cursor: String,
     ) -> Result<(), MobileBindingsError> {
         let cursor = parse_cursor(high_water_cursor)?;
         with_client(&self.client, |client| {
-            client.observe_server_high_water(cursor)
+            client.observe_server_high_water(cursor)?;
+            client.observe_replay_head(cursor)
         })
     }
 

@@ -1294,6 +1294,8 @@ async fn replay(session: &Arc<Session>) -> BridgeResult<ReplayOutcome> {
             // An empty page proves this pull reached the server head, so the cut is safe to expose
             // even when nothing new arrived (e.g. after a restart). Without a head there is no proof.
             if let Some(target) = replay_target {
+                let c = client(session);
+                blocking(move || c.observe_replay_head(target).map_err(core_error)).await?;
                 session.set_replay_target_high_water(Some(target));
                 session.notify();
             }
@@ -1311,6 +1313,10 @@ async fn replay(session: &Arc<Session>) -> BridgeResult<ReplayOutcome> {
         }
         // Both the receive frontier and this target are now safe to expose: receipt committed in
         // one SQLite transaction. Do not notify when the HTTP page is merely fetched.
+        if let Some(target) = replay_target {
+            let c = client(session);
+            blocking(move || c.observe_replay_head(target).map_err(core_error)).await?;
+        }
         session.set_replay_target_high_water(replay_target);
         session.notify();
         drain_apply(session, APPLY_STEPS).await?;

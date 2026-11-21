@@ -136,6 +136,7 @@ pub(super) fn handles(command: &str) -> bool {
             | "ack_outbox"
             | "ingest"
             | "ingest_batch"
+            | "_worker_observe_replay_head"
             | "sync_progress"
             | "key_status"
             | "activate_epoch"
@@ -445,6 +446,11 @@ impl BrowserCore {
             "ack_outbox" => self.ack_outbox(args),
             "ingest" => self.ingest(args),
             "ingest_batch" => self.ingest_batch(args),
+            "_worker_observe_replay_head" => {
+                let cursor = parse_cursor(required_string(&args, "highWaterCursor")?)?;
+                self.client()?.observe_replay_head(cursor).map_err(core)?;
+                Ok(json!({}))
+            }
             "sync_progress" => self.sync_progress(),
             "key_status" => self.key_status(),
             "activate_epoch" => self.activate_epoch(args),
@@ -552,11 +558,23 @@ impl BrowserCore {
 
     fn sync_progress(&self) -> Result<Value, Failure> {
         let progress = self.client()?.replay_progress().map_err(core)?;
-        Ok(json!({
+        let mut result = json!({
             "receivedThrough": progress.received_through.0.to_string(),
             "processedThrough": progress.processed_through.0.to_string(),
             "waitingForKeys": progress.waiting_for_keys.to_string(),
-        }))
+        });
+        if progress.received_through.0 > progress.processed_through.0 {
+            let block = match self.client()?.history_block().map_err(core)? {
+                Some(peppy_client_core::HistoryBlock::Withheld) => Some("withheld"),
+                Some(peppy_client_core::HistoryBlock::Repairing) => Some("repairing"),
+                Some(peppy_client_core::HistoryBlock::Failed) => Some("failed"),
+                None => None,
+            };
+            if let Some(block) = block {
+                result["historyBlock"] = json!(block);
+            }
+        }
+        Ok(result)
     }
 
     fn key_status(&self) -> Result<Value, Failure> {
@@ -994,6 +1012,28 @@ mod tests {
         }
         let result = response(core, "pending_outbox", json!({"limit": 1001}));
         assert_eq!(result["error"]["code"], "invalid-request");
+    }
+
+    #[test]
+    fn replay_head_requires_a_canonical_cursor_and_accepts_empty_head() {
+        let mut fixture = open_core();
+        let core = &mut fixture.core;
+        assert_eq!(
+            response(
+                core,
+                "_worker_observe_replay_head",
+                json!({"highWaterCursor": "0"})
+            )["value"],
+            json!({})
+        );
+        assert_eq!(
+            response(
+                core,
+                "_worker_observe_replay_head",
+                json!({"highWaterCursor": "01"})
+            )["error"]["code"],
+            "invalid-request"
+        );
     }
 
     #[test]

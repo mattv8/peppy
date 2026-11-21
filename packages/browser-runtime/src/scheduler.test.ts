@@ -935,7 +935,7 @@ describe("BrowserScheduler", () => {
       download: async () => new Uint8Array(),
     }, { onProgress: value => progress.push(value) }).poll();
 
-    expect(mutations.slice(0, 2)).toEqual(["ingest_batch", "apply_pending"]);
+    expect(mutations.slice(0, 3)).toEqual(["ingest_batch", "_worker_observe_replay_head", "apply_pending"]);
     expect(progress).toEqual([
       { phase: "receiving", receivedThrough: "2", processedThrough: "0", targetHighWater: "2" },
       { phase: "current", receivedThrough: "2", processedThrough: "2", targetHighWater: "2" },
@@ -968,6 +968,7 @@ describe("BrowserScheduler", () => {
 
   it("settles an empty caught-up page to current instead of leaving receiving", async () => {
     const progress: string[] = [];
+    const heads: unknown[] = [];
     const session = {
       hydrate: async () => undefined,
       query: async (command: string) => {
@@ -977,7 +978,10 @@ describe("BrowserScheduler", () => {
         if (command === "sync_work_status") return { pendingApply: false };
         return [];
       },
-      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+      mutate: async (command: string, args: unknown) => {
+        if (command === "_worker_observe_replay_head") heads.push(args);
+        return { applied: 0, quarantined: 0, drained: 0 };
+      },
     };
     await new BrowserScheduler(session, {
       json: async path => path.startsWith("/v1/events") ? { events: [], high_water_cursor: "5", next_after: null } : {},
@@ -986,6 +990,7 @@ describe("BrowserScheduler", () => {
     }, { onProgress: value => progress.push(value.phase) }).poll();
 
     expect(progress).toEqual(["current"]);
+    expect(heads).toEqual([{ highWaterCursor: "5" }]);
   });
 
   it("settles a duplicates-only page to current after its ingest checkpoint", async () => {

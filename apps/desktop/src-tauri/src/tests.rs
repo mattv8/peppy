@@ -2067,6 +2067,11 @@ mod real_server {
                     .ingest_raw(event["envelope"].to_string().as_bytes(), Cursor(cursor))
                     .unwrap();
             }
+            self.client
+                .observe_replay_head(Cursor(
+                    page["high_water_cursor"].as_str().unwrap().parse().unwrap(),
+                ))
+                .unwrap();
             while self.client.apply_pending(1000).unwrap().applied > 0 {}
         }
     }

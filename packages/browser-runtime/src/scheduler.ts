@@ -329,6 +329,7 @@ export class BrowserScheduler {
       const events = array(page.events);
       this.targetHighWater = optionalDecimal(page.high_water_cursor);
       if (events.length === 0) {
+        if (this.targetHighWater !== undefined) await this.session.mutate("_worker_observe_replay_head", { highWaterCursor: this.targetHighWater });
         await this.publishProgress("applying");
         await this.observeHistorySearch(attempts, context, page);
         return "caughtUp";
@@ -338,6 +339,7 @@ export class BrowserScheduler {
         await this.session.mutate("ingest_batch", { events: batch });
         await this.publishProgress("receiving");
       }
+      if (this.targetHighWater !== undefined) await this.session.mutate("_worker_observe_replay_head", { highWaterCursor: this.targetHighWater });
       await this.apply(signal);
       // Duplicate or quarantine-only pages may apply nothing; settle the page's final phase from durable frontiers.
       await this.publishProgress("applying");
