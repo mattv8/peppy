@@ -5,7 +5,8 @@ use peppy_client_core::{
 };
 use peppy_desktop_api::{
     rcs_status::{
-        snapshot_at, RcsEligibilityState, RcsGatewayState, RcsStatusSnapshot, SnapshotAccess,
+        snapshot_at, typing_target, unique_current_linked_gateway, RcsStatusSnapshot,
+        SnapshotAccess,
     },
     GatewayView,
 };
@@ -474,46 +475,6 @@ fn trusted_roster(status: &NetStatus) -> Option<Vec<DeviceId>> {
         .flatten()
 }
 
-fn typing_target(
-    snapshot: &RcsStatusSnapshot,
-    conversation_id: ConversationId,
-) -> Option<DeviceId> {
-    let candidates: Vec<_> = snapshot
-        .eligibilities
-        .iter()
-        .filter(|eligibility| {
-            eligibility.conversation_id == conversation_id.to_string()
-                && eligibility.eligibility == RcsEligibilityState::Eligible
-                && snapshot.gateways.iter().any(|gateway| {
-                    gateway.gateway_id == eligibility.gateway_id
-                        && gateway.current
-                        && gateway.state == RcsGatewayState::Linked
-                })
-        })
-        .filter_map(|eligibility| eligibility.gateway_id.parse().ok())
-        .collect();
-    unique(candidates)
-}
-
-fn unique_current_linked_gateway(snapshot: &RcsStatusSnapshot) -> Option<DeviceId> {
-    unique(
-        snapshot
-            .gateways
-            .iter()
-            .filter(|gateway| gateway.current && gateway.state == RcsGatewayState::Linked)
-            .filter_map(|gateway| gateway.gateway_id.parse().ok())
-            .collect(),
-    )
-}
-
-fn unique(candidates: Vec<DeviceId>) -> Option<DeviceId> {
-    let candidate = candidates.first()?.to_owned();
-    candidates
-        .iter()
-        .all(|other| *other == candidate)
-        .then_some(candidate)
-}
-
 #[derive(Default)]
 pub(crate) struct LiveTypingState {
     context: Option<LiveEnableContext>,
@@ -586,6 +547,11 @@ pub(crate) struct TypingDisplayState {
 /// Inbound typing is keyed by conversation and group participant (`None` for 1:1 typing).
 type TypingKey = (ConversationId, Option<String>);
 
+struct ReplyFrames {
+    reply: String,
+    follow_ups: Vec<String>,
+}
+
 #[derive(Default)]
 struct InboundTyping {
     displays: HashMap<TypingKey, TypingDisplayState>,
@@ -639,7 +605,7 @@ impl InboundTyping {
         outcome: LiveOutcome,
         generation: Option<LiveEnableGeneration>,
         clock: LiveClock,
-    ) -> Option<String> {
+    ) -> Option<ReplyFrames> {
         if Some(outcome.generation) != generation {
             return None;
         }
@@ -649,9 +615,17 @@ impl InboundTyping {
         {
             return None;
         }
-        let reply = outcome
-            .reply
-            .and_then(|frame| serde_json::to_string(&frame).ok());
+        let reply = outcome.reply.and_then(|frame| {
+            let reply = serde_json::to_string(&frame).ok()?;
+            let follow_ups = outcome
+                .follow_ups
+                .into_iter()
+                .map(|frame| serde_json::to_string(&frame))
+                .take_while(Result::is_ok)
+                .filter_map(Result::ok)
+                .collect();
+            Some(ReplyFrames { reply, follow_ups })
+        });
         let Some(action) = outcome.action else {
             return reply;
         };
@@ -935,6 +909,8 @@ enum Admission {
 #[derive(Default)]
 struct InboundOutcome {
     wire: Option<String>,
+    follow_ups: Vec<String>,
+    mark: Option<SealMark>,
     suspended: bool,
 }
 
@@ -963,6 +939,8 @@ struct TypingActor {
     published: watch::Sender<Published>,
     counts: TypingCounts,
     counts_open: bool,
+    #[cfg(test)]
+    stopped_emitted_with_counts_open: bool,
 }
 
 #[derive(Default)]
@@ -970,8 +948,17 @@ struct TypingCounts {
     sealed: u64,
     not_sealed: u64,
     inbound: u64,
-    replies: u64,
+    replies_produced: u64,
     displays: u64,
+}
+
+impl TypingCounts {
+    fn summary(&self) -> String {
+        format!(
+            "peppy: live typing sealed={} not_sealed={} inbound={} replies_produced={} displays={}",
+            self.sealed, self.not_sealed, self.inbound, self.replies_produced, self.displays
+        )
+    }
 }
 
 impl TypingActor {
@@ -997,6 +984,8 @@ impl TypingActor {
             published,
             counts: TypingCounts::default(),
             counts_open: false,
+            #[cfg(test)]
+            stopped_emitted_with_counts_open: false,
         }
     }
 
@@ -1045,7 +1034,13 @@ impl TypingActor {
                 self.reevaluate();
             }
             Cmd::SocketWake => self.apply_socket_wake(),
-            Cmd::SocketClosed => self.log_counts(),
+            Cmd::SocketClosed => {
+                if self.socket_up {
+                    self.socket_up = false;
+                    self.teardown();
+                }
+                self.log_counts();
+            }
             #[cfg(test)]
             Cmd::SocketUp => {
                 let _ = self.session.live_typing.set_socket_state(true);
@@ -1272,10 +1267,7 @@ impl TypingActor {
     fn log_counts(&mut self) {
         self.counts_open = false;
         let counts = std::mem::take(&mut self.counts);
-        eprintln!(
-            "peppy: live typing sealed={} not_sealed={} inbound={} replies={} displays={}",
-            counts.sealed, counts.not_sealed, counts.inbound, counts.replies, counts.displays
-        );
+        eprintln!("{}", counts.summary());
     }
 
     fn observe_suspend(&mut self) -> bool {
@@ -1326,15 +1318,36 @@ impl TypingActor {
         if suspended || self.session.cancel.is_cancelled() {
             withhold_started(&mut outcome);
         }
-        let wire = self
+        let frames = self
             .inbound
             .publish(outcome, self.state.generation(), clock);
-        if wire.is_some() {
-            self.counts.replies += 1;
+        if frames.is_some() {
+            self.counts.replies_produced += 1;
         }
         self.inbound.expire(clock.mono_ms);
         self.emit();
-        InboundOutcome { wire, suspended }
+        let (wire, follow_ups, mark) = if !suspended && !self.session.cancel.is_cancelled() {
+            match frames {
+                Some(frames) => (
+                    Some(frames.reply),
+                    frames.follow_ups,
+                    Some(SealMark {
+                        seq: self.enabled_seq,
+                        sharing_epoch: self.sharing_epoch,
+                        state: TypingStateV2::Stopped,
+                    }),
+                ),
+                None => (None, Vec::new(), None),
+            }
+        } else {
+            (None, Vec::new(), None)
+        };
+        InboundOutcome {
+            wire,
+            follow_ups,
+            mark,
+            suspended,
+        }
     }
 
     fn expire(&mut self) {
@@ -1343,6 +1356,15 @@ impl TypingActor {
     }
 
     fn emit(&mut self) {
+        #[cfg(test)]
+        if self
+            .inbound
+            .events
+            .iter()
+            .any(|event| event.state == TypingStateV2::Stopped)
+        {
+            self.stopped_emitted_with_counts_open = self.counts_open;
+        }
         let generation = self.state.generation();
         let count = emit_events(&mut self.inbound, &self.session, generation) as u64;
         if count > 0 && self.counts.displays == 0 {
@@ -1782,10 +1804,8 @@ async fn run_socket(
                     if outcome.suspended {
                         return SocketEnd::Lost;
                     }
-                    if let Some(reply) = outcome.wire {
-                        if !bounded_send(socket, &session.cancel, Message::Text(reply.into())).await {
-                            return SocketEnd::Lost;
-                        }
+                    if let Some(end) = send_inbound_outcome(session, socket, outcome).await {
+                        return end;
                     }
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return SocketEnd::Lost,
@@ -1793,6 +1813,36 @@ async fn run_socket(
             }
         }
     }
+}
+
+async fn send_inbound_outcome<S>(
+    session: &Session,
+    socket: &mut WebSocketStream<S>,
+    outcome: InboundOutcome,
+) -> Option<SocketEnd>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if let Some(reply) = outcome.wire {
+        if !bounded_send(socket, &session.cancel, Message::Text(reply.into())).await {
+            return Some(SocketEnd::Lost);
+        }
+        if let Some(mark) = outcome.mark {
+            for json in outcome.follow_ups {
+                let mark = SealMark {
+                    state: TypingStateV2::Started,
+                    ..mark
+                };
+                match transmit(session, socket, SealedFrame { json, mark }).await {
+                    Transmit::Sent => {}
+                    Transmit::Dropped => break,
+                    Transmit::Lost => return Some(SocketEnd::Lost),
+                    Transmit::Cancelled => return Some(SocketEnd::Cancelled),
+                }
+            }
+        }
+    }
+    None
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1932,17 +1982,38 @@ async fn wait_or_cancel(
     delay: Duration,
     attempted_at: tokio::time::Instant,
 ) -> bool {
+    wait_or_cancel_with(
+        session,
+        delay,
+        attempted_at,
+        tokio::time::Instant::now(),
+        tokio::time::sleep_until,
+    )
+    .await
+}
+
+async fn wait_or_cancel_with<S, F>(
+    session: &Session,
+    delay: Duration,
+    attempted_at: tokio::time::Instant,
+    now: tokio::time::Instant,
+    sleep_until: S,
+) -> bool
+where
+    S: Fn(tokio::time::Instant) -> F,
+    F: std::future::Future<Output = ()>,
+{
     let floor = attempted_at + Duration::from_secs(5);
-    let deadline = (tokio::time::Instant::now() + delay).max(floor);
+    let deadline = (now + delay).max(floor);
     tokio::select! {
         biased;
         _ = session.cancel.cancelled() => false,
-        _ = tokio::time::sleep_until(deadline) => true,
+        _ = sleep_until(deadline) => true,
         _ = session.live_context_wake.notified() => {
             tokio::select! {
                 biased;
                 _ = session.cancel.cancelled() => false,
-                _ = tokio::time::sleep_until(floor) => true,
+                _ = sleep_until(floor) => true,
             }
         }
     }
@@ -1997,7 +2068,9 @@ fn process_inbound_frame(
     clock: LiveClock,
 ) -> Result<Option<String>, LiveError> {
     let outcome = client.open_typing_signal_v2_json(frame_json, clock)?;
-    let reply = inbound.publish(outcome, generation, clock);
+    let reply = inbound
+        .publish(outcome, generation, clock)
+        .map(|frames| frames.reply);
     inbound.expire(clock.mono_ms);
     Ok(reply)
 }
@@ -2013,10 +2086,7 @@ mod tests {
     use peppy_client_core::{
         RcsCapabilityState, RcsEligibility, RcsEligibilityProjection, RcsLinkStatusEvent,
     };
-    use peppy_desktop_api::{
-        gateways::{CapabilitiesResponse, DevicesResponse},
-        RcsConversationEligibility, RcsGatewayStatus,
-    };
+    use peppy_desktop_api::gateways::{CapabilitiesResponse, DevicesResponse};
     use tokio::net::TcpListener;
 
     const NOW_MS: i64 = 10_000;
@@ -2269,24 +2339,47 @@ mod tests {
     #[tokio::test]
     async fn context_wakes_respect_attempt_floor_and_cancellation() {
         let (_fixture, session, _) = session_with_linked_eligible_gateway();
-        let attempt = tokio::time::Instant::now() - Duration::from_millis(4800);
-        session.live_context_wake.notify_one();
-        let wait = wait_or_cancel(&session, Duration::from_secs(30), attempt);
-        tokio::pin!(wait);
-        assert!(tokio::time::timeout(Duration::from_millis(50), &mut wait)
-            .await
-            .is_err());
-        session.live_context_wake.notify_one();
-        assert!(tokio::time::timeout(Duration::from_secs(1), &mut wait)
-            .await
-            .unwrap());
+        let start = tokio::time::Instant::now();
+        let (clock, receiver) = watch::channel(start);
+        let sleep_until = |deadline| {
+            let mut receiver = receiver.clone();
+            async move {
+                while *receiver.borrow_and_update() < deadline {
+                    receiver.changed().await.unwrap();
+                }
+            }
+        };
+        let mut retry = LiveRetry {
+            backoff: Duration::from_secs(30),
+        };
+        for (step, delay) in [(0, 30), (1, 60)] {
+            let attempt = start + Duration::from_secs(step * 5);
+            assert_eq!(retry.after_failure(), Duration::from_secs(delay));
+            session.live_context_wake.notify_one();
+            let wait = wait_or_cancel_with(
+                &session,
+                Duration::from_secs(delay),
+                attempt,
+                attempt,
+                &sleep_until,
+            );
+            tokio::pin!(wait);
+            assert!(futures_util::poll!(&mut wait).is_pending());
+            clock.send_replace(attempt + Duration::from_millis(4_999));
+            assert!(futures_util::poll!(&mut wait).is_pending());
+            clock.send_replace(attempt + Duration::from_secs(5));
+            assert_eq!(futures_util::poll!(&mut wait), std::task::Poll::Ready(true));
+        }
+        assert_eq!(retry.backoff, Duration::from_secs(60));
         session.cancel.cancel();
         session.live_context_wake.notify_one();
         assert!(
-            !wait_or_cancel(
+            !wait_or_cancel_with(
                 &session,
                 Duration::from_secs(30),
-                tokio::time::Instant::now()
+                start,
+                start,
+                &sleep_until
             )
             .await
         );
@@ -2823,23 +2916,44 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let ack = process_inbound_frame(
-            &sender,
-            &mut InboundTyping::default(),
-            &challenge,
-            Some(LiveEnableGeneration(1)),
-            LiveClock {
-                wall_ms: 1_002,
-                mono_ms: 1_002,
-            },
-        )
-        .unwrap()
-        .unwrap();
+        let challenge_clock = LiveClock {
+            wall_ms: 1_002,
+            mono_ms: 1_002,
+        };
+        let outcome = sender
+            .open_typing_signal_v2_json(&challenge, challenge_clock)
+            .unwrap();
+        assert_eq!(outcome.follow_ups.len(), 1);
+        assert!(InboundTyping::default()
+            .publish(
+                outcome.clone(),
+                Some(LiveEnableGeneration(2)),
+                challenge_clock
+            )
+            .is_none());
+        let (_fixture, session, _) = real_supervisor_session("http://127.0.0.1:9");
+        let suspend = Arc::new(TestSuspendClock::new());
+        session.live_typing.install_suspend_clock(suspend.clone());
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        suspend.set(LIVE_SUSPEND_TICK + LIVE_SUSPEND_SKEW + Duration::from_secs(2));
+        let suspended = h.actor.publish_inbound(outcome.clone(), challenge_clock);
+        assert!(suspended.suspended);
+        assert!(suspended.wire.is_none());
+        assert!(suspended.follow_ups.is_empty());
+        let frames = InboundTyping::default()
+            .publish(outcome, Some(LiveEnableGeneration(1)), challenge_clock)
+            .unwrap();
+        let frames: Vec<_> = std::iter::once(frames.reply)
+            .chain(frames.follow_ups)
+            .collect();
+        assert_eq!(frames.len(), 2, "ack must be followed by the active start");
+        let ack = &frames[0];
         assert_eq!(
             process_inbound_frame(
                 &receiver,
                 &mut inbound,
-                &ack,
+                ack,
                 Some(LiveEnableGeneration(1)),
                 LiveClock {
                     wall_ms: 1_003,
@@ -2848,6 +2962,20 @@ mod tests {
             ),
             Ok(None)
         );
+        assert_eq!(
+            process_inbound_frame(
+                &receiver,
+                &mut inbound,
+                &frames[1],
+                Some(LiveEnableGeneration(1)),
+                LiveClock {
+                    wall_ms: 1_003,
+                    mono_ms: 1_003,
+                },
+            ),
+            Ok(None)
+        );
+        assert!(inbound.displays.contains_key(&(conversation, None)));
         let second = sender
             .seal_typing_signal_v2(
                 conversation,
@@ -2994,21 +3122,6 @@ mod tests {
         let (_, session, _) = session_with_linked_eligible_gateway();
         let status = session.status.lock().unwrap();
         assert!(resolve_typing_target(&status, inputs(&session), ConversationId::new()).is_none());
-    }
-
-    #[test]
-    fn ambiguous_gateways_have_no_target() {
-        let conversation_id = ConversationId::new();
-        let gateway_a = DeviceId::new();
-        let gateway_b = DeviceId::new();
-        let snapshot = RcsStatusSnapshot {
-            gateways: vec![gateway_status(gateway_a), gateway_status(gateway_b)],
-            eligibilities: vec![
-                eligibility(conversation_id, gateway_a),
-                eligibility(conversation_id, gateway_b),
-            ],
-        };
-        assert!(typing_target(&snapshot, conversation_id).is_none());
     }
 
     #[test]
@@ -3246,6 +3359,34 @@ mod tests {
             session.client.set_typing_sharing(true),
             Err(LiveError::Disabled)
         );
+    }
+
+    #[test]
+    fn socket_close_clears_active_display_before_resetting_counts() {
+        let (_fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        let generation = h.actor.state.generation().unwrap().0;
+        let peer = DeviceId::new();
+        h.actor.inbound.update_peer(PeerSessionUpdate {
+            peer_device_id: peer,
+            replaced_session_token: None,
+            current_session_token: 1,
+            validation_revision: 1,
+        });
+        h.actor.inbound.publish(
+            display_outcome(peer, conversation, generation, 1, 1, 20_000),
+            Some(LiveEnableGeneration(generation)),
+            clock(),
+        );
+        assert!(h.actor.inbound.displays.contains_key(&(conversation, None)));
+        h.actor.counts.displays = 7;
+        h.send(Cmd::SocketClosed);
+        assert!(h.actor.inbound.displays.is_empty());
+        assert!(h.actor.inbound.events.is_empty());
+        assert!(h.actor.stopped_emitted_with_counts_open);
+        assert_eq!(h.actor.counts.displays, 0);
+        assert!(!h.actor.counts_open);
     }
 
     #[test]
@@ -3935,6 +4076,167 @@ mod tests {
         .expect("peer answers the challenge")
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn refused_first_follow_up_stops_remaining_frames() {
+        let (_fixture, session, _) = real_supervisor_session("http://127.0.0.1:9");
+        let (commands, mut received) = mpsc::unbounded_channel();
+        session.live_typing.install(commands);
+        let (left, right) = tokio::io::duplex(4096);
+        let mut socket =
+            WebSocketStream::from_raw_socket(left, tungstenite::protocol::Role::Client, None).await;
+        let mut peer =
+            WebSocketStream::from_raw_socket(right, tungstenite::protocol::Role::Server, None)
+                .await;
+        let outcome = InboundOutcome {
+            wire: Some("reply".into()),
+            follow_ups: vec!["first".into(), "second".into()],
+            mark: Some(SealMark {
+                seq: 1,
+                sharing_epoch: 0,
+                state: TypingStateV2::Stopped,
+            }),
+            suspended: false,
+        };
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let observed = attempts.clone();
+        let actor = tokio::spawn(async move {
+            while let Some(Cmd::ConfirmTransmit { mark, reply }) = received.recv().await {
+                observed.lock().unwrap().push(mark.state);
+                let _ = reply.send(Admission::Rejected);
+            }
+        });
+        let end = send_inbound_outcome(&session, &mut socket, outcome).await;
+        assert!(end.is_none());
+        assert_eq!(*attempts.lock().unwrap(), [TypingStateV2::Started]);
+        actor.abort();
+        let message = futures_util::poll!(peer.next());
+        assert!(
+            matches!(message, std::task::Poll::Ready(Some(Ok(Message::Text(text)))) if text == "reply")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sharing_off_still_sends_control_reply_without_vault_follow_up() {
+        let (fixture, session, conversation) = real_supervisor_session("http://127.0.0.1:9");
+        let local = fixture.binding.device_id.parse().unwrap();
+        let peer = peer_sender(&fixture, local, &[conversation]);
+        share_capabilities(&peer, &session.client);
+        install_gateway(&session, &peer.device.to_string());
+        session.set_status(|status| status.rcs_live_roster.push(peer.device.to_string()));
+        let mut h = harness(&session);
+        h.send(Cmd::SocketUp);
+        assert!(h.send_typing(conversation, TypingStateV2::Started));
+        let start = h.sealed.try_recv().unwrap().json;
+        let sent_at: i64 = serde_json::from_str::<serde_json::Value>(&start).unwrap()["sent_at_ms"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        peer.wall.set(peer.wall.get().max(sent_at));
+        let challenge = peer
+            .client
+            .open_typing_signal_v2_json(&start, peer_clock(&peer))
+            .unwrap()
+            .reply
+            .unwrap();
+        assert!(h.sharing(false).is_ok());
+        let outcome = h.inbound(&serde_json::to_string(&challenge).unwrap());
+        assert!(outcome.wire.is_some());
+        assert!(outcome.follow_ups.is_empty());
+        let (left, right) = tokio::io::duplex(4096);
+        let mut socket =
+            WebSocketStream::from_raw_socket(left, tungstenite::protocol::Role::Client, None).await;
+        let mut remote =
+            WebSocketStream::from_raw_socket(right, tungstenite::protocol::Role::Server, None)
+                .await;
+        assert!(send_inbound_outcome(&session, &mut socket, outcome)
+            .await
+            .is_none());
+        assert!(matches!(
+            futures_util::poll!(remote.next()),
+            std::task::Poll::Ready(Some(Ok(Message::Text(_))))
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn socket_sends_ack_then_active_start_after_challenge() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (fixture, session, conversation) = real_supervisor_session(&origin);
+        let local: DeviceId = fixture.binding.device_id.parse().unwrap();
+        let peer = peer_sender(&fixture, local, &[conversation]);
+        share_capabilities(&peer, &session.client);
+        install_gateway(&session, &peer.device.to_string());
+        session.set_status(|status| status.rcs_live_roster.push(peer.device.to_string()));
+        start(session.clone());
+        let mut socket = accept_live_peer(&listener).await;
+        send_server_hello(&mut socket).await;
+        wait_for_live_enabled(&session, true).await;
+
+        assert!(request_send_typing(&session, conversation, TypingStateV2::Started).await);
+        let Some(Ok(Message::Text(start))) = timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+        else {
+            panic!("missing start");
+        };
+        let sent_at: i64 = serde_json::from_str::<serde_json::Value>(&start).unwrap()["sent_at_ms"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        peer.wall.set(peer.wall.get().max(sent_at));
+        let challenge = peer
+            .client
+            .open_typing_signal_v2_json(&start, peer_clock(&peer))
+            .unwrap()
+            .reply
+            .expect("peer challenges the start");
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&challenge).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        let Some(Ok(Message::Text(ack))) = timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+        else {
+            panic!("missing ack");
+        };
+        let Some(Ok(Message::Text(replay))) = timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("missing replay")
+        else {
+            panic!("missing replay");
+        };
+        let ack_sent: i64 = serde_json::from_str::<serde_json::Value>(&ack).unwrap()["sent_at_ms"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        peer.wall.set(peer.wall.get().max(ack_sent));
+        peer.client
+            .open_typing_signal_v2_json(&ack, peer_clock(&peer))
+            .unwrap();
+        let replay_sent: i64 = serde_json::from_str::<serde_json::Value>(&replay).unwrap()
+            ["sent_at_ms"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        peer.wall.set(peer.wall.get().max(replay_sent));
+        let result = peer
+            .client
+            .open_typing_signal_v2_json(&replay, peer_clock(&peer))
+            .unwrap();
+        assert!(matches!(
+            result.action,
+            Some(LiveAction::GatewayTypingIntent { .. })
+        ));
+        assert!(crate::sync::drain(&session, Duration::from_secs(5)).await);
+    }
+
     /// Drives challenge then ack through the actor, leaving the peer validated on the receiver.
     fn complete_handshake(h: &mut Harness, peer: &PeerSender, conversation: ConversationId) {
         let challenge = h
@@ -3943,6 +4245,24 @@ mod tests {
             .expect("challenge for an unknown session");
         let ack = peer_answer(peer, &challenge);
         assert!(h.inbound(&ack).wire.is_none());
+    }
+
+    #[test]
+    fn reply_counter_reports_produced_even_before_transport_sends() {
+        let (fixture, session, _) = real_supervisor_session("http://127.0.0.1:9");
+        let conversation = ConversationId::new();
+        let local = fixture.binding.device_id.parse().unwrap();
+        let peer = peer_sender(&fixture, local, &[conversation]);
+        share_capabilities(&peer, &session.client);
+        let mut h = harness(&session);
+        h.send(Cmd::GatewayRefresh(status_refresh(
+            &session,
+            &[&fixture.binding.device_id, &peer.device.to_string()],
+            true,
+        )));
+        h.send(Cmd::SocketUp);
+        assert!(h.inbound(&seal_started(&peer, conversation)).wire.is_some());
+        assert!(h.actor.counts.summary().contains("replies_produced=1"));
     }
 
     fn session_id_of(frame: &str) -> String {
@@ -4767,33 +5087,5 @@ mod tests {
             Err(LiveError::Disabled)
         );
         drop(bare);
-    }
-
-    fn gateway_status(gateway_id: DeviceId) -> RcsGatewayStatus {
-        RcsGatewayStatus {
-            gateway_id: gateway_id.to_string(),
-            state: RcsGatewayState::Linked,
-            current: true,
-            available: true,
-            healthy: true,
-            phone_responsive: true,
-            observed_at_ms: NOW_MS.to_string(),
-            capability_revision: "1".into(),
-            expires_at_ms: Some((NOW_MS + 1).to_string()),
-        }
-    }
-
-    fn eligibility(
-        conversation_id: ConversationId,
-        gateway_id: DeviceId,
-    ) -> RcsConversationEligibility {
-        RcsConversationEligibility {
-            conversation_id: conversation_id.to_string(),
-            gateway_id: gateway_id.to_string(),
-            eligibility: RcsEligibilityState::Eligible,
-            observed_at_ms: NOW_MS.to_string(),
-            mapping_revision: "1".into(),
-            expires_at_ms: Some((NOW_MS + 1).to_string()),
-        }
     }
 }
