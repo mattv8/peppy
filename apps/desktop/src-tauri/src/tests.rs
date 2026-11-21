@@ -1918,6 +1918,27 @@ mod real_server {
 
     const ADDRESS: &str = "+15555550123";
 
+    /// Authorization header of every replay request (`GET /v1/events`) the test server answered.
+    type EventReads = Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// Counts replay requests per device without changing the response.
+    async fn record_event_reads(
+        axum::extract::State(reads): axum::extract::State<EventReads>,
+        request: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        if request.method() == axum::http::Method::GET && request.uri().path() == "/v1/events" {
+            let header = request
+                .headers()
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            reads.lock().unwrap().push(header);
+        }
+        next.run(request).await
+    }
+
     struct Server {
         url: String,
         owner: String,
@@ -1929,6 +1950,7 @@ mod real_server {
         pool: sqlx::PgPool,
         schema: String,
         task: tokio::task::JoinHandle<()>,
+        event_reads: EventReads,
     }
 
     async fn start() -> Server {
@@ -1966,7 +1988,11 @@ mod real_server {
             .await
             .unwrap();
         server.start_maintenance().unwrap();
-        let router = server.router();
+        let event_reads = EventReads::default();
+        let router = server.router().layer(axum::middleware::from_fn_with_state(
+            event_reads.clone(),
+            record_event_reads,
+        ));
         let vault = VaultId::new();
         let profile = KeyProfile::new(vault.0, 1).unwrap();
         let fingerprint = profile.fingerprint().unwrap();
@@ -1997,6 +2023,7 @@ mod real_server {
             pool,
             schema,
             task,
+            event_reads,
         }
     }
 
@@ -2032,6 +2059,16 @@ mod real_server {
             transaction.commit().await.unwrap();
             (id, token)
         }
+        /// Replay requests (`GET /v1/events`) answered for the device that holds `token`.
+        fn replay_requests(&self, token: &str) -> usize {
+            let bearer = format!("Bearer {token}");
+            self.event_reads
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|header| **header == bearer)
+                .count()
+        }
         async fn shutdown(self) {
             self.task.abort();
             let _ = self.task.await;
@@ -2050,7 +2087,8 @@ mod real_server {
         _dir: tempfile::TempDir,
     }
     impl Gateway {
-        async fn sync(&self) {
+        /// Uploads queued records without pulling, so this peer stays behind the server.
+        async fn upload_outbox(&self) {
             let http = reqwest::Client::new();
             for envelope in self.client.pending_outbox().unwrap() {
                 http.post(format!("{}/v1/events", self.url))
@@ -2063,6 +2101,10 @@ mod real_server {
                     .unwrap();
                 self.client.ack_outbox(envelope.envelope_id).unwrap();
             }
+        }
+        async fn sync(&self) {
+            self.upload_outbox().await;
+            let http = reqwest::Client::new();
             let after = self.client.receive_cursor().unwrap().0;
             let page: Value = http
                 .get(format!("{}/v1/events?after={after}&limit=100", self.url))
@@ -2227,6 +2269,330 @@ mod real_server {
         let search = fresh.client.search_local(peppy_client_core::LocalSearchRequest {
             query: "Person".into(), kind: Some(peppy_client_core::SearchKind::Contact), cursor: None, limit: None,
         }).unwrap();
+        assert!(search.items.is_empty());
+        state.close_session().await;
+        server.shutdown().await;
+    }
+
+    /// Gateway peer for the deletion scenario: its compaction state comes from the real snapshot route.
+    async fn gateway_peer(server: &Server, id: DeviceId, token: String) -> Gateway {
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: dir.path().join("client.db"),
+                vault_id: server.vault,
+                device_id: id,
+            },
+            DatabaseKey::new(&[5; 32]).unwrap(),
+        )
+        .unwrap();
+        client.unlock(&server.profile, &server.header, PHRASE).unwrap();
+        let snapshot: Value = reqwest::Client::new()
+            .get(format!("{}/v1/snapshot", server.url))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        client
+            .set_server_compaction_state(
+                snapshot["compaction_supported"].as_bool().unwrap(),
+                snapshot["compaction_active"].as_bool().unwrap(),
+            )
+            .unwrap();
+        Gateway { client, token, url: server.url.clone(), _dir: dir }
+    }
+
+    /// Every envelope the server still stores for this vault, read as `token`, with its cursor.
+    async fn stored(url: &str, token: &str) -> Vec<(u64, Value)> {
+        let http = reqwest::Client::new();
+        let mut after = 0_u64;
+        let mut out = Vec::new();
+        loop {
+            let page: Value = http
+                .get(format!("{url}/v1/events?after={after}&limit=100"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let events = page["events"].as_array().unwrap();
+            if events.is_empty() {
+                return out;
+            }
+            for event in events {
+                after = event["cursor"].as_str().unwrap().parse().unwrap();
+                out.push((after, event["envelope"].clone()));
+            }
+        }
+    }
+
+    /// Polls the stored envelopes until `ready` accepts them, failing after `seconds`.
+    async fn poll_stored(
+        url: &str,
+        token: &str,
+        what: &str,
+        seconds: u64,
+        ready: impl Fn(&[(u64, Value)]) -> bool,
+    ) -> Vec<(u64, Value)> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+        loop {
+            let envelopes = stored(url, token).await;
+            if ready(&envelopes) {
+                return envelopes;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// `(compaction key, terminal)` for each compaction-bearing envelope `device` produced.
+    fn compaction_records(envelopes: &[(u64, Value)], device: DeviceId) -> Vec<(String, bool)> {
+        let device = device.to_string();
+        envelopes
+            .iter()
+            .filter(|(_, envelope)| envelope["producer_device_id"].as_str() == Some(device.as_str()))
+            .filter_map(|(_, envelope)| {
+                let compaction = envelope.get("compaction")?;
+                Some((
+                    compaction["key"].as_str()?.to_owned(),
+                    compaction["terminal"].as_bool() == Some(true),
+                ))
+            })
+            .collect()
+    }
+
+    /// The contact count a gateway peer reports for `book_id`, when the book is listed.
+    fn peer_contact_count(client: &Client, book_id: &str) -> Option<u64> {
+        let books: Value = serde_json::from_str(&client.list_contact_books_json().ok()?).ok()?;
+        let book = books["books"]
+            .as_array()?
+            .iter()
+            .find(|book| book["id"] == book_id)?;
+        book["contact_count"].as_u64()
+    }
+
+    /// The contact count the desktop view reports for `book_id`, when the book is listed.
+    fn desktop_contact_count(session: &Session, book_id: &str) -> Option<u64> {
+        let book = crate::contacts::list_books(session)
+            .ok()?
+            .into_iter()
+            .find(|book| book["id"] == book_id)?;
+        book["contactCount"].as_u64()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires TEST_DATABASE_URL plus the local SeaweedFS S3 from test.env; run with --include-ignored"]
+    async fn real_server_receiver_finishes_a_deletion_delivered_over_the_socket() {
+        receiver_completes_deletion(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires TEST_DATABASE_URL plus the local SeaweedFS S3 from test.env; run with --include-ignored"]
+    async fn real_server_receiver_finishes_after_unlock_when_locked_at_the_fence() {
+        receiver_completes_deletion(true).await;
+    }
+
+    /// The phone publishes c1..c5, and the deleter learns them. The phone then adds c6, which the
+    /// deleter never syncs. The phone is revoked and the deleter deletes the book. The receiver,
+    /// either live over its socket or locked until after the fence arrives, must drop the book and
+    /// upload exactly one member, for c6.
+    async fn receiver_completes_deletion(locked_at_fence: bool) {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let server = start().await;
+        let (phone_id, phone_token) = server.add_test_device("gateway").await;
+        let (deleter_id, deleter_token) = server.add_test_device("device").await;
+        let (receiver_id, receiver_token) = server.add_test_device("device").await;
+        let phone = gateway_peer(&server, phone_id, phone_token).await;
+        let deleter = gateway_peer(&server, deleter_id, deleter_token.clone()).await;
+        let book_id = "receiver-deletion-book";
+        let capture = |numbers: std::ops::Range<usize>| {
+            json!({
+                "schema_version": 1,
+                "book": {"id": book_id, "owner_device_id": phone_id.to_string(), "generation": "1", "state": "active", "region": "US"},
+                "contacts": numbers.map(|n| json!({
+                    "id": format!("contact-{n:03}"), "book_id": book_id, "revision": "1",
+                    "display_name": format!("Contact {n:03}"),
+                    "name": {"given": format!("Contact {n:03}"), "family": "Example"},
+                    "phones": [{"id": "phone", "value": format!("+1555000{n:04}")}],
+                    "emails": [], "organization": "", "addresses": [],
+                    "provenance": {"source_id": format!("source-{n:03}"), "read_only": false}
+                })).collect::<Vec<_>>()
+            })
+            .to_string()
+        };
+
+        // The phone publishes c1..c5. The deleter syncs until it holds all five.
+        phone.client.capture_contact_book(&capture(1..6)).unwrap();
+        while phone.client.seal_pending_batch(1000).unwrap() > 0 {}
+        phone.sync().await;
+        for _ in 0..5 {
+            deleter.sync().await;
+            if peer_contact_count(&deleter.client, book_id) == Some(5) {
+                break;
+            }
+        }
+        assert_eq!(peer_contact_count(&deleter.client, book_id), Some(5));
+
+        // The receiver is a real desktop session with its own replay worker. Locked, it only
+        // ingests; otherwise it unlocks and must reach the current state on the first publication.
+        let (_root, state, receiver) = desktop_locked(
+            &server,
+            receiver_id,
+            &receiver_token,
+            Arc::new(|| {}),
+            |_| {},
+        )
+        .await;
+        if !locked_at_fence {
+            unlock_desktop(&state, &receiver).await;
+        }
+        let head = stored(&server.url, &deleter_token)
+            .await
+            .last()
+            .map_or(0, |(cursor, _)| *cursor);
+        until("receiver ingests c1..c5", 60, || {
+            receiver.client.receive_cursor().unwrap().0 >= head
+        })
+        .await;
+        if !locked_at_fence {
+            until("receiver holds c1..c5, is live and is current", 60, || {
+                desktop_contact_count(&receiver, book_id) == Some(5)
+                    && receiver.status.lock().unwrap().live
+                    && receiver.sync_current().unwrap_or(false)
+            })
+            .await;
+        }
+
+        // The phone adds c6. The deleter does not sync again, so it never learns c6.
+        let known: std::collections::HashSet<String> = compaction_records(
+            &stored(&server.url, &deleter_token).await,
+            phone_id,
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+        let captured: Value =
+            serde_json::from_str(&phone.client.capture_contact_book(&capture(1..7)).unwrap())
+                .unwrap();
+        assert_eq!(captured["changed"], 1, "only c6 is a new contact");
+        while phone.client.seal_pending_batch(1000).unwrap() > 0 {}
+        phone.sync().await;
+        let after_c6 = stored(&server.url, &deleter_token).await;
+        let mut added: Vec<String> = compaction_records(&after_c6, phone_id)
+            .into_iter()
+            .map(|(key, _)| key)
+            .filter(|key| !known.contains(key))
+            .collect();
+        added.sort();
+        added.dedup();
+        let [contact6] = <[String; 1]>::try_from(added).expect("c6 has one new contact key");
+        let head_c6 = after_c6.last().map_or(0, |(cursor, _)| *cursor);
+        if locked_at_fence {
+            until("locked receiver ingests c6", 60, || {
+                receiver.client.receive_cursor().unwrap().0 >= head_c6
+            })
+            .await;
+        } else {
+            until("receiver holds c1..c6", 60, || {
+                desktop_contact_count(&receiver, book_id) == Some(6)
+            })
+            .await;
+        }
+
+        // The phone is revoked through the owner route, then the deleter deletes the book.
+        reqwest::Client::new()
+            .post(format!("{}/v1/devices/{}/revoke", server.url, phone_id.0))
+            .bearer_auth(&server.owner)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let deleted: Value = serde_json::from_str(
+            &deleter
+                .client
+                .delete_contact_book(
+                    &json!({"book_id": book_id, "revoked_device_ids": [phone_id.to_string()], "sync_current": true})
+                        .to_string(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(deleted["contacts"], 5);
+        deleter.upload_outbox().await;
+        let deletion = stored(&server.url, &deleter_token).await;
+        let deleter_records = compaction_records(&deletion, deleter_id);
+        let members: std::collections::HashSet<String> = deleter_records
+            .iter()
+            .filter(|(_, terminal)| *terminal)
+            .map(|(key, _)| key.clone())
+            .collect();
+        assert_eq!(members.len(), 5, "one terminal member per deleted contact");
+        assert_eq!(deleter_records.len(), 6, "the book fence plus five members");
+        assert!(members.is_subset(&known) && !members.contains(&contact6));
+        let fence_head = deletion.last().map_or(0, |(cursor, _)| *cursor);
+        let replays_at_delete = server.replay_requests(&receiver_token);
+
+        // A locked receiver takes the fence, then gets unlocked with no further deleter traffic.
+        if locked_at_fence {
+            until("locked receiver ingests the fence", 60, || {
+                receiver.client.receive_cursor().unwrap().0 >= fence_head
+            })
+            .await;
+            unlock_desktop(&state, &receiver).await;
+        }
+        until("receiver drops the deleted book", 60, || {
+            crate::contacts::list_books(&receiver)
+                .unwrap()
+                .iter()
+                .all(|book| book["id"] != book_id)
+        })
+        .await;
+
+        // Exactly one member, for c6, is uploaded; none for c1..c5. A settle window catches late duplicates.
+        poll_stored(&server.url, &deleter_token, "the receiver's deletion member", 60, |envelopes| {
+            !compaction_records(envelopes, receiver_id).is_empty()
+        })
+        .await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let uploaded = compaction_records(&stored(&server.url, &deleter_token).await, receiver_id);
+        assert_eq!(uploaded, vec![(contact6.clone(), true)]);
+        assert!(receiver.client.pending_outbox_batch(10).unwrap().is_empty());
+        println!(
+            "receiver replay requests after the delete: {}",
+            server.replay_requests(&receiver_token) - replays_at_delete
+        );
+
+        // A fresh device never sees the book, c6, or any contact.
+        let (fresh_id, fresh_token) = server.add_test_device("device").await;
+        let fresh = gateway_peer(&server, fresh_id, fresh_token).await;
+        for _ in 0..10 {
+            fresh.sync().await;
+        }
+        let books: Value =
+            serde_json::from_str(&fresh.client.list_contact_books_json().unwrap()).unwrap();
+        assert!(books["books"].as_array().unwrap().iter().all(|book| book["id"] != book_id));
+        let search = fresh
+            .client
+            .search_local(peppy_client_core::LocalSearchRequest {
+                query: "Contact".into(),
+                kind: Some(peppy_client_core::SearchKind::Contact),
+                cursor: None,
+                limit: None,
+            })
+            .unwrap();
         assert!(search.items.is_empty());
         state.close_session().await;
         server.shutdown().await;
@@ -2524,6 +2890,20 @@ mod real_server {
         notifier: Notifier,
         on_session: impl FnOnce(&Arc<Session>),
     ) -> (tempfile::TempDir, AppState, Arc<Session>) {
+        let (root, state, session) =
+            desktop_locked(server, device, token, notifier, on_session).await;
+        unlock_desktop(&state, &session).await;
+        (root, state, session)
+    }
+
+    /// A desktop session that has not been unlocked: connected and replaying, without keys.
+    async fn desktop_locked(
+        server: &Server,
+        device: DeviceId,
+        token: &str,
+        notifier: Notifier,
+        on_session: impl FnOnce(&Arc<Session>),
+    ) -> (tempfile::TempDir, AppState, Arc<Session>) {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::new(
             root.path().to_path_buf(),
@@ -2542,6 +2922,11 @@ mod real_server {
             .unwrap();
         let session = state.session().await.unwrap().unwrap();
         on_session(&session);
+        (root, state, session)
+    }
+
+    /// Fetches the vault header and unlocks a desktop session, as the native unlock does.
+    async fn unlock_desktop(state: &AppState, session: &Arc<Session>) {
         let vault = sync::fetch_vault(
             &session.api,
             &session.binding.vault_id,
@@ -2551,8 +2936,8 @@ mod real_server {
         .unwrap();
         let (profile, header) = sync::vault_header(&vault).unwrap();
         crate::unlock_with(
-            &state,
-            &session,
+            state,
+            session,
             profile,
             header,
             zeroize::Zeroizing::new(PHRASE.into()),
@@ -2560,7 +2945,6 @@ mod real_server {
         )
         .await
         .unwrap();
-        (root, state, session)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
