@@ -127,14 +127,16 @@ adb shell 'dumpsys package dev.peppy.mobile | grep -E "versionCode=|versionName=
 adb shell 'dumpsys activity services dev.peppy.mobile | grep -E "ServiceRecord|isForeground|createTime|lastActivity" | cut -c1-260'
 ```
 
-Ask the user to export diagnostics from **Settings → Advanced → Diagnostics → Share log**, then pull the newest file:
+Ask the user to export the phone's diagnostics from **Settings → Advanced → Diagnostics → Share log**, then pull the newest file:
 
 ```sh
 adb shell 'ls -lt /sdcard/Download | head -5'
 adb pull /sdcard/Download/diagnostics-<uuid>.log.txt .opencode/sessions/<task>/
 ```
 
-The first line of the export records `version=`, `source=<commit>`, and `dirty=`. Compare that commit with the checkout before reading code:
+The desktop app keeps its own log with the same record format. The user exports it from **Settings → Diagnostics → Export log** on the computer, and it is not pulled over `adb`. Its header has `platform=desktop` and no source commit. Desktop event and field numbers are in [diagnostics.rs](../../apps/desktop/src-tauri/src/diagnostics.rs), and [desktop diagnostics](../apps/desktop.md#diagnostics) describes the export.
+
+The first line of the phone export records `version=`, `source=<commit>`, and `dirty=`. Compare that commit with the checkout before reading code:
 
 ```sh
 git diff --stat <source-commit> HEAD -- apps/android crates/client-core crates/mobile-bindings
