@@ -66,16 +66,19 @@ internal fun DetailsNavigationRow(tag: String, label: String, attention: String?
 @Composable
 internal fun DetailsStatusRow(tag: String, label: String, value: String) {
     val fontScale = LocalDensity.current.fontScale
-    BoxWithConstraints(Modifier.fillMaxWidth().testTag(tag)) {
-        if (maxWidth < 360.dp || fontScale > 1.15f) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    BoxWithConstraints(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag(tag).semantics(mergeDescendants = true) {},
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        if (maxWidth < 312.dp || fontScale > 1.15f) {
+            Column(Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(value, style = MaterialTheme.typography.bodyMedium)
+                Text(value, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
             }
         } else {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                Text(value, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.End)
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(label, Modifier.weight(0.4f), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(value, Modifier.weight(0.6f), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, textAlign = TextAlign.End)
             }
         }
     }

@@ -2,7 +2,10 @@ package dev.peppy.mobile.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -18,8 +21,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.ui.theme.PeppyTokens
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun HeroBanner(title: String, body: String, tag: String) {
+internal fun HeroBanner(title: String, body: String, tag: String, badges: List<BadgeSpec> = emptyList()) {
     Column(Modifier.fillMaxWidth().background(PeppyTokens.Dark.surfaceChrome).testTag(tag).padding(24.dp)) {
         Canvas(Modifier.fillMaxWidth().height(72.dp).clearAndSetSemantics {}) {
             val accent = PeppyTokens.Dark.accent
@@ -33,5 +37,14 @@ internal fun HeroBanner(title: String, body: String, tag: String) {
         }
         Text(title, Modifier.padding(top = 16.dp).semantics { heading() }.testTag("$tag-title"), color = PeppyTokens.Dark.textStrong, style = MaterialTheme.typography.headlineSmall)
         Text(body, Modifier.padding(top = 8.dp).testTag("$tag-body"), color = PeppyTokens.Dark.textPrimary, style = MaterialTheme.typography.bodyLarge)
+        if (badges.isNotEmpty()) {
+            FlowRow(
+                Modifier.padding(top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                badges.forEach { PeppyBadge(it, onDarkBand = true) }
+            }
+        }
     }
 }
