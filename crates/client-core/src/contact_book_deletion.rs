@@ -78,7 +78,7 @@ pub(crate) fn apply(conn: &Connection, payload: &PrivatePayload) -> Result<bool,
             }
             // A stored book of another owner under this id is not this owner's to delete. The
             // fence is not stored at all, so a later book of that owner is not suppressed.
-            if stored_book(conn, book_id)?.is_some_and(|(owner, _)| owner != *owner_device_id) {
+            if stored_under_other_owner(conn, book_id, owner_device_id)? {
                 return Ok(true);
             }
             store_fence(conn, book_id, owner_device_id, generation, *deleted_at_ms)?;
@@ -105,7 +105,7 @@ pub(crate) fn apply(conn: &Connection, payload: &PrivatePayload) -> Result<bool,
             if has_successor(conn, owner_device_id)? {
                 return Ok(true);
             }
-            if stored_book(conn, book_id)?.is_some_and(|(owner, _)| owner != *owner_device_id) {
+            if stored_under_other_owner(conn, book_id, owner_device_id)? {
                 return Ok(true);
             }
             if !covers(conn, book_id, owner_device_id, Some(generation))? {
@@ -338,6 +338,14 @@ fn store_fence(
         params![book_id, owner, generation, deleted_at_ms],
     )?;
     Ok(())
+}
+
+/// Whether the book stored under `book_id` belongs to another owner. The stored book is normalised
+/// to its terminal owner first, so a legacy book still named by a succeeded owner is judged by the
+/// owner that now holds it, not consumed as a foreign-owner no-op.
+fn stored_under_other_owner(conn: &Connection, book_id: &str, owner: &str) -> Result<bool, Error> {
+    crate::device_succession::inherit_stored_book(conn, book_id)?;
+    Ok(stored_book(conn, book_id)?.is_some_and(|(stored, _)| stored != owner))
 }
 
 /// Whether the stored book belongs to `owner` at a generation not above `generation`.

@@ -2088,6 +2088,112 @@ fn snapshot_book_named_by_a_succeeded_owner_cannot_resurrect_under_the_successor
 }
 
 #[test]
+fn staged_predecessor_fence_never_removes_the_book_inherited_by_this_device() {
+    let mut p = pair();
+    capture(
+        &p.owner,
+        &book(&p.owner_cfg, BOOK),
+        vec![contact(BOOK, "c1", "Ada")],
+    );
+    p.server.upload(&p.owner);
+    let receiver_config = config(&p._dir, "successor", &p.vault);
+    let receiver = unlocked(&receiver_config, &p.vault);
+    // This device already holds the predecessor's book live, before any succession.
+    p.server.sync(&receiver);
+    assert_eq!(visible(&receiver, BOOK), ["c1"]);
+    let path = &receiver_config.database_path;
+    let predecessor = p.owner_cfg.device_id;
+    let me = receiver_config.device_id;
+    let template = p.server.log[0].clone();
+    let forged = |sequence: u64, payload: PrivatePayload| {
+        let mut envelope = template.clone();
+        envelope.envelope_id = EnvelopeId::new();
+        envelope.producer_sequence = SourceSequence(sequence);
+        reseal_snapshot_payload(&p.vault, &mut envelope, &payload);
+        envelope
+    };
+    let fence = |book_id: &str, sequence: u64| {
+        forged(
+            sequence,
+            PrivatePayload::ContactBookDeleted {
+                book_id: book_id.into(),
+                owner_device_id: predecessor.to_string(),
+                generation: "1".into(),
+                deleted_at_ms: 1_000,
+            },
+        )
+    };
+    // The unrelated fences keep promotion pending after the book's fence is staged.
+    let records: Vec<Envelope> = vec![fence(BOOK, 1), fence("other-1", 2), fence("other-2", 3)];
+    // The forged records sit above the cursors this device already journaled from the server.
+    let base = p.server.log.len() as u64;
+    let records: Vec<SnapshotRecord> = records
+        .into_iter()
+        .enumerate()
+        .map(|(index, envelope)| SnapshotRecord {
+            cursor: Cursor(base + index as u64 + 1),
+            envelope,
+        })
+        .collect();
+    import(&receiver, &records, base as usize + records.len(), Some(96));
+    let staged_fence = || -> i64 {
+        crate::contact_book_deletion::sqlcipher(path)
+            .query_row(
+                "SELECT COUNT(*) FROM projection_deleted_books WHERE book_id=?",
+                [BOOK],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    for _ in 0..50 {
+        if staged_fence() > 0 {
+            break;
+        }
+        receiver.apply_pending(1).unwrap();
+    }
+    assert_eq!(staged_fence(), 1, "the predecessor's fence is staged");
+    assert!(
+        !matches!(
+            state(&receiver),
+            Some((SnapshotProjectionState::Promoted, _))
+        ),
+        "promotion is still pending when the succession arrives"
+    );
+    crate::contact_book_deletion::sqlcipher(path)
+        .execute_batch(&format!(
+            "INSERT INTO device_successions(predecessor,successor,platform,hint_tag,key_epoch) VALUES('{predecessor}','{me}','android','hint',1)"
+        ))
+        .unwrap();
+
+    settle(&receiver);
+
+    assert_eq!(
+        state(&receiver),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    let connection = crate::contact_book_deletion::sqlcipher(path);
+    let owner: String = connection
+        .query_row("SELECT owner_device_id FROM contact_books", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let contacts: i64 = connection
+        .query_row("SELECT COUNT(*) FROM contacts WHERE id='c1'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        owner,
+        me.to_string(),
+        "the book is inherited by this device"
+    );
+    assert_eq!(
+        contacts, 1,
+        "the predecessor's fence leaves the inherited contact alone"
+    );
+}
+
+#[test]
 fn a_member_before_or_after_a_continued_upsert_stages_the_same_contact() {
     let mut p = pair();
     deleted_by_another_device(&mut p);

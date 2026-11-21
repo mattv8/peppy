@@ -1050,6 +1050,137 @@ fn succession_first_arrival_of_a_predecessor_book_is_inherited_without_deletion(
     ));
 }
 
+/// Whether a predecessor's deletion reaches the observer before or after the succession.
+#[derive(Clone, Copy, Debug)]
+enum Arrival {
+    BeforeSuccession,
+    AfterSuccession,
+}
+
+/// The predecessor's generation-1 deletion: the book fence, or Ada's member record.
+#[derive(Clone, Copy, Debug)]
+enum Deletion {
+    Fence,
+    Member,
+}
+
+/// Stored book and contact ids at `path`.
+fn stored_ids(path: &Path, sql: &str) -> Vec<String> {
+    let connection = sqlcipher(path);
+    let mut statement = connection.prepare(sql).unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// Stored book ids and contact ids of one device.
+type StoredIds = (Vec<String>, Vec<String>);
+
+/// Ingests the predecessor's book, the succession, the deletion and then the successor's
+/// republication, in order. Returns the observer's stored ids once the records are ingested live,
+/// and the same for a fresh device that ingests the whole list as one batch.
+fn predecessor_deletion_then_republication(
+    deletion: Deletion,
+    arrival: Arrival,
+) -> (StoredIds, StoredIds) {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let a_cfg = config(&dir, "android-before-reinstall", &vault);
+    let b_cfg = config(&dir, "android-after-reinstall", &vault);
+    let c_cfg = config(&dir, "observer", &vault);
+    let d_cfg = config(&dir, "fresh", &vault);
+    let a = unlocked(&a_cfg, &vault);
+    let b = unlocked(&b_cfg, &vault);
+    let c = unlocked(&c_cfg, &vault);
+    let (a_id, b_id) = (a_cfg.device_id, b_cfg.device_id);
+    capture_owned(&a, a_id);
+    a.register_device_hint("android", HINT).unwrap();
+    let a_events = a.pending_outbox().unwrap();
+    sync(&a_events, &b);
+    b.observe_server_high_water(Cursor(a_events.len() as u64))
+        .unwrap();
+    b.register_device_hint("android", HINT).unwrap();
+    let b_events = b.pending_outbox().unwrap();
+
+    let record = match deletion {
+        Deletion::Fence => fence(a_id, "1"),
+        Deletion::Member => ada_member(a_id, "1"),
+    };
+    let deletion_event = sealed(&vault, a_id, 900, record);
+    let republication = vec![
+        sealed(
+            &vault,
+            b_id,
+            1001,
+            PrivatePayload::ContactBookState {
+                book: book(b_id, "1"),
+            },
+        ),
+        sealed(
+            &vault,
+            b_id,
+            1002,
+            PrivatePayload::ContactUpserted {
+                book: book(b_id, "1"),
+                contact: contact("ada", "Ada"),
+            },
+        ),
+        sealed(
+            &vault,
+            b_id,
+            1003,
+            PrivatePayload::ContactUpserted {
+                book: book(b_id, "1"),
+                contact: contact("bea", "Bea"),
+            },
+        ),
+    ];
+    let (before, after) = match arrival {
+        Arrival::BeforeSuccession => (vec![deletion_event.clone()], Vec::new()),
+        Arrival::AfterSuccession => (Vec::new(), vec![deletion_event]),
+    };
+    let chunks = [a_events, before, b_events, after, republication];
+
+    for chunk in &chunks {
+        sync(chunk, &c);
+    }
+    let live = (
+        stored_ids(
+            &c_cfg.database_path,
+            "SELECT id FROM contact_books ORDER BY id",
+        ),
+        stored_ids(&c_cfg.database_path, "SELECT id FROM contacts ORDER BY id"),
+    );
+
+    let d = unlocked(&d_cfg, &vault);
+    sync(&chunks.concat(), &d);
+    let fresh = (
+        stored_ids(
+            &d_cfg.database_path,
+            "SELECT id FROM contact_books ORDER BY id",
+        ),
+        stored_ids(&d_cfg.database_path, "SELECT id FROM contacts ORDER BY id"),
+    );
+    (live, fresh)
+}
+
+#[test]
+fn predecessor_deletions_never_suppress_the_successors_republication_in_either_order() {
+    let expected = (
+        vec![BOOK.to_owned()],
+        vec!["ada".to_owned(), "bea".to_owned()],
+    );
+    for deletion in [Deletion::Fence, Deletion::Member] {
+        for arrival in [Arrival::BeforeSuccession, Arrival::AfterSuccession] {
+            let (live, fresh) = predecessor_deletion_then_republication(deletion, arrival);
+            assert_eq!(live, expected, "{deletion:?} {arrival:?}: live arrival");
+            assert_eq!(fresh, expected, "{deletion:?} {arrival:?}: fresh import");
+        }
+    }
+}
+
 #[test]
 fn republication_above_the_book_generation_establishes_known_provenance() {
     let dir = TempDir::new().unwrap();

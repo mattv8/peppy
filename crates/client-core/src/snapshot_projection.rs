@@ -1327,14 +1327,15 @@ pub(super) fn stage_removal(
     Ok(())
 }
 
-/// Moves every staged row that names a succeeded owner to that owner's terminal successor, so the
-/// promotion fences and filters judge it under the owner that now holds the book. Staging applies
-/// this already; it covers a succession learned after the record was staged. The named body of a
-/// staged book is kept, so promotion can still tell a book inherited here from an own book.
+/// Moves every staged book and contact that names a succeeded owner to that owner's terminal
+/// successor, so the promotion fences and filters judge it under the owner that now holds the book.
+/// Staging applies this already; it covers a succession learned after the record was staged. The
+/// named body of a staged book is kept, so promotion can still tell a book inherited here from an
+/// own book. Deletions are never retargeted: a predecessor's deletion has no successor authority.
 fn retarget_succeeded_owners(conn: &Connection, generation: i64) -> Result<(), Error> {
     let owners: Vec<String> = conn
         .prepare(
-            "SELECT owner_device_id FROM projection_books WHERE generation=?1 UNION SELECT publication_owner FROM projection_contacts WHERE generation=?1 AND publication_owner IS NOT NULL UNION SELECT owner_device_id FROM projection_deleted_books WHERE generation=?1 UNION SELECT owner_device_id FROM projection_deleted_members WHERE generation=?1",
+            "SELECT owner_device_id FROM projection_books WHERE generation=?1 UNION SELECT publication_owner FROM projection_contacts WHERE generation=?1 AND publication_owner IS NOT NULL",
         )?
         .query_map([generation], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
@@ -1352,22 +1353,6 @@ fn retarget_succeeded_owners(conn: &Connection, generation: i64) -> Result<(), E
             "UPDATE projection_contacts SET publication_owner=?3 WHERE generation=?1 AND publication_owner=?2",
             ids,
         )?;
-        conn.execute(
-            "INSERT INTO projection_deleted_books(generation,book_id,owner_device_id,book_generation,deleted_at_ms) SELECT generation,book_id,?3,book_generation,deleted_at_ms FROM projection_deleted_books WHERE generation=?1 AND owner_device_id=?2 ON CONFLICT(generation,book_id,owner_device_id) DO UPDATE SET book_generation=MAX(projection_deleted_books.book_generation,excluded.book_generation),deleted_at_ms=MAX(projection_deleted_books.deleted_at_ms,excluded.deleted_at_ms)",
-            ids,
-        )?;
-        conn.execute(
-            "DELETE FROM projection_deleted_books WHERE generation=?1 AND owner_device_id=?2",
-            params![generation, owner],
-        )?;
-        conn.execute(
-            "INSERT INTO projection_deleted_members(generation,book_id,contact_id,owner_device_id,book_generation) SELECT generation,book_id,contact_id,?3,book_generation FROM projection_deleted_members WHERE generation=?1 AND owner_device_id=?2 ON CONFLICT(generation,book_id,contact_id,owner_device_id) DO UPDATE SET book_generation=MAX(projection_deleted_members.book_generation,excluded.book_generation)",
-            ids,
-        )?;
-        conn.execute(
-            "DELETE FROM projection_deleted_members WHERE generation=?1 AND owner_device_id=?2",
-            params![generation, owner],
-        )?;
     }
     Ok(())
 }
@@ -1380,6 +1365,18 @@ fn retarget_succeeded_owners(conn: &Connection, generation: i64) -> Result<(), E
 /// deletion would remove it. Staged books and contacts it covers are dropped before the rest of
 /// promotion reads them. Contacts are filtered first, while their staged book rows still exist.
 fn promote_deletions(conn: &Connection, generation: i64, me: &str) -> Result<(), Error> {
+    // Staging ignores records of this device's own book and of a succeeded owner, as live apply
+    // does. Those can never apply later either, so every step below sees only applicable records.
+    // A succession learned after staging therefore cannot move a predecessor's deletion onto the
+    // local inherited book.
+    conn.execute(
+        "DELETE FROM projection_deleted_books WHERE generation=?1 AND (owner_device_id=?2 OR EXISTS(SELECT 1 FROM device_successions s WHERE s.predecessor=projection_deleted_books.owner_device_id))",
+        params![generation, me],
+    )?;
+    conn.execute(
+        "DELETE FROM projection_deleted_members WHERE generation=?1 AND (owner_device_id=?2 OR EXISTS(SELECT 1 FROM device_successions s WHERE s.predecessor=projection_deleted_members.owner_device_id))",
+        params![generation, me],
+    )?;
     // A different owner blocks the fence unless that owner's book is itself fenced in this
     // snapshot; this permits a reused id to retain both owners' fences.
     conn.execute(

@@ -412,6 +412,9 @@ CREATE TABLE IF NOT EXISTS deleted_contact_members(book_id TEXT NOT NULL, contac
         )?;
     }
     crate::device_succession::initialize(conn)?;
+    // Legacy books may still be stored under a predecessor the chain already succeeded. Their
+    // effective owner is normalised before any deletion record is judged against them.
+    crate::device_succession::move_stale_book_owners(conn)?;
     crate::contact_sync_requests::initialize(conn)?;
     Ok(())
 }
@@ -768,6 +771,10 @@ pub(crate) fn capture_tx(
             encoded(&public)?
         ],
     )?;
+    // A captured book may name a succeeded predecessor (the successor is the capturing device).
+    // Normalise the owner column, body owner and inheritance marker before anything publishes it.
+    crate::device_succession::inherit_stored_book(tx, book_id)?;
+    let public = book_body(tx, book_id)?;
     tx.execute(
         "INSERT INTO contact_book_sources(book_id,body) VALUES(?,?) ON CONFLICT(book_id) DO UPDATE SET body=excluded.body",
         params![book_id, encoded(&raw_book)?],

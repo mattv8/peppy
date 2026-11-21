@@ -1,7 +1,9 @@
 //! Re-pair regression coverage for contact-book device succession.
 
 use crate::common::*;
-use peppy_crypto::{KeyPurpose, derive_purpose_key, derive_root_key, encrypt};
+use peppy_crypto::{
+    EncryptedEnvelope, KeyPurpose, decrypt, derive_purpose_key, derive_root_key, encrypt,
+};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -902,6 +904,142 @@ fn predecessor_contact_events_after_succession_are_rejected() {
     let rejected = sync(&late_events, &observer);
     assert_eq!(rejected.quarantined, 2);
     assert_eq!(observer.quarantine_count().unwrap(), 2);
+}
+
+/// Decrypted payloads of `client`'s pending outbox, in order.
+fn published(vault: &Vault, client: &Client) -> Vec<PrivatePayload> {
+    let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
+    let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    queued(client)
+        .into_iter()
+        .map(|envelope| {
+            let (nonce, ciphertext) = envelope.ciphertext.split_at(24);
+            let encrypted = EncryptedEnvelope {
+                nonce: nonce.try_into().unwrap(),
+                ciphertext: ciphertext.to_vec(),
+            };
+            let plain = decrypt(&key, &envelope.aad_bytes().unwrap(), &encrypted).unwrap();
+            serde_json::from_slice(&plain).unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn successor_capture_of_a_predecessor_named_book_publishes_under_the_successor() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let a_cfg = config(&dir, "android-before-reinstall", &vault);
+    let b_cfg = config(&dir, "android-after-reinstall", &vault);
+    let a = unlocked(&a_cfg, &vault);
+    let b = unlocked(&b_cfg, &vault);
+    a.register_device_hint("android", HINT).unwrap();
+    let a_events = queued(&a);
+    sync(&a_events, &b);
+    b.observe_server_high_water(Cursor(a_events.len() as u64))
+        .unwrap();
+    b.register_device_hint("android", HINT).unwrap();
+    b.pending_outbox().unwrap();
+
+    // The successor captures the book still named by its predecessor.
+    capture(&b, &a_cfg, "address-book");
+
+    let successor = b_cfg.device_id.to_string();
+    let listed = books(&b);
+    assert_eq!(listed["books"][0]["owner_device_id"], json!(successor));
+    let connection = sqlcipher(&b_cfg.database_path);
+    let body: String = connection
+        .query_row(
+            "SELECT body FROM contact_books WHERE id='address-book'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["owner_device_id"], json!(successor));
+    let owners: Vec<String> = connection
+        .prepare("SELECT publication_owner FROM contacts WHERE book_id='address-book'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(owners, vec![successor.clone(), successor.clone()]);
+    let marked: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM inherited_contact_books WHERE book_id='address-book' AND predecessor=?",
+            [a_cfg.device_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        marked, 1,
+        "the captured book carries the inheritance marker"
+    );
+
+    let published_books: Vec<Value> = published(&vault, &b)
+        .into_iter()
+        .filter_map(|payload| match payload {
+            PrivatePayload::ContactBookState { book }
+            | PrivatePayload::ContactUpserted { book, .. } => Some(book),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !published_books.is_empty(),
+        "the capture publishes the book"
+    );
+    for book in &published_books {
+        assert_eq!(book["owner_device_id"], json!(successor), "{book}");
+    }
+    assert!(matches!(
+        b.contact_book_selection().unwrap(),
+        ContactBookSelection::Inherited { ref book_id, .. } if book_id == "address-book"
+    ));
+}
+
+#[test]
+fn successor_deletion_removes_a_legacy_stranded_book_before_any_reconciliation() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let a_cfg = config(&dir, "android-a", &vault);
+    let c_cfg = config(&dir, "android-c", &vault);
+    let a = unlocked(&a_cfg, &vault);
+    let c = unlocked(&c_cfg, &vault);
+    let b = DeviceId::new();
+
+    capture(&a, &a_cfg, "address-book");
+    sync(&queued(&a), &c);
+    drop(c);
+    // Legacy state: the authenticated succession A→B is recorded, but the book is still stored
+    // under its predecessor, as older code left it.
+    sqlcipher(&c_cfg.database_path)
+        .execute(
+            "INSERT INTO device_successions(predecessor,successor,platform,hint_tag,key_epoch) VALUES(?,?,?,?,?)",
+            params![a_cfg.device_id.to_string(), b.to_string(), "android", tag(&vault), 1],
+        )
+        .unwrap();
+
+    // Reopening repairs the stored owner; the successor's deletion then removes the book.
+    let reopened = unlocked(&c_cfg, &vault);
+    let fence = sealed(
+        &vault,
+        b,
+        1,
+        PrivatePayload::ContactBookDeleted {
+            book_id: "address-book".into(),
+            owner_device_id: b.to_string(),
+            generation: "1".into(),
+            deleted_at_ms: 1_000,
+        },
+    );
+    let applied = sync(&[fence], &reopened);
+    assert_eq!(applied.quarantined, 0);
+    assert!(books(&reopened)["books"].as_array().unwrap().is_empty());
+    let connection = sqlcipher(&c_cfg.database_path);
+    let contacts: i64 = connection
+        .query_row("SELECT COUNT(*) FROM contacts", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(contacts, 0);
 }
 
 #[test]

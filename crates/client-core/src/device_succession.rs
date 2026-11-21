@@ -298,6 +298,8 @@ fn accept(
     if conn.changes() == 0 {
         return Ok(false);
     }
+    // Deletion records a predecessor made stay keyed by it. Once succeeded, it has no authority,
+    // so they never delete the successor's book, whichever arrived first.
     let books: Vec<(String, String)> = conn
         .prepare("SELECT id,body FROM contact_books WHERE owner_device_id=?")?
         .query_map([predecessor.to_string()], |row| {
@@ -307,33 +309,8 @@ fn accept(
     for (book_id, body) in books {
         transfer_book(conn, &book_id, &predecessor.to_string(), &body, &terminal)?;
     }
-    transfer_fences(conn, &predecessor.to_string(), &terminal)?;
     crate::requeue_successor_invalid_payload(conn, &terminal)?;
     Ok(true)
-}
-
-/// Moves the deletion fences and member records a predecessor holds to its terminal successor.
-/// Fences are judged by the effective owner, so they must be keyed by it. Each keeps its highest
-/// generation.
-fn transfer_fences(conn: &Connection, predecessor: &str, terminal: &DeviceId) -> Result<(), Error> {
-    let terminal = terminal.to_string();
-    conn.execute(
-        "INSERT INTO deleted_contact_books(book_id,owner_device_id,generation,deleted_at_ms) SELECT book_id,?2,generation,deleted_at_ms FROM deleted_contact_books WHERE owner_device_id=?1 ON CONFLICT(book_id,owner_device_id) DO UPDATE SET deleted_at_ms=CASE WHEN excluded.generation>deleted_contact_books.generation THEN excluded.deleted_at_ms ELSE deleted_contact_books.deleted_at_ms END,generation=MAX(deleted_contact_books.generation,excluded.generation)",
-        params![predecessor, terminal],
-    )?;
-    conn.execute(
-        "DELETE FROM deleted_contact_books WHERE owner_device_id=?",
-        [predecessor],
-    )?;
-    conn.execute(
-        "INSERT INTO deleted_contact_members(book_id,contact_id,owner_device_id,generation) SELECT book_id,contact_id,?2,generation FROM deleted_contact_members WHERE owner_device_id=?1 ON CONFLICT(book_id,contact_id,owner_device_id) DO UPDATE SET generation=MAX(deleted_contact_members.generation,excluded.generation)",
-        params![predecessor, terminal],
-    )?;
-    conn.execute(
-        "DELETE FROM deleted_contact_members WHERE owner_device_id=?",
-        [predecessor],
-    )?;
-    Ok(())
 }
 
 /// Hands a book from its succeeded owner to `terminal`. Its contacts follow the book so that
