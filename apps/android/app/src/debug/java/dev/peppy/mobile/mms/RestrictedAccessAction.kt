@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.compose.runtime.Composable
 import dev.peppy.mobile.R
 
+internal fun restrictedMessageAccessVisible(): Boolean = true
+
 @Composable
 internal fun RestrictedNotAllowedAccessControls(
     context: Context,
