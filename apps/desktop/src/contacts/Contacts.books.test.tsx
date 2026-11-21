@@ -6,7 +6,7 @@ import { ContactsView } from "./Contacts";
 import { BookRail } from "./BookRail";
 import type { ContactActionNotice } from "./contact-action-notice";
 import { deferred, mockContactBook, resetContactBridgeMocks, restoreContactDomGlobals } from "./contacts-test-utils";
-import { RemovedBookStrip } from "./RemovedBookStrip";
+import { RemoveBookDialog, RemovedBookStrip } from "./RemovedBookStrip";
 
 vi.mock("../bridge/bridge", { spy: true });
 
@@ -18,7 +18,7 @@ function renderRail(books: ContactBookView[]) {
   const onBooksChanged = vi.fn();
   const onRemoveRequest = vi.fn();
   const onNotice = vi.fn();
-  render(<BookRail books={books} bookId={books[0].id} width={220} panelRef={{ current: null }} onSelect={onSelect} onBooksChanged={onBooksChanged} onRemoveRequest={onRemoveRequest} onNotice={onNotice} />);
+  render(<BookRail books={books} loading={false} bookId={books[0].id} width={220} panelRef={{ current: null }} onSelect={onSelect} onBooksChanged={onBooksChanged} onRemoveRequest={onRemoveRequest} onNotice={onNotice} />);
   return { onSelect, onBooksChanged, onRemoveRequest, onNotice };
 }
 
@@ -56,6 +56,17 @@ describe("removed contact book", () => {
     await waitFor(() => expect(bridge.forget_contact_book).toHaveBeenCalledWith("book-iphone"));
     await waitFor(() => expect(removalDialog()).not.toBeInTheDocument());
     await waitFor(() => expect(document.querySelector("#contacts-center-pane")).toHaveTextContent("Removed iPhone from this computer."));
+  });
+
+  it("counts the book's contacts in the dialog, with a singular form for one", () => {
+    const dialogFor = (contactCount: number) => {
+      const view = render(<RemoveBookDialog book={{ ...removedBook, contactCount }} opener={{ current: null }} onDismiss={vi.fn()} onRemoved={vi.fn()} onNotice={vi.fn()} />);
+      const text = removalDialog()!.textContent;
+      view.unmount();
+      return text;
+    };
+    expect(dialogFor(1)).toContain("iPhone and its 1 contact stop showing");
+    expect(dialogFor(1803)).toContain(`its ${new Intl.NumberFormat().format(1803)} contacts stop showing`);
   });
 
   it("keeps the dialog open on failure", async () => {
@@ -114,6 +125,19 @@ describe("contact book rail", () => {
   });
   afterEach(() => restoreContactDomGlobals());
 
+  it("shows placeholder rows, hidden from assistive tech, until the book list has loaded", () => {
+    const railProps = { bookId: "", width: 220, panelRef: { current: null }, onSelect: vi.fn(), onBooksChanged: vi.fn(), onRemoveRequest: vi.fn(), onNotice: vi.fn() };
+    const view = render(<BookRail books={[]} loading {...railProps} />);
+    const list = document.getElementById("contacts-books")!;
+    expect(list).toHaveAttribute("aria-busy", "true");
+    expect(list.querySelectorAll('li[data-book-skeleton][aria-hidden="true"]')).toHaveLength(3);
+
+    view.rerender(<BookRail books={[mockContactBook]} loading={false} {...railProps} bookId={mockContactBook.id} />);
+    expect(list).toHaveAttribute("aria-busy", "false");
+    expect(list.querySelector("li[data-book-skeleton]")).toBeNull();
+    expect(list.querySelectorAll("li[data-book-row]")).toHaveLength(1);
+  });
+
   it("shows a lookup switch on each row only with two or more books", () => {
     renderRail([mockContactBook, otherBook]);
     expect(screen.getAllByRole("switch")).toHaveLength(2);
@@ -122,7 +146,7 @@ describe("contact book rail", () => {
   });
 
   it("hides the switch for one included book and keeps it for one excluded book", () => {
-    const { unmount } = render(<BookRail books={[mockContactBook]} bookId={mockContactBook.id} width={220} panelRef={{ current: null }} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onNotice={vi.fn()} />);
+    const { unmount } = render(<BookRail books={[mockContactBook]} loading={false} bookId={mockContactBook.id} width={220} panelRef={{ current: null }} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onNotice={vi.fn()} />);
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     unmount();
     renderRail([{ ...mockContactBook, lookupExcluded: true }]);
@@ -401,7 +425,7 @@ describe("book rail placement, hidden-name line, icon, and sync reason", () => {
 
   it("anchors the menu under its more button, never left of the rail", () => {
     const panelRef = { current: null as HTMLElement | null };
-    render(<BookRail books={[mockContactBook, removedBook]} bookId={mockContactBook.id} width={220} panelRef={panelRef} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onNotice={vi.fn()} />);
+    render(<BookRail books={[mockContactBook, removedBook]} loading={false} bookId={mockContactBook.id} width={220} panelRef={panelRef} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onNotice={vi.fn()} />);
     vi.spyOn(panelRef.current!, "getBoundingClientRect").mockReturnValue({ left: 60 } as DOMRect);
     const button = screen.getByRole("button", { name: "More actions for iPhone" });
     vi.spyOn(button, "getBoundingClientRect").mockReturnValue({ left: 80, right: 100, top: 26, bottom: 50 } as DOMRect);
@@ -411,7 +435,7 @@ describe("book rail placement, hidden-name line, icon, and sync reason", () => {
 
   it("keeps a right-click menu's pointer position but clamps it to the rail", () => {
     const panelRef = { current: null as HTMLElement | null };
-    render(<BookRail books={[mockContactBook, removedBook]} bookId={mockContactBook.id} width={220} panelRef={panelRef} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onNotice={vi.fn()} />);
+    render(<BookRail books={[mockContactBook, removedBook]} loading={false} bookId={mockContactBook.id} width={220} panelRef={panelRef} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onNotice={vi.fn()} />);
     vi.spyOn(panelRef.current!, "getBoundingClientRect").mockReturnValue({ left: 60 } as DOMRect);
     fireEvent.contextMenu(document.querySelector<HTMLElement>('li[data-book-id="book-iphone"]')!, { clientX: 20, clientY: 90 });
     expect(document.getElementById("contacts-book-menu")).toHaveStyle({ left: "64px", top: "90px" });

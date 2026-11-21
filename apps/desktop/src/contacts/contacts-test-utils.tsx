@@ -86,6 +86,8 @@ export function resetContactBridgeMocks() {
     mockContactRiver,
   ]);
   vi.mocked(bridge.forget_contact_book).mockResolvedValue(undefined);
+  // clearAllMocks keeps implementations, so a scan status one test sets would leak into the next.
+  vi.mocked(bridge.get_contact_sync_request).mockResolvedValue(null);
   vi.mocked(bridge.list_restorable_contacts).mockResolvedValue([]);
 }
 

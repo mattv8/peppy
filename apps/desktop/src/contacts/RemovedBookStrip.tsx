@@ -3,6 +3,7 @@ import { Modal } from "@peppy/desktop-ui";
 import { bridge, type ContactBookView } from "../bridge/bridge";
 import { IsolatedText } from "../notices/IsolatedText";
 import type { PostContactActionNotice } from "./contact-action-notice";
+import { bookContactCountText } from "./contact-labels";
 import "./book-rail.css";
 
 /** The removed-book strip. The removal dialog itself is owned by ContactsView, so it survives the strip leaving the status slot. */
@@ -26,7 +27,7 @@ export function RemovedBookStrip({ book, onRemoveRequest }: {
 
 export function RemoveBookDialog({ book, opener, onDismiss, onRemoved, onNotice }: {
   book: ContactBookView;
-  opener: React.RefObject<HTMLElement | null>;
+  opener: RefObject<HTMLElement | null>;
   onDismiss(): void;
   onRemoved(bookId: string): void;
   onNotice: PostContactActionNotice;
@@ -55,7 +56,7 @@ export function RemoveBookDialog({ book, opener, onDismiss, onRemoved, onNotice 
     <button type="button" className="secondary-button" disabled={busy} onClick={onDismiss}>Cancel</button>
     <button type="button" className="destructive-button" disabled={busy} onClick={() => void remove()}>{busy ? "Removing…" : "Remove from this computer"}</button>
   </>}>
-    <p><IsolatedText text={book.deviceName} /> and its {book.contactCount} contacts stop showing on this computer, and names from this book stop being used here. Other devices in your vault keep theirs. Contacts on the phone aren't touched.</p>
+    <p><IsolatedText text={book.deviceName} /> and its {bookContactCountText(book.contactCount)} stop showing on this computer, and names from this book stop being used here. Other devices in your vault keep theirs. Contacts on the phone aren't touched.</p>
     <p>You can't bring the book back on this computer later.</p>
     {failed && <p role="alert">Couldn't remove this book. Try again.</p>}
   </Modal>;
