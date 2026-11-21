@@ -384,14 +384,6 @@ CREATE TABLE IF NOT EXISTS contact_book_deletion_completion_contacts(book_id TEX
         "contact_book_deletion_completion",
         "gate_cursor INTEGER NOT NULL DEFAULT 0",
     )?;
-    // The publication a late covered record owes for; NULL for contacts captured by a fence.
-    for definition in ["publication_producer TEXT", "publication_sequence INTEGER"] {
-        crate::add_column_if_missing(
-            conn,
-            "contact_book_deletion_completion_contacts",
-            definition,
-        )?;
-    }
     let columns = conn
         .prepare("PRAGMA table_info(contacts)")?
         .query_map([], |row| row.get::<_, String>(1))?
@@ -2371,10 +2363,9 @@ pub(crate) fn apply_event(
     producer: &str,
     historical: bool,
     key_epoch: u32,
-    sequence: i64,
     payload: &PrivatePayload,
 ) -> Result<bool, Error> {
-    match apply_peer(conn, producer, historical, key_epoch, sequence, payload) {
+    match apply_peer(conn, producer, historical, key_epoch, payload) {
         Err(Error::InvalidRequest(_)) => Ok(false),
         other => other,
     }
@@ -2517,7 +2508,6 @@ fn apply_peer(
     producer: &str,
     historical: bool,
     key_epoch: u32,
-    sequence: i64,
     payload: &PrivatePayload,
 ) -> Result<bool, Error> {
     match payload {
@@ -2535,13 +2525,7 @@ fn apply_peer(
                 // deleter's member, so it is recorded as owed work. A malformed record stays a no-op.
                 if let Ok((id, _, _)) = peer_contact(contact, book_id) {
                     let owner = publication_owner(conn, book)?;
-                    crate::contact_book_deletion::owe_covered_contact(
-                        conn,
-                        book_id,
-                        &owner,
-                        &id,
-                        (producer, sequence),
-                    )?;
+                    crate::contact_book_deletion::owe_covered_contact(conn, book_id, &owner, &id)?;
                 }
                 return Ok(true);
             }
@@ -2605,7 +2589,6 @@ fn apply_peer(
                         book_id,
                         &fence_owner,
                         contact_id,
-                        (producer, sequence),
                     )?;
                 }
                 return Ok(true);
@@ -2853,60 +2836,60 @@ mod tests {
             book: json!({"id":"b1"}),
             contact: json!({}),
         };
-        assert!(!apply_event(&conn, "owner", false, 1, 1, &bad).unwrap());
+        assert!(!apply_event(&conn, "owner", false, 1, &bad).unwrap());
         let bad_rev = PrivatePayload::ContactUpserted {
             book: book("owner", "1"),
             contact: contact("01", "A"),
         };
-        assert!(!apply_event(&conn, "owner", false, 1, 1, &bad_rev).unwrap());
+        assert!(!apply_event(&conn, "owner", false, 1, &bad_rev).unwrap());
         let bad_request = PrivatePayload::ContactEditRequest {
             request: json!({"schema_version":1}),
         };
-        assert!(!apply_event(&conn, "peer", false, 1, 1, &bad_request).unwrap());
+        assert!(!apply_event(&conn, "peer", false, 1, &bad_request).unwrap());
     }
 
     #[test]
     fn foreign_owner_and_cross_book_contacts_are_rejected() {
         let conn = db();
-        assert!(apply_event(&conn, "owner", false, 1, 1, &upsert("1", "A")).unwrap());
+        assert!(apply_event(&conn, "owner", false, 1, &upsert("1", "A")).unwrap());
         // Another device claiming the same book id is quarantined and changes nothing.
         let hijack = PrivatePayload::ContactUpserted {
             book: book("mallory", "9"),
             contact: contact("9", "M"),
         };
-        assert!(!apply_event(&conn, "mallory", false, 1, 1, &hijack).unwrap());
+        assert!(!apply_event(&conn, "mallory", false, 1, &hijack).unwrap());
         // A contact naming another book inside an owned book's event is rejected.
         let cross = PrivatePayload::ContactUpserted {
             book: book("owner", "1"),
             contact: json!({"id":"c1","book_id":"b2","revision":"5","display_name":"X"}),
         };
-        assert!(!apply_event(&conn, "owner", false, 1, 1, &cross).unwrap());
+        assert!(!apply_event(&conn, "owner", false, 1, &cross).unwrap());
         assert_eq!(name(&conn).0, "A");
     }
 
     #[test]
     fn tombstones_and_upserts_are_revision_gated() {
         let conn = db();
-        assert!(apply_event(&conn, "owner", false, 1, 1, &upsert("3", "Three")).unwrap());
+        assert!(apply_event(&conn, "owner", false, 1, &upsert("3", "Three")).unwrap());
         let stale = PrivatePayload::ContactRemoved {
             book_id: "b1".into(),
             contact_id: "c1".into(),
             tombstone: json!({"contact_id":"c1","revision":"2","deleted_at":1,"restored_contact":contact("2","Two")}),
         };
-        assert!(apply_event(&conn, "owner", false, 1, 1, &stale).unwrap());
+        assert!(apply_event(&conn, "owner", false, 1, &stale).unwrap());
         assert_eq!(name(&conn), ("Three".into(), None));
         let fresh = PrivatePayload::ContactRemoved {
             book_id: "b1".into(),
             contact_id: "c1".into(),
             tombstone: json!({"contact_id":"c1","revision":"4","deleted_at":7,"restored_contact":contact("4","Three")}),
         };
-        assert!(apply_event(&conn, "owner", false, 1, 1, &fresh).unwrap());
+        assert!(apply_event(&conn, "owner", false, 1, &fresh).unwrap());
         assert_eq!(name(&conn), ("Three".into(), Some(7)));
         // A replayed older upsert cannot resurrect the tombstoned contact.
-        assert!(apply_event(&conn, "owner", false, 1, 1, &upsert("3", "Three")).unwrap());
+        assert!(apply_event(&conn, "owner", false, 1, &upsert("3", "Three")).unwrap());
         assert_eq!(name(&conn).1, Some(7));
         // A non-owner tombstone is quarantined.
-        assert!(!apply_event(&conn, "mallory", false, 1, 1, &fresh).unwrap());
+        assert!(!apply_event(&conn, "mallory", false, 1, &fresh).unwrap());
     }
 
     #[test]
@@ -2917,7 +2900,6 @@ mod tests {
                 &conn,
                 "owner",
                 false,
-                1,
                 1,
                 &PrivatePayload::ContactBookState {
                     book: book("owner", "1")
@@ -2942,11 +2924,11 @@ mod tests {
         let result = |status: &str| PrivatePayload::ContactEditResult {
             result: json!({"request_id":"r1","book_id":"b1","status":status}),
         };
-        assert!(!apply_event(&conn, "mallory", false, 1, 1, &result("applied")).unwrap());
+        assert!(!apply_event(&conn, "mallory", false, 1, &result("applied")).unwrap());
         assert_eq!(status(&conn), "requested");
-        assert!(!apply_event(&conn, "owner", false, 1, 1, &result("approved_by_magic")).unwrap());
-        assert!(apply_event(&conn, "owner", false, 1, 1, &result("rejected")).unwrap());
-        assert!(apply_event(&conn, "owner", false, 1, 1, &result("applied")).unwrap());
+        assert!(!apply_event(&conn, "owner", false, 1, &result("approved_by_magic")).unwrap());
+        assert!(apply_event(&conn, "owner", false, 1, &result("rejected")).unwrap());
+        assert!(apply_event(&conn, "owner", false, 1, &result("applied")).unwrap());
         assert_eq!(status(&conn), "rejected");
     }
 
@@ -2959,7 +2941,6 @@ mod tests {
                 &conn,
                 "peer",
                 true,
-                1,
                 1,
                 &PrivatePayload::ContactEditRequest { request }
             )

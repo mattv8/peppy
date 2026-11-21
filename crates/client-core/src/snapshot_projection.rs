@@ -644,6 +644,7 @@ pub(crate) fn advance(
             }
         };
         if let Some(payload) = payload {
+            learn_staged_contact(conn, &envelope, &payload)?;
             let staged_ok = stage(
                 conn,
                 generation,
@@ -684,6 +685,31 @@ pub(crate) fn advance(
         &ctx.device_id.to_string(),
     )?;
     Ok(None)
+}
+
+/// Learns a staged contact record into the compaction frontier, as live apply does. Promotion
+/// decides owed members from the frontier, and a staged publication or member is otherwise not
+/// known there. Learning is idempotent, and it keeps no effect of the record itself.
+fn learn_staged_contact(
+    conn: &Connection,
+    envelope: &crate::Envelope,
+    payload: &PrivatePayload,
+) -> Result<(), Error> {
+    if !matches!(
+        payload,
+        PrivatePayload::ContactUpserted { .. }
+            | PrivatePayload::ContactRemoved { .. }
+            | PrivatePayload::ContactBookDeletedMember { .. }
+    ) {
+        return Ok(());
+    }
+    crate::learn_compaction(
+        conn,
+        crate::compaction_identity(payload).as_deref(),
+        &envelope.producer_device_id.to_string(),
+        to_i64(envelope.producer_sequence.0)?,
+        envelope.compaction.as_ref(),
+    )
 }
 
 /// RCS events and compactable contacts retained by an in-flight authoritative snapshot must not
@@ -1452,13 +1478,7 @@ fn promote_deletions(conn: &Connection, generation: i64, me: &str) -> Result<(),
         .query_map([generation], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<Result<_, _>>()?;
     for (book_id, owner, book_generation) in covered {
-        contact_book_deletion::capture_completion(
-            conn,
-            &book_id,
-            &owner,
-            book_generation,
-            Some(generation),
-        )?;
+        contact_book_deletion::capture_completion(conn, &book_id, &owner, book_generation)?;
         contact_book_deletion::remove_covered_contacts(conn, &book_id, &owner, book_generation)?;
     }
     let books: Vec<String> = conn

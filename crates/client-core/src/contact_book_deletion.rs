@@ -86,9 +86,8 @@ pub(crate) fn apply(conn: &Connection, payload: &PrivatePayload) -> Result<bool,
                 return Ok(true);
             }
             store_fence(conn, book_id, owner_device_id, generation, *deleted_at_ms)?;
-            // Captured before the member rows below go: a terminal member already received is what
-            // settles a contact, so it must still be visible here.
-            capture_completion(conn, book_id, owner_device_id, generation, None)?;
+            // Captured before the covered rows below go, because the capture reads them.
+            capture_completion(conn, book_id, owner_device_id, generation)?;
             conn.execute(
                 "DELETE FROM deleted_contact_members WHERE book_id=? AND owner_device_id=? AND generation<=?",
                 params![book_id, owner_device_id, generation],
@@ -115,10 +114,8 @@ pub(crate) fn apply(conn: &Connection, payload: &PrivatePayload) -> Result<bool,
             if stored_under_other_owner(conn, book_id, owner_device_id)? {
                 return Ok(true);
             }
-            // A terminal record from elsewhere settles this device's own obligation for the contact.
-            cancel_completion(conn, book_id, owner_device_id, contact_id, generation)?;
-            // Recorded even when the fence covers it: a live record of this contact that arrives later
-            // is then known to be settled, and must not owe a second member.
+            // Recorded even when the fence covers it, for the covered checks of later records of this
+            // contact. It does not settle owed work: only the frontier decides that, at drain.
             conn.execute(
                 "INSERT INTO deleted_contact_members(book_id,contact_id,owner_device_id,generation) VALUES(?,?,?,?) ON CONFLICT(book_id,contact_id,owner_device_id) DO UPDATE SET generation=MAX(generation,excluded.generation)",
                 params![book_id, contact_id, owner_device_id, generation],
@@ -213,16 +210,13 @@ fn sync_not_current(conn: &Connection, ctx: &Ctx<'_>) -> Result<bool, Error> {
 }
 
 /// Records the contacts this device holds that a fence of `owner` covers, before their rows are
-/// removed. A contact without a known terminal member becomes owed work, so this device publishes
-/// the member itself. Known means a member at or above `generation` in `deleted_contact_members`,
-/// or, while promoting snapshot generation `staged`, one staged in `projection_deleted_members`
-/// (those reach the live table only after this capture). Covered contacts include tombstones.
+/// removed. A covered contact with an open publication (see `open_publication`) becomes owed work.
+/// Covered contacts include tombstones. Whether the owed member is still needed is decided at drain.
 pub(crate) fn capture_completion(
     conn: &Connection,
     book_id: &str,
     owner: &str,
     generation: i64,
-    staged: Option<i64>,
 ) -> Result<(), Error> {
     let gate = to_i64(receive_cursor(conn)?)?;
     conn.execute(
@@ -230,73 +224,43 @@ pub(crate) fn capture_completion(
         params![book_id, owner, generation, gate],
     )?;
     conn.execute(
-        "INSERT OR IGNORE INTO contact_book_deletion_completion_contacts(book_id,owner_device_id,contact_id) SELECT c.book_id,?2,c.id FROM contacts c JOIN contact_books b ON b.id=c.book_id WHERE c.book_id=?1 AND COALESCE(c.publication_owner,b.owner_device_id)=?2 AND COALESCE(c.publication_generation,b.generation)<=?3 AND NOT EXISTS(SELECT 1 FROM deleted_contact_members m WHERE m.book_id=c.book_id AND m.contact_id=c.id AND m.owner_device_id=?2 AND m.generation>=?3)",
+        "INSERT OR IGNORE INTO contact_book_deletion_completion_contacts(book_id,owner_device_id,contact_id) SELECT c.book_id,?2,c.id FROM contacts c JOIN contact_books b ON b.id=c.book_id WHERE c.book_id=?1 AND COALESCE(c.publication_owner,b.owner_device_id)=?2 AND COALESCE(c.publication_generation,b.generation)<=?3 AND EXISTS(SELECT 1 FROM compaction_frontier f WHERE f.identity='contact:'||c.book_id||':'||c.id AND f.terminal=0)",
         params![book_id, owner, generation],
     )?;
-    // A member staged by the snapshot being promoted is not in `deleted_contact_members` yet, so
-    // it settles its contact here. Only promotion has a stage, so the live path never reads it.
-    if let Some(staged) = staged {
-        conn.execute(
-            "DELETE FROM contact_book_deletion_completion_contacts WHERE book_id=?1 AND owner_device_id=?2 AND EXISTS(SELECT 1 FROM projection_deleted_members p WHERE p.generation=?3 AND p.book_id=contact_book_deletion_completion_contacts.book_id AND p.contact_id=contact_book_deletion_completion_contacts.contact_id AND p.owner_device_id=contact_book_deletion_completion_contacts.owner_device_id AND p.book_generation>=?4)",
-            params![book_id, owner, staged, generation],
-        )?;
-    }
     Ok(())
 }
 
 /// Records the owed members of a promotion's covered contacts that live only in the stage: staged
 /// publications (`projection_contacts`) and covered records staging dropped
-/// (`projection_covered_contacts`). Deduplicated against terminal members known in the stage and
-/// live. Called inside the promotion transaction, after this stage's fences reach
-/// `deleted_contact_books` and before the stage rows are removed, so a failed promotion owes nothing.
+/// (`projection_covered_contacts`). A contact owes only while the frontier holds an open publication
+/// of it. Staging learned every staged contact record (`snapshot_projection::advance`), so the
+/// frontier already reflects the stage's members. Called inside the promotion transaction, after
+/// this stage's fences reach `deleted_contact_books` and before the stage rows are removed, so a
+/// failed promotion owes nothing.
 pub(crate) fn capture_staged_completion(conn: &Connection, generation: i64) -> Result<(), Error> {
     let gate = to_i64(receive_cursor(conn)?)?;
     const STAGED: &str = "WITH staged(book_id,contact_id,owner,gen) AS (SELECT book_id,contact_id,publication_owner,publication_generation FROM projection_contacts WHERE generation=?1 AND publication_owner IS NOT NULL UNION ALL SELECT book_id,contact_id,owner_device_id,book_generation FROM projection_covered_contacts WHERE generation=?1)";
-    let uncovered = "s.gen<=d.generation AND NOT EXISTS(SELECT 1 FROM projection_deleted_members m WHERE m.generation=?1 AND m.book_id=s.book_id AND m.contact_id=s.contact_id AND m.owner_device_id=s.owner AND m.book_generation>=d.generation) AND NOT EXISTS(SELECT 1 FROM deleted_contact_members m WHERE m.book_id=s.book_id AND m.contact_id=s.contact_id AND m.owner_device_id=s.owner AND m.generation>=d.generation)";
+    let open = "s.gen<=d.generation AND EXISTS(SELECT 1 FROM compaction_frontier f WHERE f.identity='contact:'||s.book_id||':'||s.contact_id AND f.terminal=0)";
     conn.execute(
-        &format!("{STAGED} INSERT INTO contact_book_deletion_completion(book_id,owner_device_id,generation,gate_cursor) SELECT DISTINCT s.book_id,s.owner,d.generation,?2 FROM staged s JOIN deleted_contact_books d ON d.book_id=s.book_id AND d.owner_device_id=s.owner WHERE {uncovered} ON CONFLICT(book_id,owner_device_id) DO UPDATE SET generation=MAX(generation,excluded.generation),gate_cursor=MAX(gate_cursor,excluded.gate_cursor)"),
+        &format!("{STAGED} INSERT INTO contact_book_deletion_completion(book_id,owner_device_id,generation,gate_cursor) SELECT DISTINCT s.book_id,s.owner,d.generation,?2 FROM staged s JOIN deleted_contact_books d ON d.book_id=s.book_id AND d.owner_device_id=s.owner WHERE {open} ON CONFLICT(book_id,owner_device_id) DO UPDATE SET generation=MAX(generation,excluded.generation),gate_cursor=MAX(gate_cursor,excluded.gate_cursor)"),
         params![generation, gate],
     )?;
     conn.execute(
-        &format!("{STAGED} INSERT OR IGNORE INTO contact_book_deletion_completion_contacts(book_id,owner_device_id,contact_id) SELECT DISTINCT s.book_id,s.owner,s.contact_id FROM staged s JOIN deleted_contact_books d ON d.book_id=s.book_id AND d.owner_device_id=s.owner WHERE {uncovered}"),
+        &format!("{STAGED} INSERT OR IGNORE INTO contact_book_deletion_completion_contacts(book_id,owner_device_id,contact_id) SELECT DISTINCT s.book_id,s.owner,s.contact_id FROM staged s JOIN deleted_contact_books d ON d.book_id=s.book_id AND d.owner_device_id=s.owner WHERE {open}"),
         params![generation],
     )?;
     Ok(())
 }
 
-/// Settles this device's owed member for one contact that a fence captured, once a terminal member at
-/// or above the fence generation is known (received, or enqueued by this device). A lower-generation
-/// member does not settle it. A late covered publication is not settled here: its owed row stays until
-/// drain checks whether a known record still leaves that publication on the frontier.
-fn cancel_completion(
-    conn: &Connection,
-    book_id: &str,
-    owner: &str,
-    contact_id: &str,
-    generation: i64,
-) -> Result<(), Error> {
-    conn.execute(
-        "DELETE FROM contact_book_deletion_completion_contacts WHERE book_id=?1 AND owner_device_id=?2 AND contact_id=?3 AND publication_sequence IS NULL AND ?4>=(SELECT generation FROM contact_book_deletion_completion w WHERE w.book_id=?1 AND w.owner_device_id=?2)",
-        params![book_id, owner, contact_id, generation],
-    )?;
-    Ok(())
-}
-
-/// Whether a known record already supersedes the publication `producer`/`sequence`.
-fn covered_publication(conn: &Connection, producer: &str, sequence: i64) -> Result<bool, Error> {
+/// Whether the contact has an open publication: a non-terminal record of its compaction identity
+/// (`contact:{book}:{contact}`) still on the frontier, so no known record supersedes it. A terminal
+/// record (a member, or a removal) is not an open publication, because it expires on the server.
+/// Only an open publication leaves history this device must supersede.
+fn open_publication(conn: &Connection, book_id: &str, contact_id: &str) -> Result<bool, Error> {
+    let identity = format!("contact:{book_id}:{contact_id}");
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM compaction_covered WHERE producer_device_id=?1 AND source_sequence=?2)",
-        params![producer, sequence],
-        |row| row.get(0),
-    )?)
-}
-
-/// Whether the publication `producer`/`sequence` is still on its identity's frontier, so no known
-/// record supersedes it.
-fn on_frontier(conn: &Connection, producer: &str, sequence: i64) -> Result<bool, Error> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM compaction_frontier WHERE producer_device_id=?1 AND source_sequence=?2)",
-        params![producer, sequence],
+        "SELECT EXISTS(SELECT 1 FROM compaction_frontier WHERE identity=?1 AND terminal=0)",
+        params![identity],
         |row| row.get(0),
     )?)
 }
@@ -437,32 +401,26 @@ pub(crate) fn completion_replay_need(
 /// Records a contact of a fenced book that a live record delivered and that the fence covers. The
 /// record is an applied no-op, so the contact is not materialised. The deleter may have covered it
 /// only after the fence, so its member is owed like one captured by the fence: it drains through the
-/// same head gate, and owner and successor exclusions and the superseded check still apply. The gate
-/// moves to the receive frontier now, so the head must cover this record.
+/// same head gate, and owner and successor exclusions, the open-publication check and the superseded
+/// check still apply. The gate moves to the receive frontier now, so the head must cover this record.
 ///
-/// The row keeps this publication (`publication`: producer and sequence). A known terminal member
-/// does not settle the row by itself. Drain emits only while the publication is still on the
-/// frontier, so a member that supersedes it leaves nothing owed, and one that does not supersede it
-/// still gets a member. A publication a known record already supersedes owes nothing.
+/// Nothing is decided here. The record joins the frontier when apply learns it, after this call, so
+/// drain judges the contact by the frontier, and a publication a known record already supersedes
+/// owes nothing.
 pub(crate) fn owe_covered_contact(
     conn: &Connection,
     book_id: &str,
     owner: &str,
     contact_id: &str,
-    publication: (&str, i64),
 ) -> Result<(), Error> {
-    let (producer, sequence) = publication;
-    if covered_publication(conn, producer, sequence)? {
-        return Ok(());
-    }
     let gate = to_i64(receive_cursor(conn)?)?;
     conn.execute(
         "INSERT INTO contact_book_deletion_completion(book_id,owner_device_id,generation,gate_cursor) SELECT book_id,owner_device_id,generation,?3 FROM deleted_contact_books WHERE book_id=?1 AND owner_device_id=?2 ON CONFLICT(book_id,owner_device_id) DO UPDATE SET gate_cursor=MAX(gate_cursor,excluded.gate_cursor)",
         params![book_id, owner, gate],
     )?;
     conn.execute(
-        "INSERT INTO contact_book_deletion_completion_contacts(book_id,owner_device_id,contact_id,publication_producer,publication_sequence) SELECT w.book_id,w.owner_device_id,?3,?4,?5 FROM contact_book_deletion_completion w WHERE w.book_id=?1 AND w.owner_device_id=?2 ON CONFLICT(book_id,owner_device_id,contact_id) DO UPDATE SET publication_producer=excluded.publication_producer,publication_sequence=excluded.publication_sequence",
-        params![book_id, owner, contact_id, producer, sequence],
+        "INSERT OR IGNORE INTO contact_book_deletion_completion_contacts(book_id,owner_device_id,contact_id) SELECT w.book_id,w.owner_device_id,?3 FROM contact_book_deletion_completion w WHERE w.book_id=?1 AND w.owner_device_id=?2",
+        params![book_id, owner, contact_id],
     )?;
     Ok(())
 }
@@ -503,8 +461,9 @@ fn settle_owed(
 /// after every row of the batch and any snapshot promotion, so in-batch order does not matter.
 /// Only an unlocked device emits, and only when `completion_head` allows it. Work for a book this
 /// device owns, or whose owner was succeeded, is dropped because those records are never applied.
-/// A contact that a newer or foreign publication now covers is settled without a member. A failure
-/// other than a compaction deferral fails the batch.
+/// A contact with no open publication (see `open_publication`) is settled without a member, and so
+/// is one that a newer or foreign publication now covers. A failure other than a compaction deferral
+/// fails the batch.
 pub(crate) fn drain_completion(tx: &mut Transaction<'_>, ctx: &Ctx<'_>) -> Result<(), Error> {
     // Work with nothing left owed is finished, whatever the lock or compaction state.
     tx.execute(
@@ -533,40 +492,22 @@ pub(crate) fn drain_completion(tx: &mut Transaction<'_>, ctx: &Ctx<'_>) -> Resul
             forget_completion(tx, &book_id, &owner)?;
         }
     }
-    type Owed = (String, String, i64, String, Option<String>, Option<i64>);
+    type Owed = (String, String, i64, String);
     let batch: Vec<Owed> = tx
         .prepare(
-            "SELECT p.book_id,p.owner_device_id,w.generation,p.contact_id,p.publication_producer,p.publication_sequence FROM contact_book_deletion_completion_contacts p JOIN contact_book_deletion_completion w ON w.book_id=p.book_id AND w.owner_device_id=p.owner_device_id WHERE w.gate_cursor<=?2 ORDER BY p.rowid LIMIT ?1",
+            "SELECT p.book_id,p.owner_device_id,w.generation,p.contact_id FROM contact_book_deletion_completion_contacts p JOIN contact_book_deletion_completion w ON w.book_id=p.book_id AND w.owner_device_id=p.owner_device_id WHERE w.gate_cursor<=?2 ORDER BY p.rowid LIMIT ?1",
         )?
         .query_map(params![MAX_SEAL_BATCH as i64, to_i64(head)?], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-            ))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })?
         .collect::<Result<_, _>>()?;
     let mut enqueued = false;
-    for (book_id, owner, generation, contact_id, producer, sequence) in batch {
-        match producer.zip(sequence) {
-            // A fence's captured contact is settled by any known member at or above the fence.
-            None => {
-                if member_covers(tx, &book_id, &contact_id, &owner, generation)? {
-                    cancel_completion(tx, &book_id, &owner, &contact_id, generation)?;
-                    continue;
-                }
-            }
-            // A late publication is not settled by a member: only the frontier decides it (see
-            // `owe_covered_contact`). Once a known record supersedes it, nothing is owed.
-            Some((producer, sequence)) => {
-                if !on_frontier(tx, &producer, sequence)? {
-                    settle_owed(tx, &book_id, &owner, &contact_id)?;
-                    continue;
-                }
-            }
+    for (book_id, owner, generation, contact_id) in batch {
+        // Only a known record that supersedes every open publication settles the contact. A member
+        // that leaves one on the frontier does not, so this device still publishes its own.
+        if !open_publication(tx, &book_id, &contact_id)? {
+            settle_owed(tx, &book_id, &owner, &contact_id)?;
+            continue;
         }
         if superseded_publication(tx, &book_id, &owner, &contact_id, generation)? {
             settle_owed(tx, &book_id, &owner, &contact_id)?;
@@ -655,7 +596,6 @@ pub(crate) fn delete(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Resul
         [book_id],
         |row| row.get(0),
     )?;
-    let book_generation = generation;
     let generation = generation.to_string();
     let fence = PrivatePayload::ContactBookDeleted {
         book_id: book_id.to_owned(),
@@ -678,12 +618,9 @@ pub(crate) fn delete(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Resul
             break;
         }
     }
+    // The members above supersede every open publication of their contacts, so the fence's capture
+    // owes nothing for them and emits no second record.
     apply(&tx, &fence)?;
-    // Every stored contact already has this device's member above, so the fence's capture of
-    // them is settled here and must not emit a second record.
-    for contact_id in &members {
-        cancel_completion(&tx, book_id, &owner, contact_id, book_generation)?;
-    }
     tx.commit()?;
     Ok(json!({"status": "deleted", "book_id": book_id, "contacts": live}).to_string())
 }
@@ -901,12 +838,12 @@ mod tests {
             generation: "1".into(),
             deleted_at_ms: 1,
         };
-        assert!(crate::contacts::apply_event(&conn, "deleter", true, 1, 1, &fence).unwrap());
+        assert!(crate::contacts::apply_event(&conn, "deleter", true, 1, &fence).unwrap());
         let upsert = PrivatePayload::ContactUpserted {
             book: serde_json::json!({"id":"b1","owner_device_id":"owner","generation":"1","state":"active"}),
             contact: serde_json::json!({"id":"c1","book_id":"b1","revision":"3","display_name":"Ada"}),
         };
-        assert!(crate::contacts::apply_event(&conn, "owner", true, 1, 2, &upsert).unwrap());
+        assert!(crate::contacts::apply_event(&conn, "owner", true, 1, &upsert).unwrap());
         let contacts: i64 = conn
             .query_row("SELECT COUNT(*) FROM contacts", [], |row| row.get(0))
             .unwrap();

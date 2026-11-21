@@ -13881,7 +13881,6 @@ fn apply_record(
                 &producer.to_string(),
                 historical,
                 envelope.key_epoch,
-                to_i64(envelope.producer_sequence.0)?,
                 &payload,
             )? {
                 return Ok(Some(Q::InvalidPayload));
@@ -14761,7 +14760,9 @@ const AUTO_BACKFILL_ROWS: usize = 2_000;
 
 /// Local compaction bookkeeping, independent of the versioned schema:
 /// - `compaction_frontier`: per identity, every known record (own outbox, received journal,
-///   legacy header-free or marked) that no known metadata record supersedes yet;
+///   legacy header-free or marked) that no known metadata record supersedes yet. `terminal` marks
+///   a record of a terminal group (it expires on the server). Rows learned before the column
+///   existed read as non-terminal, so a deletion owes at worst one extra member;
 /// - `compaction_covered`: every `(producer, sequence)` some known record supersedes, so a late
 ///   older record never re-enters the frontier.
 fn initialize_compaction_state(conn: &Connection) -> Result<(), Error> {
@@ -14771,12 +14772,17 @@ CREATE INDEX IF NOT EXISTS compaction_frontier_identity ON compaction_frontier(i
 CREATE TABLE IF NOT EXISTS compaction_covered(producer_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL, PRIMARY KEY(producer_device_id, source_sequence));
 CREATE TABLE IF NOT EXISTS compaction_backfill_skipped(source TEXT NOT NULL CHECK(source IN ('outbox','journal')), position INTEGER NOT NULL, key_epoch INTEGER NOT NULL, PRIMARY KEY(source, position));",
     )?;
+    add_column_if_missing(
+        conn,
+        "compaction_frontier",
+        "terminal INTEGER NOT NULL DEFAULT 0",
+    )?;
     Ok(())
 }
 
 /// Records one known record: its references leave the frontier (and stay covered), and the
 /// record itself joins its identity's frontier unless something already supersedes it.
-fn learn_compaction(
+pub(crate) fn learn_compaction(
     conn: &Connection,
     identity: Option<&str>,
     producer: &str,
@@ -14801,9 +14807,10 @@ fn learn_compaction(
         )?;
     }
     if let Some(identity) = identity {
+        let terminal = metadata.is_some_and(|m| m.terminal);
         conn.execute(
-            "INSERT OR IGNORE INTO compaction_frontier(producer_device_id,source_sequence,identity) SELECT ?1,?2,?3 WHERE NOT EXISTS(SELECT 1 FROM compaction_covered WHERE producer_device_id=?1 AND source_sequence=?2)",
-            params![producer, sequence, identity],
+            "INSERT OR IGNORE INTO compaction_frontier(producer_device_id,source_sequence,identity,terminal) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS(SELECT 1 FROM compaction_covered WHERE producer_device_id=?1 AND source_sequence=?2)",
+            params![producer, sequence, identity, terminal],
         )?;
     }
     Ok(())
@@ -15399,7 +15406,7 @@ fn compaction_group(
 /// Frontier identity of a compactable payload: the set of records one new state supersedes.
 /// Notification posts and removals of one key (all lifetimes) share an identity, as do an edit
 /// request and all its results. Dismissals are standalone terminal roots.
-fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
+pub(crate) fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
     match payload {
         PrivatePayload::RcsMessageStatus { message_id, .. } => {
             Some(format!("rcs-message-status:{message_id}"))
@@ -23020,6 +23027,14 @@ mod tests {
                 .conn
                 .execute(
                     "INSERT INTO contact_book_deletion_completion_contacts(book_id,owner_device_id,contact_id) VALUES('b',?,'c1')",
+                    params![owner],
+                )
+                .unwrap();
+            // The owed contact's open publication, which the drain needs to owe a member.
+            store
+                .conn
+                .execute(
+                    "INSERT INTO compaction_frontier(producer_device_id,source_sequence,identity,terminal) VALUES(?,2,'contact:b:c1',0)",
                     params![owner],
                 )
                 .unwrap();
