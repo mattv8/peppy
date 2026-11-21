@@ -506,7 +506,7 @@ fn upsert_owned(
     body["revision"] = Value::String(rev.to_string());
     conn.execute(
         "INSERT INTO contacts(id,book_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,NULL,?,?) ON CONFLICT(book_id,id) DO UPDATE SET revision=excluded.revision,body=excluded.body,deleted_at=NULL,publication_owner=excluded.publication_owner,publication_generation=excluded.publication_generation",
-        params![id, book_id, rev, encoded(&body)?, req(book, "owner_device_id")?, revision(book, "generation")?],
+        params![id, book_id, rev, encoded(&body)?, publication_owner(conn, book)?, revision(book, "generation")?],
     )?;
     enqueue(
         conn,
@@ -550,7 +550,7 @@ fn tombstone_owned(
             rev,
             encoded(&body)?,
             deleted_at,
-            req(&book, "owner_device_id")?,
+            publication_owner(conn, &book)?,
             revision(&book, "generation")?,
             book_id,
             id
@@ -609,7 +609,7 @@ fn mark_restored(
         params![
             rev,
             encoded(&body)?,
-            req(&book, "owner_device_id")?,
+            publication_owner(conn, &book)?,
             revision(&book, "generation")?,
             book_id,
             old_id
@@ -2411,6 +2411,34 @@ pub(crate) fn terminal_owner(conn: &Connection, owner: &str) -> Result<String, E
     Ok(current)
 }
 
+/// The effective owner of a record: the book owner it names, normalised through succession. Every
+/// fence, member, provenance and stored-owner decision goes through this, so a predecessor-named
+/// record is judged as its successor's record.
+pub(crate) fn publication_owner(conn: &Connection, book: &Value) -> Result<String, Error> {
+    terminal_owner(conn, req(book, "owner_device_id")?)
+}
+
+/// Publication-generation merge for an upsert into `table`. Provenance only advances. A same-owner
+/// publication keeps the row's generation unless it is strictly higher. An unknown (NULL) row's
+/// effective generation is `fallback`, the book's generation before the incoming record. So a
+/// delayed republication leaves NULL as NULL, and only a strictly higher generation sets it.
+pub(crate) fn publication_generation_merge(table: &str, fallback: &str) -> String {
+    format!(
+        "CASE WHEN {table}.publication_owner=excluded.publication_owner THEN CASE WHEN {table}.publication_generation IS NULL THEN CASE WHEN excluded.publication_generation>{fallback} THEN excluded.publication_generation END ELSE MAX({table}.publication_generation,excluded.publication_generation) END ELSE excluded.publication_generation END"
+    )
+}
+
+/// Generation of the stored book, if this device holds it.
+pub(crate) fn book_generation(conn: &Connection, book_id: &str) -> Result<Option<i64>, Error> {
+    Ok(conn
+        .query_row(
+            "SELECT generation FROM contact_books WHERE id=?",
+            [book_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// Generation of the stored book, which a live record of that book must have.
 fn stored_generation(conn: &Connection, book_id: &str) -> Result<i64, Error> {
     Ok(conn.query_row(
@@ -2471,15 +2499,18 @@ fn apply_peer(
     match payload {
         PrivatePayload::ContactBookState { book } => apply_book(conn, producer, book),
         PrivatePayload::ContactUpserted { book, contact } => {
+            let book_id = req(book, "id")?;
+            // The book's generation before this record: a NULL-provenance contact is judged by it,
+            // not by a generation this same record raises.
+            let prior_generation = book_generation(conn, book_id)?;
             if !apply_book(conn, producer, book)? {
                 return Ok(false);
             }
             if book_fenced(conn, book)? {
                 return Ok(true);
             }
-            let (id, rev, body) = peer_contact(contact, req(book, "id")?)?;
-            let book_id = req(book, "id")?;
-            let owner = terminal_owner(conn, req(book, "owner_device_id")?)?;
+            let (id, rev, body) = peer_contact(contact, book_id)?;
+            let owner = publication_owner(conn, book)?;
             let book_generation = revision(book, "generation")?;
             if crate::contact_book_deletion::member_covers(
                 conn,
@@ -2491,8 +2522,11 @@ fn apply_peer(
                 return Ok(true);
             }
             conn.execute(
-                "INSERT INTO contacts(id,book_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,NULL,?,?) ON CONFLICT(book_id,id) DO UPDATE SET revision=CASE WHEN excluded.revision>contacts.revision THEN excluded.revision ELSE contacts.revision END,body=CASE WHEN excluded.revision>contacts.revision THEN excluded.body ELSE contacts.body END,deleted_at=CASE WHEN excluded.revision>contacts.revision THEN NULL ELSE contacts.deleted_at END,publication_owner=excluded.publication_owner,publication_generation=CASE WHEN contacts.publication_owner=excluded.publication_owner THEN MAX(COALESCE(contacts.publication_generation,0),excluded.publication_generation) ELSE excluded.publication_generation END WHERE excluded.revision>=contacts.revision",
-                params![id, book_id, rev, encoded(&body)?, owner, book_generation],
+                &format!(
+                    "INSERT INTO contacts(id,book_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,NULL,?,?) ON CONFLICT(book_id,id) DO UPDATE SET revision=CASE WHEN excluded.revision>contacts.revision THEN excluded.revision ELSE contacts.revision END,body=CASE WHEN excluded.revision>contacts.revision THEN excluded.body ELSE contacts.body END,deleted_at=CASE WHEN excluded.revision>contacts.revision THEN NULL ELSE contacts.deleted_at END,publication_owner=excluded.publication_owner,publication_generation={} WHERE excluded.revision>=contacts.revision",
+                    publication_generation_merge("contacts", "?7")
+                ),
+                params![id, book_id, rev, encoded(&body)?, owner, book_generation, prior_generation],
             )?;
             Ok(true)
         }
@@ -2504,6 +2538,7 @@ fn apply_peer(
             if req(tombstone, "contact_id")? != contact_id {
                 return Ok(false);
             }
+            let prior_generation = book_generation(conn, book_id)?;
             if let Some(book) = tombstone.get("book")
                 && (req(book, "id")? != book_id || !apply_book(conn, producer, book)?)
             {
@@ -2514,7 +2549,7 @@ fn apply_peer(
             // is the fence owner the removal is judged against.
             let (fence_owner, book_generation) = match tombstone.get("book") {
                 Some(book) => (
-                    terminal_owner(conn, req(book, "owner_device_id")?)?,
+                    publication_owner(conn, book)?,
                     Some(revision(book, "generation")?),
                 ),
                 None => (
@@ -2562,8 +2597,20 @@ fn apply_peer(
                 return Ok(true);
             }
             conn.execute(
-                "INSERT INTO contacts(id,book_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,?,?,?) ON CONFLICT(book_id,id) DO UPDATE SET revision=CASE WHEN excluded.revision>contacts.revision THEN excluded.revision ELSE contacts.revision END,body=CASE WHEN excluded.revision>contacts.revision THEN excluded.body ELSE contacts.body END,deleted_at=CASE WHEN excluded.revision>contacts.revision THEN excluded.deleted_at ELSE contacts.deleted_at END,publication_owner=excluded.publication_owner,publication_generation=CASE WHEN contacts.publication_owner=excluded.publication_owner THEN MAX(COALESCE(contacts.publication_generation,0),excluded.publication_generation) ELSE excluded.publication_generation END WHERE excluded.revision>=contacts.revision",
-                params![id, book_id, rev, encoded(&body)?, deleted_at, fence_owner, generation],
+                &format!(
+                    "INSERT INTO contacts(id,book_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,?,?,?) ON CONFLICT(book_id,id) DO UPDATE SET revision=CASE WHEN excluded.revision>contacts.revision THEN excluded.revision ELSE contacts.revision END,body=CASE WHEN excluded.revision>contacts.revision THEN excluded.body ELSE contacts.body END,deleted_at=CASE WHEN excluded.revision>contacts.revision THEN excluded.deleted_at ELSE contacts.deleted_at END,publication_owner=excluded.publication_owner,publication_generation={} WHERE excluded.revision>=contacts.revision",
+                    publication_generation_merge("contacts", "?8")
+                ),
+                params![
+                    id,
+                    book_id,
+                    rev,
+                    encoded(&body)?,
+                    deleted_at,
+                    fence_owner,
+                    generation,
+                    prior_generation
+                ],
             )?;
             Ok(true)
         }
@@ -2660,7 +2707,7 @@ fn book_fenced(conn: &Connection, book: &Value) -> Result<bool, Error> {
     crate::contact_book_deletion::covers(
         conn,
         req(book, "id")?,
-        req(book, "owner_device_id")?,
+        &publication_owner(conn, book)?,
         Some(generation),
     )
 }
@@ -2700,12 +2747,17 @@ fn apply_book(conn: &Connection, producer: &str, book: &Value) -> Result<bool, E
         "INSERT INTO contact_books(id,owner_device_id,generation,state,body,forgotten) VALUES(?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET owner_device_id=excluded.owner_device_id,generation=excluded.generation,state=excluded.state,body=excluded.body",
         params![
             id,
-            terminal_owner(conn, producer)?,
+            publication_owner(conn, book)?,
             generation,
             book.get("state").and_then(Value::as_str).unwrap_or("active"),
             encoded(&body)?
         ],
     )?;
+    // A book named by a succeeded owner is inherited as a stored book is: owner column, body
+    // owner and the inheritance marker move together, so selection returns the takeover route.
+    if let Some(terminal) = crate::device_succession::inherit_stored_book(conn, id)? {
+        crate::requeue_successor_invalid_payload(conn, &terminal)?;
+    }
     Ok(true)
 }
 

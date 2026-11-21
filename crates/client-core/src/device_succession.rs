@@ -307,8 +307,33 @@ fn accept(
     for (book_id, body) in books {
         transfer_book(conn, &book_id, &predecessor.to_string(), &body, &terminal)?;
     }
+    transfer_fences(conn, &predecessor.to_string(), &terminal)?;
     crate::requeue_successor_invalid_payload(conn, &terminal)?;
     Ok(true)
+}
+
+/// Moves the deletion fences and member records a predecessor holds to its terminal successor.
+/// Fences are judged by the effective owner, so they must be keyed by it. Each keeps its highest
+/// generation.
+fn transfer_fences(conn: &Connection, predecessor: &str, terminal: &DeviceId) -> Result<(), Error> {
+    let terminal = terminal.to_string();
+    conn.execute(
+        "INSERT INTO deleted_contact_books(book_id,owner_device_id,generation,deleted_at_ms) SELECT book_id,?2,generation,deleted_at_ms FROM deleted_contact_books WHERE owner_device_id=?1 ON CONFLICT(book_id,owner_device_id) DO UPDATE SET deleted_at_ms=CASE WHEN excluded.generation>deleted_contact_books.generation THEN excluded.deleted_at_ms ELSE deleted_contact_books.deleted_at_ms END,generation=MAX(deleted_contact_books.generation,excluded.generation)",
+        params![predecessor, terminal],
+    )?;
+    conn.execute(
+        "DELETE FROM deleted_contact_books WHERE owner_device_id=?",
+        [predecessor],
+    )?;
+    conn.execute(
+        "INSERT INTO deleted_contact_members(book_id,contact_id,owner_device_id,generation) SELECT book_id,contact_id,?2,generation FROM deleted_contact_members WHERE owner_device_id=?1 ON CONFLICT(book_id,contact_id,owner_device_id) DO UPDATE SET generation=MAX(deleted_contact_members.generation,excluded.generation)",
+        params![predecessor, terminal],
+    )?;
+    conn.execute(
+        "DELETE FROM deleted_contact_members WHERE owner_device_id=?",
+        [predecessor],
+    )?;
+    Ok(())
 }
 
 /// Hands a book from its succeeded owner to `terminal`. Its contacts follow the book so that
@@ -383,29 +408,53 @@ fn reconcile_terminal_book_owners(conn: &Connection) -> Result<(), Error> {
 /// Returns the terminal successor of every book moved. Snapshot promotion calls this too, since it
 /// can store a book under a predecessor it names. It is idempotent.
 pub(crate) fn move_stale_book_owners(conn: &Connection) -> Result<Vec<DeviceId>, Error> {
-    let books = conn
-        .prepare("SELECT id,owner_device_id,body FROM contact_books")?
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+    let book_ids: Vec<String> = conn
+        .prepare("SELECT id FROM contact_books")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
     let mut terminals = Vec::new();
-    for (book_id, owner, body) in books {
-        let owner: DeviceId = owner.parse().map_err(|_| Error::Database)?;
-        let Some(terminal) = terminal_successor(conn, &owner, &owner)? else {
-            continue;
-        };
-        if terminal == owner {
-            continue;
+    for book_id in book_ids {
+        if let Some(terminal) = inherit_stored_book(conn, &book_id)? {
+            terminals.push(terminal);
         }
-        transfer_book(conn, &book_id, &owner.to_string(), &body, &terminal)?;
-        terminals.push(terminal);
     }
     Ok(terminals)
+}
+
+/// Normalises one stored book to its terminal owner. A book is stale when its owner column or the
+/// owner its body names was succeeded; then it moves like `transfer_book` moves it, so the body
+/// owner, contacts and inheritance marker all agree. Returns the terminal owner when it moved.
+pub(crate) fn inherit_stored_book(
+    conn: &Connection,
+    book_id: &str,
+) -> Result<Option<DeviceId>, Error> {
+    let stored: Option<(String, String)> = conn
+        .query_row(
+            "SELECT owner_device_id,body FROM contact_books WHERE id=?",
+            [book_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((column, body)) = stored else {
+        return Ok(None);
+    };
+    let value: serde_json::Value = serde_json::from_str(&body).map_err(|_| Error::Database)?;
+    let named = value
+        .get("owner_device_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&column);
+    // Succession is keyed by device ids only; any other owner name cannot have been succeeded.
+    let Ok(named) = named.parse::<DeviceId>() else {
+        return Ok(None);
+    };
+    let Some(terminal) = terminal_successor(conn, &named, &named)? else {
+        return Ok(None);
+    };
+    if terminal == named && column == terminal.to_string() {
+        return Ok(None);
+    }
+    transfer_book(conn, book_id, &named.to_string(), &body, &terminal)?;
+    Ok(Some(terminal))
 }
 
 pub(crate) fn local_hint_registered(conn: &Connection) -> Result<bool, Error> {

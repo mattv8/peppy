@@ -946,6 +946,216 @@ fn deletion_after_succession_removes_the_inherited_book_and_its_contacts() {
 }
 
 #[test]
+fn delayed_predecessor_records_cannot_resurrect_a_book_deleted_under_its_successor() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let a_cfg = config(&dir, "android-before-reinstall", &vault);
+    let b_cfg = config(&dir, "android-after-reinstall", &vault);
+    let c_cfg = config(&dir, "observer", &vault);
+    let a = unlocked(&a_cfg, &vault);
+    let b = unlocked(&b_cfg, &vault);
+    let c = unlocked(&c_cfg, &vault);
+    capture_owned(&a, a_cfg.device_id);
+    a.register_device_hint("android", HINT).unwrap();
+    let a_events = a.pending_outbox().unwrap();
+    sync(&a_events, &b);
+    b.observe_server_high_water(Cursor(a_events.len() as u64))
+        .unwrap();
+    b.register_device_hint("android", HINT).unwrap();
+    let b_events = b.pending_outbox().unwrap();
+    sync(&a_events, &c);
+    sync(&b_events, &c);
+    let deleted = c
+        .delete_contact_book(&delete_input(&[b_cfg.device_id.to_string()]))
+        .unwrap();
+    assert!(deleted.contains("\"deleted\""), "{deleted}");
+
+    // A's book and contact arrive late, named by A but judged as B's, which the fence covers.
+    let path = &c_cfg.database_path;
+    let a_id = a_cfg.device_id;
+    sync(
+        &[
+            sealed(
+                &vault,
+                a_id,
+                900,
+                PrivatePayload::ContactBookState {
+                    book: book(a_id, "1"),
+                },
+            ),
+            sealed(
+                &vault,
+                a_id,
+                901,
+                PrivatePayload::ContactUpserted {
+                    book: book(a_id, "1"),
+                    contact: contact("ada", "Ada"),
+                },
+            ),
+            sealed(&vault, a_id, 902, ada_tombstone(book(a_id, "1"), "2")),
+        ],
+        &c,
+    );
+    assert!(book_ids(&c).is_empty());
+    assert_eq!(count(path, "SELECT COUNT(*) FROM contacts"), 0);
+    assert_eq!(count(path, "SELECT COUNT(*) FROM contact_books"), 0);
+}
+
+#[test]
+fn succession_first_arrival_of_a_predecessor_book_is_inherited_without_deletion() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let a_cfg = config(&dir, "android-before-reinstall", &vault);
+    let b_cfg = config(&dir, "android-after-reinstall", &vault);
+    let a = unlocked(&a_cfg, &vault);
+    let b = unlocked(&b_cfg, &vault);
+    capture_owned(&a, a_cfg.device_id);
+    a.register_device_hint("android", HINT).unwrap();
+    let (hints, books): (Vec<Envelope>, Vec<Envelope>) = a
+        .pending_outbox()
+        .unwrap()
+        .into_iter()
+        .partition(|envelope| {
+            matches!(
+                opened(&vault, envelope),
+                PrivatePayload::DeviceHintRegistered { .. }
+            )
+        });
+    // The successor learns the succession before the predecessor's book reaches it.
+    sync(&hints, &b);
+    b.observe_server_high_water(Cursor(hints.len() as u64))
+        .unwrap();
+    b.register_device_hint("android", HINT).unwrap();
+    assert!(book_ids(&b).is_empty());
+
+    let state: Vec<Envelope> = books
+        .into_iter()
+        .filter(|envelope| {
+            matches!(
+                opened(&vault, envelope),
+                PrivatePayload::ContactBookState { .. }
+            )
+        })
+        .collect();
+    assert_eq!(sync(&state, &b).quarantined, 0);
+    assert_eq!(book_ids(&b), vec![BOOK.to_owned()]);
+    let listed: Value = serde_json::from_str(&b.list_contact_books_json().unwrap()).unwrap();
+    assert_eq!(
+        listed["books"][0]["owner_device_id"],
+        json!(b_cfg.device_id.to_string())
+    );
+    assert!(matches!(
+        b.contact_book_selection().unwrap(),
+        ContactBookSelection::Inherited { ref book_id, .. } if book_id == BOOK
+    ));
+}
+
+#[test]
+fn republication_above_the_book_generation_establishes_known_provenance() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    sqlcipher(&config.database_path)
+        .execute("UPDATE contacts SET publication_generation=NULL", [])
+        .unwrap();
+    sync(
+        &[
+            sealed(
+                &vault,
+                owner,
+                4,
+                PrivatePayload::ContactBookState {
+                    book: book(owner, "2"),
+                },
+            ),
+            sealed(
+                &vault,
+                owner,
+                5,
+                PrivatePayload::ContactUpserted {
+                    book: book(owner, "3"),
+                    contact: contact("ada", "Ada"),
+                },
+            ),
+        ],
+        &observer,
+    );
+    let path = &config.database_path;
+    assert_eq!(
+        count(
+            path,
+            "SELECT COUNT(*) FROM contacts WHERE id='ada' AND publication_generation=3"
+        ),
+        1,
+        "a generation-3 republication is known provenance"
+    );
+    sync(
+        &[sealed(&vault, DeviceId::new(), 1, fence(owner, "2"))],
+        &observer,
+    );
+    assert_eq!(
+        count(path, "SELECT COUNT(*) FROM contacts WHERE id='ada'"),
+        1
+    );
+    sync(
+        &[sealed(&vault, DeviceId::new(), 2, fence(owner, "3"))],
+        &observer,
+    );
+    assert_eq!(
+        count(path, "SELECT COUNT(*) FROM contacts WHERE id='ada'"),
+        0
+    );
+}
+
+#[test]
+fn delayed_member_keeps_unknown_provenance_under_a_continued_book() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    sqlcipher(&config.database_path)
+        .execute("UPDATE contacts SET publication_generation=NULL", [])
+        .unwrap();
+    sync(
+        &[
+            sealed(
+                &vault,
+                owner,
+                4,
+                PrivatePayload::ContactBookState {
+                    book: book(owner, "2"),
+                },
+            ),
+            sealed(
+                &vault,
+                owner,
+                5,
+                PrivatePayload::ContactUpserted {
+                    book: book(owner, "1"),
+                    contact: contact("ada", "Ada"),
+                },
+            ),
+            sealed(&vault, DeviceId::new(), 1, ada_member(owner, "1")),
+        ],
+        &observer,
+    );
+    let path = &config.database_path;
+    assert_eq!(
+        count(
+            path,
+            "SELECT COUNT(*) FROM contacts WHERE id='ada' AND publication_generation IS NULL"
+        ),
+        1,
+        "a delayed generation-1 replay keeps unknown provenance under a generation-2 book"
+    );
+    sync(
+        &[sealed(&vault, DeviceId::new(), 2, ada_member(owner, "2"))],
+        &observer,
+    );
+    assert_eq!(
+        count(path, "SELECT COUNT(*) FROM contacts WHERE id='ada'"),
+        0
+    );
+}
+
+#[test]
 fn live_generation_two_tombstone_survives_a_delayed_generation_one_member_and_fence() {
     let dir = TempDir::new().unwrap();
     let (vault, config, observer, owner) = observed_book(&dir);
@@ -1056,6 +1266,48 @@ fn legacy_contacts_with_unknown_generation_follow_the_book_generation() {
     sync(&[sealed(&vault, deleter, 2, fence(owner, "2"))], &observer);
     assert_eq!(count(path, "SELECT COUNT(*) FROM contacts"), 0);
     assert_eq!(count(path, "SELECT COUNT(*) FROM contact_books"), 0);
+}
+
+#[test]
+fn delayed_republication_preserves_unknown_generation_under_continued_book() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    sqlcipher(&config.database_path)
+        .execute("UPDATE contacts SET publication_generation=NULL", [])
+        .unwrap();
+    sync(
+        &[
+            sealed(
+                &vault,
+                owner,
+                4,
+                PrivatePayload::ContactBookState {
+                    book: book(owner, "2"),
+                },
+            ),
+            sealed(
+                &vault,
+                owner,
+                5,
+                PrivatePayload::ContactUpserted {
+                    book: book(owner, "1"),
+                    contact: contact("ada", "Ada"),
+                },
+            ),
+        ],
+        &observer,
+    );
+    sync(
+        &[sealed(&vault, DeviceId::new(), 1, fence(owner, "1"))],
+        &observer,
+    );
+    assert_eq!(
+        count(
+            &config.database_path,
+            "SELECT COUNT(*) FROM contacts WHERE id='ada'"
+        ),
+        1
+    );
 }
 
 #[test]

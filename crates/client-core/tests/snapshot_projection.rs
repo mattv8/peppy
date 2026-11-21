@@ -2017,6 +2017,77 @@ fn snapshot_promotion_moves_a_book_named_by_a_succeeded_owner_to_its_successor()
 }
 
 #[test]
+fn snapshot_book_named_by_a_succeeded_owner_cannot_resurrect_under_the_successors_fence() {
+    let mut p = pair();
+    capture(
+        &p.owner,
+        &book(&p.owner_cfg, BOOK),
+        vec![contact(BOOK, "c1", "Ada")],
+    );
+    p.server.upload(&p.owner);
+    let receiver_config = config(&p._dir, "succeeded", &p.vault);
+    let receiver = unlocked(&receiver_config, &p.vault);
+    let path = &receiver_config.database_path;
+    let predecessor = p.owner_cfg.device_id;
+    let successor = DeviceId::new();
+    crate::contact_book_deletion::sqlcipher(path)
+        .execute_batch(&format!(
+            "INSERT INTO device_successions(predecessor,successor,platform,hint_tag,key_epoch) VALUES('{predecessor}','{successor}','android','hint',1)"
+        ))
+        .unwrap();
+
+    // The successor's deletion of the inherited book, then the predecessor-named book and contact
+    // at the same generation. Both are covered by the fence, so neither may be promoted.
+    let template = p.server.log[0].clone();
+    let forged = |sequence: u64, payload: PrivatePayload| {
+        let mut envelope = template.clone();
+        envelope.envelope_id = EnvelopeId::new();
+        envelope.producer_sequence = SourceSequence(sequence);
+        reseal_snapshot_payload(&p.vault, &mut envelope, &payload);
+        envelope
+    };
+    let records: Vec<Envelope> = vec![
+        forged(
+            1,
+            PrivatePayload::ContactBookDeleted {
+                book_id: BOOK.into(),
+                owner_device_id: successor.to_string(),
+                generation: "1".into(),
+                deleted_at_ms: 1_000,
+            },
+        ),
+        forged(
+            2,
+            PrivatePayload::ContactBookState {
+                book: book(&p.owner_cfg, BOOK),
+            },
+        ),
+        forged(
+            3,
+            PrivatePayload::ContactUpserted {
+                book: book(&p.owner_cfg, BOOK),
+                contact: contact(BOOK, "c1", "Ada"),
+            },
+        ),
+    ];
+    import(&receiver, &full(&records), records.len(), Some(96));
+    settle(&receiver);
+
+    assert_eq!(
+        state(&receiver),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert!(visible(&receiver, BOOK).is_empty());
+    assert_eq!(
+        crate::contact_book_deletion::sqlcipher(path)
+            .query_row("SELECT COUNT(*) FROM contact_books", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn a_member_before_or_after_a_continued_upsert_stages_the_same_contact() {
     let mut p = pair();
     deleted_by_another_device(&mut p);

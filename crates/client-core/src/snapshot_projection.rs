@@ -963,6 +963,15 @@ pub(super) fn reduce(
     }
 }
 
+/// The publication-generation merge of a staged contact upsert. Staged rows always carry a
+/// generation (a stage with unknown provenance is failed), so the fallback is the staged book's.
+fn staged_publication_merge() -> String {
+    contacts::publication_generation_merge(
+        "projection_contacts",
+        "(SELECT book_generation FROM projection_books WHERE generation=excluded.generation AND book_id=excluded.book_id)",
+    )
+}
+
 /// Owner of `book_id` as staged in this generation, else as currently materialized.
 fn known_owner(conn: &Connection, generation: i64, book_id: &str) -> Result<Option<String>, Error> {
     let staged: Option<String> = conn
@@ -1003,7 +1012,7 @@ fn stage_contact_payload(
             }
             let book_id = contacts::req(book, "id")?;
             let (id, revision, body) = contacts::peer_contact(contact, book_id)?;
-            let owner = contacts::terminal_owner(conn, contacts::req(book, "owner_device_id")?)?;
+            let owner = contacts::publication_owner(conn, book)?;
             let book_generation = contacts::revision(book, "generation")?;
             let covered: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM projection_deleted_members WHERE generation=? AND book_id=? AND contact_id=? AND owner_device_id=? AND book_generation>=?)",
@@ -1022,7 +1031,10 @@ fn stage_contact_payload(
                 return Ok(true);
             }
             conn.execute(
-                "INSERT INTO projection_contacts(generation,book_id,contact_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,?,NULL,?,?) ON CONFLICT(generation,book_id,contact_id) DO UPDATE SET revision=CASE WHEN excluded.revision>projection_contacts.revision THEN excluded.revision ELSE projection_contacts.revision END,body=CASE WHEN excluded.revision>projection_contacts.revision THEN excluded.body ELSE projection_contacts.body END,deleted_at=CASE WHEN excluded.revision>projection_contacts.revision THEN NULL ELSE projection_contacts.deleted_at END,publication_owner=excluded.publication_owner,publication_generation=CASE WHEN projection_contacts.publication_owner=excluded.publication_owner THEN MAX(COALESCE(projection_contacts.publication_generation,0),excluded.publication_generation) ELSE excluded.publication_generation END WHERE excluded.revision>=projection_contacts.revision",
+                &format!(
+                    "INSERT INTO projection_contacts(generation,book_id,contact_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,?,NULL,?,?) ON CONFLICT(generation,book_id,contact_id) DO UPDATE SET revision=CASE WHEN excluded.revision>projection_contacts.revision THEN excluded.revision ELSE projection_contacts.revision END,body=CASE WHEN excluded.revision>projection_contacts.revision THEN excluded.body ELSE projection_contacts.body END,deleted_at=CASE WHEN excluded.revision>projection_contacts.revision THEN NULL ELSE projection_contacts.deleted_at END,publication_owner=excluded.publication_owner,publication_generation={} WHERE excluded.revision>=projection_contacts.revision",
+                    staged_publication_merge()
+                ),
                 params![generation, book_id, id, revision, crate::json(&body)?, owner, book_generation],
             )?;
             Ok(true)
@@ -1098,7 +1110,10 @@ fn stage_contact_payload(
                 return Ok(true);
             }
             conn.execute(
-                "INSERT INTO projection_contacts(generation,book_id,contact_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(generation,book_id,contact_id) DO UPDATE SET revision=excluded.revision,body=excluded.body,deleted_at=excluded.deleted_at,publication_owner=excluded.publication_owner,publication_generation=excluded.publication_generation WHERE excluded.revision>projection_contacts.revision",
+                &format!(
+                    "INSERT INTO projection_contacts(generation,book_id,contact_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(generation,book_id,contact_id) DO UPDATE SET revision=CASE WHEN excluded.revision>projection_contacts.revision THEN excluded.revision ELSE projection_contacts.revision END,body=CASE WHEN excluded.revision>projection_contacts.revision THEN excluded.body ELSE projection_contacts.body END,deleted_at=CASE WHEN excluded.revision>projection_contacts.revision THEN excluded.deleted_at ELSE projection_contacts.deleted_at END,publication_owner=excluded.publication_owner,publication_generation={} WHERE excluded.revision>=projection_contacts.revision",
+                    staged_publication_merge()
+                ),
                 params![generation, book_id, id, revision, crate::json(&body)?, deleted_at, owner, book_generation],
             )?;
             Ok(true)
@@ -1226,12 +1241,12 @@ fn stage_book(
         return Ok(false);
     }
     let book_generation = contacts::revision(book, "generation")?;
-    let owner = contacts::req(book, "owner_device_id")?;
-    if staged_covered(conn, generation, id, owner, Some(book_generation))? {
+    let owner = contacts::publication_owner(conn, book)?;
+    if staged_covered(conn, generation, id, &owner, Some(book_generation))? {
         return Ok(false);
     }
     if !known_owner(conn, generation, id)?
-        .map(|owner| contacts::owner_or_successor(conn, &owner, producer))
+        .map(|known| contacts::owner_or_successor(conn, &known, producer))
         .transpose()?
         .unwrap_or(true)
     {
@@ -1260,7 +1275,7 @@ fn stage_book(
         params![
             generation,
             id,
-            producer,
+            owner,
             book_generation,
             book.get("state").and_then(Value::as_str).unwrap_or("active"),
             crate::json(&body)?
@@ -1309,6 +1324,51 @@ pub(super) fn stage_removal(
         "UPDATE projection_notifications SET removed=1,title='',text='',app_icon_png_base64=NULL,source_sequence=? WHERE generation=? AND source_device_id=? AND notification_key=? AND lifetime=? AND source_sequence<=?",
         params![sequence, generation, t.source_device_id, t.notification_key, t.lifetime, sequence],
     )?;
+    Ok(())
+}
+
+/// Moves every staged row that names a succeeded owner to that owner's terminal successor, so the
+/// promotion fences and filters judge it under the owner that now holds the book. Staging applies
+/// this already; it covers a succession learned after the record was staged. The named body of a
+/// staged book is kept, so promotion can still tell a book inherited here from an own book.
+fn retarget_succeeded_owners(conn: &Connection, generation: i64) -> Result<(), Error> {
+    let owners: Vec<String> = conn
+        .prepare(
+            "SELECT owner_device_id FROM projection_books WHERE generation=?1 UNION SELECT publication_owner FROM projection_contacts WHERE generation=?1 AND publication_owner IS NOT NULL UNION SELECT owner_device_id FROM projection_deleted_books WHERE generation=?1 UNION SELECT owner_device_id FROM projection_deleted_members WHERE generation=?1",
+        )?
+        .query_map([generation], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    for owner in owners {
+        let terminal = contacts::terminal_owner(conn, &owner)?;
+        if terminal == owner {
+            continue;
+        }
+        let ids = params![generation, owner, terminal];
+        conn.execute(
+            "UPDATE projection_books SET owner_device_id=?3 WHERE generation=?1 AND owner_device_id=?2",
+            ids,
+        )?;
+        conn.execute(
+            "UPDATE projection_contacts SET publication_owner=?3 WHERE generation=?1 AND publication_owner=?2",
+            ids,
+        )?;
+        conn.execute(
+            "INSERT INTO projection_deleted_books(generation,book_id,owner_device_id,book_generation,deleted_at_ms) SELECT generation,book_id,?3,book_generation,deleted_at_ms FROM projection_deleted_books WHERE generation=?1 AND owner_device_id=?2 ON CONFLICT(generation,book_id,owner_device_id) DO UPDATE SET book_generation=MAX(projection_deleted_books.book_generation,excluded.book_generation),deleted_at_ms=MAX(projection_deleted_books.deleted_at_ms,excluded.deleted_at_ms)",
+            ids,
+        )?;
+        conn.execute(
+            "DELETE FROM projection_deleted_books WHERE generation=?1 AND owner_device_id=?2",
+            params![generation, owner],
+        )?;
+        conn.execute(
+            "INSERT INTO projection_deleted_members(generation,book_id,contact_id,owner_device_id,book_generation) SELECT generation,book_id,contact_id,?3,book_generation FROM projection_deleted_members WHERE generation=?1 AND owner_device_id=?2 ON CONFLICT(generation,book_id,contact_id,owner_device_id) DO UPDATE SET book_generation=MAX(projection_deleted_members.book_generation,excluded.book_generation)",
+            ids,
+        )?;
+        conn.execute(
+            "DELETE FROM projection_deleted_members WHERE generation=?1 AND owner_device_id=?2",
+            params![generation, owner],
+        )?;
+    }
     Ok(())
 }
 
@@ -1366,14 +1426,24 @@ fn promote(
     high_water: i64,
     me: &str,
 ) -> Result<(), Error> {
+    retarget_succeeded_owners(conn, generation)?;
+    // Stored books named by a succeeded owner move first, so the stage is applied over them.
+    crate::device_succession::move_stale_book_owners(conn)?;
+    // A NULL-provenance contact is judged by its book as it stood before this promotion.
+    conn.execute("DROP TABLE IF EXISTS temp.prior_book_generations", [])?;
+    conn.execute(
+        "CREATE TEMP TABLE prior_book_generations AS SELECT id,generation FROM contact_books",
+        [],
+    )?;
     promote_deletions(conn, generation, me)?;
-    // Contact books owned elsewhere; deleting a book cascades to its contacts.
+    // Contact books owned elsewhere; deleting a book cascades to its contacts. "Own" is judged by
+    // the named owner, so a book this device inherited is still promoted and normalised below.
     conn.execute(
         "DELETE FROM contact_books WHERE owner_device_id!=?1 AND NOT EXISTS(SELECT 1 FROM projection_books s WHERE s.generation=?2 AND s.book_id=contact_books.id)",
         params![me, generation],
     )?;
     conn.execute(
-        "INSERT INTO contact_books(id,owner_device_id,generation,state,body,forgotten) SELECT book_id,owner_device_id,book_generation,state,body,0 FROM projection_books WHERE generation=?2 AND owner_device_id!=?1 ON CONFLICT(id) DO UPDATE SET generation=excluded.generation,state=excluded.state,body=excluded.body WHERE contact_books.owner_device_id=excluded.owner_device_id AND (excluded.generation>contact_books.generation OR (excluded.generation=contact_books.generation AND contact_books.state!='retired' AND CAST(COALESCE(json_extract(excluded.body,'$.state_revision'),'0') AS INTEGER)>=CAST(COALESCE(json_extract(contact_books.body,'$.state_revision'),'0') AS INTEGER)))",
+        "INSERT INTO contact_books(id,owner_device_id,generation,state,body,forgotten) SELECT book_id,owner_device_id,book_generation,state,body,0 FROM projection_books WHERE generation=?2 AND json_extract(body,'$.owner_device_id')!=?1 ON CONFLICT(id) DO UPDATE SET generation=excluded.generation,state=excluded.state,body=excluded.body WHERE contact_books.owner_device_id=excluded.owner_device_id AND (excluded.generation>contact_books.generation OR (excluded.generation=contact_books.generation AND contact_books.state!='retired' AND CAST(COALESCE(json_extract(excluded.body,'$.state_revision'),'0') AS INTEGER)>=CAST(COALESCE(json_extract(contact_books.body,'$.state_revision'),'0') AS INTEGER)))",
         params![me, generation],
     )?;
     conn.execute(
@@ -1381,9 +1451,16 @@ fn promote(
         params![me, generation],
     )?;
     conn.execute(
-        "INSERT INTO contacts(id,book_id,revision,body,deleted_at,publication_owner,publication_generation) SELECT s.contact_id,s.book_id,s.revision,s.body,s.deleted_at,s.publication_owner,s.publication_generation FROM projection_contacts s JOIN contact_books b ON b.id=s.book_id WHERE s.generation=?2 AND b.owner_device_id!=?1 ON CONFLICT(book_id,id) DO UPDATE SET revision=CASE WHEN excluded.revision>contacts.revision THEN excluded.revision ELSE contacts.revision END,body=CASE WHEN excluded.revision>contacts.revision THEN excluded.body ELSE contacts.body END,deleted_at=CASE WHEN excluded.revision>contacts.revision THEN excluded.deleted_at ELSE contacts.deleted_at END,publication_owner=excluded.publication_owner,publication_generation=CASE WHEN contacts.publication_owner=excluded.publication_owner THEN MAX(COALESCE(contacts.publication_generation,0),excluded.publication_generation) ELSE excluded.publication_generation END WHERE excluded.revision>=contacts.revision",
+        &format!(
+            "INSERT INTO contacts(id,book_id,revision,body,deleted_at,publication_owner,publication_generation) SELECT s.contact_id,s.book_id,s.revision,s.body,s.deleted_at,s.publication_owner,s.publication_generation FROM projection_contacts s JOIN contact_books b ON b.id=s.book_id LEFT JOIN projection_books pb ON pb.generation=s.generation AND pb.book_id=s.book_id WHERE s.generation=?2 AND COALESCE(json_extract(pb.body,'$.owner_device_id'),b.owner_device_id)!=?1 ON CONFLICT(book_id,id) DO UPDATE SET revision=CASE WHEN excluded.revision>contacts.revision THEN excluded.revision ELSE contacts.revision END,body=CASE WHEN excluded.revision>contacts.revision THEN excluded.body ELSE contacts.body END,deleted_at=CASE WHEN excluded.revision>contacts.revision THEN excluded.deleted_at ELSE contacts.deleted_at END,publication_owner=excluded.publication_owner,publication_generation={} WHERE excluded.revision>=contacts.revision",
+            contacts::publication_generation_merge(
+                "contacts",
+                "(SELECT generation FROM prior_book_generations WHERE id=excluded.book_id)"
+            )
+        ),
         params![me, generation],
     )?;
+    conn.execute("DROP TABLE temp.prior_book_generations", [])?;
     // A staged book or contact may name a succeeded owner; it moves to the terminal successor as
     // live succession moves it, so a later deletion of that successor's book matches it.
     crate::device_succession::move_stale_book_owners(conn)?;
