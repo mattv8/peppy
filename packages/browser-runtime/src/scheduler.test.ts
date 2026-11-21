@@ -133,7 +133,88 @@ describe("BrowserScheduler", () => {
       download: async () => new Uint8Array(),
     };
     await new BrowserScheduler(session, transport).poll();
-    expect(contexts).toEqual([{ devices, capabilities, connection: "connected", outboxRejected: false }]);
+    expect(contexts).toEqual([{ devices, capabilities, connection: "connected", outboxRejected: false, syncCurrent: false }]);
+  });
+
+  it("publishes sync currency only while the last pull is at the server head with every row applied", async () => {
+    const state = { target: "5", received: "5", processed: "5", waiting: "0", pending: false, headAhead: false };
+    const contexts: Record<string, unknown>[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string, args: Record<string, unknown>) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: state.received };
+        if (command === "sync_progress") return { receivedThrough: state.received, processedThrough: state.processed, waitingForKeys: state.waiting };
+        if (command === "sync_work_status") return { pendingApply: state.pending };
+        if (command === "_worker_apply_server_context") { contexts.push(args); return {}; }
+        return [];
+      },
+      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+    };
+    const transport = {
+      json: async (path: string) => {
+        if (path === "/v1/devices" || path === "/v1/capabilities") return path === "/v1/devices" ? { devices: [] } : { capabilities: [] };
+        return { events: [], high_water_cursor: state.headAhead ? "6" : state.target, next_after: null };
+      },
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    };
+    const scheduler = new BrowserScheduler(session, transport);
+    const lastSyncCurrent = () => contexts.at(-1)?.syncCurrent;
+
+    await scheduler.poll();
+    expect(lastSyncCurrent()).toBe(true);
+
+    state.processed = "4";
+    await scheduler.poll();
+    expect(lastSyncCurrent()).toBe(false);
+
+    state.processed = "5";
+    state.waiting = "1";
+    await scheduler.poll();
+    expect(lastSyncCurrent()).toBe(false);
+
+    state.waiting = "0";
+    state.pending = true;
+    await scheduler.poll();
+    expect(lastSyncCurrent()).toBe(false);
+
+    state.pending = false;
+    state.headAhead = true;
+    await scheduler.poll();
+    expect(lastSyncCurrent()).toBe(false);
+
+    state.headAhead = false;
+    await scheduler.poll();
+    expect(lastSyncCurrent()).toBe(true);
+  });
+
+  it("never reports sync currency when the round cannot reach the server", async () => {
+    const contexts: Record<string, unknown>[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string, args: Record<string, unknown>) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "5" };
+        if (command === "sync_progress") return { receivedThrough: "5", processedThrough: "5", waitingForKeys: "0" };
+        if (command === "_worker_apply_server_context") { contexts.push(args); return {}; }
+        return [];
+      },
+      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+    };
+    const transport = {
+      json: async (path: string) => {
+        if (path.startsWith("/v1/events")) return { events: [], high_water_cursor: "5", next_after: null };
+        throw new TransportError("offline");
+      },
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    };
+
+    const status = await new BrowserScheduler(session, transport).poll();
+
+    expect(status.connection).toBe("offline");
+    expect(contexts.every(context => context.syncCurrent !== true)).toBe(true);
   });
 
   it("reports gateway HTTP failures as offline server context", async () => {

@@ -1291,6 +1291,12 @@ async fn replay(session: &Arc<Session>) -> BridgeResult<ReplayOutcome> {
                 });
         if count == 0 {
             let _ = observe_history_replay(session, contexts, proof).await;
+            // An empty page proves this pull reached the server head, so the cut is safe to expose
+            // even when nothing new arrived (e.g. after a restart). Without a head there is no proof.
+            if let Some(target) = replay_target {
+                session.set_replay_target_high_water(Some(target));
+                session.notify();
+            }
             caught_up = true;
             break;
         }
@@ -3517,6 +3523,51 @@ mod transport_status_tests {
             "a non-advancing round must not start another replay round"
         );
         assert_eq!(session.client.receive_cursor().unwrap(), Cursor(100));
+    }
+
+    #[tokio::test]
+    async fn empty_first_page_after_restart_records_the_server_head_for_sync_currency() {
+        let (origin, _) = mock_server(move |method, path, _| match (method, path) {
+            ("GET", path) if path.starts_with("/v1/events?") => (
+                200,
+                json!({"events": [], "high_water_cursor": "0", "next_after": null}).to_string(),
+            ),
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let fixture = fixture_at(&origin);
+        // Restart: a fresh session over the same store has no in-memory replay cut.
+        drop(open(&fixture, &fixture.binding, &[]));
+        let restarted = Arc::new(open(&fixture, &fixture.binding, &[]));
+        restarted.set_status(|status| status.live = true);
+        assert!(!restarted.sync_current().unwrap());
+
+        replay_until_caught_up(&restarted).await.unwrap();
+
+        assert!(restarted.sync_current().unwrap());
+    }
+
+    #[tokio::test]
+    async fn replay_page_in_flight_keeps_sync_not_current() {
+        let (origin, _) = mock_server(move |method, path, _| match (method, path) {
+            ("GET", path) if path.starts_with("/v1/events?") => (
+                200,
+                json!({"events": [], "high_water_cursor": "0", "next_after": null}).to_string(),
+            ),
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let fixture = fixture_at(&origin);
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        session.set_status(|status| status.live = true);
+        replay_until_caught_up(&session).await.unwrap();
+        assert!(session.sync_current().unwrap());
+
+        let in_flight = session.replay_page_in_flight();
+        assert!(!session.sync_current().unwrap());
+        drop(in_flight);
+
+        assert!(session.sync_current().unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

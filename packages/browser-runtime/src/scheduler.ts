@@ -70,6 +70,8 @@ export class BrowserScheduler {
   private lastPublishedProgress?: string;
   /** True when this round stopped outbox delivery on a coded server refusal; reset at each round start. */
   private outboxRejected = false;
+  /** True when this round's last pull ended at the server head (empty or short page); reset at each round start. */
+  private pullCaughtUp = false;
   private draftSyncFailed = false;
   private retentionNegotiationResolved = false;
   private draftSyncEnabled?: boolean;
@@ -136,6 +138,7 @@ export class BrowserScheduler {
   private async round(signal: AbortSignal): Promise<void> {
     this.lastPublishedProgress = undefined;
     this.outboxRejected = false;
+    this.pullCaughtUp = false;
     try {
       throwIfAborted(signal);
       const retention = await this.options.retention?.prepareRound(signal);
@@ -166,9 +169,12 @@ export class BrowserScheduler {
       }
       await this.sendOutbox(signal);
       if (negotiationResolved) {
-        while (await this.replay(signal) === "morePages") {
+        let pull = await this.replay(signal);
+        while (pull === "morePages") {
           throwIfAborted(signal);
+          pull = await this.replay(signal);
         }
+        this.pullCaughtUp = pull === "caughtUp";
         if (await this.hasPendingProjectionWork()) await this.apply(signal);
         await this.options.retention?.reconcile(signal);
       }
@@ -551,13 +557,30 @@ export class BrowserScheduler {
     const devices = await this.transport.json("/v1/devices", { method: "GET", signal });
     throwIfAborted(signal);
     const capabilities = await this.transport.json("/v1/capabilities", { method: "GET", signal });
+    const connection = this.draftSyncFailed ? "error" : "connected";
     await this.session.query("_worker_apply_server_context", {
       devices,
       capabilities,
-      connection: this.draftSyncFailed ? "error" : "connected",
+      connection,
       outboxRejected: this.outboxRejected,
+      syncCurrent: connection === "connected" && await this.serverHeadApplied(),
       ...(this.snapshotTooLargeAt !== undefined ? { snapshotTooLarge: true } : {}),
     });
+  }
+
+  /**
+   * Same meaning as the desktop's sync currency: the last pull reached the server head and every row through it is
+   * applied, with no key wait or apply backlog. Any read failure is not current (fail closed).
+   */
+  private async serverHeadApplied(): Promise<boolean> {
+    if (!this.pullCaughtUp) return false;
+    try {
+      const progress = object(await this.session.query("sync_progress", {}));
+      const pendingWork = await this.hasPendingProjectionWork();
+      return progressPhase("applying", progress, this.targetHighWater, pendingWork, false) === "current";
+    } catch {
+      return false;
+    }
   }
 
   private async refreshSnapshotTooLargeContext(signal: AbortSignal | undefined): Promise<void> {
