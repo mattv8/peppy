@@ -48,6 +48,8 @@ export function InlineStatus({ items, idPrefix = "inline-status", labels }: { it
   const visibleItems = items.filter((item) => !item.srOnly);
   const primary = visibleItems[0];
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const messageRef = useRef<HTMLSpanElement>(null);
+  const heldFocusRef = useRef(false);
   const popoverRef = useRef<HTMLDivElement>(null);
   const hoverTimer = useRef<number | undefined>(undefined);
   const animationFrame = useRef<number | undefined>(undefined);
@@ -128,13 +130,25 @@ export function InlineStatus({ items, idPrefix = "inline-status", labels }: { it
     return () => window.removeEventListener("resize", updatePosition);
   }, [open, confirmationAction?.id, primary?.key, visibleItems.length]);
   useEffect(() => {
-    const trigger = triggerRef.current;
-    if (!trigger || !primary || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => setTruncated(trigger.scrollWidth > trigger.clientWidth));
-    observer.observe(trigger);
-    setTruncated(trigger.scrollWidth > trigger.clientWidth);
+    const message = messageRef.current;
+    if (!message || !primary || typeof ResizeObserver === "undefined") return;
+    const measure = () => {
+      const cutOff = message.scrollWidth > message.clientWidth;
+      const focused = document.activeElement;
+      // A status that fits again may drop its trigger and popover; note whether they hold focus.
+      if (!cutOff && focused && (focused === triggerRef.current || popoverRef.current?.contains(focused))) heldFocusRef.current = true;
+      setTruncated(cutOff);
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(message);
+    measure();
     return () => observer.disconnect();
-  }, [primary?.key, primary?.message]);
+  }, [primary?.key, primary?.message, needsPopover]);
+  useEffect(() => {
+    if (!heldFocusRef.current) return;
+    heldFocusRef.current = false;
+    if (!needsPopover) focusIfConnected(document.getElementById("composer-textarea"));
+  }, [needsPopover, truncated]);
   useEffect(() => {
     if (open && !needsPopover) close();
     if (confirming && !confirmationAction) setConfirming(null);
@@ -188,7 +202,7 @@ export function InlineStatus({ items, idPrefix = "inline-status", labels }: { it
               event.stopPropagation();
               close(true);
             }
-          }} onClick={(event) => toggle(event.detail === 0)}><span data-inline-status-message>{primary.message}</span>{moreCount > 0 ? <span data-inline-status-more data-count={moreCount} aria-hidden /> : null}</button> : <span data-inline-status-message>{primary.message}</span>}
+          }} onClick={(event) => toggle(event.detail === 0)}><span ref={messageRef} data-inline-status-message>{primary.message}</span>{moreCount > 0 ? <span data-inline-status-more data-count={moreCount} aria-hidden /> : null}</button> : <span ref={messageRef} data-inline-status-message>{primary.message}</span>}
         </div>
         {moreCount > 0 ? <span id={moreId} className="sr-only">{moreLabel(moreCount)}</span> : null}
         {primary.actions?.map((action) => actionButton(primary.key, action, action.id))}
