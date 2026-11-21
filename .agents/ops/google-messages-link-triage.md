@@ -95,7 +95,7 @@ A page entirely below the floor is still offered to `core.invalidate` for protoc
 
 ## Reading the link's diagnostics
 
-Diagnostics are off unless enabled in **Settings → Diagnostics**. When on, each link event also goes to logcat as `PeppyRcsDiagnostics: reason=<n>`, with `n` from the append-only table in [GoogleMessagesLinkDiagnostics.kt](../../apps/android/app/src/main/java/dev/peppy/mobile/diagnostics/GoogleMessagesLinkDiagnostics.kt). Other diagnostic events, including provider-capture reasons from `SyncDiagnosticReason`, appear only in the exported file.
+Diagnostics are off unless enabled in **Settings → Advanced → Diagnostics**. When on, each link event also goes to logcat as `PeppyRcsDiagnostics: reason=<n>`, with `n` from the append-only table in [GoogleMessagesLinkDiagnostics.kt](../../apps/android/app/src/main/java/dev/peppy/mobile/diagnostics/GoogleMessagesLinkDiagnostics.kt). Other diagnostic events, including provider-capture reasons from `SyncDiagnosticReason`, appear only in the exported file.
 
 | Pattern | Meaning |
 | --- | --- |

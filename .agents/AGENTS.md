@@ -416,8 +416,8 @@ This reference records non-obvious Peppy domain constraints.
   `SmsCaptureWorker` ANRs from an unindexed pending-acquisition scan
   (`sms_acquisitions_pending_order`). Measure with
   `dumpsys batterystats`, `dumpsys jobscheduler`, and the Diagnostics trace
-  (Settings → Diagnostics); logcat on the phone rotates within about a
-  minute, so it is not a timing source. See
+  (Settings → Advanced → Diagnostics); logcat on the phone rotates within
+  about a minute, so it is not a timing source. See
   [gateway scheduling](../apps/android/app/src/main/java/dev/peppy/mobile/GatewayWork.kt),
   [MMS capture](../apps/android/app/src/main/java/dev/peppy/mobile/MmsCaptureWork.kt),
   and [MMS previews](../apps/android/app/src/main/java/dev/peppy/mobile/mms/MmsMediaPreview.kt).
