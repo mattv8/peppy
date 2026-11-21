@@ -4,15 +4,17 @@ import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -33,21 +35,21 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.R
-import dev.peppy.mobile.Section
-import dev.peppy.mobile.StatusRow
 import dev.peppy.mobile.approval.actions
+import dev.peppy.mobile.ui.DetailsStatusRow
+import dev.peppy.mobile.ui.InfoButton
+import dev.peppy.mobile.ui.SettingToggleRow
+import dev.peppy.mobile.ui.SettingsGroup
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 internal data class DiagnosticsActions(
-    val recording: Boolean,
     val canShare: Boolean,
     val canClear: Boolean,
 )
 
 internal fun diagnosticsActions(state: DiagnosticsState) = DiagnosticsActions(
-    recording = state.enabled,
     canShare = state.bytes > 0 && !state.busy,
     canClear = state.bytes > 0 && !state.busy,
 )
@@ -96,6 +98,7 @@ internal fun DiagnosticsSettings() {
     )
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun DiagnosticsSettingsContent(
     state: DiagnosticsState,
@@ -108,50 +111,41 @@ internal fun DiagnosticsSettingsContent(
     val verboseLoggingLabel = stringResource(R.string.peppy_diagnostics_verbose_sync_logging)
     val workingLabel = stringResource(R.string.peppy_diagnostics_working)
 
-    Section(
+    SettingsGroup(
         "diagnostics-section",
         stringResource(R.string.peppy_diagnostics_title),
-        helpBody = stringResource(R.string.peppy_diagnostics_overhead),
     ) {
-        Row(
-            Modifier.fillMaxWidth().testTag("diagnostics-verbose-sync-logging"),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(verboseLoggingLabel)
-                Text(
-                    stringResource(R.string.peppy_diagnostics_verbose_sync_logging_hint),
-                    style = MaterialTheme.typography.bodySmall,
+        SettingToggleRow(
+            title = verboseLoggingLabel,
+            tag = "diagnostics-verbose-sync-logging",
+            checked = state.enabled,
+            enabled = !state.busy,
+            onCheckedChange = onEnabledChanged,
+            subtitle = stringResource(if (state.enabled) R.string.peppy_diagnostics_recording else R.string.peppy_settings_off),
+            titleTrailing = {
+                InfoButton(
+                    topic = verboseLoggingLabel,
+                    title = verboseLoggingLabel,
+                    body = stringResource(R.string.peppy_diagnostics_verbose_sync_logging_hint) + "\n\n" + stringResource(R.string.peppy_diagnostics_overhead),
+                    tag = "info-diagnostics-section",
                 )
-            }
-            Switch(
-                checked = state.enabled,
-                onCheckedChange = onEnabledChanged,
-                enabled = !state.busy,
-                modifier = Modifier
-                    .testTag("diagnostics-verbose-sync-logging-switch")
-                    .semantics { contentDescription = verboseLoggingLabel },
-            )
-        }
-        StatusRow(
-            "diagnostics-recording-status",
-            stringResource(R.string.peppy_diagnostics_recording),
-            stringResource(if (actions.recording) R.string.peppy_diagnostics_active else R.string.peppy_diagnostics_off_retained),
+            },
         )
-        StatusRow(
+        DetailsStatusRow(
             "diagnostics-retained-size",
             stringResource(R.string.peppy_diagnostics_retained_size),
-            "${diagnosticsSize(state.bytes)} / ${stringResource(R.string.peppy_diagnostics_retained_size_limit)}",
+            stringResource(R.string.peppy_diagnostics_retained_of_limit, diagnosticsSize(state.bytes)),
         )
-        StatusRow(
+        DetailsStatusRow(
             "diagnostics-dropped-events",
             stringResource(R.string.peppy_diagnostics_dropped_events),
             state.dropped.toString(),
         )
         Text(
             stringResource(R.string.peppy_diagnostics_privacy),
-            Modifier.testTag("diagnostics-privacy-text"),
-            style = MaterialTheme.typography.bodySmall,
+            Modifier.padding(vertical = 8.dp).testTag("diagnostics-privacy-text"),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         state.error?.let { error ->
             Text(
@@ -163,15 +157,17 @@ internal fun DiagnosticsSettingsContent(
                     },
                 ),
                 Modifier
+                    .padding(vertical = 8.dp)
                     .testTag("diagnostics-error")
                     .semantics { liveRegion = LiveRegionMode.Assertive },
                 color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.bodyMedium,
             )
         }
-        Row(
+        FlowRow(
+            Modifier.padding(top = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             OutlinedButton(
                 onClick = onShare,
@@ -184,16 +180,18 @@ internal fun DiagnosticsSettingsContent(
                 modifier = Modifier.testTag("diagnostics-clear-logs"),
             ) { Text(stringResource(R.string.peppy_diagnostics_clear_logs)) }
             if (state.busy) {
-                CircularProgressIndicator(
-                    Modifier
-                        .size(24.dp)
-                        .testTag("diagnostics-busy")
-                        .semantics {
-                            contentDescription = workingLabel
-                            liveRegion = LiveRegionMode.Polite
-                        },
-                    strokeWidth = 2.dp,
-                )
+                Box(Modifier.heightIn(min = 40.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(
+                        Modifier
+                            .size(24.dp)
+                            .testTag("diagnostics-busy")
+                            .semantics {
+                                contentDescription = workingLabel
+                                liveRegion = LiveRegionMode.Polite
+                            },
+                        strokeWidth = 2.dp,
+                    )
+                }
             }
         }
     }
@@ -210,6 +208,7 @@ internal fun DiagnosticsSettingsContent(
                         onClear()
                     },
                     modifier = Modifier.testTag("diagnostics-clear-confirm"),
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
                 ) { Text(stringResource(R.string.peppy_diagnostics_clear_confirm)) }
             },
             dismissButton = {

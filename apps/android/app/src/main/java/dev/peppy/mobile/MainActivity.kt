@@ -1,7 +1,6 @@
 package dev.peppy.mobile
 
 import android.Manifest
-import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -10,7 +9,6 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
@@ -23,7 +21,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -31,7 +28,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Contacts
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
@@ -41,7 +37,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -53,13 +48,14 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.semantics.heading
-import androidx.compose.ui.semantics.onClick as semanticsOnClick
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -85,7 +81,6 @@ import dev.peppy.mobile.account.AccountTabRequests
 import dev.peppy.mobile.account.AccountAccessState
 import dev.peppy.mobile.account.AccountRefreshTrigger
 import dev.peppy.mobile.account.AndroidHostedSecureStore
-import dev.peppy.mobile.account.HostedAccountDeletionEntry
 import dev.peppy.mobile.account.HostedAccountClient
 import dev.peppy.mobile.account.HostedFailure
 import dev.peppy.mobile.account.signInHostedAccount
@@ -101,14 +96,12 @@ import dev.peppy.mobile.approval.createOwnerComputerApprovalHost
 import dev.peppy.mobile.approval.createOwnerPhoneApprovalHost
 import dev.peppy.mobile.contacts.ContactSyncHost
 import dev.peppy.mobile.contacts.ContactSyncSettings
-import dev.peppy.mobile.diagnostics.DiagnosticsSettings
 import dev.peppy.mobile.enrollment.EnrollmentScreen
 import dev.peppy.mobile.enrollment.HostedEnrollmentScreen
 import dev.peppy.mobile.enrollment.SelfHostedSetupScreen
 import dev.peppy.mobile.enrollment.WelcomeDestination
 import dev.peppy.mobile.enrollment.WelcomeScreen
 import dev.peppy.mobile.gateway.GatewayAccountHost
-import dev.peppy.mobile.gateway.AccountNavigationRow
 import dev.peppy.mobile.gateway.GatewayAccountSettings
 import dev.peppy.mobile.gateway.GatewayStatus
 import dev.peppy.mobile.gateway.ImportResult
@@ -119,6 +112,7 @@ import dev.peppy.mobile.gateway.SyncPhase
 import dev.peppy.mobile.gateway.UnlockResult
 import dev.peppy.mobile.notifications.NotificationAppFiltersScreen
 import dev.peppy.mobile.notifications.NotificationMirroringSettings
+import dev.peppy.mobile.settings.SettingsScreen
 import dev.peppy.mobile.security.rememberDeviceAuthenticator
 import dev.peppy.mobile.security.revealOwnerVaultSecret
 import dev.peppy.mobile.sms.SmsCaptureLifecycle
@@ -131,8 +125,12 @@ import dev.peppy.mobile.gateway.SetupFinishTracker
 import dev.peppy.mobile.gateway.historyTooLargeRibbonVisible
 import dev.peppy.mobile.sms.syncDetailsRoute
 import dev.peppy.mobile.sms.syncStopped
+import dev.peppy.mobile.ui.DetailPage
 import dev.peppy.mobile.ui.InfoButton
-import dev.peppy.mobile.ui.ScreenBody
+import dev.peppy.mobile.ui.LocalPageChromeHost
+import dev.peppy.mobile.ui.PageChrome
+import dev.peppy.mobile.ui.PageChromeHost
+import dev.peppy.mobile.ui.PageChromeTopAppBar
 import dev.peppy.mobile.ui.SystemRibbonHost
 import dev.peppy.mobile.ui.belowSystemRibbon
 import dev.peppy.mobile.ui.theme.PeppyTheme
@@ -361,8 +359,9 @@ private fun CompanionScreen(activity: ComponentActivity) {
     var appFiltersOpen by remember { mutableStateOf(false) }
     var smsDetailsOpen by remember { mutableStateOf(false) }
     var contactsDetailsOpen by remember { mutableStateOf(false) }
-    var accountDetailsOpen by remember { mutableStateOf(false) }
+    var accountResetToken by remember { mutableIntStateOf(0) }
     var stoppedSyncDetailsOpen by remember { mutableStateOf(false) }
+    val pageChromeHost = remember { PageChromeHost() }
     val accountTabRequested by AccountTabRequests.state.collectAsState()
     LaunchedEffect(accountTabRequested) {
         if (accountTabRequested) {
@@ -371,7 +370,8 @@ private fun CompanionScreen(activity: ComponentActivity) {
             appFiltersOpen = false
             smsDetailsOpen = false
             contactsDetailsOpen = false
-            accountDetailsOpen = false
+            subscriptionOpen = false
+            accountResetToken++
             destination = "account"
         }
     }
@@ -545,10 +545,6 @@ private fun CompanionScreen(activity: ComponentActivity) {
         return
     }
 
-    BackHandler(enabled = settingsOpen || subscriptionOpen) {
-        if (subscriptionOpen) subscriptionOpen = false else settingsOpen = false
-    }
-
     Column(Modifier.fillMaxSize()) {
         val ribbonVisible = SystemRibbonHost(
             enrolled = status?.enrolled == true,
@@ -567,20 +563,14 @@ private fun CompanionScreen(activity: ComponentActivity) {
             },
             onOpenSubscription = { subscriptionOpen = true },
         )
+        CompositionLocalProvider(LocalPageChromeHost provides pageChromeHost) {
         Scaffold(
             modifier = Modifier.weight(1f).belowSystemRibbon(ribbonVisible),
             topBar = {
-                TopAppBar(
-                    title = { Text(stringResource(if (subscriptionOpen) R.string.peppy_play_subscription_title else if (settingsOpen) R.string.peppy_settings else R.string.peppy_app_name)) },
-                    navigationIcon = {
-                        if (settingsOpen || subscriptionOpen) IconButton(onClick = { if (subscriptionOpen) subscriptionOpen = false else settingsOpen = false }, Modifier.testTag(if (subscriptionOpen) "subscription-back-button" else "settings-back-button")) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.peppy_back))
-                        }
-                    },
-                )
+                PageChromeTopAppBar(host = pageChromeHost, fallbackTitle = stringResource(R.string.peppy_app_name))
             },
             bottomBar = {
-                if (status?.enrolled == true && status?.sharedKeysReady == true && !settingsOpen && !subscriptionOpen && !smsDetailsOpen && !contactsDetailsOpen && !accountDetailsOpen) NavigationBar(Modifier.testTag("bottom-navigation")) {
+                if (status?.enrolled == true && status?.sharedKeysReady == true && !settingsOpen && !subscriptionOpen && !smsDetailsOpen && !contactsDetailsOpen && pageChromeHost.current == null) NavigationBar(Modifier.testTag("bottom-navigation")) {
                     listOf("mirroring" to R.string.peppy_mirroring, "sms" to R.string.peppy_sms, "contacts" to R.string.peppy_permissions_contacts, "account" to R.string.peppy_account).forEach { (route, labelRes) ->
                         val label = stringResource(labelRes)
                         val icon = when (route) { "mirroring" -> Icons.Default.Notifications; "sms" -> Icons.Default.Sms; "contacts" -> Icons.Default.Contacts; else -> Icons.Default.Person }
@@ -594,6 +584,8 @@ private fun CompanionScreen(activity: ComponentActivity) {
                 LaunchedEffect(destination) { scrollState.scrollTo(0) }
                 LaunchedEffect(contactsDetailsOpen) { scrollState.scrollTo(0) }
                 LaunchedEffect(smsDetailsOpen) { scrollState.scrollTo(0) }
+                val pageChromeTag by remember { derivedStateOf { pageChromeHost.current?.tag } }
+                LaunchedEffect(pageChromeTag) { scrollState.scrollTo(0) }
                 Column(
                     Modifier.fillMaxSize().verticalScroll(scrollState).then(
                         if (status?.enrolled == true && status?.sharedKeysReady == true) Modifier else Modifier.padding(24.dp),
@@ -605,7 +597,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
                 subscriptionOpen = subscriptionOpen,
                 isPlay = isPlayDistribution(),
                 subscriptionContent = {
-                    ScreenBody("subscription-screen") {
+                    DetailPage(PageChrome(title = stringResource(R.string.peppy_play_subscription_title), tag = "subscription", onBack = { subscriptionOpen = false })) {
                         PlaySubscriptionPanel(
                             requireNotNull(subscriptionCoordinator),
                             subscriptionRouteState.selection.accountId,
@@ -661,7 +653,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
 
             if (status?.enrolled == true && !status!!.sharedKeysReady && !settingsOpen && !subscriptionOpen) Section("lock-screen", stringResource(R.string.peppy_locked), showDivider = false) {
                 Text(
-                    "Enter the existing encryption passphrase you already use on your other devices. This phone does not create a new passphrase.",
+                    stringResource(R.string.peppy_lock_screen_body),
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 OutlinedTextField(
@@ -675,7 +667,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
                     modifier = Modifier.fillMaxWidth().testTag("passphrase-field"),
                 )
                 BusyButton(
-                    "unlock-button", "Unlock", unlockBusy,
+                    "unlock-button", stringResource(R.string.peppy_hosted_unlock_cta), unlockBusy,
                     enabled = !unlockBusy && status?.enrolled == true && passphrase.isNotEmpty(),
                 ) {
                     val attempt = passphrase
@@ -710,61 +702,33 @@ private fun CompanionScreen(activity: ComponentActivity) {
                     onDetailsChanged = { contactsDetailsOpen = it },
                 )
             }
-            if (!subscriptionOpen && !settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "account") GatewayAccountSettings(onChanged = { refresh++ }, onOpenSettings = { settingsOpen = true }, onOpenSubscription = { subscriptionOpen = true }, onAddPhone = {
-                scope.launch { ownerPhoneHost = withContext(Dispatchers.IO) { createOwnerPhoneApprovalHost(context) }; addPhoneOpen = ownerPhoneHost != null }
-            }, canAddPhone = ownerPhoneAvailable, onConnectComputer = {
-                scope.launch { ownerComputerHost = withContext(Dispatchers.IO) { createOwnerComputerApprovalHost(context) }; connectComputerOpen = ownerComputerHost != null }
-            }, canConnectComputer = ownerPhoneAvailable, onDetailChanged = { accountDetailsOpen = it }, onRouteChanged = { scope.launch { scrollState.scrollTo(0) } },
-                playDeletionContext = playDeletionContext)
-            if (settingsOpen && !subscriptionOpen) {
-                ScreenBody("settings-screen") {
-                    val externalLinkLabel = stringResource(R.string.peppy_about_opens_in_browser)
-                    val guidesOpenFailed = stringResource(R.string.peppy_guides_open_failed)
-                    Section("about-section", "About") {
-                        Text(stringResource(R.string.peppy_encrypted))
-                        StatusRow("settings-server", "Server", status?.origin ?: "Not enrolled")
-                        TextButton(
-                            onClick = {
-                                try {
-                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/privacy")))
-                                } catch (_: ActivityNotFoundException) {
-                                    Toast.makeText(context, "No app is available to open the Privacy Policy.", Toast.LENGTH_SHORT).show()
-                                }
-                            },
-                            modifier = Modifier.testTag("settings-privacy-policy"),
-                        ) { Text(stringResource(R.string.peppy_privacy_policy)) }
-                        Text(stringResource(R.string.peppy_privacy_policy_scope), style = MaterialTheme.typography.bodySmall)
-                        TextButton(
-                            onClick = {
-                                try {
-                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/docs")))
-                                } catch (_: ActivityNotFoundException) {
-                                    Toast.makeText(context, guidesOpenFailed, Toast.LENGTH_SHORT).show()
-                                }
-                            },
-                            modifier = Modifier.heightIn(min = 48.dp).semantics {
-                                semanticsOnClick(externalLinkLabel, null)
-                            }.testTag("settings-guides"),
-                        ) { Text(stringResource(R.string.peppy_guides)) }
-                    }
-                    DiagnosticsSettings()
-                    if (status?.enrolled == true && status?.sharedKeysReady == true) {
-                        GatewayAccountSettings(
-                            onChanged = { refresh++ },
-                            settingsMode = true,
-                            onOpenSubscription = { subscriptionOpen = true },
-                            playDeletionContext = playDeletionContext,
-                        )
-                    } else LockedHostedSettings(
-                        status?.origin,
-                        isPlayDistribution(),
-                        playDeletionContext,
-                    ) { subscriptionOpen = true }
-                }
+            if (!subscriptionOpen && !settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "account") key(accountResetToken) {
+                GatewayAccountSettings(
+                    onChanged = { refresh++ },
+                    onOpenSettings = { settingsOpen = true },
+                    onOpenSubscription = { subscriptionOpen = true },
+                    onAddPhone = {
+                        scope.launch { ownerPhoneHost = withContext(Dispatchers.IO) { createOwnerPhoneApprovalHost(context) }; addPhoneOpen = ownerPhoneHost != null }
+                    },
+                    canAddPhone = ownerPhoneAvailable,
+                    onConnectComputer = {
+                        scope.launch { ownerComputerHost = withContext(Dispatchers.IO) { createOwnerComputerApprovalHost(context) }; connectComputerOpen = ownerComputerHost != null }
+                    },
+                    canConnectComputer = ownerPhoneAvailable,
+                )
             }
+            if (settingsOpen && !subscriptionOpen) SettingsScreen(
+                status = status,
+                isPlay = isPlayDistribution(),
+                playDeletionContext = playDeletionContext,
+                onClose = { settingsOpen = false },
+                onOpenSubscription = { subscriptionOpen = true },
+                onChanged = { refresh++ },
+            )
             }
                 }
             }
+        }
         }
     }
 }
@@ -777,35 +741,6 @@ internal fun SubscriptionRoute(
     content: @Composable () -> Unit,
 ) {
     if (subscriptionOpen && isPlay) subscriptionContent() else content()
-}
-
-@Composable
-internal fun LockedHostedSettings(
-    origin: String?,
-    isPlay: Boolean,
-    playDeletionContext: dev.peppy.mobile.billing.PlayDeletionContext = dev.peppy.mobile.billing.PlayDeletionContext(false, null),
-    onOpenSubscription: () -> Unit,
-) {
-    if (origin != "https://peppy.pro") return
-    var deletionOpenError by remember { mutableStateOf(false) }
-    if (isPlay) {
-        Section("settings-account-group", stringResource(R.string.peppy_play_subscription_title), showDivider = false) {
-            AccountNavigationRow("settings-subscription-row", stringResource(R.string.peppy_play_account_row), onOpenSubscription)
-        }
-    }
-    Section("settings-account-deletion-section", stringResource(R.string.peppy_account_delete_section)) {
-        HostedAccountDeletionEntry(
-            tag = "account-delete-row",
-            onOpenFailed = { deletionOpenError = true },
-            onViewSubscription = onOpenSubscription,
-            playManaged = playDeletionContext.managed,
-            playProductId = playDeletionContext.productId,
-        )
-    }
-    if (deletionOpenError) Text(
-        stringResource(R.string.peppy_toggle_android_link_unavailable),
-        Modifier.testTag("account-delete-open-error"),
-    )
 }
 
 @Composable

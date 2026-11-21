@@ -21,6 +21,7 @@ import dev.peppy.mobile.billing.playManageUri
 import uniffi.peppy_mobile_bindings.NativeBillingProvider
 import uniffi.peppy_mobile_bindings.NativePlayBillingContext
 import dev.peppy.mobile.ui.ConsentSheet
+import dev.peppy.mobile.ui.DestructiveRow
 
 internal const val HOSTED_ACCOUNT_DELETION_URL = "https://peppy.pro/account/delete"
 internal const val PLAY_SUBSCRIPTIONS_URL = "https://play.google.com/store/account/subscriptions"
@@ -49,7 +50,6 @@ internal fun openPlaySubscription(context: Context, productId: String?): Boolean
 @Composable
 internal fun HostedAccountDeletionEntry(
     tag: String,
-    includeVaultDistinction: Boolean = false,
     onOpenFailed: () -> Unit,
     onViewSubscription: (() -> Unit)? = null,
     isPlay: Boolean = BuildConfig.PEPPY_DISTRIBUTION == "play",
@@ -58,16 +58,67 @@ internal fun HostedAccountDeletionEntry(
     openDeletion: (Context) -> Boolean = ::openHostedAccountDeletion,
     openPlaySubscriptions: (Context) -> Boolean = ::openPlaySubscriptionList,
 ) {
-    val context = LocalContext.current
     var open by remember { mutableStateOf(false) }
     TextButton(onClick = { open = true }, modifier = Modifier.testTag(tag)) {
         Text(stringResource(R.string.peppy_account_delete_row))
     }
-    if (includeVaultDistinction) {
-        Text(stringResource(R.string.peppy_account_delete_vault_distinct))
-    }
+    if (open) HostedAccountDeletionSheet(
+        onDismiss = { open = false },
+        onOpenFailed = onOpenFailed,
+        onViewSubscription = onViewSubscription,
+        isPlay = isPlay,
+        playManaged = playManaged,
+        playProductId = playProductId,
+        openDeletion = openDeletion,
+        openPlaySubscriptions = openPlaySubscriptions,
+    )
+}
+
+@Composable
+internal fun HostedAccountDeletionRow(
+    tag: String,
+    onOpenFailed: () -> Unit,
+    onViewSubscription: (() -> Unit)? = null,
+    isPlay: Boolean = BuildConfig.PEPPY_DISTRIBUTION == "play",
+    playManaged: Boolean = false,
+    playProductId: String? = null,
+    openDeletion: (Context) -> Boolean = ::openHostedAccountDeletion,
+    openPlaySubscriptions: (Context) -> Boolean = ::openPlaySubscriptionList,
+) {
+    var open by remember { mutableStateOf(false) }
+    DestructiveRow(
+        tag = tag,
+        label = stringResource(R.string.peppy_account_delete_row),
+        consequence = stringResource(R.string.peppy_settings_delete_account_consequence),
+        actionLabel = stringResource(R.string.peppy_settings_delete_action),
+        onAction = { open = true },
+    )
+    if (open) HostedAccountDeletionSheet(
+        onDismiss = { open = false },
+        onOpenFailed = onOpenFailed,
+        onViewSubscription = onViewSubscription,
+        isPlay = isPlay,
+        playManaged = playManaged,
+        playProductId = playProductId,
+        openDeletion = openDeletion,
+        openPlaySubscriptions = openPlaySubscriptions,
+    )
+}
+
+@Composable
+private fun HostedAccountDeletionSheet(
+    onDismiss: () -> Unit,
+    onOpenFailed: () -> Unit,
+    onViewSubscription: (() -> Unit)?,
+    isPlay: Boolean,
+    playManaged: Boolean,
+    playProductId: String?,
+    openDeletion: (Context) -> Boolean,
+    openPlaySubscriptions: (Context) -> Boolean,
+) {
+    val context = LocalContext.current
     val viewSubscription: () -> Unit = {
-        open = false
+        onDismiss()
         if (playManaged) {
             val opened = playProductId?.let { openPlaySubscription(context, it) } ?: openPlaySubscriptions(context)
             if (!opened) onOpenFailed()
@@ -77,7 +128,7 @@ internal fun HostedAccountDeletionEntry(
             onOpenFailed()
         }
     }
-    if (open) ConsentSheet(
+    ConsentSheet(
         title = stringResource(R.string.peppy_account_delete_title),
         body = stringResource(R.string.peppy_account_delete_body),
         nextStep = if (playManaged) {
@@ -88,9 +139,9 @@ internal fun HostedAccountDeletionEntry(
             null
         },
         tag = "account-delete-sheet",
-        onDismiss = { open = false },
+        onDismiss = onDismiss,
         onConfirm = {
-            open = false
+            onDismiss()
             if (!openDeletion(context)) onOpenFailed()
         },
         confirmLabel = stringResource(R.string.peppy_account_delete_continue),

@@ -1,37 +1,24 @@
 package dev.peppy.mobile.gateway
 
-import android.Manifest
-import android.app.Activity
 import android.content.Context
-import android.content.ContextWrapper
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.AddToHomeScreen
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.CreditCard
+import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -44,25 +31,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.semantics.heading
-import androidx.compose.ui.semantics.onClick as semanticsOnClick
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.dp
-import dev.peppy.mobile.R
 import dev.peppy.mobile.BuildConfig
-import dev.peppy.mobile.RelayWakePreference
-import dev.peppy.mobile.RelayWakeRuntime
-import dev.peppy.mobile.RelayWakeStatus
-import dev.peppy.mobile.RemoteMessagingPreferences
-import dev.peppy.mobile.RemoteMessagingRuntime
-import dev.peppy.mobile.RemoteMessagingService
-import dev.peppy.mobile.GatewayEnqueueCause
-import dev.peppy.mobile.RemoteMessagingStatus
-import dev.peppy.mobile.Section
-import dev.peppy.mobile.StatusRow
-import dev.peppy.mobile.account.AccountAccessState
-import dev.peppy.mobile.account.AccountSettingsPolicy
+import dev.peppy.mobile.R
 import dev.peppy.mobile.about.AboutBuildInfo
 import dev.peppy.mobile.about.AboutRoute
 import dev.peppy.mobile.about.AboutScreen
@@ -70,29 +43,28 @@ import dev.peppy.mobile.about.AssetThirdPartyNotices
 import dev.peppy.mobile.about.GUIDES_URL
 import dev.peppy.mobile.about.LicenseTextScreen
 import dev.peppy.mobile.about.LicensesScreen
-import dev.peppy.mobile.about.PRIVACY_URL
 import dev.peppy.mobile.about.ThirdPartyNotices
-import dev.peppy.mobile.account.HostedAccountDeletionEntry
-import dev.peppy.mobile.billing.PlayDeletionContext
-import dev.peppy.mobile.attachments.AttachmentStorageCapacityNotice
+import dev.peppy.mobile.account.AccountAccessState
+import dev.peppy.mobile.account.AccountSettingsPolicy
 import dev.peppy.mobile.attachments.AttachmentStorageLoad
 import dev.peppy.mobile.attachments.AttachmentStorageSettingsController
-import dev.peppy.mobile.attachments.AttachmentStorageSnapshot
 import dev.peppy.mobile.attachments.AttachmentStorageUiState
-import dev.peppy.mobile.attachments.attachmentStorageCapacityNotice
-import dev.peppy.mobile.security.CredentialParser
-import dev.peppy.mobile.ui.ConsentSheet
+import dev.peppy.mobile.attachments.AttachmentStoragePage
+import dev.peppy.mobile.ui.BadgeSpec
+import dev.peppy.mobile.ui.ExternalLinkRow
 import dev.peppy.mobile.ui.HeroBanner
-import dev.peppy.mobile.ui.InfoButton
+import dev.peppy.mobile.ui.NavigationRow
 import dev.peppy.mobile.ui.ScreenBody
-import java.util.Locale
+import dev.peppy.mobile.ui.SettingsGroup
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import uniffi.peppy_mobile_bindings.hostedWakeRelayUrl
 
-/** Drop-in Account destination; parent calls GatewayAccountSettings(onChanged). */
+private const val HOSTED_ORIGIN = "https://peppy.pro"
+private const val HOSTED_ACCOUNT_URL = "https://peppy.pro/account"
+
+/** Drop-in Account destination; the parent renders it on the Account tab only. */
 @Composable
 internal fun GatewayAccountSettings(
     onChanged: () -> Unit,
@@ -101,17 +73,14 @@ internal fun GatewayAccountSettings(
     canAddPhone: Boolean = false,
     onConnectComputer: () -> Unit = {},
     canConnectComputer: Boolean = false,
-    settingsMode: Boolean = false,
-    onDetailChanged: (Boolean) -> Unit = {},
     onOpenSubscription: () -> Unit = {},
-    attachmentStorageOriginSupported: (String?) -> Boolean = { it == "https://peppy.pro" },
+    attachmentStorageOriginSupported: (String?) -> Boolean = { it == HOSTED_ORIGIN },
     accountLoader: (Context) -> GatewayAccountState? = GatewayAccountHost::load,
     gatewayStatusLoader: (Context) -> GatewayStatus = NativeGateway::status,
     attachmentStorageScopeLoader: (Context) -> GatewayAccountHost.AttachmentStorageScope? = GatewayAccountHost::attachmentStorageScope,
     attachmentStorageLoader: (Context, GatewayAccountHost.AttachmentStorageScope) -> AttachmentStorageLoad? = GatewayAccountHost::loadAttachmentStorage,
     thirdPartyNoticesLoader: (Context) -> ThirdPartyNotices? = { AssetThirdPartyNotices.openOrNull(it.assets) },
-    onRouteChanged: () -> Unit = {},
-    playDeletionContext: PlayDeletionContext = PlayDeletionContext(false, null),
+    readOnlyState: StateFlow<Boolean> = AccountAccessState.readOnly,
 ) {
     val context = LocalContext.current
     val resources = LocalResources.current
@@ -119,40 +88,16 @@ internal fun GatewayAccountSettings(
     var gatewayStatus by remember { mutableStateOf<GatewayStatus?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
     var aboutLinkError by remember { mutableStateOf<String?>(null) }
-    var deleteOpen by remember { mutableStateOf(false) }
-    var erase by remember { mutableStateOf("") }
-    var deletingVault by remember { mutableStateOf(false) }
-    var revokeTarget by remember { mutableStateOf<GatewayAccountDevice?>(null) }
+    var refreshing by remember { mutableStateOf(false) }
     var devicesOpen by remember { mutableStateOf(false) }
     var storageOpen by remember { mutableStateOf(false) }
     var aboutRoute by remember { mutableStateOf<AboutRoute>(AboutRoute.Closed) }
     var thirdPartyNotices by remember { mutableStateOf<ThirdPartyNotices?>(null) }
     var storageBusy by remember { mutableStateOf(false) }
-    var notificationConsentOpen by remember { mutableStateOf(false) }
-    val relayPrefs = remember { context.getSharedPreferences("peppy-relay", 0) }
-    var relayEnabled by remember { mutableStateOf(relayPrefs.getBoolean("relay-enabled.v1", false)) }
-    var relayOrigin by remember { mutableStateOf(relayPrefs.getString("relay-origin.v1", "") ?: "") }
-    var remoteMessagingEnabled by remember { mutableStateOf(RemoteMessagingPreferences.enabled(context)) }
-    var wakePreference by remember { mutableStateOf<RelayWakePreference?>(null) }
-    var wakeStatus by remember { mutableStateOf(RelayWakeStatus.PENDING) }
     val attachmentStorageController = remember { AttachmentStorageSettingsController() }
     var attachmentStorageScope by remember { mutableStateOf<GatewayAccountHost.AttachmentStorageScope?>(null) }
     var attachmentStorageState by remember { mutableStateOf<AttachmentStorageUiState>(AttachmentStorageUiState.Loading) }
-    var relayLoaded by remember { mutableStateOf(false) }
-    var relayWritePending by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    DisposableEffect(relayPrefs, context) {
-        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-            when (key) {
-                "hosted-relay-preference.v1" -> scope.launch { wakePreference = withContext(Dispatchers.IO) { RelayWakeRuntime.preference(context) } }
-                "hosted-relay-status.v1" -> scope.launch { wakeStatus = withContext(Dispatchers.IO) { RelayWakeRuntime.status(context) } }
-                "relay-enabled.v1" -> relayEnabled = relayPrefs.getBoolean("relay-enabled.v1", false)
-                "relay-origin.v1" -> relayOrigin = relayPrefs.getString("relay-origin.v1", "") ?: ""
-            }
-        }
-        relayPrefs.registerOnSharedPreferenceChangeListener(listener)
-        onDispose { relayPrefs.unregisterOnSharedPreferenceChangeListener(listener) }
-    }
     suspend fun refreshStorage() {
         if (storageBusy) return
         storageBusy = true
@@ -187,10 +132,10 @@ internal fun GatewayAccountSettings(
         val loaded = withContext(Dispatchers.IO) { accountLoader(context) }
         gatewayStatus = withContext(Dispatchers.IO) { gatewayStatusLoader(context) }
         state = loaded
-        if (state == null) failure = "Could not load devices. Unlock or check the server connection."
+        if (state == null) failure = resources.getString(R.string.peppy_devices_load_failed)
     }
     LaunchedEffect(Unit) { refresh() }
-    LaunchedEffect(settingsMode) { if (!settingsMode) thirdPartyNotices = withContext(Dispatchers.IO) { thirdPartyNoticesLoader(context) } }
+    LaunchedEffect(Unit) { thirdPartyNotices = withContext(Dispatchers.IO) { thirdPartyNoticesLoader(context) } }
     LaunchedEffect(storageOpen) { if (storageOpen) refreshStorage() }
     val aboutOpen = aboutRoute != AboutRoute.Closed
     val displayedAboutRoute = when (val route = aboutRoute) {
@@ -199,30 +144,10 @@ internal fun GatewayAccountSettings(
         else -> route
     }
     LaunchedEffect(aboutRoute) {
-        if (aboutRoute != AboutRoute.Closed) {
-            aboutLinkError = null
-            onRouteChanged()
-        }
+        if (aboutRoute != AboutRoute.Closed) aboutLinkError = null
     }
     LaunchedEffect(aboutRoute, displayedAboutRoute) {
         if (aboutRoute != displayedAboutRoute) aboutRoute = displayedAboutRoute
-    }
-    DisposableEffect(devicesOpen, storageOpen, aboutOpen) {
-        onDetailChanged(devicesOpen || storageOpen || aboutOpen)
-        onDispose { onDetailChanged(false) }
-    }
-    BackHandler(enabled = devicesOpen || storageOpen || aboutOpen) {
-        aboutRoute = when (aboutRoute) {
-            is AboutRoute.License -> AboutRoute.Licenses
-            AboutRoute.Licenses -> AboutRoute.About
-            AboutRoute.About -> AboutRoute.Closed
-            AboutRoute.Closed -> if (storageOpen) { closeStorageDetail(); AboutRoute.Closed } else { devicesOpen = false; AboutRoute.Closed }
-        }
-    }
-    LaunchedEffect(Unit) {
-        wakePreference = withContext(Dispatchers.IO) { RelayWakeRuntime.preference(context) }
-        wakeStatus = withContext(Dispatchers.IO) { RelayWakeRuntime.status(context) }
-        relayLoaded = true
     }
     // Lock and recovery may change while this screen remains open. This is local state only; the
     // explicit Refresh button remains the only roster/server request.
@@ -232,438 +157,203 @@ internal fun GatewayAccountSettings(
             delay(1_000)
         }
     }
-    Column(Modifier.fillMaxWidth().testTag(accountTag(settingsMode, devicesOpen, aboutRoute))) {
-        val accountReadOnly by AccountAccessState.readOnly.collectAsState()
-        val account = state
-        if (account == null) {
-            if (!settingsMode && !aboutOpen) {
-                HeroBanner(stringResource(R.string.peppy_toggle_android_account_offline_title), gatewayStatus?.origin ?: stringResource(R.string.peppy_toggle_android_account_offline_body), "account-hero")
-                ScreenBody("account-offline-body") {
-                    Text(failure ?: stringResource(R.string.peppy_toggle_android_account_loading), Modifier.testTag("devices-loading"))
-                    TextButton(onClick = { scope.launch { failure = null; refresh() } }, modifier = Modifier.testTag("account-retry-button")) { Text(stringResource(R.string.peppy_toggle_android_retry)) }
-                    AccountNavigationRow("account-settings-row", stringResource(R.string.peppy_toggle_android_account_settings), onOpenSettings)
-                    AccountNavigationRow("account-privacy-policy-row", stringResource(R.string.peppy_privacy_policy)) { openUri(context, PRIVACY_URL, failureSetter = { failure = it }) }
-                    AccountNavigationRow("account-guides-row", stringResource(R.string.peppy_guides), true) { openUri(context, GUIDES_URL, failureSetter = { failure = it }) }
-                    AccountNavigationRow("account-about-row", stringResource(R.string.peppy_about_row_label)) { aboutRoute = AboutRoute.About }
-                }
-            }
-        } else {
-            if (!settingsMode && !devicesOpen && !storageOpen && !aboutOpen) {
-                HeroBanner(
-                    title = stringResource(R.string.peppy_account),
-                    body = listOfNotNull(
-                        gatewayStatus?.origin,
-                        stringResource(R.string.peppy_toggle_android_account_role, account.self.role),
-                        if (accountReadOnly) stringResource(R.string.peppy_account_send_paused_status) else null,
-                    ).joinToString("\n"),
-                    tag = "account-hero",
+
+    val accountReadOnly by readOnlyState.collectAsState()
+    val account = state
+    val origin = gatewayStatus?.origin
+    val storageSupported = attachmentStorageOriginSupported(origin)
+    LaunchedEffect(state == null) {
+        if (state == null) {
+            devicesOpen = false
+            if (storageOpen) closeStorageDetail()
+        }
+    }
+
+    Column(Modifier.fillMaxWidth().testTag("account-tab-screen")) {
+        if (aboutOpen) {
+            when (val route = displayedAboutRoute) {
+                AboutRoute.About -> AboutScreen(
+                    buildInfo = AboutBuildInfo.fromBuildConfig(),
+                    onBack = { aboutRoute = AboutRoute.Closed },
+                    onOpenLink = { openUri(context, it, failureSetter = { error -> aboutLinkError = error }) },
+                    onOpenLicenses = { aboutRoute = AboutRoute.Licenses },
+                    licensesAvailable = thirdPartyNotices != null,
+                    linkError = aboutLinkError,
                 )
-                ScreenBody("account-body") {
-                Section("account-section", stringResource(R.string.peppy_account), showDivider = false) {
-                    AccountNavigationRow("account-devices-row", stringResource(R.string.peppy_toggle_android_account_devices)) { devicesOpen = true }
+                AboutRoute.Licenses -> thirdPartyNotices?.let { notices ->
+                    LicensesScreen(notices, onBack = { aboutRoute = AboutRoute.About }, onOpenLicense = { aboutRoute = AboutRoute.License(it.fileName) })
+                }
+                is AboutRoute.License -> {
+                    val notices = thirdPartyNotices
+                    val entry = notices?.entries()?.firstOrNull { it.fileName == route.fileName }
+                    if (notices != null && entry != null) LicenseTextScreen(notices, entry, onBack = { aboutRoute = AboutRoute.Licenses })
+                }
+                AboutRoute.Closed -> Unit
+            }
+        } else if (account == null) {
+            HeroBanner(
+                stringResource(R.string.peppy_toggle_android_account_offline_title),
+                origin ?: stringResource(R.string.peppy_toggle_android_account_offline_body),
+                "account-hero",
+            )
+            ScreenBody("account-offline-body") {
+                Text(failure ?: stringResource(R.string.peppy_toggle_android_account_loading), Modifier.testTag("devices-loading"))
+                TextButton(onClick = { scope.launch { failure = null; refresh() } }, modifier = Modifier.testTag("account-retry-button")) {
+                    Text(stringResource(R.string.peppy_toggle_android_retry))
+                }
+                AppGroup(
+                    onOpenSettings = onOpenSettings,
+                    onOpenGuides = { openUri(context, GUIDES_URL, failureSetter = { failure = it }) },
+                    onOpenAbout = { aboutRoute = AboutRoute.About },
+                )
+            }
+        } else if (devicesOpen) {
+            DevicesPage(
+                state = account,
+                onBack = { devicesOpen = false },
+                onRefresh = {
+                    scope.launch {
+                        failure = null
+                        refreshing = true
+                        try {
+                            refresh()
+                        } finally {
+                            refreshing = false
+                        }
+                        onChanged()
+                    }
+                },
+                refreshing = refreshing,
+                revoke = { device -> withContext(Dispatchers.IO) { GatewayAccountHost.revoke(context, device.id) } },
+                rename = { device, name -> withContext(Dispatchers.IO) { GatewayAccountHost.rename(context, device.id, name) } },
+                onChanged = onChanged,
+                accountReadOnly = accountReadOnly,
+                errorMessage = failure,
+            )
+        } else if (storageOpen && storageSupported) {
+            AttachmentStoragePage(
+                state = attachmentStorageState,
+                scope = attachmentStorageScope?.value,
+                busy = storageBusy,
+                onBack = ::closeStorageDetail,
+                onRefresh = { scope.launch { refreshStorage() } },
+                onManage = { manageOrigin -> openUri(context, "$manageOrigin/account", failureSetter = { failure = it }) },
+                showPurchaseActions = BuildConfig.PEPPY_DISTRIBUTION != "play",
+            )
+            AccountError(failure)
+        } else {
+            HeroBanner(
+                title = stringResource(R.string.peppy_account),
+                body = origin.orEmpty(),
+                tag = "account-hero",
+                badges = listOf(BadgeSpec(roleLabel(account.self.role), "account-hero-role")),
+            )
+            ScreenBody("account-body") {
+                SettingsGroup(tag = "account-section", title = stringResource(R.string.peppy_devices), showDivider = false) {
+                    NavigationRow(
+                        tag = "account-devices-row",
+                        label = stringResource(R.string.peppy_toggle_android_account_devices),
+                        onClick = { devicesOpen = true },
+                        icon = Icons.Default.Devices,
+                        summary = stringResource(R.string.peppy_account_devices_active, account.devices.count { !it.revoked }),
+                    )
                     if (AccountSettingsPolicy.canAddPhone(account.self.role, canAddPhone)) {
-                        AccountNavigationRow("add-phone-row", stringResource(R.string.peppy_toggle_android_account_add_phone), onAddPhone)
+                        NavigationRow(
+                            tag = "add-phone-row",
+                            label = stringResource(R.string.peppy_toggle_android_account_add_phone),
+                            onClick = onAddPhone,
+                            icon = Icons.AutoMirrored.Filled.AddToHomeScreen,
+                        )
                     }
                     if (canConnectComputer) {
-                        AccountNavigationRow("connect-computer-row", stringResource(R.string.peppy_owner_computer_add_cta), onConnectComputer)
-                    } else {
-                        Text(
-                            stringResource(R.string.peppy_owner_computer_owner_required),
-                            modifier = Modifier.testTag("connect-computer-owner-help"),
-                            style = MaterialTheme.typography.bodySmall,
+                        NavigationRow(
+                            tag = "connect-computer-row",
+                            label = stringResource(R.string.peppy_owner_computer_add_cta),
+                            onClick = onConnectComputer,
+                            icon = Icons.Default.Computer,
                         )
                     }
-                    if (gatewayStatus?.origin == "https://peppy.pro" && BuildConfig.PEPPY_DISTRIBUTION == "play") {
-                        AccountNavigationRow("account-subscription-row", stringResource(R.string.peppy_play_account_row), onOpenSubscription)
-                    } else if (gatewayStatus?.origin == "https://peppy.pro") {
-                        AccountNavigationRow("account-hosted-row", stringResource(R.string.peppy_toggle_android_account_billing)) {
-                        openUri(context, "https://peppy.pro/account", failureSetter = { failure = it })
-                        }
-                    }
-                    if (attachmentStorageOriginSupported(gatewayStatus?.origin)) AccountNavigationRow("attachment-storage-row", stringResource(R.string.peppy_attachment_storage_section_title)) { storageOpen = true }
-                    AccountNavigationRow("account-settings-row", stringResource(R.string.peppy_toggle_android_account_settings), onOpenSettings)
-                    AccountNavigationRow("account-privacy-policy-row", stringResource(R.string.peppy_privacy_policy)) {
-                        openUri(context, PRIVACY_URL, failureSetter = { failure = it })
-                    }
-                    AccountNavigationRow("account-guides-row", stringResource(R.string.peppy_guides), true) {
-                        openUri(context, GUIDES_URL, failureSetter = { failure = it })
-                    }
-                    AccountNavigationRow("account-about-row", stringResource(R.string.peppy_about_row_label)) { aboutRoute = AboutRoute.About }
                 }
-                }
-            }
-            if (devicesOpen) {
-                ScreenBody("devices-body") {
-                TextButton(onClick = { devicesOpen = false }, modifier = Modifier.testTag("devices-back-button")) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.peppy_back)) }
-                Section("devices-section", stringResource(R.string.peppy_devices), showDivider = false) {
-                account.devices.forEach { device ->
-                    Row(Modifier.fillMaxWidth().testTag("device-row-${device.id}")) {
-                        Text("${device.id.take(8)} · ${device.role}${if (device.id == account.self.id) " (this device)" else ""}", Modifier.weight(1f))
-                        if (!device.revoked && (device.id == account.self.id || account.self.role == "owner")) OutlinedButton(
-                            onClick = { revokeTarget = device },
-                            modifier = Modifier.testTag("device-remove-${device.id}"),
-                        ) { Text(if (device.id == account.self.id) "Disconnect" else "Remove") }
-                    }
-                }
-                }
-                TextButton(onClick = { scope.launch { failure = null; refresh(); onChanged() } }, modifier = Modifier.testTag("refresh-enrollment-button")) { Text("Refresh from server") }
-                }
-            }
-            if (storageOpen && attachmentStorageOriginSupported(gatewayStatus?.origin)) {
-                ScreenBody("attachment-storage-body") {
-                    TextButton(onClick = ::closeStorageDetail, modifier = Modifier.testTag("attachment-storage-back")) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.peppy_back)) }
-                    AttachmentStorageSettings(
-                        state = attachmentStorageState,
-                        scope = attachmentStorageScope?.value,
-                        busy = storageBusy,
-                        onRefresh = { scope.launch { refreshStorage() } },
-                        onManage = { origin -> openUri(context, "$origin/account", failureSetter = { failure = it }) },
-                        showPurchaseActions = BuildConfig.PEPPY_DISTRIBUTION != "play",
-                    )
-                }
-            }
-            if (settingsMode && gatewayStatus?.origin == "https://peppy.pro" && BuildConfig.PEPPY_DISTRIBUTION == "play") {
-                Section("settings-account-group", stringResource(R.string.peppy_play_subscription_title), showDivider = false) {
-                    AccountNavigationRow("settings-subscription-row", stringResource(R.string.peppy_play_account_row), onOpenSubscription)
-                }
-            }
-            if (settingsMode && gatewayStatus?.sharedKeysReady == true && (account.self.role == "owner" || account.self.role == "gateway")) {
-                Section("settings-sync-section", stringResource(R.string.peppy_toggle_android_settings_sync)) {
-                    Row(Modifier.fillMaxWidth().testTag("remote-messaging-toggle-row")) {
-                        Column(Modifier.weight(1f)) {
-                            Text(stringResource(R.string.peppy_remote_messaging_label))
-                        }
-                        InfoButton(
-                            topic = stringResource(R.string.peppy_remote_messaging_label),
-                            title = stringResource(R.string.peppy_remote_messaging_label),
-                            body = stringResource(R.string.peppy_remote_messaging_hint),
-                            tag = "info-remote-messaging",
+                val hosted = origin == HOSTED_ORIGIN
+                if (hosted || storageSupported) SettingsGroup(tag = "account-plan-group", title = stringResource(R.string.peppy_account_group_plan)) {
+                    val attention = if (accountReadOnly) stringResource(R.string.peppy_account_attention_action_needed) else null
+                    if (hosted && BuildConfig.PEPPY_DISTRIBUTION == "play") {
+                        NavigationRow(
+                            tag = "account-subscription-row",
+                            label = stringResource(R.string.peppy_play_account_row),
+                            onClick = onOpenSubscription,
+                            icon = Icons.Default.CreditCard,
+                            attention = attention,
                         )
-                        Switch(
-                            checked = remoteMessagingEnabled,
-                            enabled = gatewayStatus?.sharedKeysReady == true && gatewayStatus?.syncPhase != SyncPhase.RECOVERY_REQUIRED,
-                            onCheckedChange = { enabled ->
-                                remoteMessagingEnabled = enabled
-                                RemoteMessagingPreferences.setEnabled(context, enabled)
-                                if (enabled) RemoteMessagingService.resumeOrEnqueue(context, GatewayEnqueueCause.SETTINGS) else RemoteMessagingService.stop(context)
-                            },
-                            modifier = Modifier.testTag("remote-messaging-toggle"),
+                    } else if (hosted) {
+                        ExternalLinkRow(
+                            tag = "account-hosted-row",
+                            label = stringResource(R.string.peppy_toggle_android_account_billing),
+                            onClick = { openUri(context, HOSTED_ACCOUNT_URL, failureSetter = { failure = it }) },
+                            icon = Icons.Default.CreditCard,
+                            attention = attention,
                         )
                     }
-                    val statusRes = when (RemoteMessagingRuntime.status()) {
-                        RemoteMessagingStatus.CONNECTED -> R.string.peppy_remote_messaging_status_connected
-                        RemoteMessagingStatus.RECONNECTING -> R.string.peppy_remote_messaging_status_reconnecting
-                        RemoteMessagingStatus.LOCKED -> R.string.peppy_remote_messaging_status_locked
-                    }
-                    if (remoteMessagingEnabled) StatusRow("remote-messaging-status", stringResource(R.string.peppy_remote_messaging_status_label), stringResource(statusRes))
-                    if (gatewayStatus?.syncPhase == SyncPhase.RECOVERY_REQUIRED) Text(stringResource(R.string.peppy_remote_messaging_recovery_required))
-                    else if (gatewayStatus?.sharedKeysReady != true) Text(stringResource(R.string.peppy_remote_messaging_status_locked))
-                    if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                        Text(stringResource(R.string.peppy_remote_messaging_notifications_disabled))
-                        TextButton(
-                            onClick = { notificationConsentOpen = true },
-                            modifier = Modifier.testTag("remote-messaging-notification-permission"),
-                        ) { Text(stringResource(R.string.peppy_remote_messaging_allow_notifications)) }
-                    }
-                }
-            }
-        }
-        if (aboutOpen && !settingsMode) when (val route = displayedAboutRoute) {
-            AboutRoute.About -> AboutScreen(
-                buildInfo = AboutBuildInfo.fromBuildConfig(),
-                onBack = { aboutRoute = AboutRoute.Closed },
-                onOpenLink = { openUri(context, it, failureSetter = { error -> aboutLinkError = error }) },
-                onOpenLicenses = { aboutRoute = AboutRoute.Licenses },
-                licensesAvailable = thirdPartyNotices != null,
-                linkError = aboutLinkError,
-            )
-            AboutRoute.Licenses -> thirdPartyNotices?.let { notices -> LicensesScreen(notices, onBack = { aboutRoute = AboutRoute.About }, onOpenLicense = { aboutRoute = AboutRoute.License(it.fileName) }) }
-            is AboutRoute.License -> {
-                val notices = thirdPartyNotices
-                val entry = notices?.entries()?.firstOrNull { it.fileName == route.fileName }
-                if (notices != null && entry != null) LicenseTextScreen(notices, entry, onBack = { aboutRoute = AboutRoute.Licenses })
-            }
-            AboutRoute.Closed -> Unit
-        }
-        if (settingsMode && gatewayStatus?.sharedKeysReady == true) Section("settings-relay-section", stringResource(R.string.peppy_wake_section_title), showDivider = account != null) {
-            val hostedRelay = gatewayStatus?.origin?.let { hostedWakeRelayUrl(it) }
-            val relayReady = relayLoaded && gatewayStatus != null && !relayWritePending
-            if (hostedRelay != null) {
-                val statusText = when (wakeStatus) {
-                    RelayWakeStatus.REGISTERED -> stringResource(R.string.peppy_wake_status_registered)
-                    RelayWakeStatus.RETRYING -> stringResource(R.string.peppy_wake_status_retrying)
-                    RelayWakeStatus.PAUSED -> stringResource(R.string.peppy_wake_status_paused)
-                    RelayWakeStatus.UNAVAILABLE -> stringResource(R.string.peppy_wake_status_unavailable)
-                    RelayWakeStatus.PENDING -> stringResource(R.string.peppy_wake_status_pending)
-                    RelayWakeStatus.MISSING_APP_SUPPORT -> stringResource(R.string.peppy_wake_status_unavailable)
-                    RelayWakeStatus.CLEANUP_PENDING -> stringResource(R.string.peppy_wake_status_paused)
-                }
-                val footer = when (wakeStatus) {
-                    RelayWakeStatus.REGISTERED -> R.string.peppy_wake_footer_registered
-                    RelayWakeStatus.RETRYING -> R.string.peppy_wake_footer_retrying
-                    RelayWakeStatus.PAUSED -> R.string.peppy_wake_footer_paused
-                    RelayWakeStatus.UNAVAILABLE -> R.string.peppy_wake_footer_unavailable_server
-                    RelayWakeStatus.PENDING -> R.string.peppy_wake_footer_pending
-                    RelayWakeStatus.MISSING_APP_SUPPORT -> R.string.peppy_wake_footer_missing_app_support
-                    RelayWakeStatus.CLEANUP_PENDING -> R.string.peppy_wake_cleanup_pending
-                }
-                StatusRow("relay-wake-status", stringResource(R.string.peppy_wake_status_label), statusText)
-                Row(Modifier.fillMaxWidth()) {
-                    Text(stringResource(R.string.peppy_wake_updates_toggle_label), Modifier.weight(1f).testTag("relay-wake-toggle-label"))
-                    Switch(
-                        checked = wakePreference.let { it != null && it != RelayWakePreference.PAUSED },
-                        enabled = relayReady,
-                        onCheckedChange = { enabled ->
-                            val next = if (enabled) RelayWakePreference.AUTOMATIC else RelayWakePreference.PAUSED
-                            relayWritePending = true
-                            scope.launch {
-                                try {
-                                    withContext(Dispatchers.IO) { RelayWakeRuntime.setPreference(context, next) }
-                                    wakePreference = withContext(Dispatchers.IO) { RelayWakeRuntime.preference(context) }
-                                } finally {
-                                    relayWritePending = false
-                                }
-                            }
-                        },
-                        modifier = Modifier.testTag("relay-wake-toggle"),
+                    if (storageSupported) NavigationRow(
+                        tag = "attachment-storage-row",
+                        label = stringResource(R.string.peppy_account_storage_row),
+                        onClick = { storageOpen = true },
+                        icon = Icons.Default.Cloud,
                     )
                 }
-                Text(stringResource(footer), Modifier.testTag("relay-wake-footer"))
-            } else {
-                OutlinedTextField(relayOrigin, { relayOrigin = it }, enabled = relayReady, label = { Text("Relay HTTPS origin") }, modifier = Modifier.testTag("relay-origin-field"))
-                Row(Modifier.fillMaxWidth()) {
-                    Text("Enable wake relay", Modifier.weight(1f))
-                    Switch(
-                        checked = relayEnabled,
-                        enabled = relayReady,
-                        onCheckedChange = { enabled ->
-                            val origin = if (enabled) CredentialParser.canonicalOrigin(relayOrigin, false) else null
-                            if (enabled && origin == null) {
-                                failure = "Enter a canonical HTTPS relay origin."
-                            } else {
-                                relayWritePending = true
-                                scope.launch {
-                                    try {
-                                        withContext(Dispatchers.IO) { RelayWakeRuntime.setEnabled(context, origin, enabled) }
-                                        relayEnabled = withContext(Dispatchers.IO) { relayPrefs.getBoolean("relay-enabled.v1", false) }
-                                    } finally {
-                                        relayWritePending = false
-                                    }
-                                }
-                            }
-                        },
-                        modifier = Modifier.testTag("relay-enable-toggle"),
-                    )
-                }
-                val communityFooter = if (relayEnabled) R.string.peppy_wake_community_relay_enabled else R.string.peppy_wake_community_relay_disabled
-                Text(stringResource(communityFooter), Modifier.testTag("relay-not-configured"))
+                AppGroup(
+                    onOpenSettings = onOpenSettings,
+                    onOpenGuides = { openUri(context, GUIDES_URL, failureSetter = { failure = it }) },
+                    onOpenAbout = { aboutRoute = AboutRoute.About },
+                )
+                AccountError(failure)
             }
         }
-        if (settingsMode && account == null && gatewayStatus?.origin == "https://peppy.pro" && BuildConfig.PEPPY_DISTRIBUTION == "play") {
-            Section("settings-account-group", stringResource(R.string.peppy_play_subscription_title), showDivider = false) {
-                AccountNavigationRow("settings-subscription-row", stringResource(R.string.peppy_play_account_row), onOpenSubscription)
-            }
-        }
-        if (settingsMode && gatewayStatus?.origin == "https://peppy.pro") Section(
-            "settings-account-deletion-section",
-            stringResource(R.string.peppy_account_delete_section),
-        ) {
-            HostedAccountDeletionEntry(
-                tag = "account-delete-row",
-                includeVaultDistinction = account?.self?.role == "owner",
-                onOpenFailed = { failure = resources.getString(R.string.peppy_toggle_android_link_unavailable) },
-                onViewSubscription = onOpenSubscription,
-                playManaged = playDeletionContext.managed,
-                playProductId = playDeletionContext.productId,
-            )
-        }
-        if (settingsMode && account?.self?.role == "owner") Section("settings-group-danger", stringResource(R.string.peppy_toggle_android_settings_danger)) {
-            Button(onClick = { deleteOpen = true }, modifier = Modifier.testTag("vault-delete-button")) { Text("Delete vault") }
-        }
-        failure?.let { Text(it, Modifier.testTag("account-error")) }
     }
-    if (notificationConsentOpen) ConsentSheet(
-        title = stringResource(R.string.peppy_toggle_android_settings_notifications_title),
-        body = stringResource(R.string.peppy_toggle_android_settings_notifications_rationale),
-        tag = "remote-messaging-notification-consent",
-        onDismiss = { notificationConsentOpen = false },
-        onConfirm = {
-            notificationConsentOpen = false
-            if (Build.VERSION.SDK_INT >= 33) context.findActivity()?.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
-        },
-        confirmLabel = stringResource(R.string.peppy_toggle_android_agree),
-    )
-    if (deleteOpen) AlertDialog(
-        onDismissRequest = { if (!deletingVault) { erase = ""; deleteOpen = false } }, title = { Text("Type ERASE to confirm") },
-        text = { OutlinedTextField(erase, { erase = it }, enabled = !deletingVault, label = { Text("Type ERASE") }, modifier = Modifier.testTag("vault-delete-confirm-field")) },
-        confirmButton = { Button(onClick = { if (deletingVault) return@Button; deletingVault = true; scope.launch { try { val ok = withContext(Dispatchers.IO) { GatewayAccountHost.deleteVault(context) }; if (!ok) failure = "Could not reach the server. The vault was not deleted." else onChanged() } finally { deletingVault = false; erase = ""; deleteOpen = false } } }, enabled = erase == "ERASE" && !deletingVault, modifier = Modifier.testTag("vault-delete-final-button")) { Text("Delete vault") } },
-        dismissButton = { OutlinedButton(onClick = { erase = ""; deleteOpen = false }, enabled = !deletingVault) { Text("Keep vault") } },
-    )
-    revokeTarget?.let { target ->
-        val own = state?.self?.id == target.id
-        AlertDialog(
-            onDismissRequest = { revokeTarget = null },
-            title = { Text(if (own) "Disconnect this phone?" else "Remove device?") },
-            text = { Text(if (own) "This stops Peppy locally. If offline, the server credential remains active until a later revoke succeeds." else "This device will lose access to the Peppy server.") },
-            confirmButton = { Button(onClick = {
-                scope.launch {
-                    val ok = withContext(Dispatchers.IO) { GatewayAccountHost.revoke(context, target.id) }
-                    if (!ok) failure = if (own) "Could not revoke. Peppy remains locally available and the server token is still active." else "Could not remove device."
-                    else { revokeTarget = null; refresh(); onChanged() }
-                }
-            }, modifier = Modifier.testTag("device-revoke-confirm-${target.id}")) { Text(if (own) "Disconnect" else "Remove") } },
-            dismissButton = { OutlinedButton(onClick = { revokeTarget = null }) { Text("Cancel") } },
+}
+
+@Composable
+private fun AppGroup(onOpenSettings: () -> Unit, onOpenGuides: () -> Unit, onOpenAbout: () -> Unit) {
+    SettingsGroup(tag = "account-app-group", title = stringResource(R.string.peppy_account_group_app)) {
+        NavigationRow(
+            tag = "account-settings-row",
+            label = stringResource(R.string.peppy_toggle_android_account_settings),
+            onClick = onOpenSettings,
+            icon = Icons.Default.Settings,
+        )
+        ExternalLinkRow(
+            tag = "account-guides-row",
+            label = stringResource(R.string.peppy_guides),
+            onClick = onOpenGuides,
+            icon = Icons.AutoMirrored.Filled.MenuBook,
+        )
+        NavigationRow(
+            tag = "account-about-row",
+            label = stringResource(R.string.peppy_about_row_label),
+            onClick = onOpenAbout,
+            icon = Icons.Default.Info,
         )
     }
 }
 
-private fun accountTag(settingsMode: Boolean, devicesOpen: Boolean, aboutRoute: AboutRoute) = if (settingsMode) "settings-account-group" else when (aboutRoute) {
-    AboutRoute.About -> "about-screen"
-    AboutRoute.Licenses -> "licenses-screen"
-    is AboutRoute.License -> "license-screen"
-    AboutRoute.Closed -> if (devicesOpen) "devices-screen" else "account-tab-screen"
-}
-
 @Composable
-internal fun AttachmentStorageSettings(
-    state: AttachmentStorageUiState,
-    scope: String?,
-    busy: Boolean,
-    onRefresh: () -> Unit,
-    onManage: (String) -> Unit,
-    showPurchaseActions: Boolean = true,
-) {
-    when (state) {
-        AttachmentStorageUiState.Loading -> Section("attachment-storage-section", stringResource(R.string.peppy_attachment_storage_section_title)) {
-            Text(stringResource(R.string.peppy_toggle_android_account_loading), Modifier.testTag("attachment-storage-loading"))
-            TextButton(onClick = onRefresh, enabled = !busy, modifier = Modifier.testTag("attachment-storage-refresh")) { Text(stringResource(R.string.peppy_attachment_storage_reload_cta)) }
-        }
-        AttachmentStorageUiState.Unsupported -> Section("attachment-storage-section", stringResource(R.string.peppy_attachment_storage_section_title)) {
-            Text(stringResource(R.string.peppy_attachment_storage_unavailable), Modifier.testTag("attachment-storage-unavailable"))
-            TextButton(onClick = onRefresh, enabled = !busy, modifier = Modifier.testTag("attachment-storage-refresh")) { Text(stringResource(R.string.peppy_attachment_storage_reload_cta)) }
-        }
-        is AttachmentStorageUiState.Unavailable -> StorageSection(scope, showsInfo = false) {
-            Text(stringResource(R.string.peppy_attachment_storage_unavailable), Modifier.testTag("attachment-storage-unavailable"))
-            state.lastKnown?.let { stale ->
-                Text(stringResource(R.string.peppy_attachment_storage_stale_usage), Modifier.testTag("attachment-storage-stale-label"))
-                StorageValues(stale, "attachment-storage-stale-values")
-            }
-            TextButton(onClick = onRefresh, enabled = !busy, modifier = Modifier.testTag("attachment-storage-refresh")) { Text(stringResource(R.string.peppy_attachment_storage_reload_cta)) }
-        }
-        is AttachmentStorageUiState.Available -> {
-            val status = state.status
-            StorageSection(scope, includePurchaseInfo = showPurchaseActions) { onLearnMore ->
-                StorageValues(status, "attachment-storage-values")
-                CapacityNotice(attachmentStorageCapacityNotice(status), onLearnMore)
-                if (showPurchaseActions) {
-                    Text(stringResource(R.string.peppy_attachment_storage_billing_handoff))
-                    TextButton(onClick = { onManage("https://peppy.pro") }, modifier = Modifier.testTag("attachment-storage-manage")) { Text(stringResource(R.string.peppy_attachment_storage_manage_cta)) }
-                }
-                TextButton(onClick = onRefresh, enabled = !busy, modifier = Modifier.testTag("attachment-storage-refresh")) { Text(stringResource(R.string.peppy_attachment_storage_reload_cta)) }
-            }
-        }
+private fun AccountError(message: String?) {
+    message?.let {
+        Text(
+            it,
+            Modifier.testTag("account-error").semantics { liveRegion = LiveRegionMode.Polite },
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+        )
     }
 }
 
 @Composable
-private fun StorageSection(
-    scope: String?,
-    showsInfo: Boolean = true,
-    includePurchaseInfo: Boolean = true,
-    content: @Composable (onLearnMore: () -> Unit) -> Unit,
-) {
-    var infoOpen by remember(scope) { mutableStateOf(false) }
-    Section(
-        "attachment-storage-section",
-        stringResource(R.string.peppy_attachment_storage_section_title),
-        headerAction = if (showsInfo) {
-            {
-                IconButton(
-                    onClick = { infoOpen = true },
-                    modifier = Modifier.testTag("attachment-storage-info-button"),
-                ) {
-                    Icon(Icons.Default.Info, stringResource(R.string.peppy_attachment_storage_info_label))
-                }
-            }
-        } else {
-            null
-        },
-    ) { content { infoOpen = true } }
-    if (infoOpen) StorageInfoDialog(includePurchaseInfo, onDismiss = { infoOpen = false })
-}
-
-@Composable
-private fun StorageInfoDialog(includePurchaseInfo: Boolean, onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.peppy_attachment_storage_info_title), Modifier.semantics { heading() }) },
-        text = {
-            Column(
-                Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Text(stringResource(R.string.peppy_attachment_storage_info_body_cleanup), style = MaterialTheme.typography.bodyMedium)
-                Text(stringResource(R.string.peppy_attachment_storage_info_body_protected), style = MaterialTheme.typography.bodyMedium)
-                if (includePurchaseInfo) Text(stringResource(R.string.peppy_attachment_storage_info_body_purchase), style = MaterialTheme.typography.bodyMedium)
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = onDismiss,
-                modifier = Modifier.heightIn(min = 48.dp).testTag("attachment-storage-info-dismiss"),
-            ) { Text(stringResource(R.string.peppy_attachment_storage_info_dismiss)) }
-        },
-        modifier = Modifier.testTag("attachment-storage-info-dialog"),
-    )
-}
-
-@Composable
-private fun CapacityNotice(notice: AttachmentStorageCapacityNotice, onLearnMore: () -> Unit) {
-    Column(Modifier.testTag("attachment-storage-notice")) {
-        when (notice) {
-            AttachmentStorageCapacityNotice.None -> Unit
-            AttachmentStorageCapacityNotice.NearFull -> CapacityNoticeText(R.string.peppy_attachment_storage_near_full, onLearnMore)
-            AttachmentStorageCapacityNotice.FullCleanup -> CapacityNoticeText(R.string.peppy_attachment_storage_full_cleanup, onLearnMore)
-            is AttachmentStorageCapacityNotice.NearFullBlocked -> {
-                CapacityNoticeText(R.string.peppy_attachment_storage_near_full, onLearnMore)
-                Text(stringResource(notice.causeKey.resourceId()), Modifier.testTag("attachment-storage-cause"))
-            }
-            is AttachmentStorageCapacityNotice.Cause -> Text(stringResource(notice.key.resourceId()), Modifier.testTag("attachment-storage-cause"))
-        }
-    }
-}
-
-@Composable
-private fun CapacityNoticeText(key: Int, onLearnMore: () -> Unit) {
-    Text(stringResource(key), Modifier.testTag("attachment-storage-capacity-notice"))
-    TextButton(onClick = onLearnMore, modifier = Modifier.heightIn(min = 48.dp).testTag("attachment-storage-learn-more")) {
-        Text(stringResource(R.string.peppy_attachment_storage_learn_more))
-    }
-}
-
-private fun String.resourceId() = when (this) {
-    "peppy.attachment_storage_cleanup_pending" -> R.string.peppy_attachment_storage_cleanup_pending
-    "peppy.attachment_storage_device_update_required" -> R.string.peppy_attachment_storage_device_update_required
-    "peppy.attachment_storage_read_only" -> R.string.peppy_attachment_storage_read_only
-    "peppy.attachment_storage_billing_pending" -> R.string.peppy_attachment_storage_billing_pending
-    "peppy.attachment_storage_billing_unavailable" -> R.string.peppy_attachment_storage_billing_unavailable
-    "peppy.attachment_storage_disabled" -> R.string.peppy_attachment_storage_disabled
-    else -> R.string.peppy_attachment_storage_unavailable
-}
-
-@Composable
-private fun StorageValues(status: AttachmentStorageSnapshot, tag: String) {
-    Column(Modifier.testTag(tag)) {
-        StatusRow("$tag-used", stringResource(R.string.peppy_attachment_storage_usage), storageBytes(status.usedBytes))
-        StatusRow("$tag-limit", stringResource(R.string.peppy_attachment_storage_limit), storageBytes(status.limitBytes))
-        StatusRow("$tag-base", stringResource(R.string.peppy_attachment_storage_base_included), storageBytes(status.baseBytes))
-    }
-}
-
-private fun storageBytes(bytes: Long) = when {
-    bytes < 1_000_000L -> "$bytes B"
-    bytes < 1_000_000_000L -> "%.1f MB".format(Locale.getDefault(), bytes / 1_000_000.0)
-    else -> "%.1f GB".format(Locale.getDefault(), bytes / 1_000_000_000.0)
+private fun roleLabel(role: String): String = when (role) {
+    "owner" -> stringResource(R.string.peppy_devices_role_owner)
+    "gateway" -> stringResource(R.string.peppy_devices_role_gateway)
+    "device" -> stringResource(R.string.peppy_devices_role_device)
+    else -> role
 }
 
 private fun openUri(context: Context, uri: String, failureSetter: (String) -> Unit) {
@@ -671,24 +361,5 @@ private fun openUri(context: Context, uri: String, failureSetter: (String) -> Un
         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri)))
     } catch (_: android.content.ActivityNotFoundException) {
         failureSetter(context.getString(R.string.peppy_toggle_android_link_unavailable))
-    }
-}
-
-private fun Context.findActivity(): Activity? = when (this) {
-    is Activity -> this
-    is ContextWrapper -> baseContext.findActivity()
-    else -> null
-}
-
-@Composable
-internal fun AccountNavigationRow(tag: String, label: String, onClick: () -> Unit) = AccountNavigationRow(tag, label, false, onClick)
-
-@Composable
-internal fun AccountNavigationRow(tag: String, label: String, opensExternally: Boolean, onRowClick: () -> Unit) {
-    val externalLabel = stringResource(R.string.peppy_about_opens_in_browser)
-    val modifier = if (opensExternally) Modifier.semantics { semanticsOnClick(externalLabel, null) } else Modifier
-    TextButton(onClick = onRowClick, modifier = modifier.fillMaxWidth().testTag(tag), colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
-        Text(label, Modifier.weight(1f))
-        Text("›", Modifier.clearAndSetSemantics {})
     }
 }
