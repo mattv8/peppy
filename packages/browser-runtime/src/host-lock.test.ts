@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { browserHostDependencies, BrowserWorkerHost, type BrowserPort } from "./host.js";
 import type { OwnerLockManager } from "./owner.js";
+import { BrowserScheduler } from "./scheduler.js";
 
 const origin = "https://peppy.test";
 const invitationId = "00000000-0000-0000-0000-000000000003";
@@ -8,6 +9,7 @@ const invitationId = "00000000-0000-0000-0000-000000000003";
 const hoisted = vi.hoisted(() => ({
   invoke: (async () => ({})) as (request: { command: string; args: Record<string, unknown> }) => Promise<unknown>,
   session: undefined as unknown,
+  liveTeardown: undefined as (() => Promise<void>) | undefined,
 }));
 
 vi.mock("./core.js", async importOriginal => {
@@ -22,7 +24,7 @@ vi.mock("./core.js", async importOriginal => {
 
 vi.mock("./session.js", async importOriginal => {
   const actual = await importOriginal<typeof import("./session.js")>();
-  return { ...actual, BrowserSession: { boot: async () => hoisted.session } };
+  return { ...actual, BrowserSession: { boot: async (options: { liveTeardown: () => Promise<void> }) => { hoisted.liveTeardown = options.liveTeardown; return hoisted.session; } } };
 });
 
 vi.mock("/core/peppy-browser-core.js", () => ({ default: async () => ({ FS: {} }) }));
@@ -68,6 +70,7 @@ function ownerSession() {
     query: async (command: string) => command === "_worker_attachment_retention_capability_request" ? { method: "PUT", relativePath: "/v1/devices/self/retention-capability", jsonBody: "{}", protocolHeader: null, expectedSuccessStatus: 204 } : {},
     mutate: async () => ({}),
     unlock: async () => undefined,
+    clearRememberedUnlock: async () => undefined,
     enroll: async () => undefined,
     finishEnrollment: async () => undefined,
     enrollmentCore: () => ({ invoke: hoisted.invoke }),
@@ -78,8 +81,8 @@ function ownerSession() {
 }
 
 describe("browser host enrollment lock", () => {
-  it("aborts an in-flight owner status poll on lock without a remote DELETE or unhandled rejection", async () => {
-    const methods: string[] = [];
+  it("aborts an in-flight owner status poll on lock without deleting the invitation or an unhandled rejection", async () => {
+    const requests: string[] = [];
     let statusSignal: AbortSignal | undefined;
     let terminated = false;
     const rejections: unknown[] = [];
@@ -87,7 +90,7 @@ describe("browser host enrollment lock", () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), origin);
       const method = init?.method ?? "GET";
-      methods.push(method);
+      requests.push(`${method} ${url.pathname}`);
       if (url.pathname === "/web/config.json") return new Response(null, { status: 404 });
       if (url.pathname === "/hosted/v1/enrollment/config") return json({}, 404);
       if (url.pathname === "/v1/instance") return json({ mode: "community", claimed: true, setup_required: false, password_auth: true, qr_pairing: true, shared_secret_pairing: true });
@@ -133,11 +136,47 @@ describe("browser host enrollment lock", () => {
       await new Promise(resolve => setTimeout(resolve, 0));
 
       expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: true, value: expect.objectContaining({ stage: "waiting_phone" }) }));
-      expect(methods).not.toContain("DELETE");
+      expect(requests).not.toContain(`DELETE /v1/enrollment/invitations/${invitationId}`);
+      expect(requests).toContain("DELETE /v1/live/tickets");
       expect(statusSignal?.aborted).toBe(true);
       expect(rejections).toEqual([]);
     } finally {
       nodeProcess.off("unhandledRejection", onRejection);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(["revocation", "teardown"] as const)("stops typing on %s", async event => {
+    const session = ownerSession();
+    const originalQuery = session.query;
+    const query = vi.fn(async (command: string) => {
+      if (command === "_worker_typing_disable") return {};
+      return originalQuery(command);
+    });
+    session.query = query;
+    hoisted.session = session;
+    vi.stubGlobal("self", { location: { origin } });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const pathname = new URL(String(input), origin).pathname;
+      if (pathname === "/web/config.json" || pathname === "/v1/devices/self/retention-capability") return json({}, 404);
+      return new Response(null, { status: 204 });
+    }));
+    let settlePoll: ((status: { connection: "revoked" }) => void) | undefined;
+    const poll = vi.spyOn(BrowserScheduler.prototype, "poll").mockImplementation(function (this: BrowserScheduler) {
+      settlePoll = (this as unknown as { options: { onPollSettled(status: { connection: "revoked" }): void } }).options.onPollSettled;
+      return Promise.resolve({ connection: "offline" });
+    });
+    try {
+      const host = new BrowserWorkerHost(browserHostDependencies(locks(), () => {}));
+      await host.attach(port());
+      await eventually(() => settlePoll !== undefined);
+      if (event === "revocation") settlePoll!({ connection: "revoked" });
+      else await hoisted.liveTeardown!();
+      await eventually(() => query.mock.calls.some(([command]) => command === "_worker_typing_disable"));
+      expect(query.mock.calls.filter(([command]) => command === "_worker_typing_disable")).toHaveLength(1);
+      await host.stop();
+    } finally {
+      poll.mockRestore();
       vi.unstubAllGlobals();
     }
   });

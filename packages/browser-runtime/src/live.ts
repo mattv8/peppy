@@ -5,6 +5,7 @@ const LIVE_PATH = "/v1/live";
 const SESSION_BYTES = 16;
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
+const INITIAL_BACKOFF_MAX_MS = 300_000;
 
 export type LiveSocket = Pick<WebSocket, "close" | "send" | "protocol" | "readyState"> & {
   onopen: ((event: Event) => void) | null;
@@ -21,10 +22,12 @@ export interface LiveSupervisorOptions {
   schedule?: (work: () => void, delayMs: number) => unknown;
   cancel?: (handle: unknown) => void;
   onFrame?: (frameJson: string) => void;
+  onReady?: () => void;
+  onClosed?: () => void;
 }
 
 export interface LiveCore {
-  mutate(command: string, args: Record<string, unknown>): Promise<unknown>;
+  invoke(command: string, args: Record<string, unknown>): Promise<unknown>;
 }
 
 export type LiveTypingContext = {
@@ -56,30 +59,29 @@ export class LiveTypingEngine {
     private readonly display: (event: TypingDisplayEvent) => void,
   ) {}
 
-  public async enable(context: LiveTypingContext): Promise<void> {
+  public async enable(context?: LiveTypingContext): Promise<void> {
     const incarnation = this.retire();
-    const value = record(await this.core.mutate("_worker_typing_enable", { ...context, clock: this.clock() }));
+    const value = record(await this.core.invoke("_worker_typing_enable", { ...context, clock: this.clock() }));
     if (incarnation !== this.incarnation) return;
     this.generation = decimal(value.generation);
   }
 
   public async disable(): Promise<void> {
     this.retire();
-    await this.core.mutate("_worker_typing_disable", {});
+    await this.core.invoke("_worker_typing_disable", {});
   }
 
   /** The core commits the sharing transition; it remains the OD-1 admission authority. */
   public async setSharing(sharing: boolean): Promise<void> {
-    await this.core.mutate("_worker_typing_set_sharing", { sharing });
+    await this.core.invoke("_worker_typing_set_sharing", { sharing });
   }
 
-  public async send(conversationId: string, gatewayDeviceId: string, state: "started" | "stopped"): Promise<boolean> {
+  public async send(conversationId: string, state: "started" | "stopped"): Promise<boolean> {
     const expectedGeneration = this.generation;
     const incarnation = this.incarnation;
     if (!expectedGeneration) return false;
-    const value = await this.core.mutate("_worker_typing_seal", {
+    const value = await this.core.invoke("_worker_typing_seal", {
       conversationId,
-      gatewayDeviceId,
       origin: "vault_device",
       state,
       clock: this.clock(),
@@ -95,12 +97,17 @@ export class LiveTypingEngine {
     const expectedGeneration = this.generation;
     const incarnation = this.incarnation;
     if (!expectedGeneration) return;
-    const outcome = record(await this.core.mutate("_worker_typing_open", { frameJson, clock: this.clock() }));
+    const outcome = record(await this.core.invoke("_worker_typing_open", { frameJson, clock: this.clock() }));
     if (!this.isCurrent(incarnation, expectedGeneration) || decimal(outcome.generation) !== expectedGeneration) return;
     this.applySessionUpdate(outcome.sessionUpdate);
     this.publishAction(outcome.action, incarnation, expectedGeneration);
     if (typeof outcome.replyFrameJson === "string" && this.isCurrent(incarnation, expectedGeneration)) {
       this.transport.transmit(outcome.replyFrameJson);
+    }
+    if (Array.isArray(outcome.followUpFramesJson)) {
+      for (const frame of outcome.followUpFramesJson) {
+        if (typeof frame === "string" && this.isCurrent(incarnation, expectedGeneration)) this.transport.transmit(frame);
+      }
     }
   }
 
@@ -178,6 +185,8 @@ export class LiveSupervisor {
   private retryHandle: unknown;
   private stopped = true;
   private backoffMs = BACKOFF_MIN_MS;
+  private everReady = false;
+  private ready = false;
 
   public constructor(private readonly options: LiveSupervisorOptions) {
     this.sessionId = this.newSessionId();
@@ -193,6 +202,10 @@ export class LiveSupervisor {
   public async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    if (this.ready) {
+      this.ready = false;
+      this.options.onClosed?.();
+    }
     this.cancelRetry();
     this.issueAbort?.abort();
     this.issueAbort = undefined;
@@ -278,7 +291,7 @@ export class LiveSupervisor {
         }
       };
       socket.onmessage = event => {
-        if (refused) return;
+        if (refused || this.stopped || this.socketValue !== socket) return;
         if (!helloReceived) {
           if (!typingCapability(event.data)) {
             refused = true;
@@ -287,6 +300,9 @@ export class LiveSupervisor {
             return;
           }
           helloReceived = true;
+          this.everReady = true;
+          this.ready = true;
+          this.options.onReady?.();
           resolve();
           return;
         }
@@ -294,9 +310,16 @@ export class LiveSupervisor {
       };
       socket.onerror = () => { if (!helloReceived) reject(new TransportError("offline")); };
       socket.onclose = () => {
-        if (this.socketValue === socket) this.socketValue = undefined;
+        if (this.socketValue !== socket) return;
+        this.socketValue = undefined;
         if (!helloReceived) reject(new TransportError("offline"));
-        else if (!this.stopped) this.retry();
+        else {
+          if (this.ready) {
+            this.ready = false;
+            this.options.onClosed?.();
+          }
+          if (!this.stopped) this.retry();
+        }
       };
     });
   }
@@ -304,7 +327,7 @@ export class LiveSupervisor {
   private retry(_error?: unknown): void {
     if (this.stopped || this.retryHandle !== undefined) return;
     const delay = this.backoffMs;
-    this.backoffMs = Math.min(this.backoffMs * 2, BACKOFF_MAX_MS);
+    this.backoffMs = Math.min(this.backoffMs * 2, this.everReady ? BACKOFF_MAX_MS : INITIAL_BACKOFF_MAX_MS);
     this.retryHandle = (this.options.schedule ?? ((work, wait) => setTimeout(work, wait)))(() => {
       this.retryHandle = undefined;
       void this.connect();
