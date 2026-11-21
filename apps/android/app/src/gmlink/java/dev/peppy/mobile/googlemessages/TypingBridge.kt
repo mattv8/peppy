@@ -186,13 +186,37 @@ internal class TypingBridge(
             val current = client() ?: return@execute recordGoogleMessagesLinkEvent("typing", "open_failed", 0)
             runCatching { current.open(json, nativeClock()) }
                 .onSuccess { outcome ->
+                    var canSendFollowUps = true
                     outcome.replyFrameJson?.let { reply ->
                         when (sendIfCurrent(reply, outcome.generation, frameIncarnation)) {
                             SendResult.SENT -> Unit
-                            SendResult.NOT_CURRENT -> recordGoogleMessagesLinkEvent("typing", "reply_not_current", 0)
-                            SendResult.REFUSED -> recordGoogleMessagesLinkEvent("live", "send_refused", 0)
+                            SendResult.NOT_CURRENT -> {
+                                canSendFollowUps = false
+                                recordGoogleMessagesLinkEvent("typing", "reply_not_current", 0)
+                            }
+                            SendResult.REFUSED -> {
+                                canSendFollowUps = false
+                                recordGoogleMessagesLinkEvent("live", "send_refused", 0)
+                            }
                         }
                     }
+                    var replayed = false
+                    if (canSendFollowUps) {
+                        for (frame in outcome.followUpFramesJson) {
+                            when (sendIfCurrent(frame, outcome.generation, frameIncarnation)) {
+                                SendResult.SENT -> replayed = true
+                                SendResult.NOT_CURRENT -> {
+                                    recordGoogleMessagesLinkEvent("typing", "reply_not_current", 0)
+                                    break
+                                }
+                                SendResult.REFUSED -> {
+                                    recordGoogleMessagesLinkEvent("live", "send_refused", 0)
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    if (replayed) recordGoogleMessagesLinkEvent("typing", "replayed", 0)
                     adapter.consume(outcome) { isCurrent(outcome.generation, frameIncarnation) }
                 }
                 .onFailure { recordGoogleMessagesLinkEvent("typing", "open_failed", 0) }

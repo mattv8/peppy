@@ -35,6 +35,7 @@ class GoogleMessagesLinkDiagnosticsTest {
         }
         assertEquals(336L, GoogleMessagesLinkDiagnosticReason.codes["typing" to "frame_ignored"])
         assertEquals(337L, GoogleMessagesLinkDiagnosticReason.codes["typing" to "outcome_not_current"])
+        assertEquals(338L, GoogleMessagesLinkDiagnosticReason.codes["typing" to "replayed"])
     }
 
     private val stablePairs = listOf(

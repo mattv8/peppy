@@ -218,6 +218,9 @@ struct HostContext {
     revoked_device_ids: std::collections::HashSet<String>,
     #[serde(skip)]
     rcs_roster_validated: bool,
+    /// Non-revoked device ids from the verified roster; set only by the worker context path.
+    #[serde(skip)]
+    rcs_live_roster: Vec<DeviceId>,
     /// Set only by the worker context path; never deserialized from renderer host context.
     #[serde(skip)]
     outbox_rejected: bool,

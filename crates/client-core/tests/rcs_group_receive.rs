@@ -641,3 +641,104 @@ fn live_group_typing_flows_between_gateway_and_desktop() {
         outcome.action.is_none() && outcome.reply.is_none() && outcome.session_update.is_none()
     );
 }
+
+#[test]
+fn group_replay_rechecks_a_participant_removed_by_a_real_snapshot() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "departure-gateway", &vault);
+    let desktop_config = config(&directory, "departure-desktop", &vault);
+    let third_config = config(&directory, "departure-third", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    let third = unlocked(&third_config, &vault);
+    publish_current_gateway(&gateway, &gateway_config);
+    authorize_local_link_gateway(&gateway, &gateway_config);
+    let now = now_ms();
+    gateway
+        .ingest_group_candidates(&snapshot(1, vec![group(&[ALEX, SAM, LEE], now)]), now)
+        .unwrap();
+    let conversation = gateway
+        .rcs_receive_context(GOOGLE)
+        .unwrap()
+        .unwrap()
+        .conversation_id;
+    gateway
+        .publish_rcs_eligibility_from_lifecycle(&[conversation], now)
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&gateway);
+    server.sync(&desktop);
+    server.sync(&third);
+    let clock = |offset: u64| LiveClock {
+        wall_ms: now + offset as i64,
+        mono_ms: 1_000 + offset,
+    };
+    let roster = vec![
+        gateway_config.device_id,
+        desktop_config.device_id,
+        third_config.device_id,
+    ];
+    for (client, executor) in [
+        (&gateway, LiveExecutor::CurrentGateway),
+        (&desktop, LiveExecutor::None),
+        (&third, LiveExecutor::None),
+    ] {
+        client
+            .enable_live_typing(
+                LiveEnableContext {
+                    trusted_roster: roster.clone(),
+                    local_gateway_device_id: gateway_config.device_id,
+                    local_executor: executor,
+                },
+                clock(0),
+            )
+            .unwrap();
+    }
+    let start = gateway
+        .seal_typing_signal_v2(
+            conversation,
+            gateway_config.device_id,
+            TypingOriginV2::GoogleContact,
+            Some(ALEX.into()),
+            TypingStateV2::Started,
+            clock(1),
+        )
+        .unwrap()
+        .unwrap()
+        .signal;
+    let first_challenge = desktop
+        .open_typing_signal_v2(&start, clock(1))
+        .unwrap()
+        .reply
+        .unwrap();
+    let later_challenge = third
+        .open_typing_signal_v2(&start, clock(1))
+        .unwrap()
+        .reply
+        .unwrap();
+    let response = gateway
+        .open_typing_signal_v2(&first_challenge, clock(2))
+        .unwrap();
+    assert!(response.reply.is_some());
+    assert_eq!(response.follow_ups.len(), 1);
+    desktop
+        .open_typing_signal_v2(&response.reply.unwrap(), clock(2))
+        .unwrap();
+    assert!(
+        matches!(desktop.open_typing_signal_v2(&response.follow_ups[0], clock(2)).unwrap().action,
+        Some(LiveAction::Display { participant: Some(member), .. }) if member == ALEX)
+    );
+    gateway
+        .ingest_group_candidates(
+            &snapshot(2, vec![group(&[SAM, LEE], now + 3_001)]),
+            now + 3_001,
+        )
+        .unwrap();
+    assert!(!gateway.group_roster(conversation).unwrap().contains(ALEX));
+    let response = gateway
+        .open_typing_signal_v2(&later_challenge, clock(3_002))
+        .unwrap();
+    assert!(response.reply.is_some());
+    assert!(response.follow_ups.is_empty());
+}

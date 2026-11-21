@@ -9,9 +9,10 @@ use peppy_protocol::{
     POSTGRES_NOTIFY_PAYLOAD_BYTES, SessionAckPlaintextV2, TypingOriginV2, TypingPlaintextV2,
     TypingStateV2,
 };
+use std::collections::HashMap;
 
 use super::{
-    ephemeral_v2_control::{ControlBudget, IngressBudget},
+    ephemeral_v2_control::{ControlBudget, IngressBudget, ReplayBudget},
     ephemeral_v2_decode::{AuthenticatedPlaintext, decode_authenticated_frame},
     ephemeral_v2_policy::{
         ClockState, LiveClock as PolicyClock, PolicyError, SenderBudget, TypingSlot,
@@ -25,6 +26,19 @@ use super::{
 
 const MAX_ROSTER: usize = 100;
 const TTL_MS: u64 = 15_000;
+const MAX_ACTIVE_STARTS: usize = 50;
+const MAX_FOLLOW_UPS_PER_ACK: usize = 2;
+
+#[derive(Clone, Debug)]
+struct ActiveStart {
+    conversation_id: ConversationId,
+    gateway_device_id: DeviceId,
+    origin: TypingOriginV2,
+    participant: Participant,
+    expires_at_wall_ms: u64,
+    sealed_mono_ms: u64,
+    last_replay_mono_ms: Option<u64>,
+}
 
 /// Trusted host-attested admission facts. They are not cryptographic proof of a device role.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +75,7 @@ pub struct LiveOutcome {
     pub session_update: Option<PeerSessionUpdate>,
     pub action: Option<LiveAction>,
     pub reply: Option<EphemeralSignalV2>,
+    pub follow_ups: Vec<EphemeralSignalV2>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,9 +129,11 @@ pub(crate) struct EphemeralV2State {
     budget: SenderBudget,
     control_budget: ControlBudget,
     ingress_budget: IngressBudget,
+    replay_budget: ReplayBudget,
     receiver: Option<EphemeralV2SessionState>,
     sharing_enabled: bool,
     context: Option<LiveEnableContext>,
+    active_starts: HashMap<TypingSlot, ActiveStart>,
 }
 
 impl Default for EphemeralV2State {
@@ -130,9 +147,11 @@ impl Default for EphemeralV2State {
             budget: SenderBudget::new(),
             control_budget: ControlBudget::default(),
             ingress_budget: IngressBudget::default(),
+            replay_budget: ReplayBudget::default(),
             receiver: None,
             sharing_enabled: true,
             context: None,
+            active_starts: HashMap::new(),
         }
     }
 }
@@ -145,8 +164,10 @@ impl EphemeralV2State {
         self.budget = SenderBudget::new();
         self.control_budget = ControlBudget::default();
         self.ingress_budget = IngressBudget::default();
+        self.replay_budget = ReplayBudget::default();
         self.receiver = None;
         self.context = None;
+        self.active_starts.clear();
         self.generation = self.generation.saturating_add(1);
         self.session_id = [0; 16];
     }
@@ -192,9 +213,11 @@ pub(crate) fn enable(
         budget: SenderBudget::new(),
         control_budget: ControlBudget::default(),
         ingress_budget: IngressBudget::default(),
+        replay_budget: ReplayBudget::default(),
         receiver: Some(EphemeralV2SessionState::new(SessionId(session_id))),
         sharing_enabled: true,
         context: Some(context),
+        active_starts: HashMap::new(),
     };
     Ok(LiveEnableGeneration(generation))
 }
@@ -219,6 +242,23 @@ pub(crate) fn seal(
     clock: LiveClock,
     roster: GroupTypingRoster<'_>,
 ) -> Result<Option<LiveOutbound>, LiveError> {
+    if request.state == TypingStateV2::Stopped {
+        store.ephemeral_v2.active_starts.remove(&typing_slot(
+            request.conversation_id,
+            request.participant.as_deref(),
+        ));
+    }
+    seal_typing(store, request, clock, roster, None, false)
+}
+
+fn seal_typing(
+    store: &mut Store,
+    request: TypingSealRequest,
+    clock: LiveClock,
+    roster: GroupTypingRoster<'_>,
+    expiry_cap: Option<u64>,
+    skip_start_budget: bool,
+) -> Result<Option<LiveOutbound>, LiveError> {
     let TypingSealRequest {
         conversation_id,
         gateway_device_id,
@@ -241,6 +281,10 @@ pub(crate) fn seal(
         })
         .map_err(policy_error)?;
     store.ephemeral_v2.clock = Some(clock_candidate);
+    store
+        .ephemeral_v2
+        .active_starts
+        .retain(|_, entry| entry.expires_at_wall_ms > effective_wall as u64);
     if !store.ephemeral_v2.sharing_enabled && origin == TypingOriginV2::VaultDevice {
         return Ok(None);
     }
@@ -283,6 +327,7 @@ pub(crate) fn seal(
     let slot = typing_slot(conversation_id, typing.participant.as_deref());
     let mut budget_candidate = store.ephemeral_v2.budget.clone();
     let admitted = match state {
+        TypingStateV2::Started if skip_start_budget => Ok(true),
         TypingStateV2::Started => budget_candidate.admit_start(slot, clock.mono_ms),
         TypingStateV2::Stopped => budget_candidate.admit_stop(slot, clock.mono_ms),
     }
@@ -297,6 +342,10 @@ pub(crate) fn seal(
         .ok_or(LiveError::CounterExhausted)?;
     let sent_at = u64::try_from(effective_wall).map_err(|_| LiveError::Clock)?;
     let expires_at = sent_at.checked_add(TTL_MS).ok_or(LiveError::Clock)?;
+    let expires_at = expiry_cap.map_or(expires_at, |cap| expires_at.min(cap));
+    if expires_at <= sent_at {
+        return Ok(None);
+    }
     let mut signal = EphemeralSignalV2 {
         protocol_version: EPHEMERAL_V2_PROTOCOL_VERSION,
         kind: EphemeralSignalV2Kind::Typing,
@@ -327,6 +376,34 @@ pub(crate) fn seal(
     signal.validate().map_err(|_| LiveError::Crypto)?;
     store.ephemeral_v2.budget = budget_candidate;
     store.ephemeral_v2.last_sequence = sequence;
+    if state == TypingStateV2::Started && !skip_start_budget {
+        let slot = typing_slot(conversation_id, typing.participant.as_deref());
+        let starts = &mut store.ephemeral_v2.active_starts;
+        if !starts.contains_key(&slot)
+            && starts.len() >= MAX_ACTIVE_STARTS
+            && let Some(oldest) = starts
+                .iter()
+                .min_by_key(|(_, entry)| entry.expires_at_wall_ms)
+                .map(|(slot, _)| slot.clone())
+        {
+            starts.remove(&oldest);
+        }
+        let last_replay_mono_ms = starts
+            .get(&slot)
+            .and_then(|entry| entry.last_replay_mono_ms);
+        starts.insert(
+            slot,
+            ActiveStart {
+                conversation_id,
+                gateway_device_id,
+                origin,
+                participant: typing.participant,
+                expires_at_wall_ms: expires_at,
+                sealed_mono_ms: clock.mono_ms,
+                last_replay_mono_ms,
+            },
+        );
+    }
     Ok(Some(LiveOutbound {
         generation: LiveEnableGeneration(store.ephemeral_v2.generation),
         signal,
@@ -338,6 +415,12 @@ pub(crate) fn set_sharing(store: &mut Store, enabled: bool) -> Result<(), LiveEr
         return Err(LiveError::Disabled);
     }
     store.ephemeral_v2.sharing_enabled = enabled;
+    if !enabled {
+        store
+            .ephemeral_v2
+            .active_starts
+            .retain(|_, entry| entry.origin != TypingOriginV2::VaultDevice);
+    }
     Ok(())
 }
 
@@ -523,6 +606,14 @@ pub(crate) fn open(
     store.ephemeral_v2.receiver = Some(receiver_candidate);
     store.ephemeral_v2.control_budget = control_candidate;
     store.ephemeral_v2.last_sequence = next_sequence;
+    let follow_ups = if reply
+        .as_ref()
+        .is_some_and(|frame| frame.kind == EphemeralSignalV2Kind::SessionAck)
+    {
+        replay_active_starts(store, authenticated.sender_device_id, clock, effective_wall)
+    } else {
+        Vec::new()
+    };
     Ok(LiveOutcome {
         generation: LiveEnableGeneration(store.ephemeral_v2.generation),
         session_update: session_update.map(|update| PeerSessionUpdate {
@@ -558,7 +649,75 @@ pub(crate) fn open(
             },
         }),
         reply,
+        follow_ups,
     })
+}
+
+fn replay_active_starts(
+    store: &mut Store,
+    challenger: DeviceId,
+    clock: LiveClock,
+    effective_wall: i64,
+) -> Vec<EphemeralSignalV2> {
+    let starts = &mut store.ephemeral_v2.active_starts;
+    starts.retain(|_, start| start.expires_at_wall_ms > effective_wall as u64);
+    let mut candidates: Vec<_> = starts
+        .iter()
+        .filter(|(_, start)| {
+            (start.origin == TypingOriginV2::GoogleContact || start.gateway_device_id == challenger)
+                && start
+                    .expires_at_wall_ms
+                    .saturating_sub(effective_wall as u64)
+                    >= 1_000
+                && start
+                    .last_replay_mono_ms
+                    .is_none_or(|last| clock.mono_ms.saturating_sub(last) >= 3_000)
+        })
+        .map(|(slot, start)| (slot.clone(), start.clone()))
+        .collect();
+    candidates.sort_by_key(|(_, start)| std::cmp::Reverse(start.sealed_mono_ms));
+    let mut follow_ups = Vec::new();
+    for (slot, start) in candidates.into_iter().take(MAX_FOLLOW_UPS_PER_ACK) {
+        let mut replay_budget = store.ephemeral_v2.replay_budget.clone();
+        if !replay_budget.admit(clock.mono_ms) {
+            break;
+        }
+        let participant_confirmed = match start.participant.as_deref() {
+            Some(participant) => match crate::rcs_group::live_roster_contains(
+                &store.conn,
+                start.conversation_id,
+                participant,
+            ) {
+                Ok(confirmed) => confirmed,
+                Err(_) => break,
+            },
+            None => false,
+        };
+        let roster = |_: ConversationId, _: &str| participant_confirmed;
+        let result = seal_typing(
+            store,
+            TypingSealRequest {
+                conversation_id: start.conversation_id,
+                gateway_device_id: start.gateway_device_id,
+                origin: start.origin,
+                participant: start.participant,
+                state: TypingStateV2::Started,
+            },
+            clock,
+            &roster,
+            Some(start.expires_at_wall_ms),
+            true,
+        );
+        let Ok(Some(outbound)) = result else {
+            break;
+        };
+        store.ephemeral_v2.replay_budget = replay_budget;
+        if let Some(entry) = store.ephemeral_v2.active_starts.get_mut(&slot) {
+            entry.last_replay_mono_ms = Some(clock.mono_ms);
+        }
+        follow_ups.push(outbound.signal);
+    }
+    follow_ups
 }
 
 pub(crate) fn open_json(
@@ -623,6 +782,7 @@ fn empty_outcome(store: &Store) -> LiveOutcome {
         session_update: None,
         action: None,
         reply: None,
+        follow_ups: Vec::new(),
     }
 }
 
@@ -852,5 +1012,256 @@ mod group_seam_tests {
                 "{origin:?} with {participant:?}"
             );
         }
+    }
+
+    #[test]
+    fn active_starts_refresh_stop_expire_and_clear_on_reenable() {
+        let conversation = ConversationId::new();
+        let (_directory, client, device) = fixture(conversation);
+        let roster = |_: ConversationId, _: &str| true;
+        let start = |time| {
+            seal_with(
+                &client,
+                conversation,
+                device,
+                TypingOriginV2::GoogleContact,
+                None,
+                time,
+                &roster,
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let first = start(1_001);
+        let second = start(4_001);
+        {
+            let store = client.lock().unwrap();
+            let entry = store.ephemeral_v2.active_starts.values().next().unwrap();
+            assert_eq!(
+                entry.expires_at_wall_ms.to_string(),
+                second.signal.expires_at_ms
+            );
+            assert_ne!(first.signal.expires_at_ms, second.signal.expires_at_ms);
+        }
+        {
+            let mut store = client.lock().unwrap();
+            seal(
+                &mut store,
+                TypingSealRequest {
+                    conversation_id: conversation,
+                    gateway_device_id: device,
+                    origin: TypingOriginV2::GoogleContact,
+                    participant: None,
+                    state: TypingStateV2::Stopped,
+                },
+                LiveClock {
+                    wall_ms: 4_002,
+                    mono_ms: 4_002,
+                },
+                &roster,
+            )
+            .unwrap();
+            assert!(store.ephemeral_v2.active_starts.is_empty());
+        }
+        start(7_002);
+        {
+            let mut store = client.lock().unwrap();
+            let context = store.ephemeral_v2.context.clone().unwrap();
+            enable(
+                &mut store,
+                context,
+                LiveClock {
+                    wall_ms: 7_003,
+                    mono_ms: 7_003,
+                },
+            )
+            .unwrap();
+            assert!(store.ephemeral_v2.active_starts.is_empty());
+        }
+        start(7_004);
+        client.set_typing_sharing(false).unwrap();
+        assert!(
+            seal_with(
+                &client,
+                conversation,
+                device,
+                TypingOriginV2::VaultDevice,
+                None,
+                22_004,
+                &roster
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(client.lock().unwrap().ephemeral_v2.active_starts.is_empty());
+        start(22_005);
+        assert_eq!(client.lock().unwrap().ephemeral_v2.active_starts.len(), 1);
+        client.disable_live_typing().unwrap();
+        assert!(client.lock().unwrap().ephemeral_v2.active_starts.is_empty());
+    }
+
+    #[test]
+    fn sharing_off_clears_only_vault_device_starts() {
+        let conversation = ConversationId::new();
+        let (_directory, client, device) = fixture(conversation);
+        let roster = |_: ConversationId, _: &str| true;
+        seal_with(
+            &client,
+            conversation,
+            device,
+            TypingOriginV2::VaultDevice,
+            None,
+            1_001,
+            &roster,
+        )
+        .unwrap()
+        .unwrap();
+        seal_with(
+            &client,
+            conversation,
+            device,
+            TypingOriginV2::GoogleContact,
+            Some(ALEX),
+            1_002,
+            &roster,
+        )
+        .unwrap()
+        .unwrap();
+        client.set_typing_sharing(false).unwrap();
+        let store = client.lock().unwrap();
+        assert_eq!(store.ephemeral_v2.active_starts.len(), 1);
+        assert_eq!(
+            store
+                .ephemeral_v2
+                .active_starts
+                .values()
+                .next()
+                .unwrap()
+                .origin,
+            TypingOriginV2::GoogleContact
+        );
+    }
+
+    #[test]
+    fn registry_evicts_nearest_expiry_and_refused_stop_removes_slot() {
+        let conversation = ConversationId::new();
+        let (_directory, client, device) = fixture(conversation);
+        let oldest = ConversationId::new();
+        let unreserved = ConversationId::new();
+        {
+            let mut store = client.lock().unwrap();
+            for index in 0..MAX_ACTIVE_STARTS {
+                let id = match index {
+                    0 => oldest,
+                    1 => unreserved,
+                    _ => ConversationId::new(),
+                };
+                store.ephemeral_v2.active_starts.insert(
+                    typing_slot(id, None),
+                    ActiveStart {
+                        conversation_id: id,
+                        gateway_device_id: device,
+                        origin: TypingOriginV2::GoogleContact,
+                        participant: None,
+                        expires_at_wall_ms: 5_000 + index as u64,
+                        sealed_mono_ms: 1_000,
+                        last_replay_mono_ms: None,
+                    },
+                );
+            }
+        }
+        let roster = |_: ConversationId, _: &str| true;
+        seal_with(
+            &client,
+            conversation,
+            device,
+            TypingOriginV2::GoogleContact,
+            None,
+            1_001,
+            &roster,
+        )
+        .unwrap()
+        .unwrap();
+        let mut store = client.lock().unwrap();
+        assert_eq!(store.ephemeral_v2.active_starts.len(), MAX_ACTIVE_STARTS);
+        assert!(
+            !store
+                .ephemeral_v2
+                .active_starts
+                .contains_key(&typing_slot(oldest, None))
+        );
+        let result = seal(
+            &mut store,
+            TypingSealRequest {
+                conversation_id: unreserved,
+                gateway_device_id: device,
+                origin: TypingOriginV2::GoogleContact,
+                participant: None,
+                state: TypingStateV2::Stopped,
+            },
+            LiveClock {
+                wall_ms: 1_002,
+                mono_ms: 1_002,
+            },
+            &roster,
+        )
+        .unwrap();
+        assert!(result.is_none());
+        assert!(
+            !store
+                .ephemeral_v2
+                .active_starts
+                .contains_key(&typing_slot(unreserved, None))
+        );
+    }
+
+    #[test]
+    fn replay_refuses_wrong_gateway_and_rechecks_live_roster() {
+        let conversation = ConversationId::new();
+        let (_directory, client, gateway) = fixture(conversation);
+        let roster = |_: ConversationId, _: &str| true;
+        seal_with(
+            &client,
+            conversation,
+            gateway,
+            TypingOriginV2::VaultDevice,
+            None,
+            1_001,
+            &roster,
+        )
+        .unwrap()
+        .unwrap();
+        let mut store = client.lock().unwrap();
+        let clock = LiveClock {
+            wall_ms: 1_002,
+            mono_ms: 1_002,
+        };
+        assert!(replay_active_starts(&mut store, DeviceId::new(), clock, clock.wall_ms).is_empty());
+        assert_eq!(
+            replay_active_starts(&mut store, gateway, clock, clock.wall_ms).len(),
+            1
+        );
+        drop(store);
+
+        // The seal seam accepts this participant, but there is no live membership in the DB.
+        seal_with(
+            &client,
+            conversation,
+            gateway,
+            TypingOriginV2::GoogleContact,
+            Some(ALEX),
+            4_003,
+            &roster,
+        )
+        .unwrap()
+        .unwrap();
+        let mut store = client.lock().unwrap();
+        let clock = LiveClock {
+            wall_ms: 4_004,
+            mono_ms: 4_004,
+        };
+        let sequence = store.ephemeral_v2.last_sequence;
+        assert!(replay_active_starts(&mut store, DeviceId::new(), clock, clock.wall_ms).is_empty());
+        assert_eq!(store.ephemeral_v2.last_sequence, sequence);
     }
 }

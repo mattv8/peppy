@@ -9,6 +9,10 @@ use std::collections::{HashMap, VecDeque};
 const SECOND_MS: u64 = 1_000;
 const MINUTE_MS: u64 = 60_000;
 const MAX_PEER_RECORDS: usize = 100;
+// Server limit 120/min/device: ordinary 50 + acks 40 + challenges 20 + host membership 3 + replays 6 = 119.
+const MAX_REPLAYS_PER_MINUTE: usize = 6;
+const MAX_CHALLENGES_PER_MINUTE: usize = 20;
+const MAX_ACKS_PER_MINUTE: usize = 40;
 
 #[derive(Clone, Debug, Default)]
 struct RollingWindow {
@@ -36,6 +40,22 @@ impl RollingWindow {
 
     fn is_empty(&self) -> bool {
         self.accepted_at.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ReplayBudget {
+    minute: RollingWindow,
+}
+
+impl ReplayBudget {
+    pub(crate) fn admit(&mut self, mono_ms: u64) -> bool {
+        self.minute.prune(mono_ms, MINUTE_MS);
+        if !self.minute.has_capacity(MAX_REPLAYS_PER_MINUTE) {
+            return false;
+        }
+        self.minute.accept(mono_ms);
+        true
     }
 }
 
@@ -75,7 +95,7 @@ pub(crate) struct ControlBudget {
 impl ControlBudget {
     pub(crate) fn admit_challenge(&mut self, mono_ms: u64) -> bool {
         self.challenges.prune(mono_ms);
-        if !self.challenges.admits(20, 5) {
+        if !self.challenges.admits(MAX_CHALLENGES_PER_MINUTE, 5) {
             return false;
         }
         self.challenges.accept(mono_ms);
@@ -85,7 +105,7 @@ impl ControlBudget {
     pub(crate) fn admit_ack(&mut self, peer: DeviceId, mono_ms: u64) -> bool {
         self.acks.prune(mono_ms);
         self.prune_ack_peers(mono_ms);
-        if !self.acks.admits(40, 6) {
+        if !self.acks.admits(MAX_ACKS_PER_MINUTE, 6) {
             return false;
         }
         let peer_budget = self.ack_peers.get(&peer);
@@ -143,6 +163,27 @@ impl IngressBudget {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn replay_budget_has_a_half_open_six_frame_minute() {
+        let mut budget = ReplayBudget::default();
+        for _ in 0..6 {
+            assert!(budget.admit(1_000));
+        }
+        assert!(!budget.admit(60_999));
+        assert!(budget.admit(61_000));
+    }
+
+    #[test]
+    fn all_sender_budgets_fit_the_server_minute_limit() {
+        const MEMBERSHIP_CHALLENGES_PER_MINUTE: usize = 3;
+        let total = super::super::ephemeral_v2_policy::MAX_OCCUPANCY
+            + MAX_ACKS_PER_MINUTE
+            + MAX_CHALLENGES_PER_MINUTE
+            + MAX_REPLAYS_PER_MINUTE
+            + MEMBERSHIP_CHALLENGES_PER_MINUTE;
+        assert!(total <= 120, "sender maximum {total} exceeds server limit");
+    }
 
     fn peer(value: u128) -> DeviceId {
         DeviceId(Uuid::from_u128(value))

@@ -13415,6 +13415,11 @@ data class NativeLiveOutcome (
     var `action`: NativeLiveAction?
     , 
     var `replyFrameJson`: kotlin.String?
+    , 
+    /**
+     * Frames to transmit after `reply_frame_json`, in order; empty when none.
+     */
+    var `followUpFramesJson`: List<kotlin.String>
     
 ){
     
@@ -13435,6 +13440,7 @@ public object FfiConverterTypeNativeLiveOutcome: FfiConverterRustBuffer<NativeLi
             FfiConverterOptionalTypeNativeLiveSessionUpdate.read(buf),
             FfiConverterOptionalTypeNativeLiveAction.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterSequenceString.read(buf),
         )
     }
 
@@ -13442,7 +13448,8 @@ public object FfiConverterTypeNativeLiveOutcome: FfiConverterRustBuffer<NativeLi
             FfiConverterULong.allocationSize(value.`generation`) +
             FfiConverterOptionalTypeNativeLiveSessionUpdate.allocationSize(value.`sessionUpdate`) +
             FfiConverterOptionalTypeNativeLiveAction.allocationSize(value.`action`) +
-            FfiConverterOptionalString.allocationSize(value.`replyFrameJson`)
+            FfiConverterOptionalString.allocationSize(value.`replyFrameJson`) +
+            FfiConverterSequenceString.allocationSize(value.`followUpFramesJson`)
     )
 
     override fun write(value: NativeLiveOutcome, buf: ByteBuffer) {
@@ -13450,6 +13457,7 @@ public object FfiConverterTypeNativeLiveOutcome: FfiConverterRustBuffer<NativeLi
             FfiConverterOptionalTypeNativeLiveSessionUpdate.write(value.`sessionUpdate`, buf)
             FfiConverterOptionalTypeNativeLiveAction.write(value.`action`, buf)
             FfiConverterOptionalString.write(value.`replyFrameJson`, buf)
+            FfiConverterSequenceString.write(value.`followUpFramesJson`, buf)
     }
 }
 
