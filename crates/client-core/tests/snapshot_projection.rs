@@ -1469,6 +1469,20 @@ fn opened(vault: &Vault, envelope: &Envelope) -> PrivatePayload {
     serde_json::from_slice(&plain).unwrap()
 }
 
+fn reseal_snapshot_payload(vault: &Vault, envelope: &mut Envelope, payload: &PrivatePayload) {
+    let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
+    let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    let mut plain = serde_json::to_value(payload).unwrap();
+    plain["compaction"] = serde_json::to_value(&envelope.compaction).unwrap();
+    let encrypted = encrypt(
+        &key,
+        &envelope.aad_bytes().unwrap(),
+        &serde_json::to_vec(&plain).unwrap(),
+    )
+    .unwrap();
+    envelope.ciphertext = [encrypted.nonce.as_slice(), &encrypted.ciphertext].concat();
+}
+
 /// The owner publishes two contacts; the peer syncs them; a third device then deletes the book
 /// for the vault after the owner was removed, and publishes the fence and member records.
 fn deleted_by_another_device(p: &mut Pair) {
@@ -1491,6 +1505,38 @@ fn deleted_by_another_device(p: &mut Pair) {
 }
 
 #[test]
+fn failed_snapshot_deletion_never_changes_visible_book() {
+    let mut p = pair();
+    deleted_by_another_device(&mut p);
+    let original = call(p.peer.contact_book_view(
+        &json!({"schema_version": 1, "book_id": BOOK, "limit": 200}).to_string(),
+    ));
+    let mut records = full(&p.server.log);
+    let corrupt = records
+        .iter()
+        .position(|record| {
+            matches!(
+                opened(&p.vault, &record.envelope),
+                PrivatePayload::ContactBookDeletedMember { .. }
+            )
+        })
+        .unwrap();
+    records[corrupt].envelope.ciphertext[0] ^= 0x55;
+    import(&p.peer, &records, p.server.log.len(), Some(71));
+    wait_for_failed_snapshot(&p.peer, records.len());
+    for _ in 0..(records.len() + 3) {
+        p.peer.apply_pending(1).unwrap();
+        assert!(listed(&p.peer, BOOK));
+        assert_eq!(
+            call(p.peer.contact_book_view(
+                &json!({"schema_version": 1, "book_id": BOOK, "limit": 200}).to_string(),
+            )),
+            original
+        );
+    }
+}
+
+#[test]
 fn deleted_book_snapshot_stays_visible_until_promotion_then_stays_removed() {
     let mut p = pair();
     deleted_by_another_device(&mut p);
@@ -1504,6 +1550,366 @@ fn deleted_book_snapshot_stays_visible_until_promotion_then_stays_removed() {
         "staging must not change live rows"
     );
     assert!(listed(&p.peer, BOOK));
+
+    settle(&p.peer);
+    assert_eq!(
+        state(&p.peer),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert!(visible(&p.peer, BOOK).is_empty());
+    assert!(!listed(&p.peer, BOOK));
+
+    // A later compacted snapshot cannot bring it back either.
+    import(&p.peer, &compact(&p.server.log, true), high_water, Some(8));
+    settle(&p.peer);
+    assert!(visible(&p.peer, BOOK).is_empty());
+    assert!(!listed(&p.peer, BOOK));
+}
+
+#[test]
+fn deletion_records_ahead_of_owner_records_in_a_snapshot_still_remove_the_book() {
+    let mut p = pair();
+    deleted_by_another_device(&mut p);
+    // A receiver that never saw the log imports a snapshot re-sequenced so the fence and members
+    // stage before the owner's records. Cursors are fresh, so nothing is journaled yet.
+    let late = unlocked(&config(&p._dir, "late", &p.vault), &p.vault);
+    let (deletions, rest): (Vec<Envelope>, Vec<Envelope>) =
+        p.server.log.iter().cloned().partition(|envelope| {
+            matches!(
+                opened(&p.vault, envelope),
+                PrivatePayload::ContactBookDeleted { .. }
+                    | PrivatePayload::ContactBookDeletedMember { .. }
+            )
+        });
+    assert_eq!(deletions.len(), 3, "one fence and two members");
+    let records: Vec<SnapshotRecord> = deletions
+        .into_iter()
+        .chain(rest)
+        .enumerate()
+        .map(|(index, envelope)| SnapshotRecord {
+            cursor: Cursor(index as u64 + 1),
+            envelope,
+        })
+        .collect();
+
+    import(&late, &records, records.len(), Some(7));
+    settle(&late);
+
+    assert_eq!(
+        state(&late),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert!(visible(&late, BOOK).is_empty());
+    assert!(!listed(&late, BOOK));
+}
+
+#[test]
+fn legacy_snapshot_after_a_deletion_cannot_resurrect_the_book() {
+    let mut p = pair();
+    deleted_by_another_device(&mut p);
+    p.server.sync(&p.peer);
+    assert!(!listed(&p.peer, BOOK), "live apply removed the book");
+
+    let high_water = p.server.log.len();
+    import(&p.peer, &full(&p.server.log), high_water, None);
+    settle(&p.peer);
+
+    assert!(!listed(&p.peer, BOOK));
+    assert!(visible(&p.peer, BOOK).is_empty());
+}
+
+#[test]
+fn different_owners_fences_survive_compaction_and_reconstruction() {
+    let mut p = pair();
+    capture(
+        &p.owner,
+        &book(&p.owner_cfg, BOOK),
+        vec![contact(BOOK, "c1", "Ada")],
+    );
+    p.server.upload(&p.owner);
+    p.server.sync(&p.peer);
+    call(
+        p.peer.delete_contact_book(
+            &json!({
+                "book_id": BOOK, "revoked_device_ids": [p.owner_cfg.device_id.to_string()]
+            })
+            .to_string(),
+        ),
+    );
+    p.server.upload(&p.peer);
+    p.server.sync(&p.peer);
+    let owner_a_fence = p.server.log.iter().find(|envelope| {
+        matches!(opened(&p.vault, envelope), PrivatePayload::ContactBookDeleted { ref owner_device_id, .. } if owner_device_id == &p.owner_cfg.device_id.to_string())
+    }).unwrap().clone();
+
+    let owner_b_cfg = config(&p._dir, "owner-b", &p.vault);
+    let owner_b = unlocked(&owner_b_cfg, &p.vault);
+    capture(
+        &owner_b,
+        &book(&owner_b_cfg, BOOK),
+        vec![contact(BOOK, "c2", "Bea")],
+    );
+    p.server.upload(&owner_b);
+    p.server.sync(&p.peer);
+    assert_eq!(visible(&p.peer, BOOK), ["c2"]);
+    call(
+        p.peer.delete_contact_book(
+            &json!({
+                "book_id": BOOK, "revoked_device_ids": [owner_b_cfg.device_id.to_string()]
+            })
+            .to_string(),
+        ),
+    );
+    p.server.upload(&p.peer);
+    let owner_b_fence = p.server.log.iter().find(|envelope| {
+        matches!(opened(&p.vault, envelope), PrivatePayload::ContactBookDeleted { ref owner_device_id, .. } if owner_device_id == &owner_b_cfg.device_id.to_string())
+    }).unwrap();
+    assert!(
+        !owner_b_fence
+            .compaction
+            .as_ref()
+            .unwrap()
+            .supersedes
+            .iter()
+            .any(
+                |item| item.producer_device_id == owner_a_fence.producer_device_id
+                    && item.producer_sequence == owner_a_fence.producer_sequence
+            )
+    );
+    let records = compact(&p.server.log, false);
+    assert!(
+        records
+            .iter()
+            .any(|record| record.envelope.envelope_id == owner_a_fence.envelope_id)
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record.envelope.envelope_id == owner_b_fence.envelope_id)
+    );
+    let fresh_cfg = config(&p._dir, "reconstruction", &p.vault);
+    let fresh = unlocked(&fresh_cfg, &p.vault);
+    import(&fresh, &records, p.server.log.len(), Some(92));
+    settle(&fresh);
+    assert_eq!(
+        state(&fresh),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert!(!listed(&fresh, BOOK));
+    let connection = crate::contact_book_deletion::sqlcipher(&fresh_cfg.database_path);
+    let fences: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM deleted_contact_books WHERE book_id=?",
+            [BOOK],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(fences, 2);
+}
+
+#[test]
+fn foreign_owner_fence_does_not_remove_snapshot_book() {
+    let mut p = pair();
+    capture(
+        &p.owner,
+        &book(&p.owner_cfg, BOOK),
+        vec![contact(BOOK, "c1", "Ada")],
+    );
+    p.server.upload(&p.owner);
+    p.server.sync(&p.peer);
+    let mut foreign = p.server.log[0].clone();
+    foreign.envelope_id = EnvelopeId::new();
+    foreign.producer_device_id = DeviceId::new();
+    foreign.producer_sequence = SourceSequence(1);
+    let payload = PrivatePayload::ContactBookDeleted {
+        book_id: BOOK.into(),
+        owner_device_id: DeviceId::new().to_string(),
+        generation: "1".into(),
+        deleted_at_ms: 1,
+    };
+    reseal_snapshot_payload(&p.vault, &mut foreign, &payload);
+    p.server.log.push(foreign);
+    let records = full(&p.server.log);
+    import(&p.peer, &records, records.len(), Some(93));
+    settle(&p.peer);
+    assert_eq!(
+        state(&p.peer),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert_eq!(visible(&p.peer, BOOK), ["c1"]);
+}
+
+#[test]
+fn malformed_deletion_generation_in_snapshot_is_quarantined() {
+    for invalid in ["abc", "07", "99999999999999999999"] {
+        let mut p = pair();
+        capture(
+            &p.owner,
+            &book(&p.owner_cfg, BOOK),
+            vec![contact(BOOK, "c1", "Ada")],
+        );
+        p.server.upload(&p.owner);
+        p.server.sync(&p.peer);
+        let mut bad = p.server.log[0].clone();
+        bad.envelope_id = EnvelopeId::new();
+        bad.producer_device_id = DeviceId::new();
+        bad.producer_sequence = SourceSequence(1);
+        reseal_snapshot_payload(
+            &p.vault,
+            &mut bad,
+            &PrivatePayload::ContactBookDeleted {
+                book_id: BOOK.into(),
+                owner_device_id: p.owner_cfg.device_id.to_string(),
+                generation: invalid.into(),
+                deleted_at_ms: 1,
+            },
+        );
+        p.server.log.push(bad);
+        let records = full(&p.server.log);
+        import(&p.peer, &records, records.len(), Some(91));
+        wait_for_failed_snapshot(&p.peer, records.len());
+        assert_eq!(
+            state(&p.peer),
+            Some((
+                SnapshotProjectionState::Failed,
+                Some("invalid_payload".into())
+            ))
+        );
+        assert_eq!(visible(&p.peer, BOOK), ["c1"]);
+    }
+}
+
+#[test]
+fn snapshot_contact_publication_generation_converges_across_deletion_order() {
+    for revision in [None, Some("1"), Some("2")] {
+        for deletion_first in [false, true] {
+            let mut p = pair();
+            deleted_by_another_device(&mut p);
+            let mut book2 = book(&p.owner_cfg, BOOK);
+            book2["generation"] = json!("2");
+            let original = p.server.log.iter().find(|envelope| {
+                matches!(opened(&p.vault, envelope), PrivatePayload::ContactUpserted { ref contact, .. } if contact["id"] == "c2")
+            }).unwrap().clone();
+            let original_payload = opened(&p.vault, &original);
+            let PrivatePayload::ContactUpserted { mut contact, .. } = original_payload else {
+                unreachable!()
+            };
+            let original_revision = contact["revision"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap();
+            let mut continuation = Vec::new();
+            let make = |payload: PrivatePayload, sequence: u64| {
+                let mut envelope = original.clone();
+                envelope.envelope_id = EnvelopeId::new();
+                envelope.producer_sequence = SourceSequence(sequence);
+                reseal_snapshot_payload(&p.vault, &mut envelope, &payload);
+                envelope
+            };
+            continuation.push(make(
+                PrivatePayload::ContactBookState {
+                    book: book2.clone(),
+                },
+                100,
+            ));
+            if let Some(revision) = revision {
+                contact["revision"] =
+                    json!((original_revision + u64::from(revision == "2")).to_string());
+                continuation.push(make(
+                    PrivatePayload::ContactUpserted {
+                        book: book2,
+                        contact,
+                    },
+                    101,
+                ));
+            }
+            let (mut deletions, originals): (Vec<_>, Vec<_>) =
+                p.server.log.iter().cloned().partition(|envelope| {
+                    matches!(
+                        opened(&p.vault, envelope),
+                        PrivatePayload::ContactBookDeleted { .. }
+                            | PrivatePayload::ContactBookDeletedMember { .. }
+                    )
+                });
+            if deletion_first && revision == Some("1") {
+                // Exercise member-first staging without relying on a book fence.
+                deletions.retain(|envelope| {
+                    matches!(
+                        opened(&p.vault, envelope),
+                        PrivatePayload::ContactBookDeletedMember { .. }
+                    )
+                });
+            }
+            let mut records = originals;
+            if deletion_first {
+                records.extend(deletions);
+                records.extend(continuation);
+            } else {
+                records.extend(continuation);
+                records.extend(deletions);
+            }
+            let records: Vec<_> = records
+                .into_iter()
+                .enumerate()
+                .map(|(index, envelope)| SnapshotRecord {
+                    cursor: Cursor(index as u64 + 1),
+                    envelope,
+                })
+                .collect();
+            let receiver = unlocked(&config(&p._dir, "matrix", &p.vault), &p.vault);
+            import(&receiver, &records, records.len(), Some(88));
+            settle_one_by_one(&receiver);
+            assert_eq!(
+                state(&receiver),
+                Some((SnapshotProjectionState::Promoted, None))
+            );
+            assert_eq!(
+                visible(&receiver, BOOK).contains(&"c2".to_owned()),
+                revision.is_some(),
+                "revision={revision:?}, deletion_first={deletion_first}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_member_before_or_after_a_continued_upsert_stages_the_same_contact() {
+    let mut p = pair();
+    deleted_by_another_device(&mut p);
+    // The owner continues the deleted book at generation 2 and republishes Ada with a changed
+    // name, so the continuation carries a generation-2 upsert of her.
+    let mut continued = book(&p.owner_cfg, BOOK);
+    continued["generation"] = json!("2");
+    capture(&p.owner, &continued, vec![contact(BOOK, "c1", "Augusta")]);
+    p.server.upload(&p.owner);
+
+    let log = p.server.log.clone();
+    let (deletions, rest): (Vec<Envelope>, Vec<Envelope>) =
+        log.iter().cloned().partition(|envelope| {
+            matches!(
+                opened(&p.vault, envelope),
+                PrivatePayload::ContactBookDeleted { .. }
+                    | PrivatePayload::ContactBookDeletedMember { .. }
+            )
+        });
+    // Log order stages the generation-1 members before the continuation; the reversed order
+    // stages them after it. Ada, republished at generation 2, survives either way.
+    let members_after: Vec<Envelope> = rest.into_iter().chain(deletions).collect();
+    for (name, records) in [("before", &log), ("after", &members_after)] {
+        let receiver = unlocked(&config(&p._dir, name, &p.vault), &p.vault);
+        import(&receiver, &full(records), records.len(), Some(7));
+        settle(&receiver);
+        assert_eq!(
+            state(&receiver),
+            Some((SnapshotProjectionState::Promoted, None))
+        );
+        assert!(
+            visible(&receiver, BOOK).iter().any(|id| id == "c1"),
+            "{name}: the continued contact is kept"
+        );
+    }
+}
 
 /// The owner's authoritative full scan observes exactly `contacts`: unobserved rows are deleted
 /// and observed rows take their supplied bodies.
@@ -1590,66 +1996,6 @@ fn snapshot_promotion_between_cursor_pages_keeps_keyset_order() {
         state(&p.peer),
         Some((SnapshotProjectionState::Promoted, None))
     );
-    assert!(visible(&p.peer, BOOK).is_empty());
-    assert!(!listed(&p.peer, BOOK));
-
-    // A later compacted snapshot cannot bring it back either.
-    import(&p.peer, &compact(&p.server.log, true), high_water, Some(8));
-    settle(&p.peer);
-    assert!(visible(&p.peer, BOOK).is_empty());
-    assert!(!listed(&p.peer, BOOK));
-}
-
-#[test]
-fn deletion_records_ahead_of_owner_records_in_a_snapshot_still_remove_the_book() {
-    let mut p = pair();
-    deleted_by_another_device(&mut p);
-    // A receiver that never saw the log imports a snapshot re-sequenced so the fence and members
-    // stage before the owner's records. Cursors are fresh, so nothing is journaled yet.
-    let late = unlocked(&config(&p._dir, "late", &p.vault), &p.vault);
-    let (deletions, rest): (Vec<Envelope>, Vec<Envelope>) =
-        p.server.log.iter().cloned().partition(|envelope| {
-            matches!(
-                opened(&p.vault, envelope),
-                PrivatePayload::ContactBookDeleted { .. }
-                    | PrivatePayload::ContactBookDeletedMember { .. }
-            )
-        });
-    assert_eq!(deletions.len(), 3, "one fence and two members");
-    let records: Vec<SnapshotRecord> = deletions
-        .into_iter()
-        .chain(rest)
-        .enumerate()
-        .map(|(index, envelope)| SnapshotRecord {
-            cursor: Cursor(index as u64 + 1),
-            envelope,
-        })
-        .collect();
-
-    import(&late, &records, records.len(), Some(7));
-    settle(&late);
-
-    assert_eq!(
-        state(&late),
-        Some((SnapshotProjectionState::Promoted, None))
-    );
-    assert!(visible(&late, BOOK).is_empty());
-    assert!(!listed(&late, BOOK));
-}
-
-#[test]
-fn legacy_snapshot_after_a_deletion_cannot_resurrect_the_book() {
-    let mut p = pair();
-    deleted_by_another_device(&mut p);
-    p.server.sync(&p.peer);
-    assert!(!listed(&p.peer, BOOK), "live apply removed the book");
-
-    let high_water = p.server.log.len();
-    import(&p.peer, &full(&p.server.log), high_water, None);
-    settle(&p.peer);
-
-    assert!(!listed(&p.peer, BOOK));
-    assert!(visible(&p.peer, BOOK).is_empty());
 
     // Rows sorting after the cursor key ("Bea") in the promoted state.
     let promoted = call(p.peer.contact_book_view(
@@ -1682,42 +2028,4 @@ fn legacy_snapshot_after_a_deletion_cannot_resurrect_the_book() {
         after = output["next_cursor"].clone();
     }
     assert_eq!(returned[2..], expected[..]);
-}
-
-#[test]
-fn a_member_before_or_after_a_continued_upsert_stages_the_same_contact() {
-    let mut p = pair();
-    deleted_by_another_device(&mut p);
-    // The owner continues the deleted book at generation 2 and republishes Ada with a changed
-    // name, so the continuation carries a generation-2 upsert of her.
-    let mut continued = book(&p.owner_cfg, BOOK);
-    continued["generation"] = json!("2");
-    capture(&p.owner, &continued, vec![contact(BOOK, "c1", "Augusta")]);
-    p.server.upload(&p.owner);
-
-    let log = p.server.log.clone();
-    let (deletions, rest): (Vec<Envelope>, Vec<Envelope>) =
-        log.iter().cloned().partition(|envelope| {
-            matches!(
-                opened(&p.vault, envelope),
-                PrivatePayload::ContactBookDeleted { .. }
-                    | PrivatePayload::ContactBookDeletedMember { .. }
-            )
-        });
-    // Log order stages the generation-1 members before the continuation; the reversed order
-    // stages them after it. Ada, republished at generation 2, survives either way.
-    let members_after: Vec<Envelope> = rest.into_iter().chain(deletions).collect();
-    for (name, records) in [("before", &log), ("after", &members_after)] {
-        let receiver = unlocked(&config(&p._dir, name, &p.vault), &p.vault);
-        import(&receiver, &full(records), records.len(), Some(7));
-        settle(&receiver);
-        assert_eq!(
-            state(&receiver),
-            Some((SnapshotProjectionState::Promoted, None))
-        );
-        assert!(
-            visible(&receiver, BOOK).iter().any(|id| id == "c1"),
-            "{name}: the continued contact is kept"
-        );
-    }
 }

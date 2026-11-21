@@ -138,8 +138,22 @@ CREATE TABLE IF NOT EXISTS projection_rcs_conversation_metadata(generation INTEG
 CREATE TABLE IF NOT EXISTS projection_deleted_books(generation INTEGER NOT NULL, book_id TEXT NOT NULL,
     owner_device_id TEXT NOT NULL, book_generation INTEGER NOT NULL, deleted_at_ms INTEGER NOT NULL,
     PRIMARY KEY(generation,book_id,owner_device_id));
+CREATE TABLE IF NOT EXISTS projection_deleted_members(generation INTEGER NOT NULL, book_id TEXT NOT NULL, contact_id TEXT NOT NULL,
+    owner_device_id TEXT NOT NULL, book_generation INTEGER NOT NULL, PRIMARY KEY(generation,book_id,contact_id,owner_device_id));
 ",
     )?;
+    add_column_if_missing(conn, "projection_contacts", "publication_owner TEXT")?;
+    add_column_if_missing(
+        conn,
+        "projection_contacts",
+        "publication_generation INTEGER",
+    )?;
+    if table_exists("contact_books")? {
+        conn.execute(
+            "UPDATE projection_contacts SET publication_owner=COALESCE((SELECT owner_device_id FROM projection_books b WHERE b.generation=projection_contacts.generation AND b.book_id=projection_contacts.book_id),(SELECT owner_device_id FROM contact_books b WHERE b.id=projection_contacts.book_id)),publication_generation=COALESCE((SELECT book_generation FROM projection_books b WHERE b.generation=projection_contacts.generation AND b.book_id=projection_contacts.book_id),(SELECT generation FROM contact_books b WHERE b.id=projection_contacts.book_id)) WHERE publication_owner IS NULL OR publication_generation IS NULL",
+            [],
+        )?;
+    }
     add_column_if_missing(
         conn,
         "projection_notification_preferences",
@@ -976,9 +990,21 @@ fn stage_contact_payload(
             }
             let book_id = contacts::req(book, "id")?;
             let (id, revision, body) = contacts::peer_contact(contact, book_id)?;
+            let owner = contacts::req(book, "owner_device_id")?;
+            let book_generation = contacts::revision(book, "generation")?;
+            let covered: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM projection_deleted_members WHERE generation=? AND book_id=? AND contact_id=? AND owner_device_id=? AND book_generation>=?)",
+                params![generation, book_id, id, owner, book_generation],
+                |row| row.get(0),
+            )?;
+            if covered
+                || contact_book_deletion::member_covers(conn, book_id, &id, owner, book_generation)?
+            {
+                return Ok(true);
+            }
             conn.execute(
-                "INSERT INTO projection_contacts(generation,book_id,contact_id,revision,body,deleted_at) VALUES(?,?,?,?,?,NULL) ON CONFLICT(generation,book_id,contact_id) DO UPDATE SET revision=excluded.revision,body=excluded.body,deleted_at=NULL WHERE excluded.revision>projection_contacts.revision",
-                params![generation, book_id, id, revision, crate::json(&body)?],
+                "INSERT INTO projection_contacts(generation,book_id,contact_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,?,NULL,?,?) ON CONFLICT(generation,book_id,contact_id) DO UPDATE SET revision=CASE WHEN excluded.revision>projection_contacts.revision THEN excluded.revision ELSE projection_contacts.revision END,body=CASE WHEN excluded.revision>projection_contacts.revision THEN excluded.body ELSE projection_contacts.body END,deleted_at=CASE WHEN excluded.revision>projection_contacts.revision THEN NULL ELSE projection_contacts.deleted_at END,publication_owner=excluded.publication_owner,publication_generation=CASE WHEN projection_contacts.publication_owner=excluded.publication_owner THEN MAX(COALESCE(projection_contacts.publication_generation,0),excluded.publication_generation) ELSE excluded.publication_generation END WHERE excluded.revision>=projection_contacts.revision",
+                params![generation, book_id, id, revision, crate::json(&body)?, owner, book_generation],
             )?;
             Ok(true)
         }
@@ -1025,9 +1051,18 @@ fn stage_contact_payload(
             {
                 return Ok(true);
             }
+            let provenance = if let Some(book) = tombstone.get("book") {
+                Some((
+                    contacts::req(book, "owner_device_id")?.to_owned(),
+                    contacts::revision(book, "generation")?,
+                ))
+            } else {
+                known_book(conn, generation, book_id)?
+            };
+            let (owner, book_generation) = provenance.unwrap_or_else(|| (producer.to_owned(), 0));
             conn.execute(
-                "INSERT INTO projection_contacts(generation,book_id,contact_id,revision,body,deleted_at) VALUES(?,?,?,?,?,?) ON CONFLICT(generation,book_id,contact_id) DO UPDATE SET revision=excluded.revision,body=excluded.body,deleted_at=excluded.deleted_at WHERE excluded.revision>projection_contacts.revision",
-                params![generation, book_id, id, revision, crate::json(&body)?, deleted_at],
+                "INSERT INTO projection_contacts(generation,book_id,contact_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(generation,book_id,contact_id) DO UPDATE SET revision=excluded.revision,body=excluded.body,deleted_at=excluded.deleted_at,publication_owner=excluded.publication_owner,publication_generation=excluded.publication_generation WHERE excluded.revision>projection_contacts.revision",
+                params![generation, book_id, id, revision, crate::json(&body)?, deleted_at, owner, book_generation],
             )?;
             Ok(true)
         }
@@ -1073,18 +1108,14 @@ fn stage_deletion(
                 return Ok(true);
             }
             let member_generation = contacts::canonical_decimal(member_generation)?;
-            // Authorized only by the book as staged (else as live): the same owner at a generation
-            // not above the record's. A continued book keeps its contacts, whatever the order.
-            let authorized =
-                known_book(conn, generation, book_id)?.is_some_and(|(owner, stored)| {
-                    owner == *owner_device_id && stored <= member_generation
-                });
-            if authorized {
-                conn.execute(
-                    "DELETE FROM projection_contacts WHERE generation=? AND book_id=? AND contact_id=?",
-                    params![generation, book_id, contact_id],
-                )?;
-            }
+            conn.execute(
+                "INSERT INTO projection_deleted_members(generation,book_id,contact_id,owner_device_id,book_generation) VALUES(?,?,?,?,?) ON CONFLICT(generation,book_id,contact_id,owner_device_id) DO UPDATE SET book_generation=MAX(book_generation,excluded.book_generation)",
+                params![generation, book_id, contact_id, owner_device_id, member_generation],
+            )?;
+            conn.execute(
+                "DELETE FROM projection_contacts WHERE generation=? AND book_id=? AND contact_id=? AND publication_owner=? AND publication_generation<=?",
+                params![generation, book_id, contact_id, owner_device_id, member_generation],
+            )?;
             Ok(true)
         }
         _ => Ok(true),
@@ -1252,20 +1283,36 @@ pub(super) fn stage_removal(
 /// deletion would remove it. Staged books and contacts it covers are dropped before the rest of
 /// promotion reads them. Contacts are filtered first, while their staged book rows still exist.
 fn promote_deletions(conn: &Connection, generation: i64, me: &str) -> Result<(), Error> {
-    // A fence joins only when no book of another owner holds its id, as live apply refuses it.
+    // A different owner blocks the fence unless that owner's book is itself fenced in this
+    // snapshot; this permits a reused id to retain both owners' fences.
     conn.execute(
-        "INSERT INTO deleted_contact_books(book_id,owner_device_id,generation,deleted_at_ms) SELECT d.book_id,d.owner_device_id,d.book_generation,d.deleted_at_ms FROM projection_deleted_books d WHERE d.generation=?1 AND d.owner_device_id<>?2 AND NOT EXISTS(SELECT 1 FROM projection_books b WHERE b.generation=d.generation AND b.book_id=d.book_id AND b.owner_device_id<>d.owner_device_id) AND NOT EXISTS(SELECT 1 FROM contact_books c WHERE c.id=d.book_id AND c.owner_device_id<>d.owner_device_id) ON CONFLICT(book_id,owner_device_id) DO UPDATE SET generation=excluded.generation,deleted_at_ms=excluded.deleted_at_ms WHERE excluded.generation>deleted_contact_books.generation",
+        "INSERT INTO deleted_contact_books(book_id,owner_device_id,generation,deleted_at_ms) SELECT d.book_id,d.owner_device_id,d.book_generation,d.deleted_at_ms FROM projection_deleted_books d WHERE d.generation=?1 AND d.owner_device_id<>?2 AND NOT EXISTS(SELECT 1 FROM projection_books b WHERE b.generation=d.generation AND b.book_id=d.book_id AND b.owner_device_id<>d.owner_device_id AND NOT EXISTS(SELECT 1 FROM projection_deleted_books f WHERE f.generation=b.generation AND f.book_id=b.book_id AND f.owner_device_id=b.owner_device_id AND f.book_generation>=b.book_generation)) AND NOT EXISTS(SELECT 1 FROM contact_books c WHERE c.id=d.book_id AND c.owner_device_id<>d.owner_device_id AND NOT EXISTS(SELECT 1 FROM projection_deleted_books f WHERE f.generation=d.generation AND f.book_id=c.id AND f.owner_device_id=c.owner_device_id AND f.book_generation>=c.generation)) ON CONFLICT(book_id,owner_device_id) DO UPDATE SET generation=excluded.generation,deleted_at_ms=excluded.deleted_at_ms WHERE excluded.generation>deleted_contact_books.generation",
         params![generation, me],
     )?;
+    let covered: Vec<(String, String, i64)> = conn
+        .prepare("SELECT d.book_id,d.owner_device_id,d.book_generation FROM projection_deleted_books d JOIN contact_books b ON b.id=d.book_id AND b.owner_device_id=d.owner_device_id WHERE d.generation=?")?
+        .query_map([generation], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    for (book_id, owner, book_generation) in covered {
+        contact_book_deletion::remove_covered_contacts(conn, &book_id, &owner, book_generation)?;
+    }
     let books: Vec<String> = conn
-        .prepare("SELECT c.id FROM contact_books c JOIN projection_deleted_books d ON d.generation=?1 AND d.book_id=c.id AND d.owner_device_id=c.owner_device_id WHERE c.generation<=d.book_generation")?
+        .prepare("SELECT c.id FROM contact_books c JOIN projection_deleted_books d ON d.generation=?1 AND d.book_id=c.id AND d.owner_device_id=c.owner_device_id WHERE c.generation<=d.book_generation AND NOT EXISTS(SELECT 1 FROM contacts x WHERE x.book_id=c.id)")?
         .query_map([generation], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
     for book_id in &books {
         contact_book_deletion::remove_local_book(conn, book_id)?;
     }
     conn.execute(
-        "DELETE FROM projection_contacts WHERE generation=?1 AND EXISTS(SELECT 1 FROM deleted_contact_books d WHERE d.book_id=projection_contacts.book_id AND d.owner_device_id=COALESCE((SELECT b.owner_device_id FROM projection_books b WHERE b.generation=projection_contacts.generation AND b.book_id=projection_contacts.book_id),(SELECT c.owner_device_id FROM contact_books c WHERE c.id=projection_contacts.book_id),d.owner_device_id) AND d.generation>=COALESCE((SELECT b.book_generation FROM projection_books b WHERE b.generation=projection_contacts.generation AND b.book_id=projection_contacts.book_id),(SELECT c.generation FROM contact_books c WHERE c.id=projection_contacts.book_id),0))",
+        "INSERT INTO deleted_contact_members(book_id,contact_id,owner_device_id,generation) SELECT d.book_id,d.contact_id,d.owner_device_id,d.book_generation FROM projection_deleted_members d WHERE d.generation=? AND NOT EXISTS(SELECT 1 FROM deleted_contact_books f WHERE f.book_id=d.book_id AND f.owner_device_id=d.owner_device_id AND f.generation>=d.book_generation) AND NOT EXISTS(SELECT 1 FROM projection_books b WHERE b.generation=d.generation AND b.book_id=d.book_id AND b.owner_device_id<>d.owner_device_id) AND NOT EXISTS(SELECT 1 FROM contact_books b WHERE b.id=d.book_id AND b.owner_device_id<>d.owner_device_id) ON CONFLICT(book_id,contact_id,owner_device_id) DO UPDATE SET generation=MAX(generation,excluded.generation)",
+        [generation],
+    )?;
+    conn.execute(
+        "DELETE FROM deleted_contact_members WHERE EXISTS(SELECT 1 FROM deleted_contact_books f WHERE f.book_id=deleted_contact_members.book_id AND f.owner_device_id=deleted_contact_members.owner_device_id AND f.generation>=deleted_contact_members.generation)",
+        [],
+    )?;
+    conn.execute(
+        "DELETE FROM projection_contacts WHERE generation=?1 AND (EXISTS(SELECT 1 FROM deleted_contact_books d WHERE d.book_id=projection_contacts.book_id AND d.owner_device_id=projection_contacts.publication_owner AND d.generation>=projection_contacts.publication_generation) OR EXISTS(SELECT 1 FROM deleted_contact_members d WHERE d.book_id=projection_contacts.book_id AND d.contact_id=projection_contacts.contact_id AND d.owner_device_id=projection_contacts.publication_owner AND d.generation>=projection_contacts.publication_generation))",
         [generation],
     )?;
     conn.execute(
@@ -1297,7 +1344,7 @@ fn promote(
         params![me, generation],
     )?;
     conn.execute(
-        "INSERT INTO contacts(id,book_id,revision,body,deleted_at) SELECT s.contact_id,s.book_id,s.revision,s.body,s.deleted_at FROM projection_contacts s JOIN contact_books b ON b.id=s.book_id WHERE s.generation=?2 AND b.owner_device_id!=?1 ON CONFLICT(book_id,id) DO UPDATE SET revision=excluded.revision,body=excluded.body,deleted_at=excluded.deleted_at WHERE excluded.revision>contacts.revision",
+        "INSERT INTO contacts(id,book_id,revision,body,deleted_at,publication_owner,publication_generation) SELECT s.contact_id,s.book_id,s.revision,s.body,s.deleted_at,s.publication_owner,s.publication_generation FROM projection_contacts s JOIN contact_books b ON b.id=s.book_id WHERE s.generation=?2 AND b.owner_device_id!=?1 ON CONFLICT(book_id,id) DO UPDATE SET revision=CASE WHEN excluded.revision>contacts.revision THEN excluded.revision ELSE contacts.revision END,body=CASE WHEN excluded.revision>contacts.revision THEN excluded.body ELSE contacts.body END,deleted_at=CASE WHEN excluded.revision>contacts.revision THEN excluded.deleted_at ELSE contacts.deleted_at END,publication_owner=excluded.publication_owner,publication_generation=CASE WHEN contacts.publication_owner=excluded.publication_owner THEN MAX(COALESCE(contacts.publication_generation,0),excluded.publication_generation) ELSE excluded.publication_generation END WHERE excluded.revision>=contacts.revision",
         params![me, generation],
     )?;
     // Photo holders follow the stored rows, exactly as after a live apply.
@@ -1736,6 +1783,8 @@ fn is_authenticated_contact(ctx: &Ctx, wire: &[u8]) -> bool {
             PrivatePayload::ContactBookState { .. }
                 | PrivatePayload::ContactUpserted { .. }
                 | PrivatePayload::ContactRemoved { .. }
+                | PrivatePayload::ContactBookDeleted { .. }
+                | PrivatePayload::ContactBookDeletedMember { .. }
         ))
     )
 }
@@ -1840,6 +1889,7 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
     for table in [
         "projection_books",
         "projection_contacts",
+        "projection_deleted_members",
         "projection_deleted_books",
         "projection_notifications",
         "projection_tombstones",
@@ -1868,6 +1918,7 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
            AND NOT EXISTS(SELECT 1 FROM projection_books r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_deleted_books r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_contacts r WHERE r.generation=projection_generations.generation)
+           AND NOT EXISTS(SELECT 1 FROM projection_deleted_members r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_notifications r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_tombstones r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_filters r WHERE r.generation=projection_generations.generation)

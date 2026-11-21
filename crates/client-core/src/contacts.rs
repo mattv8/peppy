@@ -374,7 +374,27 @@ CREATE TABLE IF NOT EXISTS contact_scan_baselines(scan_id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS contact_scan_baseline(scan_id TEXT NOT NULL, contact_id TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(scan_id,contact_id));
 CREATE TABLE IF NOT EXISTS contact_restore_claims(book_id TEXT NOT NULL, tombstone_id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL, contact_id TEXT NOT NULL, PRIMARY KEY(book_id,tombstone_id));
 CREATE TABLE IF NOT EXISTS deleted_contact_books(book_id TEXT NOT NULL, owner_device_id TEXT NOT NULL, generation INTEGER NOT NULL, deleted_at_ms INTEGER NOT NULL, PRIMARY KEY(book_id,owner_device_id));
+CREATE TABLE IF NOT EXISTS deleted_contact_members(book_id TEXT NOT NULL, contact_id TEXT NOT NULL, owner_device_id TEXT NOT NULL, generation INTEGER NOT NULL, PRIMARY KEY(book_id,contact_id,owner_device_id));
 ",
+    )?;
+    let columns = conn
+        .prepare("PRAGMA table_info(contacts)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (name, declaration) in [
+        ("publication_owner", "publication_owner TEXT"),
+        ("publication_generation", "publication_generation INTEGER"),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            conn.execute(
+                &format!("ALTER TABLE contacts ADD COLUMN {declaration}"),
+                [],
+            )?;
+        }
+    }
+    conn.execute(
+        "UPDATE contacts SET publication_owner=(SELECT owner_device_id FROM contact_books WHERE id=contacts.book_id), publication_generation=(SELECT generation FROM contact_books WHERE id=contacts.book_id) WHERE publication_owner IS NULL OR publication_generation IS NULL",
+        [],
     )?;
     let has_key_epoch = conn
         .prepare("PRAGMA table_info(contact_edit_ledger)")?
@@ -482,8 +502,8 @@ fn upsert_owned(
     })?;
     body["revision"] = Value::String(rev.to_string());
     conn.execute(
-        "INSERT INTO contacts(id,book_id,revision,body,deleted_at) VALUES(?,?,?,?,NULL) ON CONFLICT(book_id,id) DO UPDATE SET revision=excluded.revision,body=excluded.body,deleted_at=NULL",
-        params![id, book_id, rev, encoded(&body)?],
+        "INSERT INTO contacts(id,book_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,NULL,?,?) ON CONFLICT(book_id,id) DO UPDATE SET revision=excluded.revision,body=excluded.body,deleted_at=NULL,publication_owner=excluded.publication_owner,publication_generation=excluded.publication_generation",
+        params![id, book_id, rev, encoded(&body)?, req(book, "owner_device_id")?, revision(book, "generation")?],
     )?;
     enqueue(
         conn,
@@ -2410,9 +2430,21 @@ fn apply_peer(
                 return Ok(true);
             }
             let (id, rev, body) = peer_contact(contact, req(book, "id")?)?;
+            let book_id = req(book, "id")?;
+            let owner = req(book, "owner_device_id")?;
+            let book_generation = revision(book, "generation")?;
+            if crate::contact_book_deletion::member_covers(
+                conn,
+                book_id,
+                &id,
+                owner,
+                book_generation,
+            )? {
+                return Ok(true);
+            }
             conn.execute(
-                "INSERT INTO contacts(id,book_id,revision,body,deleted_at) VALUES(?,?,?,?,NULL) ON CONFLICT(book_id,id) DO UPDATE SET revision=excluded.revision,body=excluded.body,deleted_at=NULL WHERE excluded.revision > contacts.revision",
-                params![id, req(book, "id")?, rev, encoded(&body)?],
+                "INSERT INTO contacts(id,book_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,NULL,?,?) ON CONFLICT(book_id,id) DO UPDATE SET revision=CASE WHEN excluded.revision>contacts.revision THEN excluded.revision ELSE contacts.revision END,body=CASE WHEN excluded.revision>contacts.revision THEN excluded.body ELSE contacts.body END,deleted_at=CASE WHEN excluded.revision>contacts.revision THEN NULL ELSE contacts.deleted_at END,publication_owner=excluded.publication_owner,publication_generation=CASE WHEN contacts.publication_owner=excluded.publication_owner THEN MAX(COALESCE(contacts.publication_generation,0),excluded.publication_generation) ELSE excluded.publication_generation END WHERE excluded.revision>=contacts.revision",
+                params![id, book_id, rev, encoded(&body)?, owner, book_generation],
             )?;
             Ok(true)
         }

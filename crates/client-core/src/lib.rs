@@ -14894,9 +14894,16 @@ fn compaction_group(
         ),
         // The book fence is the retained frontier of its book, so it is never terminal. It has its
         // own group: a later book state of the same book never supersedes it.
-        PrivatePayload::ContactBookDeleted { book_id, .. } => (
+        PrivatePayload::ContactBookDeleted {
+            book_id,
+            owner_device_id,
+            ..
+        } => (
             b"contact-book-deleted",
-            vec![book_id.as_bytes().to_vec()],
+            vec![
+                book_id.as_bytes().to_vec(),
+                owner_device_id.as_bytes().to_vec(),
+            ],
             false,
         ),
         PrivatePayload::ContactBookDeletedMember {
@@ -15056,9 +15063,11 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
             contact_id,
             ..
         } => Some(format!("contact:{book_id}:{contact_id}")),
-        PrivatePayload::ContactBookDeleted { book_id, .. } => {
-            Some(format!("contact-book-deleted:{book_id}"))
-        }
+        PrivatePayload::ContactBookDeleted {
+            book_id,
+            owner_device_id,
+            ..
+        } => Some(format!("contact-book-deleted:{book_id}:{owner_device_id}")),
         PrivatePayload::ContactBookDeletedMember {
             book_id,
             contact_id,

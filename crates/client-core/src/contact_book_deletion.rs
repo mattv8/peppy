@@ -82,7 +82,14 @@ pub(crate) fn apply(conn: &Connection, payload: &PrivatePayload) -> Result<bool,
                 return Ok(true);
             }
             store_fence(conn, book_id, owner_device_id, generation, *deleted_at_ms)?;
-            if stored_at_or_below(conn, book_id, owner_device_id, generation)? {
+            conn.execute(
+                "DELETE FROM deleted_contact_members WHERE book_id=? AND owner_device_id=? AND generation<=?",
+                params![book_id, owner_device_id, generation],
+            )?;
+            remove_covered_contacts(conn, book_id, owner_device_id, generation)?;
+            if stored_at_or_below(conn, book_id, owner_device_id, generation)?
+                && contact_ids(conn, book_id)?.is_empty()
+            {
                 remove_local_book(conn, book_id)?;
             }
             Ok(true)
@@ -98,15 +105,56 @@ pub(crate) fn apply(conn: &Connection, payload: &PrivatePayload) -> Result<bool,
             if has_successor(conn, owner_device_id)? {
                 return Ok(true);
             }
-            // Authorized only by the stored book: the same owner at a generation not above the
-            // record's. A delayed record of an older generation never touches a continued book.
-            if stored_at_or_below(conn, book_id, owner_device_id, generation)? {
+            if stored_book(conn, book_id)?.is_some_and(|(owner, _)| owner != *owner_device_id) {
+                return Ok(true);
+            }
+            if !covers(conn, book_id, owner_device_id, Some(generation))? {
+                conn.execute(
+                    "INSERT INTO deleted_contact_members(book_id,contact_id,owner_device_id,generation) VALUES(?,?,?,?) ON CONFLICT(book_id,contact_id,owner_device_id) DO UPDATE SET generation=MAX(generation,excluded.generation)",
+                    params![book_id, contact_id, owner_device_id, generation],
+                )?;
+            }
+            let covered: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM contacts c JOIN contact_books b ON b.id=c.book_id WHERE c.book_id=? AND c.id=? AND COALESCE(c.publication_owner,b.owner_device_id)=? AND COALESCE(c.publication_generation,b.generation)<=?)",
+                params![book_id, contact_id, owner_device_id, generation],
+                |row| row.get(0),
+            )?;
+            if covered {
                 remove_contact(conn, book_id, contact_id)?;
             }
             Ok(true)
         }
         _ => Err(invalid()),
     }
+}
+
+pub(crate) fn member_covers(
+    conn: &Connection,
+    book_id: &str,
+    contact_id: &str,
+    owner: &str,
+    generation: i64,
+) -> Result<bool, Error> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM deleted_contact_members WHERE book_id=? AND contact_id=? AND owner_device_id=? AND generation>=?)",
+        params![book_id, contact_id, owner, generation],
+        |row| row.get(0),
+    )?)
+}
+
+pub(crate) fn remove_covered_contacts(
+    conn: &Connection,
+    book_id: &str,
+    owner: &str,
+    generation: i64,
+) -> Result<(), Error> {
+    let ids: Vec<String> = conn.prepare(
+        "SELECT c.id FROM contacts c JOIN contact_books b ON b.id=c.book_id WHERE c.book_id=? AND COALESCE(c.publication_owner,b.owner_device_id)=? AND COALESCE(c.publication_generation,b.generation)<=?"
+    )?.query_map(params![book_id, owner, generation], |row| row.get(0))?.collect::<Result<_, _>>()?;
+    for id in ids {
+        remove_contact(conn, book_id, &id)?;
+    }
+    Ok(())
 }
 
 /// Deletes a removed device's contact book for the whole vault. `input` is
@@ -432,7 +480,7 @@ mod tests {
         };
         assert_eq!(
             crate::compaction_identity(&fence).as_deref(),
-            Some("contact-book-deleted:b1")
+            Some("contact-book-deleted:b1:owner")
         );
         assert_ne!(
             crate::compaction_identity(&fence),
@@ -444,5 +492,16 @@ mod tests {
                 .map(|(name, parts, _)| (name, parts))
         };
         assert_ne!(group(&fence), group(&state));
+        let other_fence = PrivatePayload::ContactBookDeleted {
+            book_id: "b1".into(),
+            owner_device_id: "other".into(),
+            generation: "1".into(),
+            deleted_at_ms: 1,
+        };
+        assert_ne!(
+            crate::compaction_identity(&fence),
+            crate::compaction_identity(&other_fence)
+        );
+        assert_ne!(group(&fence), group(&other_fence));
     }
 }

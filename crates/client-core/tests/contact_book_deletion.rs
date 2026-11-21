@@ -42,7 +42,7 @@ fn contact(id: &str, name: &str) -> Value {
     })
 }
 
-fn sqlcipher(path: &Path) -> Connection {
+pub(crate) fn sqlcipher(path: &Path) -> Connection {
     let connection = Connection::open(path).unwrap();
     connection
         .execute_batch(
@@ -793,6 +793,192 @@ fn restored_pre_delete_backup_removes_the_book_when_the_fence_replays() {
         count(
             &restored_config.database_path,
             "SELECT COUNT(*) FROM contacts"
+        ),
+        0
+    );
+}
+
+#[test]
+fn member_before_contact_blocks_old_upsert_but_not_continuation() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "member-first", &vault);
+    let observer = unlocked(&cfg, &vault);
+    let owner = DeviceId::new();
+    let deleter = DeviceId::new();
+    sync(
+        &[sealed(
+            &vault,
+            deleter,
+            1,
+            PrivatePayload::ContactBookDeletedMember {
+                book_id: BOOK.into(),
+                contact_id: "bea".into(),
+                owner_device_id: owner.to_string(),
+                generation: "1".into(),
+            },
+        )],
+        &observer,
+    );
+    sync(
+        &[sealed(
+            &vault,
+            owner,
+            1,
+            PrivatePayload::ContactUpserted {
+                book: book(owner, "1"),
+                contact: contact("bea", "Bea"),
+            },
+        )],
+        &observer,
+    );
+    assert_eq!(
+        count(
+            &cfg.database_path,
+            "SELECT COUNT(*) FROM contacts WHERE id='bea'"
+        ),
+        0
+    );
+    sync(
+        &[sealed(
+            &vault,
+            owner,
+            2,
+            PrivatePayload::ContactUpserted {
+                book: book(owner, "2"),
+                contact: contact("bea", "Bea"),
+            },
+        )],
+        &observer,
+    );
+    assert_eq!(
+        count(
+            &cfg.database_path,
+            "SELECT COUNT(*) FROM contacts WHERE id='bea'"
+        ),
+        1
+    );
+}
+
+#[test]
+fn legacy_contacts_are_backfilled_from_their_book_on_reopen() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    drop(observer);
+    let conn = sqlcipher(&config.database_path);
+    conn.execute(
+        "UPDATE contacts SET publication_owner=NULL,publication_generation=NULL",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let _observer = unlocked(&config, &vault);
+    let conn = sqlcipher(&config.database_path);
+    let (stored_owner, generation): (String, i64) = conn
+        .query_row(
+            "SELECT publication_owner,publication_generation FROM contacts WHERE id='bea'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored_owner, owner.to_string());
+    assert_eq!(generation, 1);
+}
+
+#[test]
+fn contact_publication_generation_converges_across_deletion_order() {
+    for republished in [None, Some("1"), Some("2")] {
+        for deletion_first in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let (vault, config, observer, owner) = observed_book(&dir);
+            let deleter = DeviceId::new();
+            let deletion = [
+                sealed(&vault, deleter, 1, fence(owner, "1")),
+                sealed(
+                    &vault,
+                    deleter,
+                    2,
+                    PrivatePayload::ContactBookDeletedMember {
+                        book_id: BOOK.into(),
+                        contact_id: "bea".into(),
+                        owner_device_id: owner.to_string(),
+                        generation: "1".into(),
+                    },
+                ),
+            ];
+            let mut continuation = vec![sealed(
+                &vault,
+                owner,
+                4,
+                PrivatePayload::ContactBookState {
+                    book: book(owner, "2"),
+                },
+            )];
+            if let Some(revision) = republished {
+                let mut item = contact("bea", "Bea");
+                item["revision"] = json!(revision);
+                continuation.push(sealed(
+                    &vault,
+                    owner,
+                    5,
+                    PrivatePayload::ContactUpserted {
+                        book: book(owner, "2"),
+                        contact: item,
+                    },
+                ));
+            }
+            if deletion_first {
+                sync(&deletion, &observer);
+                sync(&continuation, &observer);
+            } else {
+                sync(&continuation, &observer);
+                sync(&deletion, &observer);
+            }
+            assert_eq!(
+                count(
+                    &config.database_path,
+                    "SELECT COUNT(*) FROM contacts WHERE id='bea'"
+                ),
+                i64::from(republished.is_some()),
+                "revision={republished:?}, deletion_first={deletion_first}"
+            );
+        }
+    }
+}
+
+#[test]
+fn delayed_member_deletes_unrepublished_contact_after_book_continues() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    sync(
+        &[sealed(
+            &vault,
+            owner,
+            4,
+            PrivatePayload::ContactBookState {
+                book: book(owner, "2"),
+            },
+        )],
+        &observer,
+    );
+    sync(
+        &[sealed(
+            &vault,
+            DeviceId::new(),
+            1,
+            PrivatePayload::ContactBookDeletedMember {
+                book_id: BOOK.into(),
+                contact_id: "bea".into(),
+                owner_device_id: owner.to_string(),
+                generation: "1".into(),
+            },
+        )],
+        &observer,
+    );
+    assert_eq!(
+        count(
+            &config.database_path,
+            "SELECT COUNT(*) FROM contacts WHERE id='bea'"
         ),
         0
     );
