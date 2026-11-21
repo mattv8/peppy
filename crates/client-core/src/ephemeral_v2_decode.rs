@@ -30,7 +30,19 @@ pub(crate) struct AuthenticatedFrame {
     pub(crate) plaintext: AuthenticatedPlaintext,
 }
 
-pub(crate) fn decode_authenticated_frame(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DecodeDrop {
+    Malformed,
+    Expired,
+    Future,
+    UnknownSender,
+    KeyUnavailable,
+    Crypto,
+    NotAddressed,
+}
+
+#[cfg(test)]
+fn decode_authenticated_frame(
     effective_wall_ms: u64,
     vault_id: VaultId,
     local_device_id: DeviceId,
@@ -39,33 +51,75 @@ pub(crate) fn decode_authenticated_frame(
     frame: &EphemeralSignalV2,
     unlocked_epochs: &BTreeMap<u32, EpochKeys>,
 ) -> Option<AuthenticatedFrame> {
-    if trusted_roster.len() > 100
-        || frame.validate().is_err()
-        || frame.sender_device_id == local_device_id
+    decode_authenticated_frame_with_reason(
+        effective_wall_ms,
+        vault_id,
+        local_device_id,
+        local_session_id,
+        trusted_roster,
+        frame,
+        unlocked_epochs,
+    )
+    .ok()
+}
+
+pub(crate) fn decode_authenticated_frame_with_reason(
+    effective_wall_ms: u64,
+    vault_id: VaultId,
+    local_device_id: DeviceId,
+    local_session_id: [u8; 16],
+    trusted_roster: &[DeviceId],
+    frame: &EphemeralSignalV2,
+    unlocked_epochs: &BTreeMap<u32, EpochKeys>,
+) -> Result<AuthenticatedFrame, DecodeDrop> {
+    if trusted_roster.len() > 100 || frame.validate().is_err() {
+        return Err(DecodeDrop::Malformed);
+    }
+    if frame.sender_device_id == local_device_id
         || !trusted_roster.contains(&frame.sender_device_id)
     {
-        return None;
+        return Err(DecodeDrop::UnknownSender);
     }
 
-    let sent_at_ms = frame.sent_at_ms.parse::<u64>().ok()?;
-    let expires_at_ms = frame.expires_at_ms.parse::<u64>().ok()?;
-    if sent_at_ms > effective_wall_ms.saturating_add(EPHEMERAL_FUTURE_TOLERANCE_MS)
-        || effective_wall_ms >= expires_at_ms
-    {
-        return None;
+    let sent_at_ms = frame
+        .sent_at_ms
+        .parse::<u64>()
+        .map_err(|_| DecodeDrop::Malformed)?;
+    let expires_at_ms = frame
+        .expires_at_ms
+        .parse::<u64>()
+        .map_err(|_| DecodeDrop::Malformed)?;
+    if sent_at_ms > effective_wall_ms.saturating_add(EPHEMERAL_FUTURE_TOLERANCE_MS) {
+        return Err(DecodeDrop::Future);
+    }
+    if effective_wall_ms >= expires_at_ms {
+        return Err(DecodeDrop::Expired);
     }
     let remaining_ttl_ms = expires_at_ms
-        .checked_sub(effective_wall_ms)?
-        .min(expires_at_ms.checked_sub(sent_at_ms)?);
-    let sequence = frame.sequence.parse::<u64>().ok()?;
-    let session_id = parse_session_id(&frame.session_id)?;
-    let key = &unlocked_epochs.get(&frame.key_epoch)?.event;
-    let encrypted = parse_envelope(&frame.ciphertext_b64)?;
-    let aad = frame.aad_bytes(vault_id).ok()?;
-    let plaintext = decrypt(key, &aad, &encrypted).ok()?;
+        .checked_sub(effective_wall_ms)
+        .ok_or(DecodeDrop::Malformed)?
+        .min(
+            expires_at_ms
+                .checked_sub(sent_at_ms)
+                .ok_or(DecodeDrop::Malformed)?,
+        );
+    let sequence = frame
+        .sequence
+        .parse::<u64>()
+        .map_err(|_| DecodeDrop::Malformed)?;
+    let session_id = parse_session_id(&frame.session_id).ok_or(DecodeDrop::Malformed)?;
+    let key = &unlocked_epochs
+        .get(&frame.key_epoch)
+        .ok_or(DecodeDrop::KeyUnavailable)?
+        .event;
+    let encrypted = parse_envelope(&frame.ciphertext_b64).ok_or(DecodeDrop::Malformed)?;
+    let aad = frame
+        .aad_bytes(vault_id)
+        .map_err(|_| DecodeDrop::Malformed)?;
+    let plaintext = decrypt(key, &aad, &encrypted).map_err(|_| DecodeDrop::Crypto)?;
     let plaintext = deserialize_and_check(frame, &plaintext, local_device_id, local_session_id)?;
 
-    Some(AuthenticatedFrame {
+    Ok(AuthenticatedFrame {
         sender_device_id: frame.sender_device_id,
         session_id,
         sequence,
@@ -93,39 +147,43 @@ fn deserialize_and_check(
     plaintext: &[u8],
     local_device_id: DeviceId,
     local_session_id: [u8; 16],
-) -> Option<AuthenticatedPlaintext> {
+) -> Result<AuthenticatedPlaintext, DecodeDrop> {
     match frame.kind {
         EphemeralSignalV2Kind::Typing => {
-            let value = serde_json::from_slice::<TypingPlaintextV2>(plaintext).ok()?;
+            let value = serde_json::from_slice::<TypingPlaintextV2>(plaintext)
+                .map_err(|_| DecodeDrop::Malformed)?;
             if value.origin == TypingOriginV2::VaultDevice
                 && value.gateway_device_id != Some(local_device_id)
             {
-                return None;
+                return Err(DecodeDrop::NotAddressed);
             }
-            Some(AuthenticatedPlaintext::Typing(value))
+            Ok(AuthenticatedPlaintext::Typing(value))
         }
         EphemeralSignalV2Kind::Challenge => {
-            let value = serde_json::from_slice::<ChallengePlaintextV2>(plaintext).ok()?;
+            let value = serde_json::from_slice::<ChallengePlaintextV2>(plaintext)
+                .map_err(|_| DecodeDrop::Malformed)?;
             if value.responder_device_id != local_device_id
                 || value.challenger_device_id != frame.sender_device_id
-                || parse_session_id(&value.challenger_session_id)?
-                    != parse_session_id(&frame.session_id)?
+                || parse_session_id(&value.challenger_session_id).ok_or(DecodeDrop::Malformed)?
+                    != parse_session_id(&frame.session_id).ok_or(DecodeDrop::Malformed)?
             {
-                return None;
+                return Err(DecodeDrop::NotAddressed);
             }
-            Some(AuthenticatedPlaintext::Challenge(value))
+            Ok(AuthenticatedPlaintext::Challenge(value))
         }
         EphemeralSignalV2Kind::SessionAck => {
-            let value = serde_json::from_slice::<SessionAckPlaintextV2>(plaintext).ok()?;
+            let value = serde_json::from_slice::<SessionAckPlaintextV2>(plaintext)
+                .map_err(|_| DecodeDrop::Malformed)?;
             if value.responder_device_id != frame.sender_device_id
-                || parse_session_id(&value.responder_session_id)?
-                    != parse_session_id(&frame.session_id)?
+                || parse_session_id(&value.responder_session_id).ok_or(DecodeDrop::Malformed)?
+                    != parse_session_id(&frame.session_id).ok_or(DecodeDrop::Malformed)?
                 || value.challenger_device_id != local_device_id
-                || parse_session_id(&value.challenger_session_id)? != local_session_id
+                || parse_session_id(&value.challenger_session_id).ok_or(DecodeDrop::Malformed)?
+                    != local_session_id
             {
-                return None;
+                return Err(DecodeDrop::NotAddressed);
             }
-            Some(AuthenticatedPlaintext::SessionAck(value))
+            Ok(AuthenticatedPlaintext::SessionAck(value))
         }
     }
 }
@@ -235,6 +293,80 @@ mod tests {
         frame.ciphertext_b64 = STANDARD.encode(bytes);
         frame
     }
+
+    fn reason_case(case: &str) -> DecodeDrop {
+        let vault_id = vault(1);
+        let local = device(2);
+        let sender = device(3);
+        let keys = key_map(vault_id, 1, "correct horse battery staple");
+        let payload = serde_json::to_vec(&TypingPlaintextV2 {
+            version: EPHEMERAL_V2_PROTOCOL_VERSION,
+            origin: TypingOriginV2::VaultDevice,
+            conversation_id: Uuid::from_u128(6),
+            state: TypingStateV2::Started,
+            gateway_device_id: Some(if case == "address" { device(9) } else { local }),
+            participant: None,
+        })
+        .unwrap();
+        let mut frame = if case == "future" {
+            seal_frame_at(
+                EphemeralSignalV2Kind::Typing,
+                sender,
+                [4; 16],
+                1,
+                40_000,
+                55_000,
+                7,
+                &payload,
+                vault_id,
+                &keys,
+            )
+        } else {
+            seal_frame(
+                EphemeralSignalV2Kind::Typing,
+                sender,
+                [4; 16],
+                1,
+                &payload,
+                vault_id,
+                &keys,
+            )
+        };
+        if case == "malformed" {
+            frame.protocol_version = 0;
+        }
+        let empty_keys = BTreeMap::new();
+        decode_authenticated_frame_with_reason(
+            if case == "expired" { 15_100 } else { 100 },
+            if case == "crypto" { vault(9) } else { vault_id },
+            local,
+            [5; 16],
+            if case == "sender" {
+                &[]
+            } else {
+                std::slice::from_ref(&sender)
+            },
+            &frame,
+            if case == "key" { &empty_keys } else { &keys },
+        )
+        .unwrap_err()
+    }
+
+    macro_rules! reason_test {
+        ($name:ident, $case:literal, $expected:ident) => {
+            #[test]
+            fn $name() {
+                assert_eq!(reason_case($case), DecodeDrop::$expected);
+            }
+        };
+    }
+    reason_test!(drop_malformed, "malformed", Malformed);
+    reason_test!(drop_expired, "expired", Expired);
+    reason_test!(drop_future, "future", Future);
+    reason_test!(drop_unknown_sender, "sender", UnknownSender);
+    reason_test!(drop_key_unavailable, "key", KeyUnavailable);
+    reason_test!(drop_crypto_failure, "crypto", Crypto);
+    reason_test!(drop_not_addressed, "address", NotAddressed);
 
     #[test]
     fn decrypts_all_kinds_with_independent_normative_aad() {

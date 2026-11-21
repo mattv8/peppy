@@ -13,13 +13,15 @@ use std::collections::HashMap;
 
 use super::{
     ephemeral_v2_control::{ControlBudget, IngressBudget, ReplayBudget},
-    ephemeral_v2_decode::{AuthenticatedPlaintext, decode_authenticated_frame},
+    ephemeral_v2_decode::{
+        AuthenticatedPlaintext, DecodeDrop, decode_authenticated_frame_with_reason,
+    },
     ephemeral_v2_policy::{
         ClockState, LiveClock as PolicyClock, PolicyError, SenderBudget, TypingSlot,
     },
     ephemeral_v2_session::{
         AuthenticatedAck, AuthenticatedSequence, AuthenticatedTyping, ChallengeNonce,
-        EphemeralV2SessionState, MonoTime, Participant, RoutedTyping, SessionId,
+        EphemeralV2SessionState, MonoTime, Participant, RoutedTyping, SessionDrop, SessionId,
         SessionTypingState,
     },
 };
@@ -119,8 +121,63 @@ pub enum LiveError {
     InvalidContext,
 }
 
+macro_rules! live_typing_causes {
+    ($( $variant:ident = $code:literal => $name:literal ),+ $(,)?) => {
+        /// Stable, append-only, content-free diagnostic cause codes.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[repr(u16)]
+        pub enum LiveTypingCause { $( $variant = $code ),+ }
+
+        impl LiveTypingCause {
+            /// All defined causes in code order. Reserved codes are omitted.
+            pub const ALL: &'static [Self] = &[$( Self::$variant ),+];
+
+            /// Stable snake_case name for diagnostic headers.
+            pub const fn name(self) -> &'static str {
+                match self { $( Self::$variant => $name ),+ }
+            }
+        }
+    };
+}
+
+live_typing_causes! {
+    SealStarted = 1 => "seal_started",
+    SealStopped = 2 => "seal_stopped",
+    SealSharingOff = 3 => "seal_sharing_off",
+    SealParticipantNotMember = 4 => "seal_participant_not_member",
+    SealNotEligible = 5 => "seal_not_eligible",
+    SealBudget = 6 => "seal_budget",
+    FrameReceived = 10 => "frame_received",
+    IngressRefused = 11 => "ingress_refused",
+    DecodeMalformed = 12 => "decode_malformed",
+    DecodeExpired = 13 => "decode_expired",
+    DecodeFuture = 14 => "decode_future",
+    DecodeUnknownSender = 15 => "decode_unknown_sender",
+    DecodeKeyUnavailable = 16 => "decode_key_unavailable",
+    DecodeCrypto = 17 => "decode_crypto",
+    DecodeNotAddressed = 18 => "decode_not_addressed",
+    OriginIgnored = 19 => "origin_ignored",
+    NotEligible = 20 => "not_eligible",
+    SessionChallenged = 21 => "session_challenged",
+    SessionChallengeSuppressed = 22 => "session_challenge_suppressed",
+    SequenceStale = 23 => "sequence_stale",
+    StartSuppressed = 24 => "start_suppressed",
+    StopWithoutActive = 25 => "stop_without_active",
+    Display = 26 => "display",
+    GatewayIntent = 27 => "gateway_intent",
+    ChallengeAnswered = 28 => "challenge_answered",
+    ChallengeAnswerRefused = 29 => "challenge_answer_refused",
+    AckAccepted = 30 => "ack_accepted",
+    AckIgnored = 31 => "ack_ignored",
+    ResendSent = 32 => "resend_sent",
+    ResendSkipped = 33 => "resend_skipped",
+    RenewalChallenged = 34 => "renewal_challenged",
+    SealExpired = 35 => "seal_expired",
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct EphemeralV2State {
+    pub(crate) counters: [u64; 36],
     enabled: bool,
     generation: u64,
     session_id: [u8; 16],
@@ -139,6 +196,7 @@ pub(crate) struct EphemeralV2State {
 impl Default for EphemeralV2State {
     fn default() -> Self {
         Self {
+            counters: [0; 36],
             enabled: false,
             generation: 0,
             session_id: [0; 16],
@@ -157,6 +215,11 @@ impl Default for EphemeralV2State {
 }
 
 impl EphemeralV2State {
+    fn count(&mut self, cause: LiveTypingCause) {
+        let counter = &mut self.counters[cause as usize];
+        *counter = counter.saturating_add(1);
+    }
+
     pub(crate) fn disable(&mut self) {
         self.enabled = false;
         self.last_sequence = 0;
@@ -205,6 +268,7 @@ pub(crate) fn enable(
         .ok_or(LiveError::InvalidContext)?;
     let session_id = *uuid::Uuid::new_v4().as_bytes();
     store.ephemeral_v2 = EphemeralV2State {
+        counters: store.ephemeral_v2.counters,
         enabled: true,
         generation,
         session_id,
@@ -286,6 +350,7 @@ fn seal_typing(
         .active_starts
         .retain(|_, entry| entry.expires_at_wall_ms > effective_wall as u64);
     if !store.ephemeral_v2.sharing_enabled && origin == TypingOriginV2::VaultDevice {
+        store.ephemeral_v2.count(LiveTypingCause::SealSharingOff);
         return Ok(None);
     }
     let context = store
@@ -319,9 +384,13 @@ fn seal_typing(
     if let Some(participant) = typing.participant.as_deref()
         && !roster(conversation_id, participant)
     {
+        store
+            .ephemeral_v2
+            .count(LiveTypingCause::SealParticipantNotMember);
         return Ok(None);
     }
     if !typing_eligible(store, conversation_id, gateway_device_id, effective_wall)? {
+        store.ephemeral_v2.count(LiveTypingCause::SealNotEligible);
         return Ok(None);
     }
     let slot = typing_slot(conversation_id, typing.participant.as_deref());
@@ -333,6 +402,7 @@ fn seal_typing(
     }
     .map_err(policy_error)?;
     if !admitted {
+        store.ephemeral_v2.count(LiveTypingCause::SealBudget);
         return Ok(None);
     }
     let sequence = store
@@ -344,6 +414,7 @@ fn seal_typing(
     let expires_at = sent_at.checked_add(TTL_MS).ok_or(LiveError::Clock)?;
     let expires_at = expiry_cap.map_or(expires_at, |cap| expires_at.min(cap));
     if expires_at <= sent_at {
+        store.ephemeral_v2.count(LiveTypingCause::SealExpired);
         return Ok(None);
     }
     let mut signal = EphemeralSignalV2 {
@@ -404,6 +475,10 @@ fn seal_typing(
             },
         );
     }
+    store.ephemeral_v2.count(match state {
+        TypingStateV2::Started => LiveTypingCause::SealStarted,
+        TypingStateV2::Stopped => LiveTypingCause::SealStopped,
+    });
     Ok(Some(LiveOutbound {
         generation: LiveEnableGeneration(store.ephemeral_v2.generation),
         signal,
@@ -447,6 +522,8 @@ pub(crate) fn open(
     if !ingress_candidate.admit(frame.sender_device_id, clock.mono_ms) {
         store.ephemeral_v2.clock = Some(clock_candidate);
         store.ephemeral_v2.ingress_budget = ingress_candidate;
+        store.ephemeral_v2.count(LiveTypingCause::FrameReceived);
+        store.ephemeral_v2.count(LiveTypingCause::IngressRefused);
         return Ok(empty_outcome(store));
     }
     let context = store
@@ -459,7 +536,7 @@ pub(crate) fn open(
         .receiver
         .as_ref()
         .ok_or(LiveError::Disabled)?;
-    let authenticated = decode_authenticated_frame(
+    let authenticated = decode_authenticated_frame_with_reason(
         u64::try_from(effective_wall).map_err(|_| LiveError::Clock)?,
         store.config.vault_id,
         store.config.device_id,
@@ -470,12 +547,26 @@ pub(crate) fn open(
     );
     store.ephemeral_v2.clock = Some(clock_candidate);
     store.ephemeral_v2.ingress_budget = ingress_candidate;
-    let Some(authenticated) = authenticated else {
-        return Ok(empty_outcome(store));
+    let authenticated = match authenticated {
+        Ok(authenticated) => authenticated,
+        Err(reason) => {
+            store.ephemeral_v2.count(LiveTypingCause::FrameReceived);
+            store.ephemeral_v2.count(match reason {
+                DecodeDrop::Malformed => LiveTypingCause::DecodeMalformed,
+                DecodeDrop::Expired => LiveTypingCause::DecodeExpired,
+                DecodeDrop::Future => LiveTypingCause::DecodeFuture,
+                DecodeDrop::UnknownSender => LiveTypingCause::DecodeUnknownSender,
+                DecodeDrop::KeyUnavailable => LiveTypingCause::DecodeKeyUnavailable,
+                DecodeDrop::Crypto => LiveTypingCause::DecodeCrypto,
+                DecodeDrop::NotAddressed => LiveTypingCause::DecodeNotAddressed,
+            });
+            return Ok(empty_outcome(store));
+        }
     };
 
     let mut receiver_candidate = receiver.clone();
     let mut control_candidate = store.ephemeral_v2.control_budget.clone();
+    let mut causes = Vec::new();
     let (session_update, action, reply, next_sequence) = match authenticated.plaintext {
         AuthenticatedPlaintext::Typing(typing) => {
             let local_gateway = context.local_gateway_device_id == store.config.device_id
@@ -487,7 +578,11 @@ pub(crate) fn open(
                 TypingOriginV2::GoogleContact => {
                     (RoutedTyping::Display, authenticated.sender_device_id)
                 }
-                _ => return Ok(empty_outcome(store)),
+                _ => {
+                    store.ephemeral_v2.count(LiveTypingCause::FrameReceived);
+                    store.ephemeral_v2.count(LiveTypingCause::OriginIgnored);
+                    return Ok(empty_outcome(store));
+                }
             };
             if !typing_eligible(
                 store,
@@ -495,6 +590,8 @@ pub(crate) fn open(
                 gateway,
                 effective_wall,
             )? {
+                store.ephemeral_v2.count(LiveTypingCause::FrameReceived);
+                store.ephemeral_v2.count(LiveTypingCause::NotEligible);
                 return Ok(empty_outcome(store));
             }
             let deadline = clock
@@ -517,9 +614,27 @@ pub(crate) fn open(
                     wire_deadline_mono_ms: MonoTime(deadline),
                 })
                 .map_err(session_error)?;
+            if let Some(reason) = transition.drop {
+                causes.push(match reason {
+                    SessionDrop::ChallengeSuppressed => LiveTypingCause::SessionChallengeSuppressed,
+                    SessionDrop::SequenceStale => LiveTypingCause::SequenceStale,
+                    SessionDrop::StartSuppressed => LiveTypingCause::StartSuppressed,
+                    SessionDrop::StopWithoutActive => LiveTypingCause::StopWithoutActive,
+                    SessionDrop::AckIgnored => LiveTypingCause::AckIgnored,
+                });
+            }
+            if let Some(action) = &transition.action {
+                causes.push(match action.routing {
+                    RoutedTyping::Display => LiveTypingCause::Display,
+                    RoutedTyping::GatewayIntent => LiveTypingCause::GatewayIntent,
+                });
+            }
             let mut sequence = store.ephemeral_v2.last_sequence;
             let reply = if let Some(intent) = transition.challenge {
                 if !control_candidate.admit_challenge(clock.mono_ms) {
+                    if !transition.renewal {
+                        causes.push(LiveTypingCause::SessionChallengeSuppressed);
+                    }
                     None
                 } else {
                     sequence = sequence.checked_add(1).ok_or(LiveError::CounterExhausted)?;
@@ -541,6 +656,11 @@ pub(crate) fn open(
                     receiver_candidate
                         .record_challenge(intent, nonce)
                         .map_err(session_error)?;
+                    causes.push(if transition.renewal {
+                        LiveTypingCause::RenewalChallenged
+                    } else {
+                        LiveTypingCause::SessionChallenged
+                    });
                     Some(reply)
                 }
             } else {
@@ -555,6 +675,10 @@ pub(crate) fn open(
         }
         AuthenticatedPlaintext::Challenge(challenge) => {
             if !control_candidate.admit_ack(authenticated.sender_device_id, clock.mono_ms) {
+                store.ephemeral_v2.count(LiveTypingCause::FrameReceived);
+                store
+                    .ephemeral_v2
+                    .count(LiveTypingCause::ChallengeAnswerRefused);
                 return Ok(empty_outcome(store));
             }
             let sequence = store
@@ -577,6 +701,7 @@ pub(crate) fn open(
                 },
                 effective_wall,
             )?;
+            causes.push(LiveTypingCause::ChallengeAnswered);
             (None, None, Some(reply), sequence)
         }
         AuthenticatedPlaintext::SessionAck(ack) => {
@@ -595,6 +720,11 @@ pub(crate) fn open(
                     received_mono_ms: MonoTime(clock.mono_ms),
                 })
                 .map_err(session_error)?;
+            causes.push(if transition.drop == Some(SessionDrop::AckIgnored) {
+                LiveTypingCause::AckIgnored
+            } else {
+                LiveTypingCause::AckAccepted
+            });
             (
                 transition.session_update,
                 transition.action,
@@ -606,6 +736,10 @@ pub(crate) fn open(
     store.ephemeral_v2.receiver = Some(receiver_candidate);
     store.ephemeral_v2.control_budget = control_candidate;
     store.ephemeral_v2.last_sequence = next_sequence;
+    store.ephemeral_v2.count(LiveTypingCause::FrameReceived);
+    for cause in causes {
+        store.ephemeral_v2.count(cause);
+    }
     let follow_ups = if reply
         .as_ref()
         .is_some_and(|frame| frame.kind == EphemeralSignalV2Kind::SessionAck)
@@ -675,11 +809,17 @@ fn replay_active_starts(
         })
         .map(|(slot, start)| (slot.clone(), start.clone()))
         .collect();
+    let skipped = starts.len().saturating_sub(candidates.len())
+        + candidates.len().saturating_sub(MAX_FOLLOW_UPS_PER_ACK);
+    for _ in 0..skipped {
+        store.ephemeral_v2.count(LiveTypingCause::ResendSkipped);
+    }
     candidates.sort_by_key(|(_, start)| std::cmp::Reverse(start.sealed_mono_ms));
     let mut follow_ups = Vec::new();
     for (slot, start) in candidates.into_iter().take(MAX_FOLLOW_UPS_PER_ACK) {
         let mut replay_budget = store.ephemeral_v2.replay_budget.clone();
         if !replay_budget.admit(clock.mono_ms) {
+            store.ephemeral_v2.count(LiveTypingCause::ResendSkipped);
             break;
         }
         let participant_confirmed = match start.participant.as_deref() {
@@ -708,14 +848,20 @@ fn replay_active_starts(
             Some(start.expires_at_wall_ms),
             true,
         );
-        let Ok(Some(outbound)) = result else {
-            break;
+        let outbound = match result {
+            Ok(Some(outbound)) => outbound,
+            Ok(None) => {
+                store.ephemeral_v2.count(LiveTypingCause::ResendSkipped);
+                break;
+            }
+            Err(_) => break,
         };
         store.ephemeral_v2.replay_budget = replay_budget;
         if let Some(entry) = store.ephemeral_v2.active_starts.get_mut(&slot) {
             entry.last_replay_mono_ms = Some(clock.mono_ms);
         }
         follow_ups.push(outbound.signal);
+        store.ephemeral_v2.count(LiveTypingCause::ResendSent);
     }
     follow_ups
 }
@@ -741,10 +887,14 @@ pub(crate) fn open_json(
         .map_err(policy_error)?;
     if frame_json.len() > POSTGRES_NOTIFY_PAYLOAD_BYTES {
         store.ephemeral_v2.clock = Some(clock_candidate);
+        store.ephemeral_v2.count(LiveTypingCause::FrameReceived);
+        store.ephemeral_v2.count(LiveTypingCause::DecodeMalformed);
         return Ok(empty_outcome(store));
     }
     let Ok(frame) = serde_json::from_str::<EphemeralSignalV2>(frame_json) else {
         store.ephemeral_v2.clock = Some(clock_candidate);
+        store.ephemeral_v2.count(LiveTypingCause::FrameReceived);
+        store.ephemeral_v2.count(LiveTypingCause::DecodeMalformed);
         return Ok(empty_outcome(store));
     };
     open(store, &frame, clock)
@@ -850,6 +1000,217 @@ mod group_seam_tests {
 
     const PASSPHRASE: &str = "correct horse battery staple";
     const ALEX: &str = "+15551230001";
+
+    #[test]
+    fn replay_seal_error_does_not_count_a_refusal() {
+        let conversation = ConversationId::new();
+        let (_directory, client, device) = fixture(conversation);
+        seal_with(
+            &client,
+            conversation,
+            device,
+            TypingOriginV2::GoogleContact,
+            None,
+            1_001,
+            &|_, _| true,
+        )
+        .unwrap()
+        .unwrap();
+        let mut store = client.lock().unwrap();
+        store.ephemeral_v2.last_sequence = u64::MAX;
+        let before = store.ephemeral_v2.counters;
+        assert!(
+            replay_active_starts(
+                &mut store,
+                device,
+                LiveClock {
+                    wall_ms: 1_002,
+                    mono_ms: 1_002
+                },
+                1_002
+            )
+            .is_empty()
+        );
+        assert_eq!(store.ephemeral_v2.counters, before);
+    }
+
+    #[test]
+    fn malformed_json_counts_after_clock_commit() {
+        let (_directory, client, _) = fixture(ConversationId::new());
+        let before = client.live_typing_counters().unwrap();
+        client
+            .open_typing_signal_v2_json(
+                "{",
+                LiveClock {
+                    wall_ms: 1_001,
+                    mono_ms: 1_001,
+                },
+            )
+            .unwrap();
+        let after = client.live_typing_counters().unwrap();
+        for cause in [
+            LiveTypingCause::FrameReceived,
+            LiveTypingCause::DecodeMalformed,
+        ] {
+            let get = |values: &Vec<(LiveTypingCause, u64)>| {
+                values.iter().find(|(c, _)| *c == cause).unwrap().1
+            };
+            assert_eq!(get(&after), get(&before) + 1);
+        }
+    }
+
+    #[test]
+    fn counters_survive_disable_and_reenable() {
+        let conversation = ConversationId::new();
+        let (_directory, client, device) = fixture(conversation);
+        assert!(
+            seal_with(
+                &client,
+                conversation,
+                device,
+                TypingOriginV2::GoogleContact,
+                None,
+                1_001,
+                &|_, _| true,
+            )
+            .unwrap()
+            .is_some()
+        );
+        let before = client.live_typing_counters().unwrap();
+        assert_eq!(
+            before
+                .iter()
+                .find(|(cause, _)| *cause == LiveTypingCause::SealStarted)
+                .unwrap()
+                .1,
+            1
+        );
+        client.disable_live_typing().unwrap();
+        client
+            .enable_live_typing(
+                LiveEnableContext {
+                    trusted_roster: vec![device],
+                    local_gateway_device_id: device,
+                    local_executor: LiveExecutor::CurrentGateway,
+                },
+                LiveClock {
+                    wall_ms: 1_002,
+                    mono_ms: 1_002,
+                },
+            )
+            .unwrap();
+        assert_eq!(client.live_typing_counters().unwrap(), before);
+    }
+
+    #[test]
+    fn seal_counters_report_each_decision() {
+        let conversation = ConversationId::new();
+        let (_directory, client, device) = fixture(conversation);
+        let yes = |_: ConversationId, _: &str| true;
+        let no = |_: ConversationId, _: &str| false;
+        let count = |cause| {
+            client
+                .live_typing_counters()
+                .unwrap()
+                .into_iter()
+                .find(|(candidate, _)| *candidate == cause)
+                .unwrap()
+                .1
+        };
+        client.set_typing_sharing(false).unwrap();
+        assert!(
+            seal_with(
+                &client,
+                conversation,
+                device,
+                TypingOriginV2::VaultDevice,
+                None,
+                1_001,
+                &yes
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(count(LiveTypingCause::SealSharingOff), 1);
+        assert!(
+            seal_with(
+                &client,
+                conversation,
+                device,
+                TypingOriginV2::GoogleContact,
+                Some(ALEX),
+                1_002,
+                &no
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(count(LiveTypingCause::SealParticipantNotMember), 1);
+        assert!(
+            seal_with(
+                &client,
+                ConversationId::new(),
+                device,
+                TypingOriginV2::GoogleContact,
+                None,
+                1_003,
+                &yes
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(count(LiveTypingCause::SealNotEligible), 1);
+        assert!(
+            seal_with(
+                &client,
+                conversation,
+                device,
+                TypingOriginV2::GoogleContact,
+                None,
+                1_004,
+                &yes
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert_eq!(count(LiveTypingCause::SealStarted), 1);
+        assert!(
+            seal_with(
+                &client,
+                conversation,
+                device,
+                TypingOriginV2::GoogleContact,
+                None,
+                1_005,
+                &yes
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(count(LiveTypingCause::SealBudget), 1);
+        let mut store = client.lock().unwrap();
+        assert!(
+            seal(
+                &mut store,
+                TypingSealRequest {
+                    conversation_id: conversation,
+                    gateway_device_id: device,
+                    origin: TypingOriginV2::GoogleContact,
+                    participant: None,
+                    state: TypingStateV2::Stopped,
+                },
+                LiveClock {
+                    wall_ms: 1_006,
+                    mono_ms: 1_006
+                },
+                &yes
+            )
+            .unwrap()
+            .is_some()
+        );
+        drop(store);
+        assert_eq!(count(LiveTypingCause::SealStopped), 1);
+    }
 
     fn fixture(conversation: ConversationId) -> (tempfile::TempDir, Client, DeviceId) {
         let directory = tempfile::tempdir().unwrap();
