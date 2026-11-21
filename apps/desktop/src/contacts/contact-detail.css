@@ -173,7 +173,7 @@
   cursor: default;
 }
 
-#contacts-detail-header #contacts-detail-photo[aria-disabled="true"] .contacts-detail-photo-badge {
+#contacts-detail-header #contacts-detail-photo[data-photo-state="idle"][aria-disabled="true"]:not([aria-busy="true"]) .contacts-detail-photo-badge {
   opacity: .5;
 }
 
