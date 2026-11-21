@@ -769,7 +769,12 @@ select:focus-visible {
   color: var(--peppy-text-secondary);
 }
 #composer-inline-status:empty { display: none; }
-#composer-inline-status:has([data-inline-status-item]) { min-width: min-content; }
+#composer-inline-status:has([data-inline-status-item]) { min-width: calc(12px + 4px + 12ch); }
+#composer-toolbar #composer-inline-status :is([data-inline-status], [data-inline-status-item]) { min-width: 0; }
+@container (width >= 560px) {
+  #composer-toolbar #composer-inline-status:has([data-inline-status-action]) { min-width: min-content; }
+  #composer-toolbar #composer-inline-status :is([data-inline-status], [data-inline-status-item]):has([data-inline-status-action]) { min-width: min-content; }
+}
 #composer-toolbar:has(#composer-inline-status :is([data-tone="error"], [data-tone="warning"], #draft-sync-status, #draft-notice-action, [data-inline-status-item], [data-inline-status-action])) #shift-enter-hint { display: none; }
 #composer-toolbar button {
   display: grid;
