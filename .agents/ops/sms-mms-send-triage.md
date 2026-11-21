@@ -127,7 +127,7 @@ adb shell 'dumpsys package dev.peppy.mobile | grep -E "versionCode=|versionName=
 adb shell 'dumpsys activity services dev.peppy.mobile | grep -E "ServiceRecord|isForeground|createTime|lastActivity" | cut -c1-260'
 ```
 
-Ask the user to export diagnostics from **Settings → Diagnostics → Share log**, then pull the newest file:
+Ask the user to export diagnostics from **Settings → Advanced → Diagnostics → Share log**, then pull the newest file:
 
 ```sh
 adb shell 'ls -lt /sdcard/Download | head -5'

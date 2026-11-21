@@ -32,7 +32,7 @@ The link runs libgm (`apps/android/googlemessages`) in the native host on the ph
 
 ### Restricted settings
 
-The Play build never instructs the user to run adb and shows no on-phone Advanced features setup. For `READ_RESTRICTED_MESSAGES`, the Play build shows **Link Google Messages** instead of the copied adb command. Sideload and debug builds keep the copied command.
+The Play build never instructs the user to run adb and shows no on-phone Advanced features setup or Restricted message access UI in Sync details. Play users use **Link Google Messages** or **Manage link** on the **Google Messages (RCS)** card at the top of the SMS tab. Sideload and debug builds keep the copied command. Capture-path AppOp checks are unchanged.
 
 ### Other declared permissions
 
@@ -53,7 +53,7 @@ Record one take per shot, with the on-device disclosure visible. Keep each shot 
 4. Send a text to the phone from another number. Show it arriving on the phone.
 5. Show the same message in the Peppy web or desktop client.
 6. Reply from the desktop client. Show the reply sent from the phone's SMS app.
-7. Open **Link Google Messages** and link the phone. Show an RCS conversation from the Google Messages link.
+7. On the SMS tab's **Google Messages (RCS)** card, open **Link Google Messages** and link the phone. Show an RCS conversation from the Google Messages link.
 
 Do not show real third-party contacts or numbers. Blur or use test numbers.
 

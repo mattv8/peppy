@@ -184,8 +184,9 @@ Android classes named in `AndroidManifest.xml` and WorkManager worker classes st
 - Android uses Mirroring, SMS, Contacts and Account tabs. iOS uses Sync and
   Account; unavailable SMS/MMS and notification mirroring remain status rows,
   never actionable toggles. Settings opens from Account, not a toolbar gear.
-  An enrolled but locked Android screen retains a Settings entry for diagnostics
-  and server information; owner actions still require unlocked keys.
+  An enrolled but locked Android screen keeps a Settings entry; diagnostics and
+  server information are under Settings → Advanced. Owner actions still require
+  unlocked keys.
 - Feature switches express user intent, not permission grants. Turning a
   sensitive feature on first opens a Peppy consent bottom sheet with the full
   relevant disclosure, a Privacy Policy link and scope, and explicit agree and
@@ -233,6 +234,100 @@ Android classes named in `AndroidManifest.xml` and WorkManager worker classes st
   be delayed or missing and do not guarantee timely sync. See
   [iOS capability status](../apps/ios/PeppyMobile/PeppyMobileApp.swift) and
   [wake protocol guidance](AGENTS.md#notifications).
+
+## Android settings pages
+
+These rules cover the Android Account tab and every page reached from it:
+Settings, Advanced, Devices, Storage, Subscription, About and licenses. Other
+Android tabs adopt them when they next change. iOS adopts them when its Account
+tab next changes.
+
+- Pages below a tab root use the top app bar through `DetailPage`: back arrow,
+  title and optional icon actions. Do not add an in-page back button or a
+  second title. The bottom navigation hides while a detail page is shown.
+- Rows sit in titled groups (`SettingsGroup`). Groups are flat: a divider
+  before every group except the first, then a `titleMedium` heading with
+  heading semantics. Only the danger zone is a card, with a 1dp error border,
+  error-surface fill and 8dp corners.
+- Row types:
+  - Navigation: trailing chevron.
+  - External link: trailing open-in-new icon, announced as "Opens in your
+    browser".
+  - Toggle (`SettingToggleRow`): the whole row toggles.
+  - Status (`DetailsStatusRow`): label left, value right.
+  - Action: compact button at the row end.
+  - Destructive: consequence, then a compact error-filled button below it.
+- Rows are at least 48dp tall, or 56dp with a summary line. They have no
+  horizontal inset, so they line up with group headings. Navigation, link and
+  toggle rows clip ripples to 8dp corners. Give every row in a group a leading
+  icon, or none.
+- Put optional help in an `InfoButton` (i) right after the label. The (i) is
+  outside the row's clickable area or is its own focusable node. Navigation and
+  link rows keep it outside the clickable region. Toggle rows keep it inside the
+  toggle row as a separate node. Either way TalkBack and switch access reach
+  both. Inline text is at most one short line of current state.
+- Consent, permission, privacy, security and destructive text stays inline at
+  the point of decision, unchanged. The SMS, MMS, notification and
+  account-deletion consent sheets keep their exact text.
+- Summaries state a fact, not an explanation: "Registered", "4 active".
+- Use at most two levels below a tab root. Deeper pages are for reference
+  reading only, such as license text.
+- Technical and rarely used controls go on one Advanced page.
+- Separate values with badges or rows, never "·" or other joined separators.
+- Allow one filled primary button per page. Use outlined buttons for secondary
+  actions, compact buttons inside rows, and the error fill for destructive
+  actions. Coral is never body text. Text actions on warning surfaces use the
+  warning text color.
+- A state that needs action shows a warning badge on its root row and a callout
+  on its page. Show each message once: the read-only state is reported by the
+  system ribbon, so Account adds only the plan-row badge.
+- Destructive buttons take their row label as the accessible name ("Delete
+  vault", "Delete Peppy account"), so two Delete buttons stay distinct. The
+  label and consequence form one TalkBack stop.
+- Rows switch to a stacked layout when their content is narrower than 312dp
+  (phones under about 360dp) or the font scale is above 1.15. Stacked status
+  rows put the value under the label. Action rows put the label (and its (i))
+  first, then the button below, start-aligned with the label. Callouts put the
+  action under the text, end-aligned. Navigation rows put the attention badge
+  under the label.
+- Destructive rows always stack: label, then consequence, then the button below,
+  start-aligned.
+- Page-level errors use one style on every page: body-medium text in the error
+  color, announced politely as a live region. Field errors sit on the field,
+  with the error state and supporting text.
+- Device facts (platform, role, connection, this device) are badges on one
+  line.
+  - Order: badges are ordered by priority: This device, then a warning such as
+    Sending paused, then presence, then role. A warning is shown before facts
+    when space allows.
+  - Overflow: badges that don't fit collapse into a trailing `+N` badge. The
+    device name ellipsizes. Badge text is never cut, and nothing scrolls
+    sideways.
+  - Accessibility: the platform icon and text form one TalkBack stop whose
+    description lists every badge, including those collapsed into `+N`. The ⋮
+    button is a second stop.
+- Connection labels match desktop: Connected, Last seen …, Never connected,
+  Status unknown. Row actions (Rename, Remove, Disconnect) sit in an overflow
+  menu.
+- Account tab layout: a Devices group; a Plan and storage group (hosted only);
+  an App group (Settings, Guides, About). Add phone and Connect computer are
+  Account-tab only and gated as described in [Enrollment](#enrollment).
+  Settings has a Sync group, an Advanced row and a Danger zone; when locked, a
+  Plan group replaces Sync and the Danger zone has only account deletion.
+  Advanced has Connection, Custom relay (self-hosted) and Diagnostics.
+- Build pages from the shared pieces. `DetailPage`, `PageChrome` and
+  `PageAction` are in [PageChrome.kt](../apps/android/app/src/main/java/dev/peppy/mobile/ui/PageChrome.kt).
+  `SettingsGroup`, `NavigationRow`, `ExternalLinkRow`, `ActionRow`,
+  `DestructiveRow`, `AttentionCallout`, `PeppyBadge` and `SingleLineBadges` are
+  in [SettingsRows.kt](../apps/android/app/src/main/java/dev/peppy/mobile/ui/SettingsRows.kt).
+  Toggles use [SettingToggleRow.kt](../apps/android/app/src/main/java/dev/peppy/mobile/ui/SettingToggleRow.kt),
+  status pairs use `DetailsStatusRow` in
+  [DetailsPage.kt](../apps/android/app/src/main/java/dev/peppy/mobile/ui/DetailsPage.kt),
+  and help uses [InfoButton.kt](../apps/android/app/src/main/java/dev/peppy/mobile/ui/InfoButton.kt).
+- Every user-facing string comes from the shared catalog
+  (`packages/mobile-design/src/catalog.mjs`, used as `peppy_<key>`). No
+  hard-coded English.
+- Give every page, group, row and dialog a stable, unique test tag.
 
 ## Native presentation
 
