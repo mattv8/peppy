@@ -823,6 +823,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_rcs_canonicalizer_revision(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_live_typing_cause_names(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_sms_scan_exhausted(
@@ -1000,6 +1002,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_list_conversations(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_list_restorable_contacts_json(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_live_typing_counters(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mark_attachment_retention_reconciled(
     ): Int
@@ -1629,6 +1633,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_list_restorable_contacts_json(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_live_typing_counters(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_mark_attachment_retention_reconciled(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_mark_attachment_uploaded(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,`remoteObjectId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2235,6 +2241,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_rcs_canonicalizer_revision(uniffi_out_err: UniffiRustCallStatus, 
     ): Int
+    external fun uniffi_peppy_mobile_bindings_fn_func_live_typing_cause_names(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun ffi_peppy_mobile_bindings_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun ffi_peppy_mobile_bindings_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2576,6 +2584,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_rcs_canonicalizer_revision() and 0xFFFF) != 21371) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_live_typing_cause_names() and 0xFFFF) != 45350) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox() and 0xFFFF) != 17788) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2841,6 +2852,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_list_restorable_contacts_json() and 0xFFFF) != 20207) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_live_typing_counters() and 0xFFFF) != 32525) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mark_attachment_retention_reconciled() and 0xFFFF) != 315) {
@@ -4223,6 +4237,14 @@ public interface NativeClientInterface {
     fun `listConversations`(): List<NativeConversation>
     
     fun `listRestorableContactsJson`(`input`: kotlin.String): kotlin.String
+    
+    /**
+     * Returns every live typing drop and refusal counter, zeros included, in code order.
+     *
+     * Counters are content-free and cumulative for the life of this client. Call this off the UI
+     * thread.
+     */
+    fun `liveTypingCounters`(): List<NativeLiveTypingCount>
     
     fun `markAttachmentRetentionReconciled`()
     
@@ -6190,6 +6212,26 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterString.lower(`input`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Returns every live typing drop and refusal counter, zeros included, in code order.
+     *
+     * Counters are content-free and cumulative for the life of this client. Call this off the UI
+     * thread.
+     */
+    @Throws(NativeLiveTypingException::class)override fun `liveTypingCounters`(): List<NativeLiveTypingCount> {
+            return FfiConverterSequenceTypeNativeLiveTypingCount.lift(
+    callWithHandle {
+    uniffiRustCallWithError(NativeLiveTypingException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_live_typing_counters(
+        it,
+        _status)
 }
     }
     )
@@ -13506,6 +13548,88 @@ public object FfiConverterTypeNativeLiveSessionUpdate: FfiConverterRustBuffer<Na
             FfiConverterOptionalULong.write(value.`replacedSessionToken`, buf)
             FfiConverterULong.write(value.`currentSessionToken`, buf)
             FfiConverterULong.write(value.`validationRevision`, buf)
+    }
+}
+
+
+
+/**
+ * Stable code and snake_case name of one live typing cause.
+ */
+data class NativeLiveTypingCauseName (
+    var `code`: kotlin.UShort
+    , 
+    var `name`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeLiveTypingCauseName: FfiConverterRustBuffer<NativeLiveTypingCauseName> {
+    override fun read(buf: ByteBuffer): NativeLiveTypingCauseName {
+        return NativeLiveTypingCauseName(
+            FfiConverterUShort.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeLiveTypingCauseName) = (
+            FfiConverterUShort.allocationSize(value.`code`) +
+            FfiConverterString.allocationSize(value.`name`)
+    )
+
+    override fun write(value: NativeLiveTypingCauseName, buf: ByteBuffer) {
+            FfiConverterUShort.write(value.`code`, buf)
+            FfiConverterString.write(value.`name`, buf)
+    }
+}
+
+
+
+/**
+ * One content-free drop or refusal counter; `count` is cumulative for the life of the client.
+ */
+data class NativeLiveTypingCount (
+    var `code`: kotlin.UShort
+    , 
+    var `count`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeLiveTypingCount: FfiConverterRustBuffer<NativeLiveTypingCount> {
+    override fun read(buf: ByteBuffer): NativeLiveTypingCount {
+        return NativeLiveTypingCount(
+            FfiConverterUShort.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeLiveTypingCount) = (
+            FfiConverterUShort.allocationSize(value.`code`) +
+            FfiConverterULong.allocationSize(value.`count`)
+    )
+
+    override fun write(value: NativeLiveTypingCount, buf: ByteBuffer) {
+            FfiConverterUShort.write(value.`code`, buf)
+            FfiConverterULong.write(value.`count`, buf)
     }
 }
 
@@ -22135,6 +22259,62 @@ public object FfiConverterSequenceTypeNativeConversation: FfiConverterRustBuffer
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeNativeLiveTypingCauseName: FfiConverterRustBuffer<List<NativeLiveTypingCauseName>> {
+    override fun read(buf: ByteBuffer): List<NativeLiveTypingCauseName> {
+        val len = buf.getInt()
+        return List<NativeLiveTypingCauseName>(len) {
+            FfiConverterTypeNativeLiveTypingCauseName.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativeLiveTypingCauseName>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativeLiveTypingCauseName.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativeLiveTypingCauseName>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativeLiveTypingCauseName.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNativeLiveTypingCount: FfiConverterRustBuffer<List<NativeLiveTypingCount>> {
+    override fun read(buf: ByteBuffer): List<NativeLiveTypingCount> {
+        val len = buf.getInt()
+        return List<NativeLiveTypingCount>(len) {
+            FfiConverterTypeNativeLiveTypingCount.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativeLiveTypingCount>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativeLiveTypingCount.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativeLiveTypingCount>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativeLiveTypingCount.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeNativeMessage: FfiConverterRustBuffer<List<NativeMessage>> {
     override fun read(buf: ByteBuffer): List<NativeMessage> {
         val len = buf.getInt()
@@ -23843,6 +24023,19 @@ public object FfiConverterSequenceTypeNativeRcsBootstrapResolution: FfiConverter
             return FfiConverterUInt.lift(
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_peppy_mobile_bindings_fn_func_rcs_canonicalizer_revision(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * Every cause in code order, for host headers that name the counter codes.
+         */ fun `liveTypingCauseNames`(): List<NativeLiveTypingCauseName> {
+            return FfiConverterSequenceTypeNativeLiveTypingCauseName.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_live_typing_cause_names(
     
         _status)
 }

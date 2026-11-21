@@ -2,6 +2,9 @@ package dev.peppy.mobile.googlemessages
 
 import android.content.Context
 import android.os.SystemClock
+import dev.peppy.mobile.diagnostics.SyncDiagnostics
+import dev.peppy.mobile.diagnostics.SyncTraceEvent
+import dev.peppy.mobile.diagnostics.SyncTraceField
 import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import dev.peppy.mobile.gateway.NativeGateway
 import dev.peppy.mobile.googlemessages.live.LiveTypingCredentials
@@ -31,6 +34,8 @@ internal interface TypingCore {
     /** [participant] is the canonical sender of a group typing event; null for one-to-one. */
     fun seal(conversationId: String, gatewayDeviceId: String, participant: String?, state: NativeTypingState, clock: NativeLiveClock): uniffi.peppy_mobile_bindings.NativeLiveOutbound?
     fun open(frameJson: String, clock: NativeLiveClock): uniffi.peppy_mobile_bindings.NativeLiveOutcome
+    /** Cumulative content-free cause counters as (code, count); null when unavailable. */
+    fun counters(): List<Pair<Int, Long>>?
 }
 
 internal interface TypingTransport {
@@ -59,6 +64,7 @@ private class NativeTypingCore(private val client: uniffi.peppy_mobile_bindings.
     override fun seal(conversationId: String, gatewayDeviceId: String, participant: String?, state: NativeTypingState, clock: NativeLiveClock) =
         client.sealTypingSignalV2(conversationId, gatewayDeviceId, NativeTypingOrigin.GOOGLE_CONTACT, participant, state, clock)
     override fun open(frameJson: String, clock: NativeLiveClock) = client.openTypingSignalV2(frameJson, clock)
+    override fun counters() = client.liveTypingCounters().map { it.code.toInt() to it.count.toLong() }
 }
 
 /** Connects the Google link's typed Go callbacks with the memory-only live typing core. */
@@ -83,6 +89,8 @@ internal class TypingBridge(
     private var lastEnableAttempt = 0UL
     private val startedValidity = mutableMapOf<String, ULong>()
     private val incarnation = AtomicLong()
+    /** Last counter read per cause code; executor-confined, null until diagnostics read once. */
+    private var counterBaseline: Map<Int, Long>? = null
 
     /** Starts only after the service has observed a linked, running Go session. */
     fun start(session: TypingCredentials) {
@@ -135,12 +143,14 @@ internal class TypingBridge(
             disableCore()
             return
         }
-        runCatching {
+        val enableResult = runCatching {
             current.enable(
                 NativeLiveEnableContext(context.rosterIds, context.localDeviceId, NativeLiveExecutor.CURRENT_GATEWAY),
                 nativeClock(),
             )
-        }.onSuccess { generation ->
+        }
+        recordLiveTypingCounts(current)
+        enableResult.onSuccess { generation ->
             if (!sharing.reapplyAfterEnable { enabled -> current.setSharing(enabled) }) {
                 recordGoogleMessagesLinkEvent("typing", "enable_sharing_failed", 0)
                 disableCore()
@@ -184,7 +194,10 @@ internal class TypingBridge(
         val frameIncarnation = incarnation.get()
         executor.execute {
             val current = client() ?: return@execute recordGoogleMessagesLinkEvent("typing", "open_failed", 0)
-            runCatching { current.open(json, nativeClock()) }
+            // Follow-up replays are counted inside open, so this one read covers them too.
+            val opened = runCatching { current.open(json, nativeClock()) }
+            recordLiveTypingCounts(current)
+            opened
                 .onSuccess { outcome ->
                     var canSendFollowUps = true
                     outcome.replyFrameJson?.let { reply ->
@@ -252,6 +265,7 @@ internal class TypingBridge(
                     nativeClock(),
                 )
             }
+            recordLiveTypingCounts(current)
             if (result.isFailure) return@execute recordGoogleMessagesLinkEvent("typing", "inbound_seal_failed", 0)
             val frame = result.getOrNull()
                 ?: return@execute recordGoogleMessagesLinkEvent("typing", "inbound_seal_refused", 0)
@@ -311,6 +325,29 @@ internal class TypingBridge(
         adapter.disable()
         runCatching { client()?.disable() }
         recordGoogleMessagesLinkEvent("typing", "disabled", 0)
+    }
+
+    /**
+     * Records each cause whose counter rose since the previous read. Runs on the bridge executor only.
+     * Nothing is read while diagnostics are off; the first read after enabling sets the baseline.
+     */
+    private fun recordLiveTypingCounts(core: TypingCore) {
+        if (!SyncDiagnostics.enabled) {
+            counterBaseline = null
+            return
+        }
+        val counts = runCatching { core.counters() }.getOrNull() ?: return
+        val baseline = counterBaseline
+        counterBaseline = counts.toMap()
+        if (baseline == null) return
+        counts.forEach { (code, count) ->
+            // A count below its baseline means a new client that started at zero, so all of it is new.
+            val previous = baseline[code]?.takeIf { count >= it } ?: 0L
+            val delta = count - previous
+            if (delta > 0) {
+                SyncDiagnostics.record(SyncTraceEvent.LIVE_TYPING, SyncTraceField.REASON to code.toLong(), SyncTraceField.COUNT to delta)
+            }
+        }
     }
 
     private fun droppedStale() = recordGoogleMessagesLinkEvent("typing", "dropped_stale", 0)

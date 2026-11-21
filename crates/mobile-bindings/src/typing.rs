@@ -2,7 +2,7 @@
 
 use peppy_client_core::{
     Client, ConversationId, DeviceId, LiveAction, LiveClock, LiveEnableContext, LiveError,
-    LiveExecutor, LiveOutcome,
+    LiveExecutor, LiveOutcome, LiveTypingCause,
 };
 use peppy_protocol::{TypingOriginV2, TypingStateV2};
 use std::{str::FromStr, sync::Mutex};
@@ -84,6 +84,20 @@ pub struct NativeLiveOutcome {
     pub reply_frame_json: Option<String>,
     /// Frames to transmit after `reply_frame_json`, in order; empty when none.
     pub follow_up_frames_json: Vec<String>,
+}
+
+/// One content-free drop or refusal counter; `count` is cumulative for the life of the client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct NativeLiveTypingCount {
+    pub code: u16,
+    pub count: u64,
+}
+
+/// Stable code and snake_case name of one live typing cause.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeLiveTypingCauseName {
+    pub code: u16,
+    pub name: String,
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -197,6 +211,28 @@ pub(crate) fn outcome_view(value: LiveOutcome) -> Result<NativeLiveOutcome, Nati
             .map(|frame| serde_json::to_string(frame).map_err(|_| NativeLiveTypingError::Crypto))
             .collect::<Result<Vec<_>, _>>()?,
     })
+}
+
+pub(crate) fn counter_view(value: Vec<(LiveTypingCause, u64)>) -> Vec<NativeLiveTypingCount> {
+    value
+        .into_iter()
+        .map(|(cause, count)| NativeLiveTypingCount {
+            code: cause as u16,
+            count,
+        })
+        .collect()
+}
+
+/// Every cause in code order, for host headers that name the counter codes.
+#[uniffi::export]
+pub fn live_typing_cause_names() -> Vec<NativeLiveTypingCauseName> {
+    LiveTypingCause::ALL
+        .iter()
+        .map(|cause| NativeLiveTypingCauseName {
+            code: *cause as u16,
+            name: cause.name().to_owned(),
+        })
+        .collect()
 }
 
 fn action_view(value: LiveAction) -> NativeLiveAction {
@@ -704,5 +740,64 @@ mod tests {
         assert!(
             !json.to_string().contains("ciphertext") && !json.to_string().contains("event_key")
         );
+    }
+
+    fn count_of(counts: &[NativeLiveTypingCount], code: LiveTypingCause) -> u64 {
+        counts
+            .iter()
+            .find(|count| count.code == code as u16)
+            .map(|count| count.count)
+            .unwrap()
+    }
+
+    #[test]
+    fn live_typing_counters_list_every_cause_in_code_order_and_move_after_a_seal() {
+        let fixture = live_fixture();
+        fixture
+            .receiver
+            .enable_live_typing(
+                NativeLiveEnableContext {
+                    trusted_roster: vec![fixture.receiver_id.to_string()],
+                    local_gateway_device_id: fixture.receiver_id.to_string(),
+                    local_executor: NativeLiveExecutor::CurrentGateway,
+                },
+                clock(1_000),
+            )
+            .unwrap();
+        let before = fixture.receiver.live_typing_counters().unwrap();
+        let codes: Vec<u16> = before.iter().map(|count| count.code).collect();
+        let expected: Vec<u16> = LiveTypingCause::ALL
+            .iter()
+            .map(|cause| *cause as u16)
+            .collect();
+        assert_eq!(codes, expected);
+        assert_eq!(count_of(&before, LiveTypingCause::SealStarted), 0);
+
+        fixture
+            .receiver
+            .seal_typing_signal_v2(
+                fixture.conversation.to_string(),
+                fixture.receiver_id.to_string(),
+                NativeTypingOrigin::GoogleContact,
+                None,
+                NativeTypingState::Started,
+                clock(1_001),
+            )
+            .unwrap()
+            .unwrap();
+        let after = fixture.receiver.live_typing_counters().unwrap();
+        assert_eq!(count_of(&after, LiveTypingCause::SealStarted), 1);
+        assert_eq!(count_of(&after, LiveTypingCause::SealStopped), 0);
+    }
+
+    #[test]
+    fn live_typing_cause_names_match_the_core_list() {
+        let names = live_typing_cause_names();
+        assert_eq!(names.len(), LiveTypingCause::ALL.len());
+        for (name, cause) in names.iter().zip(LiveTypingCause::ALL) {
+            assert_eq!(name.code, *cause as u16);
+            assert_eq!(name.name, cause.name());
+        }
+        assert_eq!(names[0].name, "seal_started");
     }
 }

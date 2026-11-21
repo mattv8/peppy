@@ -900,6 +900,14 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func listRestorableContactsJson(input: String) throws  -> String
     
+    /**
+     * Returns every live typing drop and refusal counter, zeros included, in code order.
+     *
+     * Counters are content-free and cumulative for the life of this client. Call this off the UI
+     * thread.
+     */
+    func liveTypingCounters() throws  -> [NativeLiveTypingCount]
+    
     func markAttachmentRetentionReconciled() throws 
     
     func markAttachmentUploaded(attachmentId: String, remoteObjectId: String) throws 
@@ -2373,6 +2381,21 @@ open func listRestorableContactsJson(input: String)throws  -> String  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_list_restorable_contacts_json(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(input),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Returns every live typing drop and refusal counter, zeros included, in code order.
+     *
+     * Counters are content-free and cumulative for the life of this client. Call this off the UI
+     * thread.
+     */
+open func liveTypingCounters()throws  -> [NativeLiveTypingCount]  {
+    return try  FfiConverterSequenceTypeNativeLiveTypingCount.lift(try rustCallWithError(FfiConverterTypeNativeLiveTypingError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_live_typing_counters(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -8063,6 +8086,120 @@ public func FfiConverterTypeNativeLiveSessionUpdate_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeNativeLiveSessionUpdate_lower(_ value: NativeLiveSessionUpdate) -> RustBuffer {
     return FfiConverterTypeNativeLiveSessionUpdate.lower(value)
+}
+
+
+/**
+ * Stable code and snake_case name of one live typing cause.
+ */
+public struct NativeLiveTypingCauseName: Equatable, Hashable {
+    public var code: UInt16
+    public var name: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(code: UInt16, name: String) {
+        self.code = code
+        self.name = name
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeLiveTypingCauseName: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeLiveTypingCauseName: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveTypingCauseName {
+        return
+            try NativeLiveTypingCauseName(
+                code: FfiConverterUInt16.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeLiveTypingCauseName, into buf: inout [UInt8]) {
+        FfiConverterUInt16.write(value.code, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveTypingCauseName_lift(_ buf: RustBuffer) throws -> NativeLiveTypingCauseName {
+    return try FfiConverterTypeNativeLiveTypingCauseName.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveTypingCauseName_lower(_ value: NativeLiveTypingCauseName) -> RustBuffer {
+    return FfiConverterTypeNativeLiveTypingCauseName.lower(value)
+}
+
+
+/**
+ * One content-free drop or refusal counter; `count` is cumulative for the life of the client.
+ */
+public struct NativeLiveTypingCount: Equatable, Hashable {
+    public var code: UInt16
+    public var count: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(code: UInt16, count: UInt64) {
+        self.code = code
+        self.count = count
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeLiveTypingCount: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeLiveTypingCount: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeLiveTypingCount {
+        return
+            try NativeLiveTypingCount(
+                code: FfiConverterUInt16.read(from: &buf), 
+                count: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeLiveTypingCount, into buf: inout [UInt8]) {
+        FfiConverterUInt16.write(value.code, into: &buf)
+        FfiConverterUInt64.write(value.count, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveTypingCount_lift(_ buf: RustBuffer) throws -> NativeLiveTypingCount {
+    return try FfiConverterTypeNativeLiveTypingCount.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeLiveTypingCount_lower(_ value: NativeLiveTypingCount) -> RustBuffer {
+    return FfiConverterTypeNativeLiveTypingCount.lower(value)
 }
 
 
@@ -19329,6 +19466,56 @@ fileprivate struct FfiConverterSequenceTypeNativeConversation: FfiConverterRustB
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeNativeLiveTypingCauseName: FfiConverterRustBuffer {
+    typealias SwiftType = [NativeLiveTypingCauseName]
+
+    public static func write(_ value: [NativeLiveTypingCauseName], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNativeLiveTypingCauseName.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NativeLiveTypingCauseName] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NativeLiveTypingCauseName]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNativeLiveTypingCauseName.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeNativeLiveTypingCount: FfiConverterRustBuffer {
+    typealias SwiftType = [NativeLiveTypingCount]
+
+    public static func write(_ value: [NativeLiveTypingCount], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNativeLiveTypingCount.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NativeLiveTypingCount] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NativeLiveTypingCount]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNativeLiveTypingCount.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeNativeMessage: FfiConverterRustBuffer {
     typealias SwiftType = [NativeMessage]
 
@@ -20693,6 +20880,16 @@ public func rcsCanonicalizerRevision() -> UInt32  {
     )
 })
 }
+/**
+ * Every cause in code order, for host headers that name the counter codes.
+ */
+public func liveTypingCauseNames() -> [NativeLiveTypingCauseName]  {
+    return try!  FfiConverterSequenceTypeNativeLiveTypingCauseName.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_live_typing_cause_names(uniffiCallStatus
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -20929,6 +21126,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_rcs_canonicalizer_revision() != 21371) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_live_typing_cause_names() != 45350) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox() != 17788) {
@@ -21196,6 +21396,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_list_restorable_contacts_json() != 20207) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_live_typing_counters() != 32525) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mark_attachment_retention_reconciled() != 315) {
