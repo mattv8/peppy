@@ -65,6 +65,54 @@ describe("browser UI bridge", () => {
     }
   });
 
+  it("shows the typing sharing setting when browser typing is present and a gateway is linked", async () => {
+    const snapshot: DesktopSnapshot = {
+      version: "1",
+      mode: "browser",
+      connection: { state: "connected" },
+      encryption: { state: "unlocked" },
+      gateways: [{ id: "gateway-browser", name: "Phone", simId: "sim-browser", online: true, simulated: false, supportsSms: true, supportsMms: false }],
+      conversations: [{ id: "conversation-browser", name: "Browser chat", preview: "", unread: 0, messages: [] }],
+      activeConversationId: "conversation-browser",
+      draft: { id: "draft-browser", conversationId: "conversation-browser", text: "", recipientIds: [], attachmentIds: [], gatewayId: "gateway-browser", simId: "sim-browser", revision: "1" },
+      head: { enabled: false, capability: "unsupported" },
+      pendingCount: 0,
+      quarantineCount: 0,
+      notifications: [],
+      appFilters: [],
+      notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full" },
+      rcsStatus: {
+        gateways: [{ gatewayId: "gateway-browser", state: "linked", current: true, available: true, healthy: true, phoneResponsive: true, observedAtMs: "0", capabilityRevision: "1", expiresAtMs: String(Date.now() + 10_000) }],
+        eligibilities: [],
+      },
+    };
+    const browserBridge: DesktopBridge = {
+      ...desktopBridge.fixtureBridge,
+      load_state: async () => snapshot,
+      subscribe: () => () => undefined,
+      subscribe_lifecycle: () => () => undefined,
+      subscribe_lifecycle_finished: () => () => undefined,
+      set_notification_context: async () => undefined,
+      mark_seen: async () => undefined,
+      send_typing: async () => undefined,
+      set_typing_sharing: async () => undefined,
+      subscribe_typing: () => Object.assign(() => undefined, { ready: Promise.resolve() }),
+    };
+    const previousBridge = uiBridge.bridge;
+    const previousDesktopBridge = desktopBridge.bridge;
+    uiBridge.installBrowserBridge(browserBridge);
+    installDesktopBrowserBridge(browserBridge);
+    try {
+      render(<App hostKind="browser" />);
+      await waitFor(() => expect(document.getElementById("shared-composer")).toBeInTheDocument());
+      document.querySelector<HTMLButtonElement>('[data-rail-item="settings"]')?.click();
+      await waitFor(() => expect(document.getElementById("settings-share-typing")).toBeInTheDocument());
+    } finally {
+      uiBridge.installBrowserBridge(previousBridge);
+      desktopBridge.installBrowserBridge(previousDesktopBridge);
+    }
+  });
+
   it("passes reported RCS fields from a browser bridge snapshot to the shared renderer", async () => {
     const snapshot: DesktopSnapshot = {
       version: "1",
