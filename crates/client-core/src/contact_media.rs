@@ -409,9 +409,26 @@ pub(crate) fn after_apply(conn: &Connection, payload: &PrivatePayload) -> Result
             contact_id,
             ..
         } => sync_contact(conn, book_id, contact_id),
-        PrivatePayload::ContactEditRequest { request } => hold_request(conn, request),
+        PrivatePayload::ContactEditRequest { request } => {
+            // A request its book's vault-wide deletion covers was ignored at apply: it holds nothing.
+            if fenced_request(conn, request)? {
+                return Ok(());
+            }
+            hold_request(conn, request)
+        }
         _ => Ok(()),
     }
+}
+
+/// Whether the request's book is fenced for its target owner, as apply judged it.
+fn fenced_request(conn: &Connection, request: &Value) -> Result<bool, Error> {
+    let (Some(book_id), Some(target)) = (
+        request.get("book_id").and_then(Value::as_str),
+        request.get("target_owner").and_then(Value::as_str),
+    ) else {
+        return Ok(false);
+    };
+    crate::contact_book_deletion::covers(conn, book_id, target, None)
 }
 
 fn sync_contact_from_payload(

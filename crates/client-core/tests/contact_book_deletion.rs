@@ -528,21 +528,13 @@ fn delete_fences_the_book_and_enqueues_one_terminal_member_per_contact() {
     assert_eq!(members.len(), 2);
     assert_eq!(records.len(), 3, "nothing but the fence and members");
 
-    // The fence is the book's retained frontier; members are terminal and supersede the
-    // owner's records of the same contact.
+    // The fence is the book's retained frontier and has its own identity, so it supersedes no
+    // book state; members are terminal and supersede the owner's records of the same contact.
     let fence_compaction = fences[0].compaction.as_ref().unwrap();
     assert!(!fence_compaction.terminal);
-    let book_state = owner_records
-        .iter()
-        .find(|(_, p)| matches!(p, PrivatePayload::ContactBookState { .. }))
-        .unwrap();
     assert!(
-        fence_compaction
-            .supersedes
-            .iter()
-            .any(|r| r.producer_device_id.to_string() == owner
-                && r.producer_sequence.0 == book_state.0),
-        "fence supersedes the owner's book state"
+        fence_compaction.supersedes.is_empty(),
+        "the fence is not superseded by, nor supersedes, the owner's book state"
     );
     for (envelope, contact_id) in members {
         let compaction = envelope.compaction.as_ref().unwrap();
@@ -804,4 +796,277 @@ fn restored_pre_delete_backup_removes_the_book_when_the_fence_replays() {
         ),
         0
     );
+}
+
+#[test]
+fn delayed_member_never_deletes_a_continued_generation() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    sync(
+        &[sealed(&vault, DeviceId::new(), 1, fence(owner, "1"))],
+        &observer,
+    );
+    assert!(book_ids(&observer).is_empty());
+
+    // The owner continues the book at generation 2 and republishes Ada.
+    let continued = sync(
+        &[
+            sealed(
+                &vault,
+                owner,
+                4,
+                PrivatePayload::ContactBookState {
+                    book: book(owner, "2"),
+                },
+            ),
+            sealed(
+                &vault,
+                owner,
+                5,
+                PrivatePayload::ContactUpserted {
+                    book: book(owner, "2"),
+                    contact: contact("ada", "Ada"),
+                },
+            ),
+        ],
+        &observer,
+    );
+    assert_eq!(continued.quarantined, 0);
+    assert_eq!(book_ids(&observer), vec![BOOK.to_owned()]);
+
+    // A delayed generation-1 member for Ada arrives after the continuation.
+    let report = sync(
+        &[sealed(
+            &vault,
+            DeviceId::new(),
+            1,
+            PrivatePayload::ContactBookDeletedMember {
+                book_id: BOOK.into(),
+                contact_id: "ada".into(),
+                owner_device_id: owner.to_string(),
+                generation: "1".into(),
+            },
+        )],
+        &observer,
+    );
+    assert_eq!(report.quarantined, 0);
+    assert_eq!(
+        count(
+            &config.database_path,
+            "SELECT COUNT(*) FROM contacts WHERE id='ada'"
+        ),
+        1,
+        "the continued generation keeps its contact"
+    );
+}
+
+#[test]
+fn fence_of_another_owner_does_not_suppress_a_later_book() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let observer_config = config(&dir, "observer", &vault);
+    let observer = unlocked(&observer_config, &vault);
+    let owner = DeviceId::new();
+    let other = DeviceId::new();
+    let path = &observer_config.database_path;
+
+    // A fence from `other` arrives before any book is stored: it is fenced for `other` only.
+    let report = sync(
+        &[sealed(&vault, DeviceId::new(), 1, fence(other, "1"))],
+        &observer,
+    );
+    assert_eq!(report.quarantined, 0);
+    assert_eq!(
+        count(
+            path,
+            &format!(
+                "SELECT COUNT(*) FROM deleted_contact_books WHERE owner_device_id='{other}' AND generation=1"
+            )
+        ),
+        1
+    );
+
+    // The owner's book, stored later under the same id, is not suppressed.
+    let report = sync(
+        &[
+            sealed(
+                &vault,
+                owner,
+                1,
+                PrivatePayload::ContactBookState {
+                    book: book(owner, "1"),
+                },
+            ),
+            sealed(
+                &vault,
+                owner,
+                2,
+                PrivatePayload::ContactUpserted {
+                    book: book(owner, "1"),
+                    contact: contact("ada", "Ada"),
+                },
+            ),
+        ],
+        &observer,
+    );
+    assert_eq!(report.quarantined, 0);
+    assert_eq!(book_ids(&observer), vec![BOOK.to_owned()]);
+    assert_eq!(count(path, "SELECT COUNT(*) FROM contacts"), 1);
+}
+
+#[test]
+fn fence_of_another_owner_is_a_noop_once_the_stored_book_is_owned_elsewhere() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, _owner) = observed_book(&dir);
+    let other = DeviceId::new();
+    let path = &config.database_path;
+
+    let report = sync(
+        &[sealed(&vault, DeviceId::new(), 1, fence(other, "1"))],
+        &observer,
+    );
+
+    assert_eq!(report.quarantined, 0);
+    assert_eq!(book_ids(&observer), vec![BOOK.to_owned()]);
+    assert_eq!(count(path, "SELECT COUNT(*) FROM contacts"), 2);
+    assert_eq!(
+        count(path, "SELECT COUNT(*) FROM deleted_contact_books"),
+        0,
+        "no fence is stored for a book another owner holds"
+    );
+
+    // A member of that other device never deletes this owner's contacts either.
+    let report = sync(
+        &[sealed(
+            &vault,
+            DeviceId::new(),
+            2,
+            PrivatePayload::ContactBookDeletedMember {
+                book_id: BOOK.into(),
+                contact_id: "ada".into(),
+                owner_device_id: other.to_string(),
+                generation: "1".into(),
+            },
+        )],
+        &observer,
+    );
+    assert_eq!(report.quarantined, 0);
+    assert_eq!(count(path, "SELECT COUNT(*) FROM contacts"), 2);
+}
+
+#[test]
+fn malformed_or_overflowing_generations_are_quarantined() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    let member = |generation: &str| PrivatePayload::ContactBookDeletedMember {
+        book_id: BOOK.into(),
+        contact_id: "ada".into(),
+        owner_device_id: owner.to_string(),
+        generation: generation.into(),
+    };
+
+    let report = sync(
+        &[
+            sealed(&vault, DeviceId::new(), 1, fence(owner, "abc")),
+            sealed(
+                &vault,
+                DeviceId::new(),
+                1,
+                fence(owner, "99999999999999999999"),
+            ),
+            sealed(&vault, DeviceId::new(), 1, member("07")),
+        ],
+        &observer,
+    );
+
+    assert_eq!(report.quarantined, 3);
+    assert_eq!(book_ids(&observer), vec![BOOK.to_owned()]);
+    let path = &config.database_path;
+    assert_eq!(count(path, "SELECT COUNT(*) FROM contacts"), 2);
+    assert_eq!(count(path, "SELECT COUNT(*) FROM deleted_contact_books"), 0);
+}
+
+#[test]
+fn a_continued_book_can_be_deleted_again_under_a_higher_fence() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    let revoked = [owner.to_string()];
+    observer
+        .delete_contact_book(&delete_input(&revoked))
+        .unwrap();
+    assert!(book_ids(&observer).is_empty());
+
+    // The owner continues the deleted book at generation 2.
+    let continued = sync(
+        &[sealed(
+            &vault,
+            owner,
+            4,
+            PrivatePayload::ContactBookState {
+                book: book(owner, "2"),
+            },
+        )],
+        &observer,
+    );
+    assert_eq!(continued.quarantined, 0);
+    assert_eq!(book_ids(&observer), vec![BOOK.to_owned()]);
+
+    let out: Value = serde_json::from_str(
+        &observer
+            .delete_contact_book(&delete_input(&revoked))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        out,
+        json!({"status": "deleted", "book_id": BOOK, "contacts": 0})
+    );
+    assert!(book_ids(&observer).is_empty());
+    let path = &config.database_path;
+    assert_eq!(
+        count(
+            path,
+            &format!(
+                "SELECT COUNT(*) FROM deleted_contact_books WHERE owner_device_id='{owner}' AND generation=2"
+            )
+        ),
+        1
+    );
+    assert_eq!(
+        observer
+            .delete_contact_book(&delete_input(&revoked))
+            .unwrap_err(),
+        Error::InvalidRequest("contact book was already deleted for all devices"),
+        "the continued deletion is final too"
+    );
+}
+
+#[test]
+fn a_failed_seal_rolls_back_the_whole_delete() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    drop(observer);
+    // The delete queues a fence and two members; the third queued row fails to seal.
+    sqlcipher(&config.database_path)
+        .execute_batch(
+            "CREATE TRIGGER fail_seal BEFORE UPDATE OF state ON outbox
+             WHEN NEW.state='queued' AND (SELECT COUNT(*) FROM outbox WHERE state='queued') >= 2
+             BEGIN SELECT RAISE(ABORT, 'seal failure'); END;",
+        )
+        .unwrap();
+    let observer = unlocked(&config, &vault);
+    let path = &config.database_path;
+    let outbox_before = count(path, "SELECT COUNT(*) FROM outbox");
+
+    assert!(
+        observer
+            .delete_contact_book(&delete_input(&[owner.to_string()]))
+            .is_err()
+    );
+
+    assert_eq!(book_ids(&observer), vec![BOOK.to_owned()]);
+    assert_eq!(count(path, "SELECT COUNT(*) FROM contacts"), 2);
+    assert_eq!(count(path, "SELECT COUNT(*) FROM deleted_contact_books"), 0);
+    assert_eq!(count(path, "SELECT COUNT(*) FROM outbox"), outbox_before);
+    assert!(observer.pending_outbox().unwrap().is_empty());
 }

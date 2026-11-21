@@ -60,7 +60,8 @@ pub(crate) fn targets_own_book(payload: &PrivatePayload, own_device: &str) -> bo
     )
 }
 
-/// Applies a book fence or a per-contact record. `Ok(false)` quarantines the record.
+/// Applies a book fence or a per-contact record. `Ok(false)` quarantines the record, which is
+/// what a malformed generation (`canonical_decimal` rejects it) becomes through `apply_event`.
 pub(crate) fn apply(conn: &Connection, payload: &PrivatePayload) -> Result<bool, Error> {
     match payload {
         PrivatePayload::ContactBookDeleted {
@@ -73,6 +74,11 @@ pub(crate) fn apply(conn: &Connection, payload: &PrivatePayload) -> Result<bool,
             check_ids(book_id, owner_device_id)?;
             // The owner was succeeded, so its successor now owns the book: nothing to delete.
             if has_successor(conn, owner_device_id)? {
+                return Ok(true);
+            }
+            // A stored book of another owner under this id is not this owner's to delete. The
+            // fence is not stored at all, so a later book of that owner is not suppressed.
+            if stored_book(conn, book_id)?.is_some_and(|(owner, _)| owner != *owner_device_id) {
                 return Ok(true);
             }
             store_fence(conn, book_id, owner_device_id, generation, *deleted_at_ms)?;
@@ -92,9 +98,9 @@ pub(crate) fn apply(conn: &Connection, payload: &PrivatePayload) -> Result<bool,
             if has_successor(conn, owner_device_id)? {
                 return Ok(true);
             }
-            if stored_at_or_below(conn, book_id, owner_device_id, generation)?
-                || covers(conn, book_id, Some(generation))?
-            {
+            // Authorized only by the stored book: the same owner at a generation not above the
+            // record's. A delayed record of an older generation never touches a continued book.
+            if stored_at_or_below(conn, book_id, owner_device_id, generation)? {
                 remove_contact(conn, book_id, contact_id)?;
             }
             Ok(true)
@@ -120,17 +126,15 @@ pub(crate) fn delete(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Resul
         .map(|id| id.as_str().ok_or(Error::InvalidRequest(DELETE_INPUT)))
         .collect::<Result<Vec<&str>, _>>()?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if fence_generation(&tx, book_id)?.is_some() {
-        return Err(Error::InvalidRequest(DELETE_ALREADY_DELETED));
-    }
-    let (owner, generation): (String, i64) = tx
-        .query_row(
-            "SELECT owner_device_id,generation FROM contact_books WHERE id=?",
-            [book_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?
-        .ok_or(Error::InvalidRequest(DELETE_NOT_FOUND))?;
+    let Some((owner, generation)) = stored_book(&tx, book_id)? else {
+        // The local book is gone. A fence for this id means the deletion already ran (a re-run).
+        let refusal = if has_fence(&tx, book_id)? {
+            DELETE_ALREADY_DELETED
+        } else {
+            DELETE_NOT_FOUND
+        };
+        return Err(Error::InvalidRequest(refusal));
+    };
     if !revoked.contains(&owner.as_str()) {
         return Err(Error::InvalidRequest(DELETE_OWNER_NOT_REMOVED));
     }
@@ -139,6 +143,11 @@ pub(crate) fn delete(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Resul
     }
     if has_successor(&tx, &owner)? {
         return Err(Error::InvalidRequest(DELETE_OWNER_SUCCEEDED));
+    }
+    // Refused only when the fence already covers the book as stored. A continued book (a higher
+    // generation after an earlier deletion) is deleted again under a higher fence.
+    if fence_generation(&tx, book_id, &owner)?.is_some_and(|fenced| fenced >= generation) {
+        return Err(Error::InvalidRequest(DELETE_ALREADY_DELETED));
     }
     // Every stored contact gets a member record, tombstones included, so each contact's history
     // is superseded and can be pruned. The reported count is the live contacts.
@@ -197,31 +206,50 @@ fn now_ms() -> i64 {
         })
 }
 
-/// Highest generation fenced for `book_id` by a vault-wide deletion, if any.
-pub(crate) fn fence_generation(conn: &Connection, book_id: &str) -> Result<Option<i64>, Error> {
+/// Highest generation fenced for `book_id` by `owner`'s vault-wide deletion, if any.
+pub(crate) fn fence_generation(
+    conn: &Connection,
+    book_id: &str,
+    owner: &str,
+) -> Result<Option<i64>, Error> {
     Ok(conn
         .query_row(
-            "SELECT generation FROM deleted_contact_books WHERE book_id=?",
-            [book_id],
+            "SELECT generation FROM deleted_contact_books WHERE book_id=? AND owner_device_id=?",
+            params![book_id, owner],
             |row| row.get(0),
         )
         .optional()?)
 }
 
-/// Whether a record for `book_id` is covered by the book's fence. `generation` is the record's
-/// own generation. A record without one is judged by the stored book's generation, and an absent
-/// book counts as covered. Covered records are no-ops: they neither quarantine nor resurrect.
+/// Whether any owner's vault-wide deletion fenced `book_id`.
+fn has_fence(conn: &Connection, book_id: &str) -> Result<bool, Error> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM deleted_contact_books WHERE book_id=?)",
+        [book_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// Whether a record of `book_id` owned by `owner` is covered by that owner's fence. `generation`
+/// is the record's own generation. A record without one is judged by the stored book of the same
+/// owner, an absent book counts as covered, and a stored book of another owner is never covered.
+/// Covered records are no-ops: they neither quarantine nor resurrect.
 pub(crate) fn covers(
     conn: &Connection,
     book_id: &str,
+    owner: &str,
     generation: Option<i64>,
 ) -> Result<bool, Error> {
-    let Some(fenced) = fence_generation(conn, book_id)? else {
+    let Some(fenced) = fence_generation(conn, book_id, owner)? else {
         return Ok(false);
     };
     let generation = match generation {
         Some(generation) => generation,
-        None => stored_book(conn, book_id)?.map_or(0, |(_, stored)| stored),
+        None => match stored_book(conn, book_id)? {
+            Some((stored_owner, stored)) if stored_owner == owner => stored,
+            Some(_) => return Ok(false),
+            None => 0,
+        },
     };
     Ok(generation <= fenced)
 }
@@ -258,7 +286,7 @@ fn store_fence(
     deleted_at_ms: i64,
 ) -> Result<(), Error> {
     conn.execute(
-        "INSERT INTO deleted_contact_books(book_id,owner_device_id,generation,deleted_at_ms) VALUES(?,?,?,?) ON CONFLICT(book_id) DO UPDATE SET owner_device_id=excluded.owner_device_id,generation=excluded.generation,deleted_at_ms=excluded.deleted_at_ms WHERE excluded.generation > deleted_contact_books.generation",
+        "INSERT INTO deleted_contact_books(book_id,owner_device_id,generation,deleted_at_ms) VALUES(?,?,?,?) ON CONFLICT(book_id,owner_device_id) DO UPDATE SET generation=excluded.generation,deleted_at_ms=excluded.deleted_at_ms WHERE excluded.generation > deleted_contact_books.generation",
         params![book_id, owner, generation, deleted_at_ms],
     )?;
     Ok(())
@@ -355,6 +383,66 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM contact_books", [], |row| row.get(0))
             .unwrap();
         assert_eq!((contacts, books), (0, 0));
-        assert_eq!(fence_generation(&conn, "b1").unwrap(), Some(1));
+        assert_eq!(fence_generation(&conn, "b1", "owner").unwrap(), Some(1));
+    }
+
+    #[test]
+    fn fenced_photo_edit_request_holds_no_photo() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::contacts::initialize(&conn).unwrap();
+        crate::contact_media::initialize(&conn).unwrap();
+        let photo = "00000000-0000-4000-8000-0000000000aa";
+        let edit = PrivatePayload::ContactEditRequest {
+            request: json!({
+                "request_id": "r1",
+                "target_owner": "owner",
+                "book_id": "b1",
+                "photo_op": {"op": "set", "attachment_id": photo}
+            }),
+        };
+        let holders = || -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM contact_photo_references WHERE holder_id='r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+
+        crate::contact_media::after_apply(&conn, &edit).unwrap();
+        assert_eq!(holders(), 1, "control: an unfenced edit holds its photo");
+
+        store_fence(&conn, "b1", "owner", 1, 1).unwrap();
+        conn.execute("DELETE FROM contact_photo_references", [])
+            .unwrap();
+        crate::contact_media::after_apply(&conn, &edit).unwrap();
+        assert_eq!(holders(), 0, "a fenced edit holds nothing");
+    }
+
+    #[test]
+    fn book_fence_is_never_in_a_book_states_frontier() {
+        let fence = PrivatePayload::ContactBookDeleted {
+            book_id: "b1".into(),
+            owner_device_id: "owner".into(),
+            generation: "1".into(),
+            deleted_at_ms: 1,
+        };
+        let state = PrivatePayload::ContactBookState {
+            book: json!({"id": "b1", "owner_device_id": "owner", "generation": "2", "state": "active"}),
+        };
+        assert_eq!(
+            crate::compaction_identity(&fence).as_deref(),
+            Some("contact-book-deleted:b1")
+        );
+        assert_ne!(
+            crate::compaction_identity(&fence),
+            crate::compaction_identity(&state)
+        );
+        let group = |payload: &PrivatePayload| {
+            crate::compaction_group(payload)
+                .unwrap()
+                .map(|(name, parts, _)| (name, parts))
+        };
+        assert_ne!(group(&fence), group(&state));
     }
 }

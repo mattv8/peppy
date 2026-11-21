@@ -1683,3 +1683,41 @@ fn legacy_snapshot_after_a_deletion_cannot_resurrect_the_book() {
     }
     assert_eq!(returned[2..], expected[..]);
 }
+
+#[test]
+fn a_member_before_or_after_a_continued_upsert_stages_the_same_contact() {
+    let mut p = pair();
+    deleted_by_another_device(&mut p);
+    // The owner continues the deleted book at generation 2 and republishes Ada with a changed
+    // name, so the continuation carries a generation-2 upsert of her.
+    let mut continued = book(&p.owner_cfg, BOOK);
+    continued["generation"] = json!("2");
+    capture(&p.owner, &continued, vec![contact(BOOK, "c1", "Augusta")]);
+    p.server.upload(&p.owner);
+
+    let log = p.server.log.clone();
+    let (deletions, rest): (Vec<Envelope>, Vec<Envelope>) =
+        log.iter().cloned().partition(|envelope| {
+            matches!(
+                opened(&p.vault, envelope),
+                PrivatePayload::ContactBookDeleted { .. }
+                    | PrivatePayload::ContactBookDeletedMember { .. }
+            )
+        });
+    // Log order stages the generation-1 members before the continuation; the reversed order
+    // stages them after it. Ada, republished at generation 2, survives either way.
+    let members_after: Vec<Envelope> = rest.into_iter().chain(deletions).collect();
+    for (name, records) in [("before", &log), ("after", &members_after)] {
+        let receiver = unlocked(&config(&p._dir, name, &p.vault), &p.vault);
+        import(&receiver, &full(records), records.len(), Some(7));
+        settle(&receiver);
+        assert_eq!(
+            state(&receiver),
+            Some((SnapshotProjectionState::Promoted, None))
+        );
+        assert!(
+            visible(&receiver, BOOK).iter().any(|id| id == "c1"),
+            "{name}: the continued contact is kept"
+        );
+    }
+}

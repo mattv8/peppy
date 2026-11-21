@@ -373,7 +373,7 @@ CREATE TABLE IF NOT EXISTS contact_scan_holds(scan_id TEXT PRIMARY KEY, book_id 
 CREATE TABLE IF NOT EXISTS contact_scan_baselines(scan_id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS contact_scan_baseline(scan_id TEXT NOT NULL, contact_id TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(scan_id,contact_id));
 CREATE TABLE IF NOT EXISTS contact_restore_claims(book_id TEXT NOT NULL, tombstone_id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL, contact_id TEXT NOT NULL, PRIMARY KEY(book_id,tombstone_id));
-CREATE TABLE IF NOT EXISTS deleted_contact_books(book_id TEXT PRIMARY KEY, owner_device_id TEXT NOT NULL, generation INTEGER NOT NULL, deleted_at_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS deleted_contact_books(book_id TEXT NOT NULL, owner_device_id TEXT NOT NULL, generation INTEGER NOT NULL, deleted_at_ms INTEGER NOT NULL, PRIMARY KEY(book_id,owner_device_id));
 ",
     )?;
     let has_key_epoch = conn
@@ -2430,11 +2430,19 @@ fn apply_peer(
                 return Ok(false);
             }
             // Checked before the owner test: a deleted book has no stored owner left to match.
-            let book_generation = tombstone
-                .get("book")
-                .map(|book| revision(book, "generation"))
-                .transpose()?;
-            if crate::contact_book_deletion::covers(conn, book_id, book_generation)? {
+            // Without an embedded book, the stored owner (or the producer, for an absent book)
+            // is the fence owner the removal is judged against.
+            let (fence_owner, book_generation) = match tombstone.get("book") {
+                Some(book) => (
+                    req(book, "owner_device_id")?.to_owned(),
+                    Some(revision(book, "generation")?),
+                ),
+                None => (
+                    stored_owner(conn, book_id)?.unwrap_or_else(|| producer.to_owned()),
+                    None,
+                ),
+            };
+            if crate::contact_book_deletion::covers(conn, book_id, &fence_owner, book_generation)? {
                 return Ok(true);
             }
             let owner = stored_owner(conn, book_id)?;
@@ -2470,7 +2478,7 @@ fn apply_peer(
             let target = req(request, "target_owner")?;
             let book_id = req(request, "book_id")?;
             // A request for a book deleted vault-wide is an applied no-op: no ledger row, no permit.
-            if crate::contact_book_deletion::covers(conn, book_id, None)? {
+            if crate::contact_book_deletion::covers(conn, book_id, target, None)? {
                 return Ok(true);
             }
             let expires = request
@@ -2509,12 +2517,13 @@ fn apply_peer(
             let Some((body, current, book_id)) = row else {
                 return Ok(true);
             };
+            let request: Value = serde_json::from_str(&body).map_err(|_| Error::Database)?;
+            let target = req(&request, "target_owner")?;
             // A result for a book deleted vault-wide is a no-op, never a quarantine.
-            if crate::contact_book_deletion::covers(conn, &book_id, None)? {
+            if crate::contact_book_deletion::covers(conn, &book_id, target, None)? {
                 return Ok(true);
             }
-            let request: Value = serde_json::from_str(&body).map_err(|_| Error::Database)?;
-            if req(&request, "target_owner")? != producer
+            if target != producer
                 || stored_owner(conn, &book_id)?.is_some_and(|owner| owner != producer)
                 || result
                     .get("book_id")
@@ -2550,7 +2559,12 @@ fn apply_peer(
 /// Whether a book record is at or below its book's vault-wide deletion fence.
 fn book_fenced(conn: &Connection, book: &Value) -> Result<bool, Error> {
     let generation = revision(book, "generation")?;
-    crate::contact_book_deletion::covers(conn, req(book, "id")?, Some(generation))
+    crate::contact_book_deletion::covers(
+        conn,
+        req(book, "id")?,
+        req(book, "owner_device_id")?,
+        Some(generation),
+    )
 }
 
 /// Book state from its owner. A foreign owner quarantines; an older generation is
