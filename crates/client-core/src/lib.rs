@@ -122,6 +122,8 @@ mod rcs_mirror;
 pub use quick_reply::{QuickReplyContext, QuickReplyInput};
 pub use rcs_media::PendingReceiveTask;
 pub use rcs_media::{RcsMediaReceiveView, ReceiveDownloadAdmission};
+#[cfg(test)]
+mod decoder_recovery_paging_tests;
 mod rcs_native;
 mod rcs_receive;
 mod rcs_send;
@@ -304,6 +306,8 @@ pub(crate) mod snapshot_sql {
 }
 /// Upper bound applied to `apply_pending(limit)`.
 pub const MAX_APPLY_BATCH: usize = 1_000;
+/// Scan pages of omitted RCS conversation metadata per `apply_pending` call.
+const RCS_METADATA_SUPERSEDE_PAGES: usize = 4;
 /// Outbox rows sealed implicitly by enqueue/unlock/import/upload; use `seal_pending_batch` for more.
 pub const MAX_SEAL_BATCH: usize = 256;
 /// Maximum messages returned by one bounded history query.
@@ -461,6 +465,10 @@ pub enum Error {
     /// history would exceed recovery capacity (then durably paused in the imported scan scope).
     #[error("SMS acquisition capacity reached")]
     SmsCapacity,
+    /// Decoder recovery is pending after a deferred key install. Writes that depend on recovered
+    /// state are refused until `recover_decoder_page` finishes it.
+    #[error("Peppy is updating your messages. Try again when it finishes.")]
+    RecoveryPending,
 }
 
 /// Advisory metadata for the next ordered RCS media upload. It contains no plaintext path or
@@ -1538,6 +1546,15 @@ pub struct DecoderRecoveryProgress {
     pub total: u64,
 }
 
+/// Whether a key install completes decoder recovery inside the call (`Inline`, the default) or
+/// leaves it to `Client::recover_decoder_page` (`Deferred`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DecoderRecoveryMode {
+    #[default]
+    Inline,
+    Deferred,
+}
+
 /// Opaque purpose-key cache for native secure storage only. It deliberately implements no
 /// `Debug`, `Clone` or `Serialize`; never place it in UI view models, JS, logs or plain files.
 /// Bound to format version, vault, device, epoch, profile fingerprint and both purposes.
@@ -1619,6 +1636,7 @@ pub(crate) struct Store {
     ephemeral_v2: ephemeral_v2::EphemeralV2State,
     pub(crate) media_dir: PathBuf,
     pub(crate) media_cache: media_cache::MediaCacheState,
+    decoder_recovery_mode: DecoderRecoveryMode,
 }
 struct Ctx<'a> {
     vault_id: VaultId,
@@ -2456,6 +2474,7 @@ impl Client {
             ephemeral_v2: ephemeral_v2::EphemeralV2State::default(),
             media_dir,
             media_cache: media_cache::MediaCacheState::default(),
+            decoder_recovery_mode: DecoderRecoveryMode::Inline,
         };
         initialize(&mut store)?;
         // Opening a store is the recovery boundary for group creates: only begun rows left by an
@@ -2722,6 +2741,7 @@ impl Client {
     }
     pub fn begin_contact_scan(&self, input: &str) -> Result<String, Error> {
         let mut store = self.lock()?;
+        ensure_recovery_complete(&store)?;
         let (conn, ctx) = store.parts();
         contacts::begin_scan(conn, &ctx, input)
     }
@@ -2732,6 +2752,7 @@ impl Client {
     }
     pub fn finish_contact_scan(&self, input: &str) -> Result<String, Error> {
         let mut store = self.lock()?;
+        ensure_recovery_complete(&store)?;
         let (conn, ctx) = store.parts();
         contacts::finish_scan(conn, &ctx, input)
     }
@@ -2809,12 +2830,14 @@ impl Client {
         transport: &str,
     ) -> Result<String, Error> {
         let mut store = self.lock()?;
+        ensure_recovery_complete(&store)?;
         let (conn, ctx) = store.parts();
         message_history_capture::begin(conn, &ctx, provider_generation, transport)
     }
     /// Finishes a previously admitted provider page and publishes terminal aggregate results.
     pub fn finish_message_history_capture(&self, input: &str) -> Result<String, Error> {
         let mut store = self.lock()?;
+        ensure_recovery_complete(&store)?;
         let (conn, ctx) = store.parts();
         message_history_capture::finish(conn, &ctx, input)
     }
@@ -2824,6 +2847,7 @@ impl Client {
         provider_generation: &str,
     ) -> Result<String, Error> {
         let mut store = self.lock()?;
+        ensure_recovery_complete(&store)?;
         let (conn, ctx) = store.parts();
         message_history_capture::drain(conn, &ctx, provider_generation)
     }
@@ -2836,6 +2860,7 @@ impl Client {
     /// Records an intermediate or terminal bounded carrier-history pass for this phone.
     pub fn record_message_history_progress(&self, input: &str) -> Result<String, Error> {
         let mut store = self.lock()?;
+        ensure_recovery_complete(&store)?;
         let (conn, ctx) = store.parts();
         message_history_protocol::record_progress(conn, &ctx, input)
     }
@@ -2860,6 +2885,7 @@ impl Client {
     }
     pub fn next_contact_apply_permit(&self, input: &str) -> Result<String, Error> {
         let mut store = self.lock()?;
+        ensure_recovery_complete(&store)?;
         let (conn, ctx) = store.parts();
         contacts::next_permit(conn, &ctx, input)
     }
@@ -3060,18 +3086,7 @@ impl Client {
         s.identity_recovery_keys
             .insert(profile.key_epoch, identity_recovery_key);
         s.identity_bootstrap_epochs.insert(profile.key_epoch);
-        recover_decoder_revision(
-            &s.conn,
-            &Ctx {
-                vault_id: s.config.vault_id,
-                device_id: s.config.device_id,
-                keys: &s.keys,
-                active_epoch: s.active_epoch,
-            },
-            profile.key_epoch,
-            &mut |_| {},
-        )?;
-        seal_with_store(s)
+        complete_key_install(s, profile.key_epoch, &mut |_| {})
     }
 
     /// Attempts an import from a borrowed opaque handoff. The original remains available for a
@@ -3171,18 +3186,7 @@ impl Client {
         s.identity_recovery_keys
             .insert(profile.key_epoch, identity_recovery_key);
         s.identity_bootstrap_epochs.insert(profile.key_epoch);
-        recover_decoder_revision(
-            &s.conn,
-            &Ctx {
-                vault_id: s.config.vault_id,
-                device_id: s.config.device_id,
-                keys: &s.keys,
-                active_epoch: s.active_epoch,
-            },
-            profile.key_epoch,
-            &mut |_| {},
-        )?;
-        seal_with_store(s)
+        complete_key_install(s, profile.key_epoch, &mut |_| {})
     }
 
     /// Manual epoch cutover. Requires the newer epoch to be unlocked; older epochs stay
@@ -3479,6 +3483,66 @@ impl Client {
         Ok(NativeKeyCache(key_cache_bytes(&s.config, epoch, keys)?))
     }
 
+    /// Selects whether key installs complete decoder recovery inline (the default) or leave it to
+    /// `recover_decoder_page`.
+    pub fn set_decoder_recovery_mode(&self, mode: DecoderRecoveryMode) -> Result<(), Error> {
+        self.lock()?.decoder_recovery_mode = mode;
+        Ok(())
+    }
+
+    /// Refuses early, before input validation. Each write still checks under its own lock.
+    fn refuse_while_recovering(&self) -> Result<(), Error> {
+        let store = self.lock()?;
+        ensure_recovery_complete(&store)
+    }
+
+    /// Aggregate progress over unlocked epochs whose decoder marker is not current, or `None`.
+    /// Sealing still owed after recovery is reported as zero of zero for the owing epoch.
+    pub fn decoder_recovery_pending(&self) -> Result<Option<DecoderRecoveryProgress>, Error> {
+        let s = self.lock()?;
+        if let Some(progress) = aggregate_decoder_progress(&s.conn, &s.keys)? {
+            return Ok(Some(progress));
+        }
+        Ok(
+            post_recovery_seal_owed(&s.conn)?.map(|epoch| DecoderRecoveryProgress {
+                epoch,
+                completed: 0,
+                total: 0,
+            }),
+        )
+    }
+
+    /// Runs one bounded page of pending decoder recovery for the lowest pending epoch. The call
+    /// that finishes the last epoch also runs the post-recovery sealing and returns its final
+    /// progress; the next call returns `None`.
+    pub fn recover_decoder_page(
+        &self,
+        max_rows: u32,
+    ) -> Result<Option<DecoderRecoveryProgress>, Error> {
+        let mut guard = self.lock()?;
+        let s = &mut *guard;
+        let Some(epoch) = lowest_pending_epoch(&s.conn, &s.keys)? else {
+            if post_recovery_seal_owed(&s.conn)?.is_some() {
+                run_post_recovery_seal(s)?;
+            }
+            return Ok(None);
+        };
+        let step = {
+            let (conn, ctx) = s.parts();
+            recover_epoch_page(conn, &ctx, epoch, max_rows)?
+        };
+        let EpochPage::Advanced { progress, .. } = step else {
+            return Ok(None);
+        };
+        match aggregate_decoder_progress(&s.conn, &s.keys)? {
+            Some(pending) => Ok(Some(pending)),
+            None => {
+                run_post_recovery_seal(s)?;
+                Ok(Some(progress))
+            }
+        }
+    }
+
     /// Restores purpose keys without a passphrase. Requires this device's pinned profile for
     /// the cached epoch and the integrity check recorded at passphrase unlock; it never pins a
     /// profile or changes the active epoch. Validation failures (cache format, identity, pinned
@@ -3581,18 +3645,7 @@ impl Client {
             handoff,
         };
         s.keys.insert(epoch, keys);
-        recover_decoder_revision(
-            &s.conn,
-            &Ctx {
-                vault_id: s.config.vault_id,
-                device_id: s.config.device_id,
-                keys: &s.keys,
-                active_epoch: s.active_epoch,
-            },
-            epoch,
-            on_progress,
-        )?;
-        seal_with_store(s)
+        complete_key_install(s, epoch, on_progress)
     }
 
     pub fn key_status(&self) -> Result<KeyStatus, Error> {
@@ -5294,6 +5347,7 @@ impl Client {
 
     /// Journals one server event at `cursor` before any decryption.
     pub fn ingest(&self, envelope: &Envelope, cursor: Cursor) -> Result<IngestResult, Error> {
+        self.refuse_while_recovering()?;
         let wire = typed_wire(envelope)?;
         let parsed = parse_wire(&wire);
         self.journal(cursor, wire, parsed.as_ref())
@@ -5301,6 +5355,7 @@ impl Client {
 
     /// Like `ingest`, for raw server JSON. Unparseable bytes are quarantined at their cursor.
     pub fn ingest_raw(&self, envelope_json: &[u8], cursor: Cursor) -> Result<IngestResult, Error> {
+        self.refuse_while_recovering()?;
         let wire = raw_wire(envelope_json)?;
         let parsed = parse_wire(&wire);
         self.journal(cursor, wire, parsed.as_ref())
@@ -5311,6 +5366,7 @@ impl Client {
         &self,
         records: &[RawReplayRecord],
     ) -> Result<IngestBatchReport, Error> {
+        self.refuse_while_recovering()?;
         if records.is_empty() || records.len() > MAX_REPLAY_PAGE {
             return Err(Error::InvalidRequest("replay page size"));
         }
@@ -5337,6 +5393,8 @@ impl Client {
         }
 
         let mut guard = self.lock()?;
+
+        ensure_recovery_complete(&guard)?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut report = IngestBatchReport::default();
@@ -5529,6 +5587,7 @@ impl Client {
     pub fn apply_pending(&self, limit: usize) -> Result<ApplyReport, Error> {
         let limit = limit.min(MAX_APPLY_BATCH);
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let (conn, ctx) = guard.parts();
         let frontier = to_i64(receive_cursor(conn)?)?;
         let epochs = ctx
@@ -5617,6 +5676,12 @@ impl Client {
             |r| r.get(0),
         )?;
         report.waiting_for_keys = usize::try_from(waiting).map_err(|_| Error::Database)?;
+        // A page can scan only rows that stay fenced, so several pages run per pass; the
+        // persisted scan position keeps later passes from rescanning them.
+        for _ in 0..RCS_METADATA_SUPERSEDE_PAGES {
+            let superseded = snapshot_projection::supersede_omitted_rcs_metadata(&tx, &ctx, limit)?;
+            report.superseded += usize::try_from(superseded).map_err(|_| Error::Database)?;
+        }
         // After every row and any promotion above: fences applied here owe their members.
         contact_book_deletion::drain_completion(&mut tx, &ctx)?;
         advance_processed_frontier(&tx)?;
@@ -5676,7 +5741,8 @@ impl Client {
                 || projection_work
                 || pending_journal
                 || owed_members
-                || conversation_merge::has_work(&store.conn)?,
+                || conversation_merge::has_work(&store.conn)?
+                || snapshot_projection::supersede_scan_pending(&store.conn)?,
             pending_snapshot,
         })
     }
@@ -5962,6 +6028,7 @@ impl Client {
 
     pub fn process_pending_send_cancellations(&self) -> Result<bool, Error> {
         let mut store = self.lock()?;
+        ensure_recovery_complete(&store)?;
         let (conn, ctx) = store.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let rows = tx.prepare("SELECT message_id,command_id FROM send_cancellations WHERE target_gateway_id=? AND state='requested'")?
@@ -6044,6 +6111,7 @@ impl Client {
         now_ms: i64,
     ) -> Result<PermitDecision, Error> {
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let active = guard.active_epoch;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -6229,6 +6297,7 @@ impl Client {
     ) -> Result<NativeRcsCommitProjection, Error> {
         let (command_id, target, media) = preparation.into_parts();
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let active = guard.active_epoch;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -6645,6 +6714,7 @@ impl Client {
         now_ms: i64,
     ) -> Result<RcsPermit, Error> {
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let active = guard.active_epoch;
         let gateway_id = guard.config.device_id;
         let tx = guard
@@ -6741,6 +6811,7 @@ impl Client {
         now_ms: i64,
     ) -> Result<AutomaticPermitDecision, Error> {
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let active = guard.active_epoch;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -8488,6 +8559,7 @@ impl Client {
         manifest: bool,
     ) -> Result<SnapshotProgress, Error> {
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         if purpose == SnapshotPurpose::Restore {
             set_meta(&guard.conn, "restore_guard", "1")?;
             attachment_retention::require_reconciliation(&guard.conn)?;
@@ -8591,6 +8663,7 @@ impl Client {
         generation: u64,
         records: &[SnapshotRecord],
     ) -> Result<SnapshotProgress, Error> {
+        self.refuse_while_recovering()?;
         self.check_page_shape(records.len())?;
         let mut page = Vec::with_capacity(records.len());
         let mut input_bytes = 0usize;
@@ -8616,6 +8689,7 @@ impl Client {
         generation: u64,
         records: &[RawSnapshotRecord],
     ) -> Result<SnapshotProgress, Error> {
+        self.refuse_while_recovering()?;
         self.check_page_shape(records.len())?;
         let input_bytes = records
             .iter()
@@ -8641,10 +8715,12 @@ impl Client {
         generation: u64,
         entries: &[SnapshotManifestEntry],
     ) -> Result<SnapshotManifestProgress, Error> {
+        self.refuse_while_recovering()?;
         if entries.is_empty() || entries.len() > MAX_SNAPSHOT_MANIFEST_PAGE {
             return Err(Error::InvalidRequest("snapshot manifest page"));
         }
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -8685,6 +8761,7 @@ impl Client {
     /// Stale or incomplete generations return `SnapshotMismatch` without touching a newer one.
     pub fn finish_snapshot(&self, generation: u64) -> Result<SnapshotReport, Error> {
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -8778,6 +8855,7 @@ impl Client {
         page: Vec<(Cursor, Vec<u8>)>,
     ) -> Result<SnapshotProgress, Error> {
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -8925,6 +9003,7 @@ impl Client {
             .filter(|cursor| *cursor > 0)
             .ok_or(Error::InvalidCursor)?;
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let result = journal_record(
@@ -11704,104 +11783,293 @@ fn initialize_battery_lookup_indexes(conn: &mut Connection) -> Result<(), Error>
     Ok(())
 }
 
+/// Runs decoder recovery for `epoch` to completion inside the call (the inline mode).
 fn recover_decoder_revision(
     conn: &Connection,
     ctx: &Ctx,
     epoch: u32,
     on_progress: &mut dyn FnMut(DecoderRecoveryProgress),
 ) -> Result<(), Error> {
+    loop {
+        match recover_epoch_page(conn, ctx, epoch, DECODER_RECOVERY_PAGE_ROWS)? {
+            EpochPage::Current => return Ok(()),
+            EpochPage::Advanced { progress, finished } => {
+                on_progress(progress);
+                if finished {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+/// Runs one page of decoder recovery for `epoch`. The page's writes and its resume record commit
+/// in one transaction. The page that finds no eligible rows writes the epoch marker and deletes
+/// the resume record in the same transaction.
+fn recover_epoch_page(
+    conn: &Connection,
+    ctx: &Ctx,
+    epoch: u32,
+    max_rows: u32,
+) -> Result<EpochPage, Error> {
     let marker = format!("decoder_revision:{epoch}");
+    let cursor_key = decoder_recovery_cursor_key(epoch);
     let stored_revision = get_meta(conn, &marker)?;
     if stored_revision.as_deref() == Some(DECODER_REVISION) {
-        return Ok(());
+        return Ok(EpochPage::Current);
     }
     let Some(keys) = ctx.keys.get(&epoch) else {
-        return Ok(());
+        return Ok(EpochPage::Current);
     };
     let needs_applied = decoder_recovery_needs_applied(stored_revision.as_deref());
-    let eligible = if needs_applied {
-        "((status='quarantined' AND reason='invalid_payload') OR status='applied')"
-    } else {
-        "(status='quarantined' AND reason='invalid_payload')"
-    };
-    let total: u64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM journal WHERE key_epoch=? AND {eligible}"),
-        params![epoch],
-        |row| row.get(0),
-    )?;
-    let mut completed = 0_u64;
-    let mut after = i64::MIN;
-    loop {
-        let rows: Vec<(i64, String, Vec<u8>, bool)> = {
-            let mut query = conn.prepare(&format!(
-                "SELECT cursor,status,wire,historical FROM journal WHERE key_epoch=? AND cursor>? AND {eligible} ORDER BY cursor LIMIT 256",
-            ))?;
-            query
-                .query_map(params![epoch, after], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })?
-                .collect::<Result<_, _>>()?
-        };
-        if rows.is_empty() {
-            break;
+    let eligible = decoder_recovery_eligible(needs_applied);
+    let source = stored_revision.unwrap_or_else(|| "none".to_owned());
+    let scope = decoder_recovery_scope(needs_applied);
+    let tx = conn.unchecked_transaction()?;
+    let mut record = match read_decoder_cursor(&tx, &cursor_key)? {
+        Some(record)
+            if record.target == DECODER_REVISION
+                && record.source == source
+                && record.scope == scope =>
+        {
+            record
         }
-        after = rows.last().expect("nonempty recovery page").0;
-        let page_len = rows.len() as u64;
-        for (cursor, status, wire, historical) in rows {
-            let Some(envelope) = parse_wire(&wire) else {
-                continue;
-            };
-            if envelope.purpose != EnvelopePurpose::Event
-                || envelope.key_epoch != epoch
-                || envelope.profile_fingerprint != keys.fingerprint
-                || envelope.crypto_suite != keys.profile.crypto_suite
-            {
-                continue;
-            }
-            let (Some(sealed), Ok(aad)) = (open_frame(&envelope.ciphertext), envelope.aad_bytes())
-            else {
-                continue;
-            };
-            let Ok(plain) = decrypt(&keys.event, &aad, &sealed) else {
-                continue;
-            };
-            let (payload, inner_compaction) = match parse_authenticated_payload(&plain) {
-                Ok(payload) => payload,
-                Err(_) => {
-                    let is_malformed_lww_event =
-                        serde_json::from_slice::<serde_json::Value>(&plain)
-                            .ok()
-                            .is_some_and(|value| {
-                                matches!(
-                                    value.get("kind").and_then(|kind| kind.as_str()),
-                                    Some(
-                                        "conversation_pin"
-                                            | "conversation_folder"
-                                            | "sender_blocklist"
-                                            | "conversation_tone"
-                                            | "notification_preferences"
-                                    )
-                                )
-                            });
-                    if status == "applied" && is_malformed_lww_event {
-                        conn.execute(
+        _ => DecoderRecoveryCursor {
+            target: DECODER_REVISION.to_owned(),
+            source: source.clone(),
+            scope: scope.to_owned(),
+            last_cursor: i64::MIN,
+            completed: 0,
+            total: count_decoder_recovery_rows(&tx, epoch, needs_applied, i64::MIN)?,
+        },
+    };
+    record.completed = record.completed.min(record.total);
+    let conn: &Connection = &tx;
+    let rows: Vec<(i64, String, Vec<u8>, bool)> = {
+        let mut query = conn.prepare(&format!(
+            "SELECT cursor,status,wire,historical FROM journal WHERE key_epoch=? AND cursor>? AND {eligible} ORDER BY cursor LIMIT ?",
+        ))?;
+        query
+            .query_map(
+                params![epoch, record.last_cursor, i64::from(max_rows.max(1))],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?
+            .collect::<Result<_, _>>()?
+    };
+    if rows.is_empty() {
+        set_meta(conn, &marker, DECODER_REVISION)?;
+        conn.execute(
+            "DELETE FROM metadata WHERE k=?",
+            params![cursor_key.as_str()],
+        )?;
+        // Sealing that follows recovery is owed until it succeeds; the marker alone cannot carry it.
+        set_meta(conn, POST_RECOVERY_SEAL_KEY, &epoch.to_string())?;
+        tx.commit()?;
+        return Ok(EpochPage::Advanced {
+            progress: DecoderRecoveryProgress {
+                epoch,
+                completed: record.total,
+                total: record.total,
+            },
+            finished: true,
+        });
+    }
+    let page_last = rows.last().expect("nonempty recovery page").0;
+    let page_len = rows.len() as u64;
+    for (cursor, status, wire, historical) in rows {
+        let Some(envelope) = parse_wire(&wire) else {
+            continue;
+        };
+        if envelope.purpose != EnvelopePurpose::Event
+            || envelope.key_epoch != epoch
+            || envelope.profile_fingerprint != keys.fingerprint
+            || envelope.crypto_suite != keys.profile.crypto_suite
+        {
+            continue;
+        }
+        let (Some(sealed), Ok(aad)) = (open_frame(&envelope.ciphertext), envelope.aad_bytes())
+        else {
+            continue;
+        };
+        let Ok(plain) = decrypt(&keys.event, &aad, &sealed) else {
+            continue;
+        };
+        let (payload, inner_compaction) = match parse_authenticated_payload(&plain) {
+            Ok(payload) => payload,
+            Err(_) => {
+                let is_malformed_lww_event = serde_json::from_slice::<serde_json::Value>(&plain)
+                    .ok()
+                    .is_some_and(|value| {
+                        matches!(
+                            value.get("kind").and_then(|kind| kind.as_str()),
+                            Some(
+                                "conversation_pin"
+                                    | "conversation_folder"
+                                    | "sender_blocklist"
+                                    | "conversation_tone"
+                                    | "notification_preferences"
+                            )
+                        )
+                    });
+                if status == "applied" && is_malformed_lww_event {
+                    conn.execute(
                             "UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?",
                             params![cursor],
                         )?;
-                    }
-                    continue;
                 }
-            };
-            if envelope.compaction.as_ref() != inner_compaction.as_ref() {
-                conn.execute(
+                continue;
+            }
+        };
+        if envelope.compaction.as_ref() != inner_compaction.as_ref() {
+            conn.execute(
                     "UPDATE journal SET status='quarantined',reason='authentication_failed' WHERE cursor=?",
                     params![cursor],
                 )?;
-                continue;
+            continue;
+        }
+        if status == "quarantined"
+            && matches!(&payload, PrivatePayload::RcsMessageStatus { .. })
+            && envelope.vault_id == ctx.vault_id
+            && envelope.validate().is_ok()
+            && storage_sequence_fits(envelope.producer_sequence.0)
+            && envelope.compaction.as_ref().is_none_or(|metadata| {
+                metadata
+                    .supersedes
+                    .iter()
+                    .all(|reference| storage_sequence_fits(reference.producer_sequence.0))
+            })
+            && serde_json::from_slice::<serde_json::Value>(&plain)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .as_object()
+                        .map(|object| !object.contains_key("rcs_reported"))
+                })
+                == Some(true)
+        {
+            snapshot_projection::recover_legacy_rcs_status(conn, cursor)?;
+            continue;
+        }
+        if matches!(
+            &payload,
+            PrivatePayload::SendCancellationCapability { .. }
+                | PrivatePayload::SendCancellationRequest { .. }
+                | PrivatePayload::SendCancellationResult { .. }
+                | PrivatePayload::ReactionCapability { .. }
+                | PrivatePayload::ReactionRequest { .. }
+                | PrivatePayload::ReactionResult { .. }
+                | PrivatePayload::MessageReactions { .. }
+        ) && !storage_sequence_fits(envelope.producer_sequence.0)
+        {
+            conn.execute(
+                "UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?",
+                [cursor],
+            )?;
+            continue;
+        }
+        match (status.as_str(), payload) {
+            ("quarantined", PrivatePayload::MmsMessage { message, media, .. })
+                if valid_message(&message, envelope.producer_device_id)
+                    && media_matches(&message, &media) =>
+            {
+                conn.execute(
+                    "UPDATE journal SET status='pending',reason=NULL,historical=1 WHERE cursor=? AND status='quarantined' AND reason='invalid_payload'",
+                    params![cursor],
+                )?;
             }
-            if status == "quarantined"
-                && matches!(&payload, PrivatePayload::RcsMessageStatus { .. })
-                && envelope.vault_id == ctx.vault_id
+            (
+                "applied",
+                PrivatePayload::MmsOwnAddress {
+                    source_device_id,
+                    subscription_id,
+                    address,
+                    revision,
+                },
+            ) => {
+                if source_device_id != envelope.producer_device_id
+                    || !mms_identity::valid_mms_own_address(&subscription_id, &address, revision)
+                {
+                    conn.execute(
+                        "UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?",
+                        params![cursor],
+                    )?;
+                    continue;
+                }
+                mms_identity::apply_mms_own_address(
+                    conn,
+                    source_device_id,
+                    &subscription_id,
+                    &address,
+                    revision,
+                )?;
+            }
+            ("applied", PrivatePayload::MmsMessage { message, media, .. })
+                if valid_message(&message, envelope.producer_device_id)
+                    && media_matches(&message, &media) =>
+            {
+                hydrate_mms_context(conn, &message)?;
+            }
+            (
+                "applied",
+                PrivatePayload::MessageOriginAlias {
+                    message_id,
+                    origin_key,
+                },
+            ) => {
+                message_origin::apply_alias(conn, &message_id, &origin_key)?;
+            }
+            (
+                "applied",
+                PrivatePayload::DeviceHintRegistered {
+                    device_id,
+                    platform,
+                    hint_tag,
+                    key_epoch,
+                },
+            ) if device_id == envelope.producer_device_id => {
+                device_succession::apply_hint(
+                    conn,
+                    ctx,
+                    &device_id,
+                    &platform,
+                    &hint_tag,
+                    if key_epoch == 0 {
+                        envelope.key_epoch
+                    } else {
+                        key_epoch
+                    },
+                )?;
+            }
+            (
+                "applied",
+                PrivatePayload::DeviceSucceeded {
+                    predecessor,
+                    successor,
+                    platform,
+                    hint_tag,
+                    key_epoch,
+                },
+            ) => {
+                let _ = device_succession::apply_succession(
+                    conn,
+                    envelope.producer_device_id,
+                    predecessor,
+                    successor,
+                    &platform,
+                    &hint_tag,
+                    key_epoch,
+                )?;
+            }
+            (
+                "quarantined",
+                PrivatePayload::ConversationFolder {
+                    conversation_id,
+                    folder,
+                    archived_through_ms,
+                    logical_revision,
+                    writer_device_id,
+                },
+            ) if envelope.vault_id == ctx.vault_id
                 && envelope.validate().is_ok()
                 && storage_sequence_fits(envelope.producer_sequence.0)
                 && envelope.compaction.as_ref().is_none_or(|metadata| {
@@ -11810,509 +12078,609 @@ fn recover_decoder_revision(
                         .iter()
                         .all(|reference| storage_sequence_fits(reference.producer_sequence.0))
                 })
-                && serde_json::from_slice::<serde_json::Value>(&plain)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .as_object()
-                            .map(|object| !object.contains_key("rcs_reported"))
-                    })
-                    == Some(true)
+                && conversation_folders::valid_event(
+                    conversation_id,
+                    folder,
+                    archived_through_ms,
+                    logical_revision,
+                    &writer_device_id,
+                    &envelope.producer_device_id.to_string(),
+                ) =>
             {
-                snapshot_projection::recover_legacy_rcs_status(conn, cursor)?;
-                continue;
+                snapshot_projection::recover_folder_event(conn, cursor)?;
             }
-            if matches!(
-                &payload,
-                PrivatePayload::SendCancellationCapability { .. }
-                    | PrivatePayload::SendCancellationRequest { .. }
-                    | PrivatePayload::SendCancellationResult { .. }
-                    | PrivatePayload::ReactionCapability { .. }
-                    | PrivatePayload::ReactionRequest { .. }
-                    | PrivatePayload::ReactionResult { .. }
-                    | PrivatePayload::MessageReactions { .. }
-            ) && !storage_sequence_fits(envelope.producer_sequence.0)
+            (
+                "applied",
+                PrivatePayload::ConversationFolder {
+                    conversation_id,
+                    folder,
+                    archived_through_ms,
+                    logical_revision,
+                    writer_device_id,
+                },
+            ) => {
+                let producer = envelope.producer_device_id.to_string();
+                if !conversation_folders::valid_event(
+                    conversation_id,
+                    folder,
+                    archived_through_ms,
+                    logical_revision,
+                    &writer_device_id,
+                    &producer,
+                ) {
+                    conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
+                    continue;
+                }
+                conversation_folders::apply(
+                    conn,
+                    conversation_id,
+                    folder,
+                    archived_through_ms,
+                    logical_revision,
+                    &writer_device_id,
+                    &producer,
+                    envelope.producer_sequence.0,
+                )?;
+                learn_compaction(
+                    conn,
+                    Some(&format!("conversation-folder:{conversation_id}")),
+                    &producer,
+                    to_i64(envelope.producer_sequence.0)?,
+                    envelope.compaction.as_ref(),
+                )?;
+            }
+            (
+                "applied",
+                PrivatePayload::SenderBlocklist {
+                    numbers,
+                    can_unblock,
+                    logical_revision,
+                    writer_device_id,
+                },
+            ) => {
+                let producer = envelope.producer_device_id.to_string();
+                if !sender_blocklist::valid_blocklist(
+                    &numbers,
+                    logical_revision,
+                    &writer_device_id,
+                    &producer,
+                ) {
+                    conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
+                    continue;
+                }
+                sender_blocklist::apply_blocklist(
+                    conn,
+                    &numbers,
+                    can_unblock,
+                    logical_revision,
+                    &writer_device_id,
+                    &producer,
+                    envelope.producer_sequence.0,
+                )?;
+                learn_compaction(
+                    conn,
+                    Some(&format!("sender-blocklist:{producer}")),
+                    &producer,
+                    to_i64(envelope.producer_sequence.0)?,
+                    envelope.compaction.as_ref(),
+                )?;
+            }
+            // Requests an older decoder skipped are history: recorded, never actionable.
+            (
+                "applied",
+                PrivatePayload::SenderUnblockRequest {
+                    request_id,
+                    conversation_id,
+                    numbers,
+                    target_device_id,
+                    writer_device_id,
+                    created_at_ms,
+                },
+            ) if sender_blocklist::valid_request(
+                conversation_id,
+                &numbers,
+                &target_device_id,
+                &writer_device_id,
+                &envelope.producer_device_id.to_string(),
+                created_at_ms,
+            ) =>
             {
-                conn.execute(
-                    "UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?",
-                    [cursor],
-                )?;
-                continue;
-            }
-            match (status.as_str(), payload) {
-                ("quarantined", PrivatePayload::MmsMessage { message, media, .. })
-                    if valid_message(&message, envelope.producer_device_id)
-                        && media_matches(&message, &media) =>
-                {
-                    conn.execute(
-                    "UPDATE journal SET status='pending',reason=NULL,historical=1 WHERE cursor=? AND status='quarantined' AND reason='invalid_payload'",
-                    params![cursor],
-                )?;
-                }
-                (
-                    "applied",
-                    PrivatePayload::MmsOwnAddress {
-                        source_device_id,
-                        subscription_id,
-                        address,
-                        revision,
-                    },
-                ) => {
-                    if source_device_id != envelope.producer_device_id
-                        || !mms_identity::valid_mms_own_address(
-                            &subscription_id,
-                            &address,
-                            revision,
-                        )
-                    {
-                        conn.execute(
-                        "UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?",
-                        params![cursor],
-                    )?;
-                        continue;
-                    }
-                    mms_identity::apply_mms_own_address(
-                        conn,
-                        source_device_id,
-                        &subscription_id,
-                        &address,
-                        revision,
-                    )?;
-                }
-                ("applied", PrivatePayload::MmsMessage { message, media, .. })
-                    if valid_message(&message, envelope.producer_device_id)
-                        && media_matches(&message, &media) =>
-                {
-                    hydrate_mms_context(conn, &message)?;
-                }
-                (
-                    "applied",
-                    PrivatePayload::MessageOriginAlias {
-                        message_id,
-                        origin_key,
-                    },
-                ) => {
-                    message_origin::apply_alias(conn, &message_id, &origin_key)?;
-                }
-                (
-                    "applied",
-                    PrivatePayload::DeviceHintRegistered {
-                        device_id,
-                        platform,
-                        hint_tag,
-                        key_epoch,
-                    },
-                ) if device_id == envelope.producer_device_id => {
-                    device_succession::apply_hint(
-                        conn,
-                        ctx,
-                        &device_id,
-                        &platform,
-                        &hint_tag,
-                        if key_epoch == 0 {
-                            envelope.key_epoch
-                        } else {
-                            key_epoch
-                        },
-                    )?;
-                }
-                (
-                    "applied",
-                    PrivatePayload::DeviceSucceeded {
-                        predecessor,
-                        successor,
-                        platform,
-                        hint_tag,
-                        key_epoch,
-                    },
-                ) => {
-                    let _ = device_succession::apply_succession(
-                        conn,
-                        envelope.producer_device_id,
-                        predecessor,
-                        successor,
-                        &platform,
-                        &hint_tag,
-                        key_epoch,
-                    )?;
-                }
-                (
-                    "quarantined",
-                    PrivatePayload::ConversationFolder {
-                        conversation_id,
-                        folder,
-                        archived_through_ms,
-                        logical_revision,
-                        writer_device_id,
-                    },
-                ) if envelope.vault_id == ctx.vault_id
-                    && envelope.validate().is_ok()
-                    && storage_sequence_fits(envelope.producer_sequence.0)
-                    && envelope.compaction.as_ref().is_none_or(|metadata| {
-                        metadata
-                            .supersedes
-                            .iter()
-                            .all(|reference| storage_sequence_fits(reference.producer_sequence.0))
-                    })
-                    && conversation_folders::valid_event(
-                        conversation_id,
-                        folder,
-                        archived_through_ms,
-                        logical_revision,
-                        &writer_device_id,
-                        &envelope.producer_device_id.to_string(),
-                    ) =>
-                {
-                    snapshot_projection::recover_folder_event(conn, cursor)?;
-                }
-                (
-                    "applied",
-                    PrivatePayload::ConversationFolder {
-                        conversation_id,
-                        folder,
-                        archived_through_ms,
-                        logical_revision,
-                        writer_device_id,
-                    },
-                ) => {
-                    let producer = envelope.producer_device_id.to_string();
-                    if !conversation_folders::valid_event(
-                        conversation_id,
-                        folder,
-                        archived_through_ms,
-                        logical_revision,
-                        &writer_device_id,
-                        &producer,
-                    ) {
-                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
-                        continue;
-                    }
-                    conversation_folders::apply(
-                        conn,
-                        conversation_id,
-                        folder,
-                        archived_through_ms,
-                        logical_revision,
-                        &writer_device_id,
-                        &producer,
-                        envelope.producer_sequence.0,
-                    )?;
-                    learn_compaction(
-                        conn,
-                        Some(&format!("conversation-folder:{conversation_id}")),
-                        &producer,
-                        to_i64(envelope.producer_sequence.0)?,
-                        envelope.compaction.as_ref(),
-                    )?;
-                }
-                (
-                    "applied",
-                    PrivatePayload::SenderBlocklist {
-                        numbers,
-                        can_unblock,
-                        logical_revision,
-                        writer_device_id,
-                    },
-                ) => {
-                    let producer = envelope.producer_device_id.to_string();
-                    if !sender_blocklist::valid_blocklist(
-                        &numbers,
-                        logical_revision,
-                        &writer_device_id,
-                        &producer,
-                    ) {
-                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
-                        continue;
-                    }
-                    sender_blocklist::apply_blocklist(
-                        conn,
-                        &numbers,
-                        can_unblock,
-                        logical_revision,
-                        &writer_device_id,
-                        &producer,
-                        envelope.producer_sequence.0,
-                    )?;
-                    learn_compaction(
-                        conn,
-                        Some(&format!("sender-blocklist:{producer}")),
-                        &producer,
-                        to_i64(envelope.producer_sequence.0)?,
-                        envelope.compaction.as_ref(),
-                    )?;
-                }
-                // Requests an older decoder skipped are history: recorded, never actionable.
-                (
-                    "applied",
-                    PrivatePayload::SenderUnblockRequest {
-                        request_id,
-                        conversation_id,
-                        numbers,
-                        target_device_id,
-                        writer_device_id,
-                        created_at_ms,
-                    },
-                ) if sender_blocklist::valid_request(
+                sender_blocklist::apply_request(
+                    conn,
+                    request_id,
                     conversation_id,
                     &numbers,
                     &target_device_id,
+                    sender_blocklist::RequestFreshness {
+                        historical: true,
+                        created_at_ms,
+                        key_epoch: envelope.key_epoch,
+                    },
+                )?;
+                learn_compaction(
+                    conn,
+                    Some(&format!("sender-unblock:{request_id}")),
                     &writer_device_id,
-                    &envelope.producer_device_id.to_string(),
-                    created_at_ms,
-                ) =>
-                {
-                    sender_blocklist::apply_request(
-                        conn,
-                        request_id,
-                        conversation_id,
-                        &numbers,
-                        &target_device_id,
-                        sender_blocklist::RequestFreshness {
-                            historical: true,
-                            created_at_ms,
-                            key_epoch: envelope.key_epoch,
-                        },
-                    )?;
-                    learn_compaction(
-                        conn,
-                        Some(&format!("sender-unblock:{request_id}")),
-                        &writer_device_id,
-                        to_i64(envelope.producer_sequence.0)?,
-                        envelope.compaction.as_ref(),
-                    )?;
+                    to_i64(envelope.producer_sequence.0)?,
+                    envelope.compaction.as_ref(),
+                )?;
+            }
+            (
+                "applied",
+                PrivatePayload::SenderUnblockResult {
+                    request_id,
+                    outcome,
+                    writer_device_id,
+                },
+            ) if writer_device_id == envelope.producer_device_id.to_string() => {
+                sender_blocklist::apply_result(conn, request_id, outcome, &writer_device_id)?;
+                learn_compaction(
+                    conn,
+                    Some(&format!("sender-unblock:{request_id}")),
+                    &writer_device_id,
+                    to_i64(envelope.producer_sequence.0)?,
+                    envelope.compaction.as_ref(),
+                )?;
+            }
+            (
+                "applied",
+                PrivatePayload::ConversationPin {
+                    conversation_id,
+                    pinned,
+                    logical_revision,
+                    writer_device_id,
+                },
+            ) => {
+                let producer = envelope.producer_device_id.to_string();
+                if !conversation_pinning::valid_event(
+                    conversation_id,
+                    logical_revision,
+                    &writer_device_id,
+                    &producer,
+                ) {
+                    conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
+                    continue;
                 }
-                (
-                    "applied",
-                    PrivatePayload::SenderUnblockResult {
-                        request_id,
-                        outcome,
-                        writer_device_id,
-                    },
-                ) if writer_device_id == envelope.producer_device_id.to_string() => {
-                    sender_blocklist::apply_result(conn, request_id, outcome, &writer_device_id)?;
-                    learn_compaction(
-                        conn,
-                        Some(&format!("sender-unblock:{request_id}")),
-                        &writer_device_id,
-                        to_i64(envelope.producer_sequence.0)?,
-                        envelope.compaction.as_ref(),
-                    )?;
+                conversation_pinning::apply(
+                    conn,
+                    conversation_id,
+                    pinned,
+                    logical_revision,
+                    &writer_device_id,
+                    &producer,
+                    envelope.producer_sequence.0,
+                )?;
+                learn_compaction(
+                    conn,
+                    Some(&format!("conversation-pin:{conversation_id}")),
+                    &producer,
+                    to_i64(envelope.producer_sequence.0)?,
+                    envelope.compaction.as_ref(),
+                )?;
+            }
+            (
+                "applied",
+                PrivatePayload::ConversationTone {
+                    seed,
+                    palette_index,
+                    logical_revision,
+                    writer_device_id,
+                },
+            ) => {
+                let producer = envelope.producer_device_id.to_string();
+                if !conversation_tones::valid_event(
+                    &seed,
+                    palette_index,
+                    logical_revision,
+                    &writer_device_id,
+                    &producer,
+                ) {
+                    conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
+                    continue;
                 }
-                (
-                    "applied",
-                    PrivatePayload::ConversationPin {
-                        conversation_id,
-                        pinned,
-                        logical_revision,
-                        writer_device_id,
-                    },
-                ) => {
-                    let producer = envelope.producer_device_id.to_string();
-                    if !conversation_pinning::valid_event(
-                        conversation_id,
-                        logical_revision,
-                        &writer_device_id,
-                        &producer,
-                    ) {
-                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
-                        continue;
-                    }
-                    conversation_pinning::apply(
-                        conn,
-                        conversation_id,
-                        pinned,
-                        logical_revision,
-                        &writer_device_id,
-                        &producer,
-                        envelope.producer_sequence.0,
-                    )?;
-                    learn_compaction(
-                        conn,
-                        Some(&format!("conversation-pin:{conversation_id}")),
-                        &producer,
-                        to_i64(envelope.producer_sequence.0)?,
-                        envelope.compaction.as_ref(),
-                    )?;
+                conversation_tones::apply(
+                    conn,
+                    &seed,
+                    palette_index,
+                    logical_revision,
+                    &writer_device_id,
+                    &producer,
+                    envelope.producer_sequence.0,
+                )?;
+                learn_compaction(
+                    conn,
+                    Some(&format!("conversation-tone:{seed}")),
+                    &producer,
+                    to_i64(envelope.producer_sequence.0)?,
+                    envelope.compaction.as_ref(),
+                )?;
+            }
+            (
+                "applied",
+                PrivatePayload::NotificationPreferences {
+                    preferences,
+                    logical_revision,
+                    writer_device_id,
+                },
+            ) => {
+                let producer = envelope.producer_device_id.to_string();
+                if !notification_preferences::valid_event(
+                    logical_revision,
+                    &writer_device_id,
+                    &producer,
+                ) {
+                    conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
+                    continue;
                 }
-                (
-                    "applied",
-                    PrivatePayload::ConversationTone {
-                        seed,
-                        palette_index,
-                        logical_revision,
-                        writer_device_id,
-                    },
-                ) => {
-                    let producer = envelope.producer_device_id.to_string();
-                    if !conversation_tones::valid_event(
-                        &seed,
-                        palette_index,
-                        logical_revision,
-                        &writer_device_id,
-                        &producer,
-                    ) {
-                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
-                        continue;
-                    }
-                    conversation_tones::apply(
-                        conn,
-                        &seed,
-                        palette_index,
-                        logical_revision,
-                        &writer_device_id,
-                        &producer,
-                        envelope.producer_sequence.0,
-                    )?;
-                    learn_compaction(
-                        conn,
-                        Some(&format!("conversation-tone:{seed}")),
-                        &producer,
-                        to_i64(envelope.producer_sequence.0)?,
-                        envelope.compaction.as_ref(),
-                    )?;
+                notification_preferences::apply(
+                    conn,
+                    &preferences,
+                    logical_revision,
+                    &writer_device_id,
+                    &producer,
+                    envelope.producer_sequence.0,
+                )?;
+                learn_compaction(
+                    conn,
+                    Some(notification_preferences::IDENTITY),
+                    &producer,
+                    to_i64(envelope.producer_sequence.0)?,
+                    envelope.compaction.as_ref(),
+                )?;
+            }
+            ("applied", PrivatePayload::SendCancellationCapability { supported }) => {
+                apply_cancellation_capability(
+                    conn,
+                    envelope.producer_device_id,
+                    envelope.key_epoch,
+                    envelope.producer_sequence.0,
+                    supported,
+                )?;
+            }
+            (
+                "applied",
+                PrivatePayload::SendCancellationRequest {
+                    message_id,
+                    command_id,
+                    target_gateway_id,
+                },
+            ) => {
+                let binding: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT message_id,gateway_device_id FROM commands WHERE command_id=?",
+                        [command_id.to_string()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                if binding.as_ref().is_some_and(|(message, gateway)| {
+                    message != &message_id.to_string() || gateway != &target_gateway_id.to_string()
+                }) || !stage_cancellation_request(
+                    conn,
+                    message_id,
+                    command_id,
+                    target_gateway_id,
+                    binding.is_some(),
+                )? {
+                    conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", [cursor])?;
                 }
-                (
-                    "applied",
-                    PrivatePayload::NotificationPreferences {
-                        preferences,
-                        logical_revision,
-                        writer_device_id,
-                    },
-                ) => {
-                    let producer = envelope.producer_device_id.to_string();
-                    if !notification_preferences::valid_event(
-                        logical_revision,
-                        &writer_device_id,
-                        &producer,
-                    ) {
-                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
-                        continue;
-                    }
-                    notification_preferences::apply(
-                        conn,
-                        &preferences,
-                        logical_revision,
-                        &writer_device_id,
-                        &producer,
-                        envelope.producer_sequence.0,
-                    )?;
-                    learn_compaction(
-                        conn,
-                        Some(notification_preferences::IDENTITY),
-                        &producer,
-                        to_i64(envelope.producer_sequence.0)?,
-                        envelope.compaction.as_ref(),
-                    )?;
-                }
-                ("applied", PrivatePayload::SendCancellationCapability { supported }) => {
-                    apply_cancellation_capability(
-                        conn,
-                        envelope.producer_device_id,
-                        envelope.key_epoch,
-                        envelope.producer_sequence.0,
-                        supported,
-                    )?;
-                }
-                (
-                    "applied",
-                    PrivatePayload::SendCancellationRequest {
-                        message_id,
-                        command_id,
-                        target_gateway_id,
-                    },
-                ) => {
-                    let binding: Option<(String, String)> = conn
-                        .query_row(
-                            "SELECT message_id,gateway_device_id FROM commands WHERE command_id=?",
-                            [command_id.to_string()],
-                            |row| Ok((row.get(0)?, row.get(1)?)),
-                        )
-                        .optional()?;
-                    if binding.as_ref().is_some_and(|(message, gateway)| {
+            }
+            (
+                "applied",
+                PrivatePayload::SendCancellationResult {
+                    message_id,
+                    command_id,
+                    target_gateway_id,
+                    state,
+                },
+            ) if !historical => {
+                let binding: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT message_id,gateway_device_id FROM commands WHERE command_id=?",
+                        [command_id.to_string()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                if !matches!(
+                    state,
+                    SendCancellationState::Confirmed
+                        | SendCancellationState::TooLate
+                        | SendCancellationState::Unknown
+                ) || envelope.producer_device_id != target_gateway_id
+                    || binding.as_ref().is_some_and(|(message, gateway)| {
                         message != &message_id.to_string()
                             || gateway != &target_gateway_id.to_string()
-                    }) || !stage_cancellation_request(
+                    })
+                    || !stage_cancellation_result(
                         conn,
                         message_id,
                         command_id,
                         target_gateway_id,
+                        state,
                         binding.is_some(),
-                    )? {
-                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", [cursor])?;
-                    }
+                    )?
+                {
+                    conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", [cursor])?;
                 }
-                (
-                    "applied",
-                    PrivatePayload::SendCancellationResult {
-                        message_id,
-                        command_id,
-                        target_gateway_id,
-                        state,
-                    },
-                ) if !historical => {
-                    let binding: Option<(String, String)> = conn
-                        .query_row(
-                            "SELECT message_id,gateway_device_id FROM commands WHERE command_id=?",
-                            [command_id.to_string()],
-                            |row| Ok((row.get(0)?, row.get(1)?)),
-                        )
-                        .optional()?;
-                    if !matches!(
-                        state,
-                        SendCancellationState::Confirmed
-                            | SendCancellationState::TooLate
-                            | SendCancellationState::Unknown
-                    ) || envelope.producer_device_id != target_gateway_id
-                        || binding.as_ref().is_some_and(|(message, gateway)| {
-                            message != &message_id.to_string()
-                                || gateway != &target_gateway_id.to_string()
-                        })
-                        || !stage_cancellation_result(
-                            conn,
-                            message_id,
-                            command_id,
-                            target_gateway_id,
-                            state,
-                            binding.is_some(),
-                        )?
-                    {
-                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", [cursor])?;
-                    }
-                }
-                // Reaction events an older decoder left unknown (or quarantined) are re-applied as
-                // history. A recovered request is never actionable on a phone (`historical`).
-                (
-                    _,
-                    PrivatePayload::ReactionRequest { .. }
-                    | PrivatePayload::ReactionResult { .. }
-                    | PrivatePayload::ReactionCapability { .. }
-                    | PrivatePayload::MessageReactions { .. },
-                ) => {
-                    conn.execute(
-                        "UPDATE journal SET status='pending',reason=NULL,historical=1 WHERE cursor=?",
-                        params![cursor],
-                    )?;
-                }
-                // Commands, notification effects, unknown/malformed records, and foreign identities
-                // are deliberately unchanged by decoder recovery.
-                _ => {}
             }
+            // Reaction events an older decoder left unknown (or quarantined) are re-applied as
+            // history. A recovered request is never actionable on a phone (`historical`).
+            (
+                _,
+                PrivatePayload::ReactionRequest { .. }
+                | PrivatePayload::ReactionResult { .. }
+                | PrivatePayload::ReactionCapability { .. }
+                | PrivatePayload::MessageReactions { .. },
+            ) => {
+                conn.execute(
+                    "UPDATE journal SET status='pending',reason=NULL,historical=1 WHERE cursor=?",
+                    params![cursor],
+                )?;
+            }
+            // Commands, notification effects, unknown/malformed records, and foreign identities
+            // are deliberately unchanged by decoder recovery.
+            _ => {}
         }
-        completed = completed.saturating_add(page_len).min(total);
-        on_progress(DecoderRecoveryProgress {
-            epoch,
-            completed,
-            total,
-        });
     }
-    set_meta(conn, &marker, DECODER_REVISION)?;
-    on_progress(DecoderRecoveryProgress {
+    record.last_cursor = page_last;
+    record.completed = record.completed.saturating_add(page_len).min(record.total);
+    set_meta(conn, &cursor_key, &json(&record)?)?;
+    let progress = DecoderRecoveryProgress {
         epoch,
-        completed: total,
-        total,
-    });
+        completed: record.completed,
+        total: record.total,
+    };
+    tx.commit()?;
+    Ok(EpochPage::Advanced {
+        progress,
+        finished: false,
+    })
+}
+
+/// Outcome of one decoder recovery page for an epoch.
+enum EpochPage {
+    /// The epoch carries the current marker or has no unlocked keys; nothing ran.
+    Current,
+    Advanced {
+        progress: DecoderRecoveryProgress,
+        finished: bool,
+    },
+}
+
+/// Resume record for an epoch's decoder recovery. A record that does not match the current
+/// target, stored marker and scope is discarded and the run restarts from the beginning.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DecoderRecoveryCursor {
+    target: String,
+    source: String,
+    scope: String,
+    last_cursor: i64,
+    completed: u64,
+    total: u64,
+}
+
+const DECODER_RECOVERY_PAGE_ROWS: u32 = 256;
+
+fn decoder_recovery_cursor_key(epoch: u32) -> String {
+    format!("decoder_recovery_cursor:{epoch}")
+}
+
+fn decoder_recovery_eligible(needs_applied: bool) -> &'static str {
+    if needs_applied {
+        "((status='quarantined' AND reason='invalid_payload') OR status='applied')"
+    } else {
+        "(status='quarantined' AND reason='invalid_payload')"
+    }
+}
+
+fn decoder_recovery_scope(needs_applied: bool) -> &'static str {
+    if needs_applied {
+        "applied"
+    } else {
+        "quarantined"
+    }
+}
+
+/// Eligible rows of `epoch` above `after` (`i64::MIN` counts them all).
+fn count_decoder_recovery_rows(
+    conn: &Connection,
+    epoch: u32,
+    needs_applied: bool,
+    after: i64,
+) -> Result<u64, Error> {
+    #[cfg(test)]
+    DECODER_ROW_COUNTS.with(|counts| counts.borrow_mut().push(epoch));
+    Ok(conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM journal WHERE key_epoch=? AND cursor>? AND {}",
+            decoder_recovery_eligible(needs_applied)
+        ),
+        params![epoch, after],
+        |row| row.get(0),
+    )?)
+}
+
+/// Recounts the remaining eligible rows of every pending epoch once per key install. The total
+/// becomes completed plus the rows after the resume position; the position and completed work
+/// are kept. Without a matching record the run starts over with a full count.
+fn refresh_decoder_recovery_totals(
+    conn: &Connection,
+    keys: &BTreeMap<u32, EpochKeys>,
+) -> Result<(), Error> {
+    for epoch in keys.keys().copied() {
+        let stored = get_meta(conn, &format!("decoder_revision:{epoch}"))?;
+        if stored.as_deref() == Some(DECODER_REVISION) {
+            continue;
+        }
+        let needs_applied = decoder_recovery_needs_applied(stored.as_deref());
+        let source = stored.unwrap_or_else(|| "none".to_owned());
+        let scope = decoder_recovery_scope(needs_applied);
+        let key = decoder_recovery_cursor_key(epoch);
+        let record = match read_decoder_cursor(conn, &key)? {
+            Some(record)
+                if record.target == DECODER_REVISION
+                    && record.source == source
+                    && record.scope == scope =>
+            {
+                let remaining =
+                    count_decoder_recovery_rows(conn, epoch, needs_applied, record.last_cursor)?;
+                let total = record.completed.saturating_add(remaining);
+                DecoderRecoveryCursor {
+                    total,
+                    completed: record.completed.min(total),
+                    ..record
+                }
+            }
+            _ => DecoderRecoveryCursor {
+                target: DECODER_REVISION.to_owned(),
+                source,
+                scope: scope.to_owned(),
+                last_cursor: i64::MIN,
+                completed: 0,
+                total: count_decoder_recovery_rows(conn, epoch, needs_applied, i64::MIN)?,
+            },
+        };
+        set_meta(conn, &key, &json(&record)?)?;
+    }
     Ok(())
 }
+
+fn read_decoder_cursor(
+    conn: &Connection,
+    key: &str,
+) -> Result<Option<DecoderRecoveryCursor>, Error> {
+    Ok(get_meta(conn, key)?.and_then(|value| serde_json::from_str(&value).ok()))
+}
+
+/// The lowest unlocked epoch whose decoder marker is not current.
+fn lowest_pending_epoch(
+    conn: &Connection,
+    keys: &BTreeMap<u32, EpochKeys>,
+) -> Result<Option<u32>, Error> {
+    for epoch in keys.keys().copied() {
+        if get_meta(conn, &format!("decoder_revision:{epoch}"))?.as_deref()
+            != Some(DECODER_REVISION)
+        {
+            return Ok(Some(epoch));
+        }
+    }
+    Ok(None)
+}
+
+/// Sums progress over every pending epoch. Epochs without a matching resume record are counted
+/// once; the record caches the total for later calls.
+fn aggregate_decoder_progress(
+    conn: &Connection,
+    keys: &BTreeMap<u32, EpochKeys>,
+) -> Result<Option<DecoderRecoveryProgress>, Error> {
+    let mut lowest = None;
+    let (mut completed, mut total) = (0_u64, 0_u64);
+    for epoch in keys.keys().copied() {
+        let stored = get_meta(conn, &format!("decoder_revision:{epoch}"))?;
+        if stored.as_deref() == Some(DECODER_REVISION) {
+            continue;
+        }
+        lowest.get_or_insert(epoch);
+        let needs_applied = decoder_recovery_needs_applied(stored.as_deref());
+        let source = stored.unwrap_or_else(|| "none".to_owned());
+        let scope = decoder_recovery_scope(needs_applied);
+        match read_decoder_cursor(conn, &decoder_recovery_cursor_key(epoch))? {
+            Some(record)
+                if record.target == DECODER_REVISION
+                    && record.source == source
+                    && record.scope == scope =>
+            {
+                completed = completed.saturating_add(record.completed.min(record.total));
+                total = total.saturating_add(record.total);
+            }
+            _ => {
+                // Counted once and persisted, so polls and later pages reuse the total instead of
+                // rescanning. A mismatched record would restart from the beginning anyway.
+                let record = DecoderRecoveryCursor {
+                    target: DECODER_REVISION.to_owned(),
+                    source,
+                    scope: scope.to_owned(),
+                    last_cursor: i64::MIN,
+                    completed: 0,
+                    total: count_decoder_recovery_rows(conn, epoch, needs_applied, i64::MIN)?,
+                };
+                set_meta(conn, &decoder_recovery_cursor_key(epoch), &json(&record)?)?;
+                total = total.saturating_add(record.total);
+            }
+        }
+    }
+    Ok(lowest.map(|epoch| DecoderRecoveryProgress {
+        epoch,
+        completed,
+        total,
+    }))
+}
+
+/// Whether an unlocked epoch still awaits decoder recovery. One marker lookup per epoch.
+fn decoder_recovery_pending_for(
+    conn: &Connection,
+    keys: &BTreeMap<u32, EpochKeys>,
+) -> Result<bool, Error> {
+    for epoch in keys.keys() {
+        if get_meta(conn, &format!("decoder_revision:{epoch}"))?.as_deref()
+            != Some(DECODER_REVISION)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Refuses writes that depend on recovered state while decoder recovery is pending. Sealing is
+/// not fenced: recovery may itself enqueue, and sealed outbox rows are not read by recovery.
+fn ensure_recovery_complete(store: &Store) -> Result<(), Error> {
+    if decoder_recovery_pending_for(&store.conn, &store.keys)? {
+        return Err(Error::RecoveryPending);
+    }
+    Ok(())
+}
+
+/// Completes a key install. Inline mode runs recovery inside the call. Deferred mode leaves
+/// recovery to `Client::recover_decoder_page` while any epoch is pending; otherwise it seals now.
+fn complete_key_install(
+    s: &mut Store,
+    epoch: u32,
+    on_progress: &mut dyn FnMut(DecoderRecoveryProgress),
+) -> Result<(), Error> {
+    // Newly unlocked epochs can make skipped superseded-metadata rows eligible again.
+    snapshot_projection::reset_rcs_metadata_supersede_scan(&s.conn)?;
+    refresh_decoder_recovery_totals(&s.conn, &s.keys)?;
+    match s.decoder_recovery_mode {
+        DecoderRecoveryMode::Inline => {
+            let (conn, ctx) = s.parts();
+            recover_decoder_revision(conn, &ctx, epoch, on_progress)?;
+        }
+        DecoderRecoveryMode::Deferred if decoder_recovery_pending_for(&s.conn, &s.keys)? => {
+            return Ok(());
+        }
+        DecoderRecoveryMode::Deferred => {}
+    }
+    run_post_recovery_seal(s)
+}
+
+/// Seals work owed after decoder recovery. The obligation is cleared only after sealing succeeds,
+/// so a failed attempt is retried by the next call.
+fn run_post_recovery_seal(s: &mut Store) -> Result<(), Error> {
+    seal_with_store(s)?;
+    s.conn.execute(
+        "DELETE FROM metadata WHERE k=?",
+        params![POST_RECOVERY_SEAL_KEY],
+    )?;
+    Ok(())
+}
+
+/// The epoch whose finished recovery still owes its post-recovery sealing, if any.
+fn post_recovery_seal_owed(conn: &Connection) -> Result<Option<u32>, Error> {
+    get_meta(conn, POST_RECOVERY_SEAL_KEY)?
+        .map(|value| value.parse::<u32>().map_err(|_| Error::Database))
+        .transpose()
+}
+
+const POST_RECOVERY_SEAL_KEY: &str = "decoder_post_recovery_seal";
 
 /// A newly accepted successor may have been rejected by this version before its ownership
 /// transfer was known. Re-apply only invalid payload records from that successor.
@@ -12596,6 +12964,10 @@ fn apply_record(
     consumed_unknown: &mut bool,
 ) -> Result<Option<QuarantineReason>, Error> {
     use QuarantineReason as Q;
+    debug_assert!(
+        !decoder_recovery_pending_for(conn, ctx.keys).unwrap_or(false),
+        "journal records are applied only after decoder recovery completes"
+    );
     let Ok(envelope) = serde_json::from_slice::<Envelope>(wire) else {
         return Ok(Some(Q::MalformedEnvelope));
     };
@@ -15180,7 +15552,29 @@ fn parse_authenticated_payload(
 }
 
 fn seal_with_store(store: &mut Store) -> Result<(), Error> {
+    #[cfg(test)]
+    if FAIL_NEXT_SEAL.with(|fail| fail.replace(false)) {
+        return Err(Error::Database);
+    }
     seal_store_batch(store, MAX_SEAL_BATCH).map(|_| ())
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_SEAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DECODER_ROW_COUNTS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Makes the next `seal_with_store` call fail once, for retry tests.
+#[cfg(test)]
+pub(crate) fn fail_next_seal() {
+    FAIL_NEXT_SEAL.with(|fail| fail.set(true));
+}
+
+/// Epochs whose eligible decoder rows were counted on this thread, in order.
+#[cfg(test)]
+pub(crate) fn take_decoder_row_counts() -> Vec<u32> {
+    DECODER_ROW_COUNTS.with(|counts| std::mem::take(&mut *counts.borrow_mut()))
 }
 fn exists(conn: &Connection, query: &str) -> Result<bool, Error> {
     Ok(conn.query_row(&format!("SELECT EXISTS({query})"), [], |row| row.get(0))?)

@@ -1,3 +1,4 @@
+import { UPDATE_PAUSED_DESCRIPTION } from "@peppy/desktop-ui";
 import { createPortal } from "react-dom";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import { Clock, Info, MessageSquare, SmilePlus, TriangleAlert, WifiOff, detectPlatform } from "@peppy/desktop-ui";
@@ -94,6 +95,7 @@ function toolbarLabel(route: ReactionRoute, message: MessageView, target: HTMLEl
 }
 
 export type MessageReactionLayerProps = {
+  writesPaused?: boolean;
   reaction: ReactionTargetControls;
   barRef: RefObject<HTMLDivElement | null>;
   messages: ReadonlyMap<string, MessageView>;
@@ -112,7 +114,7 @@ export type MessageReactionLayerProps = {
  * The single reaction bar, portaled to the body and positioned from the target bubble. It is outside `#message-list`,
  * so opening it never changes row layout or fires log announcements.
  */
-export function MessageReactionLayer({ reaction, barRef, messages, reactionSupport, routeOffline, nameOf, announce, openPicker, onSubmit }: MessageReactionLayerProps) {
+export function MessageReactionLayer({ reaction, barRef, messages, reactionSupport, routeOffline, writesPaused = false, nameOf, announce, openPicker, onSubmit }: MessageReactionLayerProps) {
   const target = reaction.target;
   const message = target ? messages.get(target.messageId) : undefined;
   const [mode, setMode] = useState<"quick" | "capture">("quick");
@@ -256,7 +258,7 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
    * a second call. A rejected call is announced once and never retried.
    */
   const submit = (subject: MessageView, emoji: string | null, text: string) => {
-    if (inFlightRef.current.has(subject.id)) return;
+    if (writesPaused || inFlightRef.current.has(subject.id)) return;
     close(true);
     announce(text);
     inFlightRef.current.add(subject.id);
@@ -274,7 +276,7 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
 
   /** A pick from the quick row or the capture field. `multiple` is set when capture dropped extra emoji. */
   const choose = (emoji: string, fromCapture: boolean, multiple = false) => {
-    if (!message || !view) return;
+    if (writesPaused || !message || !view) return;
     if (route === "native" && emoji === selected && fromCapture) {
       close(true);
       announce(ALREADY_REACTION_COPY);
@@ -351,6 +353,7 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
       {notice && Icon && <span data-reaction-bar-notice={notice}><Icon size={12} aria-hidden />{NOTICE_COPY[notice]}</span>}
       {!notice && mode === "capture" && <ReactionCapture
         route={route}
+        writesPaused={writesPaused}
         platform={detectPlatform()}
         coarse={coarse}
         openPicker={openPicker}
@@ -366,6 +369,9 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
           data-reaction-quick={hook}
           aria-label={name}
           aria-pressed={route === "native" ? emoji === selected : undefined}
+          aria-disabled={writesPaused || undefined}
+          aria-describedby={writesPaused ? "update-paused-description" : undefined}
+          title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined}
           tabIndex={index === tabStop ? 0 : -1}
           onFocus={() => setRovingIndex(index)}
           onClick={() => choose(emoji, false)}
@@ -374,9 +380,12 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
           type="button"
           data-reaction-more
           aria-label="More emoji"
+          aria-disabled={writesPaused || undefined}
+          aria-describedby={writesPaused ? "update-paused-description" : undefined}
+          title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined}
           tabIndex={moreIndex === tabStop ? 0 : -1}
           onFocus={() => setRovingIndex(moreIndex)}
-          onClick={() => setMode("capture")}
+          onClick={() => { if (!writesPaused) setMode("capture"); }}
         ><SmilePlus size={18} aria-hidden /></button>
       </>}
     </div>

@@ -5,7 +5,7 @@ import { useRcsRoute } from "./useRcsRoute";
 
 function snapshot(): DesktopSnapshot {
   return {
-    version: "1", mode: "native", connection: { state: "connected" }, encryption: { state: "unlocked" },
+    writesPaused: false, version: "1", mode: "native", connection: { state: "connected" }, encryption: { state: "unlocked" },
     gateways: [{ id: "gateway-a", name: "Gateway", simId: "sim-a", online: true, simulated: false, supportsSms: true, supportsMms: true }],
     conversations: [{ id: "conversation-a", name: "Conversation", preview: "", unread: 0, messages: [], participants: ["recipient"] }],
     head: { enabled: false, capability: "unsupported" }, pendingCount: 0, quarantineCount: 0, notifications: [], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full", muteWithHeads: true },

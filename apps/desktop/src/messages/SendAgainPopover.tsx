@@ -1,3 +1,4 @@
+import { UPDATE_PAUSED_DESCRIPTION } from "@peppy/desktop-ui";
 import { createPortal } from "react-dom";
 import { useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { TriangleAlert } from "@peppy/desktop-ui";
@@ -97,7 +98,7 @@ export function SendAgainPopover({ message, gateways, routeLabel, serverOffline,
     {send.alert !== undefined && <p id={`send-again-error-${id}`} role="alert" data-send-again-error>{send.alert}</p>}
     <div data-send-again-actions>
       <button id={`send-again-cancel-${id}`} type="button" className="secondary-button" disabled={send.pending} onClick={() => send.dismiss({ returnFocus: true })}>{peppyCopy.composer_status_cancel}</button>
-      <button ref={send.confirmRef} id={`send-again-confirm-${id}`} type="button" className="primary-button" disabled={send.pending} aria-disabled={send.confirmAriaDisabled || undefined} aria-describedby={send.noRoute ? noRouteId : send.confirmDescribedBy} onClick={() => void send.send()}>{send.pending ? peppyCopy.message_send_again_pending : peppyCopy.message_send_again_action}</button>
+      <button ref={send.confirmRef} id={`send-again-confirm-${id}`} type="button" className="primary-button" disabled={send.pending || store.writesPaused} title={store.writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined} aria-disabled={send.confirmAriaDisabled || undefined} aria-describedby={store.writesPaused ? "update-paused-description" : send.noRoute ? noRouteId : send.confirmDescribedBy} onClick={() => void send.send()}>{send.pending ? peppyCopy.message_send_again_pending : peppyCopy.message_send_again_action}</button>
     </div>
   </div>, host);
 }

@@ -183,6 +183,10 @@ pub(crate) fn core(error: CoreError) -> Failure {
             "attachment-removed-by-storage-policy",
             "The hosted attachment is no longer available.",
         ),
+        CoreError::RecoveryPending => Failure::new(
+            "update-in-progress",
+            "Peppy is updating your messages. Try again when it finishes.",
+        ),
         _ => Failure::new("core", "The local core rejected the operation."),
     }
 }
@@ -775,8 +779,11 @@ impl BrowserCore {
                 snapshot_expected: None,
                 snapshot_remaining: None,
                 snapshot_total: None,
+                update_completed: None,
+                update_total: None,
             }),
             rcs_status,
+            writes_paused: false,
         })
         .map_err(|_| core(CoreError::Database))
     }

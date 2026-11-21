@@ -58,6 +58,7 @@ const DOWNLOAD_UNAVAILABLE_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const DOWNLOAD_UNAVAILABLE_MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// Apply steps per normal pass; snapshot drains continue until `snapshot_remaining == 0`.
 const APPLY_STEPS: usize = 8;
+const DECODER_RECOVERY_PAGE: u32 = 256;
 const WS_CLOSE_REVOKED: u16 = 4401;
 const WS_CLOSE_RESYNC: u16 = 4409;
 
@@ -536,6 +537,14 @@ pub(crate) fn apply_gateway_refresh(
 const CONVERGE_STEP_BUDGET: usize = 8;
 
 pub async fn drain_apply(session: &Arc<Session>, max_steps: usize) -> BridgeResult<bool> {
+    let c = client(session);
+    blocking(move || {
+        if c.decoder_recovery_pending().map_err(core_error)?.is_some() {
+            return Err(core_error(peppy_client_core::Error::RecoveryPending));
+        }
+        Ok(())
+    })
+    .await?;
     let mut progressed = false;
     for _ in 0..max_steps {
         if session.cancel.is_cancelled() {
@@ -916,7 +925,8 @@ fn snapshot_gate(session: &Session) -> std::sync::MutexGuard<'_, SnapshotTooLarg
 
 /// A contact repair that was refused as too large must be allowed to run again once the window ends.
 fn settle_repair_attempt(session: &Session, result: &BridgeResult<()>) {
-    if matches!(result, Err(error) if error.code == SNAPSHOT_TOO_LARGE_CODE) {
+    if matches!(result, Err(error) if error.code == SNAPSHOT_TOO_LARGE_CODE || error.code == "update-in-progress")
+    {
         session
             .repair_attempted
             .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -2907,6 +2917,7 @@ async fn worker(session: Arc<Session>) {
                 WORK_INTERVAL
             }
             Err(error) if error.code == "revoked" => return revoke(&session),
+            Err(error) if error.code == "update-in-progress" => WORK_INTERVAL,
             Err(_) => {
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 jitter(backoff)
@@ -3196,12 +3207,18 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                             });
                         }
                         if let Err(error) = ingest_page(session, records).await {
+                            if error.code == "update-in-progress" {
+                                return WsEnd::Resync;
+                            }
                             session.set_status(|status| status.error_code = Some(error.code));
                             return ended(error.code);
                         }
                         // The live record is durable before observers receive a new snapshot.
                         session.notify();
-                        if drain_apply(session, APPLY_STEPS).await.is_err() {
+                        if let Err(error) = drain_apply(session, APPLY_STEPS).await {
+                            if error.code == "update-in-progress" {
+                                return WsEnd::Resync;
+                            }
                             return ended("core");
                         }
                         // Socket records carry no replay head. Owed deletion members that wait only
@@ -3242,6 +3259,17 @@ async fn live(session: Arc<Session>) {
     }
     let mut backoff = Duration::from_secs(1);
     loop {
+        if session.cancel.is_cancelled() {
+            return;
+        }
+        if let Err(error) = recover_decoder(&session, DECODER_RECOVERY_PAGE).await {
+            eprintln!("peppy: decoder recovery failed: {}", error.code);
+            if !pause_live(&session, jitter(backoff)).await {
+                return;
+            }
+            backoff = next_backoff(backoff, false);
+            continue;
+        }
         if session.cancel.is_cancelled() {
             return;
         }
@@ -3286,6 +3314,9 @@ async fn live(session: Arc<Session>) {
         if let Err(error) = round {
             if error.code == "revoked" {
                 return revoke(&session);
+            }
+            if error.code == "update-in-progress" {
+                continue;
             }
             let snapshot_too_large = error.code == "snapshot-too-large";
             session.set_status(|status| {
@@ -3345,9 +3376,158 @@ async fn live(session: Arc<Session>) {
     }
 }
 
+async fn recover_decoder(session: &Arc<Session>, page: u32) -> BridgeResult<()> {
+    recover_decoder_with_page_callback(session, page, || {}).await
+}
+
+async fn recover_decoder_with_page_callback(
+    session: &Arc<Session>,
+    page: u32,
+    mut after_page: impl FnMut() + Send,
+) -> BridgeResult<()> {
+    let c = client(session);
+    if blocking(move || c.decoder_recovery_pending().map_err(core_error))
+        .await?
+        .is_none()
+    {
+        return Ok(());
+    }
+    session.notify();
+    loop {
+        if session.cancel.is_cancelled() {
+            return Ok(());
+        }
+        let c = client(session);
+        let progress = blocking(move || c.recover_decoder_page(page).map_err(core_error)).await?;
+        after_page();
+        if progress.is_none() {
+            session.notify();
+            session.request_work();
+            return Ok(());
+        }
+        session.notify_progress(false);
+        tokio::task::yield_now().await;
+    }
+}
+
 #[cfg(test)]
 mod first_snapshot_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn recovery_finishes_before_apply() {
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(crate::tests::open_deferred(&fixture, &fixture.binding, &[]));
+        crate::tests::unlock(&session, &fixture);
+        assert!(matches!(
+            session.client.apply_pending(1),
+            Err(peppy_client_core::Error::RecoveryPending)
+        ));
+        recover_decoder(&session, 1).await.unwrap();
+        assert!(session.client.decoder_recovery_pending().unwrap().is_none());
+        assert!(session.client.apply_pending(1).is_ok());
+    }
+
+    #[tokio::test]
+    async fn live_loop_recovers_before_network_replay() {
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(crate::tests::open_deferred(&fixture, &fixture.binding, &[]));
+        crate::tests::unlock(&session, &fixture);
+        session.mark_first_snapshot_served();
+        let task = tokio::spawn(live(session.clone()));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while session.client.decoder_recovery_pending().unwrap().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        session.cancel.cancel();
+        task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sealed_outbox_upload_continues_during_recovery() {
+        let (origin, seen) =
+            crate::contacts::tests::mock_server(|method, path, _| match (method, path) {
+                ("POST", "/v1/commands") => (200, "{}".into()),
+                _ => (404, r#"{"code":"unsupported"}"#.into()),
+            })
+            .await;
+        let fixture = crate::tests::fixture_at(&origin);
+        let session = Arc::new(crate::tests::open_deferred(&fixture, &fixture.binding, &[]));
+        crate::tests::unlock(&session, &fixture);
+        while session.client.recover_decoder_page(1).unwrap().is_some() {}
+        session
+            .client
+            .queue_send(
+                peppy_client_core::OutgoingSms {
+                    conversation_id: peppy_client_core::ConversationId::new(),
+                    recipients: vec!["+15555550101".into()],
+                    body: "pending".into(),
+                },
+                peppy_client_core::GatewayRoute::Carrier {
+                    gateway_device_id: peppy_client_core::DeviceId::new(),
+                    subscription_id: "sim-1".into(),
+                },
+            )
+            .unwrap();
+        let second = peppy_client_core::KeyProfile::new(fixture.profile.vault_id, 2).unwrap();
+        let root = peppy_crypto::derive_root_key(crate::tests::PHRASE, &second).unwrap();
+        let header = peppy_crypto::create_vault_check_header(&root, second.clone()).unwrap();
+        session
+            .client
+            .unlock(&second, &header, crate::tests::PHRASE)
+            .unwrap();
+        assert!(session.client.decoder_recovery_pending().unwrap().is_some());
+        assert!(!session.client.pending_outbox().unwrap().is_empty());
+        crate::attachment_retention::negotiate(&session)
+            .await
+            .unwrap();
+        let result = work_round(&session).await;
+        assert!(matches!(result, Err(error) if error.code == "update-in-progress"));
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.path == "/v1/commands"));
+        assert!(session.client.pending_outbox().unwrap().is_empty());
+        assert!(session.client.decoder_recovery_pending().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelled_recovery_resumes_in_reopened_session() {
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let second = peppy_client_core::KeyProfile::new(fixture.profile.vault_id, 2).unwrap();
+        let root = peppy_crypto::derive_root_key(crate::tests::PHRASE, &second).unwrap();
+        let header = peppy_crypto::create_vault_check_header(&root, second.clone()).unwrap();
+        {
+            let session = Arc::new(crate::tests::open_deferred(&fixture, &fixture.binding, &[]));
+            crate::tests::unlock(&session, &fixture);
+            session
+                .client
+                .unlock(&second, &header, crate::tests::PHRASE)
+                .unwrap();
+            let mut calls = 0;
+            recover_decoder_with_page_callback(&session, 1, || {
+                calls += 1;
+                session.cancel.cancel();
+            })
+            .await
+            .unwrap();
+            assert_eq!(calls, 1);
+            assert!(session.cancel.is_cancelled());
+            assert!(session.client.decoder_recovery_pending().unwrap().is_some());
+        }
+        let session = Arc::new(crate::tests::open_deferred(&fixture, &fixture.binding, &[]));
+        crate::tests::unlock(&session, &fixture);
+        session
+            .client
+            .unlock(&second, &header, crate::tests::PHRASE)
+            .unwrap();
+        recover_decoder(&session, 1).await.unwrap();
+        assert!(session.client.decoder_recovery_pending().unwrap().is_none());
+    }
 
     fn session() -> Arc<Session> {
         let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
@@ -5068,6 +5248,17 @@ mod snapshot_too_large_gate_tests {
         settle_repair_attempt(
             &session,
             &Err(BridgeError::new(SNAPSHOT_TOO_LARGE_CODE, "too large")),
+        );
+        assert!(!session.repair_exhausted());
+        assert!(!session
+            .repair_attempted
+            .load(std::sync::atomic::Ordering::SeqCst));
+        session
+            .repair_attempted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        settle_repair_attempt(
+            &session,
+            &Err(core_error(peppy_client_core::Error::RecoveryPending)),
         );
         assert!(!session.repair_exhausted());
         assert!(!session

@@ -26,6 +26,10 @@ afterEach(() => {
 });
 
 describe("NotificationRow", () => {
+  it("disables the mute action while writes are paused", () => {
+    render(<NotificationRow {...props} writesPaused />);
+    expect((screen.getByRole("button", { name: "Mute Chat" }) as HTMLButtonElement).disabled).toBe(true);
+  });
   it("announces unread state in the description and distinguishes read rows", () => {
     const { rerender } = render(<NotificationRow {...props} />);
     const row = screen.getByRole("article");

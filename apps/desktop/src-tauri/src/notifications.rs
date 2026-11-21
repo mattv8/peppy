@@ -224,6 +224,18 @@ impl NotificationSettings {
             .migration_lock
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        if client
+            .decoder_recovery_pending()
+            .map_err(crate::error::core_error)?
+            .is_some()
+        {
+            if matches!(read, PreferenceRead::Delivery) {
+                return Err(crate::error::core_error(
+                    peppy_client_core::Error::RecoveryPending,
+                ));
+            }
+            return self.unresolved_preferences(binding, read);
+        }
         let current = client
             .notification_preferences()
             .map_err(crate::error::core_error)?;
@@ -248,9 +260,13 @@ impl NotificationSettings {
         let Some(legacy) = self.claim_legacy(binding)? else {
             return Ok((NotificationPreferences::default(), false));
         };
-        let adopted = client
-            .adopt_legacy_notification_preferences(legacy)
-            .map_err(crate::error::core_error)?;
+        let adopted = match client.adopt_legacy_notification_preferences(legacy) {
+            Ok(adopted) => adopted,
+            Err(peppy_client_core::Error::RecoveryPending) => {
+                return self.unresolved_preferences(binding, read);
+            }
+            Err(error) => return Err(crate::error::core_error(error)),
+        };
         if adopted {
             self.retire_claim(binding)?;
             return Ok((
@@ -1570,6 +1586,43 @@ mod tests {
             vault_id: vault_id.into(),
             device_id: "device".into(),
         }
+    }
+
+    #[test]
+    fn legacy_adoption_waits_for_decoder_recovery() {
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = crate::tests::open_deferred(&fixture, &fixture.binding, &[]);
+        crate::tests::unlock(&session, &fixture);
+        let settings = NotificationSettings::load(fixture.dir.path());
+        assert!(settings
+            .notification_preferences(&session.client, &fixture.binding, PreferenceRead::Delivery)
+            .is_err());
+        let legacy = NotificationPreferences {
+            message_banners: false,
+            ..NotificationPreferences::default()
+        };
+        fs::write(
+            settings.claim_path(&fixture.binding),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let (snapshot, adopted) = settings
+            .notification_preferences(&session.client, &fixture.binding, PreferenceRead::Snapshot)
+            .unwrap();
+        assert_eq!(snapshot, NotificationPreferences::default());
+        assert!(!adopted);
+        assert!(settings.claim_path(&fixture.binding).exists());
+        assert!(settings
+            .notification_preferences(&session.client, &fixture.binding, PreferenceRead::Delivery)
+            .is_err());
+        assert!(session.client.notification_preferences().unwrap().is_none());
+        while session.client.recover_decoder_page(1).unwrap().is_some() {}
+        let (adopted, changed) = settings
+            .notification_preferences(&session.client, &fixture.binding, PreferenceRead::Snapshot)
+            .unwrap();
+        assert!(changed);
+        assert_eq!(adopted, legacy);
+        assert!(!settings.claim_path(&fixture.binding).exists());
     }
 
     #[test]

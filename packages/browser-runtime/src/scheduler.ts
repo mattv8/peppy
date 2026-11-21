@@ -509,7 +509,7 @@ export class BrowserScheduler {
     for (let step = 0; step < APPLY_LIMIT; step += 1) {
       throwIfAborted(signal);
       const report = object(await this.session.mutate("apply_pending", { limit: 1000 }));
-      if (nonNegative(report.applied) + nonNegative(report.quarantined) + nonNegative(report.drained) === 0) return;
+      if (nonNegative(report.applied) + nonNegative(report.quarantined) + nonNegative(report.drained) + nonNegative(report.superseded) === 0) return;
       await this.publishProgress("applying");
     }
   }

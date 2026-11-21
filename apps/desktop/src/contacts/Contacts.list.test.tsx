@@ -212,6 +212,18 @@ describe("ContactsView with no contact books", () => {
     expect(screen.getByRole("button", { name: "Sync now" })).toBeDisabled();
   });
 
+  it("keeps the no-books title over the paused reason when both apply", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([]);
+    const { container } = render(<ContactsView writesPaused />);
+    await screen.findByText("No contact books yet");
+    const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>("#contacts-header-actions button"));
+    for (const button of buttons) {
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("title", "Connect a phone to see its contacts.");
+      expect(button).not.toHaveAttribute("aria-describedby");
+    }
+  });
+
   it("announces only that there are no books, never a 0 of 0 count", async () => {
     vi.mocked(bridge.list_contact_books).mockResolvedValue([]);
     const { container } = render(<ContactsView />);

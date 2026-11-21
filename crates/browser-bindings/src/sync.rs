@@ -499,7 +499,7 @@ impl BrowserCore {
             .apply_pending(batch_limit(&args)?)
             .map_err(core)?;
         Ok(
-            json!({"applied": report.applied, "quarantined": report.quarantined, "waitingForKeys": report.waiting_for_keys, "drained": report.drained, "snapshotRemaining": report.snapshot_remaining}),
+            json!({"applied": report.applied, "quarantined": report.quarantined, "superseded": report.superseded, "waitingForKeys": report.waiting_for_keys, "drained": report.drained, "snapshotRemaining": report.snapshot_remaining}),
         )
     }
 
@@ -1302,6 +1302,14 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn apply_pending_reports_superseded_rows_for_the_scheduler() {
+        let mut fixture = open_core();
+        let result = response(&mut fixture.core, "apply_pending", json!({"limit": 10}));
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["value"]["superseded"], 0, "{result}");
     }
 
     #[test]
