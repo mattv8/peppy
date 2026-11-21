@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
-import { ContactAvatar, Loader2, contactSeed, formatPhoneNumber } from "@peppy/desktop-ui";
+import { ContactAvatar, Loader2, Users, contactSeed, formatPhoneNumber } from "@peppy/desktop-ui";
 import type { ContactView } from "../bridge/bridge";
 import { editStateLabel } from "./contact-labels";
 import { SearchNoMatch } from "../search/SearchNoMatch";
@@ -11,6 +11,7 @@ const PAGE_STEP = 10;
 /** Starts loading the next page while the sentinel is still this far below the visible list. */
 const LOAD_MORE_ROOT_MARGIN = "0px 0px 600px 0px";
 const countFormat = new Intl.NumberFormat();
+const NO_BOOKS_ANNOUNCEMENT = "No contact books.";
 
 export type ContactListProps = {
   contacts: ContactView[];
@@ -28,6 +29,8 @@ export type ContactListProps = {
   canWrite: boolean;
   /** The local projection is failed or waiting for repair; the empty list says so. */
   emptyFailed: boolean;
+  /** No contact book exists at all: the list area explains that instead of showing an empty book. */
+  noBooks: boolean;
   nameFormat: ContactNameFormat;
   selectedId?: string;
   /** The search text the rows answer; an empty list under a search says nothing matched. */
@@ -51,6 +54,17 @@ function emptyCopy({ emptyFailed, deviceName, canWrite }: Pick<ContactListProps,
   if (emptyFailed) return "Contacts couldn't be loaded yet.";
   if (!deviceName) return "No contacts in this book.";
   return canWrite ? `No contacts in ${deviceName}. Add one with New contact.` : `No contacts in ${deviceName}.`;
+}
+
+/** Shown instead of the list when no contact book exists; styled like the search no-match state, without actions. */
+function NoContactBooks() {
+  return (
+    <div id="contacts-no-books" className="search-no-match" data-empty-reason="no-books">
+      <Users size={32} aria-hidden />
+      <h2 tabIndex={-1}>No contact books yet</h2>
+      <p>Contacts appear here after a phone shares its contacts with Peppy.</p>
+    </div>
+  );
 }
 
 /** The one row that takes Tab: the focused row, else the selected row, else the first row. */
@@ -95,7 +109,7 @@ function ContactSkeleton() {
  * a single tab stop with roving focus, and the polite announcer for loads the user triggers from the keyboard.
  */
 export function ContactList({
-  contacts, loading, loadingMore, loadMoreError, hasMore, loadFailed, contactCount, deviceName, deviceLabel, canWrite, emptyFailed,
+  contacts, loading, loadingMore, loadMoreError, hasMore, loadFailed, contactCount, deviceName, deviceLabel, canWrite, emptyFailed, noBooks,
   nameFormat, selectedId, query, onSelect, onLoadMore, onRetryLoadMore, onRetryFirstPage, onClearQuery,
 }: ContactListProps) {
   const searchedBook = deviceLabel ?? deviceName ?? "this book";
@@ -114,10 +128,10 @@ export function ContactList({
       pendingFocusIndex.current = undefined;
       setAnnouncement("Loading contacts.");
     } else if (wasLoading.current) {
-      setAnnouncement(loadedAnnouncement(loadedCount, total));
+      setAnnouncement(noBooks ? NO_BOOKS_ANNOUNCEMENT : loadedAnnouncement(loadedCount, total));
     }
     wasLoading.current = loading;
-  }, [loading, loadedCount, total]);
+  }, [loading, loadedCount, total, noBooks]);
 
   // A load started from the keyboard moves focus to its first new row once that row exists.
   useEffect(() => {
@@ -166,6 +180,16 @@ export function ContactList({
     const id = (event.target as HTMLElement).dataset.contactId;
     if (id) setFocusedId(id);
   };
+
+  const announcer = <p id="contacts-announcer" className="visually-hidden" role="status" aria-live="polite">{announcement}</p>;
+  if (noBooks) {
+    return (
+      <>
+        <NoContactBooks />
+        {announcer}
+      </>
+    );
+  }
 
   return (
     <>
@@ -236,7 +260,7 @@ export function ContactList({
       {!loading && contacts.length === 0 && !loadFailed && query && (
         <SearchNoMatch id="contacts-no-match" noun="contacts" query={query} hint={`Searching ${searchedBook} only. Search covers names, phone numbers, email addresses and organizations.`} onClearQuery={onClearQuery} />
       )}
-      <p id="contacts-announcer" className="visually-hidden" role="status" aria-live="polite">{announcement}</p>
+      {announcer}
     </>
   );
 }

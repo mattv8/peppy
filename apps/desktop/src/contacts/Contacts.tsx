@@ -788,8 +788,11 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     setValidationError("");
   });
 
+  // Books have loaded and there are none: no rail, no book-scoped actions, and no "select a book" wording.
+  const noBooks = booksLoaded && books.length === 0;
+  const noBooksTitle = "Connect a phone to see its contacts.";
   const syncDisabledReason = !book
-    ? "Select a contact book to request a scan."
+    ? (noBooks ? undefined : "Select a contact book to request a scan.")
     : book.sourceRevoked ? "Can't sync a removed phone"
       : book.state === "retired" ? "This book is retired."
         : book.state === "limited" ? "This phone has limited contact access and cannot complete an authoritative scan."
@@ -972,11 +975,11 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const headerActions = (
     <div id="contacts-header-actions" role="toolbar" aria-label="Contact actions">
       <div className="contacts-sort-control">
-        <button ref={sortButtonRef} type="button" aria-label={viewLabel} title="View options" aria-haspopup="menu" aria-expanded={sortOpen} aria-controls="contacts-sort-menu" onClick={() => setSortOpen(open => !open)} onKeyDown={event => { if (event.key === "ArrowDown") { event.preventDefault(); setSortOpen(true); } }}><ListFilter size={16} aria-hidden /></button>
+        <button ref={sortButtonRef} type="button" aria-label={viewLabel} title={noBooks ? noBooksTitle : "View options"} disabled={noBooks} aria-haspopup="menu" aria-expanded={sortOpen} aria-controls="contacts-sort-menu" onClick={() => setSortOpen(open => !open)} onKeyDown={event => { if (event.key === "ArrowDown") { event.preventDefault(); setSortOpen(true); } }}><ListFilter size={16} aria-hidden /></button>
       </div>
-      <button ref={restoreTriggerRef} type="button" aria-label="Recently deleted contacts" title={!book ? selectBookTitle : detailOverlay || editing ? closeDetailTitle : "Recently deleted"} disabled={!book || detailOverlay || Boolean(editing)} onClick={openRecentlyDeleted}><Clock size={16} aria-hidden /></button>
-      <button id="contacts-sync-now" type="button" aria-label={syncing ? "Requesting…" : "Sync now"} title={syncDisabledReason ?? "Sync now"} aria-busy={syncing} aria-describedby={activeStatus?.kind === "unavailable" ? "contacts-sync-unavailable" : undefined} disabled={Boolean(syncDisabledReason) || syncing} onClick={requestSync}><RotateCw className={syncing ? "contacts-sync-icon" : undefined} size={16} aria-hidden /></button>
-      <button ref={newContactTriggerRef} type="button" data-action="create-contact" aria-label="New contact" title={book ? "New contact" : selectBookTitle} disabled={!book} onClick={() => handleEditStart()}><UserPlus size={16} strokeWidth={1.75} aria-hidden /></button>
+      <button ref={restoreTriggerRef} type="button" aria-label="Recently deleted contacts" title={noBooks ? noBooksTitle : !book ? selectBookTitle : detailOverlay || editing ? closeDetailTitle : "Recently deleted"} disabled={!book || detailOverlay || Boolean(editing)} onClick={openRecentlyDeleted}><Clock size={16} aria-hidden /></button>
+      <button id="contacts-sync-now" type="button" aria-label={syncing ? "Requesting…" : "Sync now"} title={noBooks ? noBooksTitle : syncDisabledReason ?? "Sync now"} aria-busy={syncing} aria-describedby={activeStatus?.kind === "unavailable" ? "contacts-sync-unavailable" : undefined} disabled={!book || Boolean(syncDisabledReason) || syncing} onClick={requestSync}><RotateCw className={syncing ? "contacts-sync-icon" : undefined} size={16} aria-hidden /></button>
+      <button ref={newContactTriggerRef} type="button" data-action="create-contact" aria-label="New contact" title={noBooks ? noBooksTitle : book ? "New contact" : selectBookTitle} disabled={!book} onClick={() => handleEditStart()}><UserPlus size={16} strokeWidth={1.75} aria-hidden /></button>
     </div>
   );
 
@@ -991,7 +994,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       {bookRemoval && (
         <RemoveBookDialog book={bookRemoval.book} opener={bookRemoval.opener} onDismiss={() => setBookRemoval(undefined)} onRemoved={handleBookRemoved} onNotice={setActionNotice} />
       )}
-      {railVisible && (
+      {railVisible && !noBooks && (
         <BookRail
           books={books}
           bookId={bookId}
@@ -1003,7 +1006,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
           onNotice={setActionNotice}
         />
       )}
-      {!compactBookList && (
+      {!compactBookList && !noBooks && (
         <ResizeHandle
           id="contacts-book-resize"
           direction="horizontal"
@@ -1065,6 +1068,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
           <ContactList
             contacts={contacts}
             loading={pages.loading || !booksLoaded}
+            noBooks={noBooks}
             loadingMore={pages.loadingMore}
             loadMoreError={pages.loadMoreError}
             hasMore={pages.hasMore}

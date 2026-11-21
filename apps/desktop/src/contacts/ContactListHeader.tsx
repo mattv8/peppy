@@ -58,6 +58,8 @@ export function ContactListHeader({ books, bookId, booksLoaded, railVisible, loa
   const book = books.find(item => item.id === bookId);
   const { label } = bookLabels(books);
   const showSelector = !railVisible && books.length >= 2;
+  // Books have loaded and there are none: the header is just "Contacts", with no count.
+  const noBooks = booksLoaded && books.length === 0;
   const total = book?.contactCount;
   const delayedLoadingMore = useDelayedFlag(loadingMore, COUNT_PROGRESS_DELAY_MS);
   const progressTotal = !query && delayedLoadingMore && total !== undefined && loaded > 0 && loaded <= total ? total : undefined;
@@ -71,16 +73,18 @@ export function ContactListHeader({ books, bookId, booksLoaded, railVisible, loa
             ))}
           </select>
         ) : (
-          <h2 id="contacts-list-title" tabIndex={-1}>{book ? label(book) : "Contact book"}</h2>
+          <h2 id="contacts-list-title" tabIndex={-1}>{book ? label(book) : noBooks ? "Contacts" : "Contact book"}</h2>
         )}
-        <span id="contacts-count" data-count-state={query ? "search" : progressTotal !== undefined ? "progress" : booksLoaded ? "known" : "loading"}>
-          {query ? searchCountText(query, matchCount) : progressTotal !== undefined ? (
-            <>
-              {`${countFormat.format(loaded)} of ${countFormat.format(progressTotal)} contacts`}
-              <progress id="contacts-count-bar" aria-label="Loading contacts" value={loaded} max={progressTotal} />
-            </>
-          ) : contactCountText(booksLoaded, book)}
-        </span>
+        {!noBooks && (
+          <span id="contacts-count" data-count-state={query ? "search" : progressTotal !== undefined ? "progress" : booksLoaded ? "known" : "loading"}>
+            {query ? searchCountText(query, matchCount) : progressTotal !== undefined ? (
+              <>
+                {`${countFormat.format(loaded)} of ${countFormat.format(progressTotal)} contacts`}
+                <progress id="contacts-count-bar" aria-label="Loading contacts" value={loaded} max={progressTotal} />
+              </>
+            ) : contactCountText(booksLoaded, book)}
+          </span>
+        )}
       </div>
       {children}
     </header>

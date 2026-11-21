@@ -158,3 +158,73 @@ describe("ContactsView list header", () => {
     });
   });
 });
+
+describe("ContactsView with no contact books", () => {
+  beforeEach(() => resetContactBridgeMocks());
+  afterEach(() => restoreContactDomGlobals());
+
+  it("renders no book rail, resize handle or lookup strip once the books load empty", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([]);
+    const { container } = render(<ContactsView />);
+    expect(await screen.findByRole("heading", { level: 2, name: "Contacts" })).toHaveAttribute("id", "contacts-list-title");
+    expect(container.querySelector("#contacts-book-list")).toBeNull();
+    expect(container.querySelector("#contacts-book-resize")).toBeNull();
+    expect(container.querySelector("#contacts-book-use")).toBeNull();
+  });
+
+  it("drops the count and shows the no-books empty state without actions", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([]);
+    const { container } = render(<ContactsView />);
+    const empty = await waitFor(() => {
+      const element = container.querySelector("#contacts-no-books");
+      expect(element).not.toBeNull();
+      return element!;
+    });
+    expect(empty).toHaveAttribute("data-empty-reason", "no-books");
+    expect(empty).toHaveTextContent("No contact books yet");
+    expect(empty).toHaveTextContent("Contacts appear here after a phone shares its contacts with Peppy.");
+    expect(empty.querySelector("button")).toBeNull();
+    expect(container.querySelector("#contacts-count")).toBeNull();
+    expect(container.querySelector("#contacts-empty-state")).toBeNull();
+    expect(container.querySelector("#contacts-list")).toBeNull();
+  });
+
+  it("shows no scan or readiness strip while there is no book to select", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([]);
+    const { container } = render(<ContactsView />);
+    await screen.findByText("No contact books yet");
+    expect(container.querySelector("#contacts-status")).toBeNull();
+    expect(container.querySelector("#contacts-sync-unavailable")).toBeNull();
+    expect(screen.queryByText("Select a contact book to request a scan.")).not.toBeInTheDocument();
+  });
+
+  it("disables the toolbar actions and explains why in their titles", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([]);
+    const { container } = render(<ContactsView />);
+    await screen.findByText("No contact books yet");
+    const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>("#contacts-header-actions button"));
+    expect(buttons).toHaveLength(4);
+    for (const button of buttons) {
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("title", "Connect a phone to see its contacts.");
+    }
+    expect(screen.getByRole("button", { name: "New contact" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Sync now" })).toBeDisabled();
+  });
+
+  it("announces only that there are no books, never a 0 of 0 count", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([]);
+    const { container } = render(<ContactsView />);
+    await waitFor(() => expect(container.querySelector("#contacts-announcer")).toHaveTextContent("No contact books."));
+    expect(container.querySelector("#contacts-announcer")).not.toHaveTextContent("contacts loaded");
+  });
+
+  it("keeps the skeleton and loading count until the books arrive", () => {
+    vi.mocked(bridge.list_contact_books).mockReturnValue(new Promise(() => {}));
+    const { container } = render(<ContactsView />);
+    expect(container.querySelector("#contacts-no-books")).toBeNull();
+    expect(container.querySelector("#contacts-skeleton")).toBeInTheDocument();
+    expect(container.querySelector("#contacts-count")).toHaveTextContent("Loading contacts…");
+    expect(container.querySelector("#contacts-announcer")).toHaveTextContent("Loading contacts.");
+  });
+});
