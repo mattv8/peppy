@@ -37,3 +37,9 @@ just desktop-open
 The helper runs `powershell.exe` or `pwsh.exe` with `-NoProfile -ExecutionPolicy Bypass`; it changes neither machine nor user policy. It does not use WSLg, Linux Tauri, a mirrored checkout, global PATH, or profile changes. Outputs are `apps/desktop/src-tauri/target/release/bundle/{nsis,msi}` and `desktop-open` starts `apps/desktop/src-tauri/target/release/peppy-desktop.exe` after it exists. Set `CARGO_TARGET_DIR` to select another output directory.
 
 These are development artifacts. They do not establish installer signing, store readiness, native connection behavior, WebSocket reconnect, attachment/public-copy behavior, or transparent-window input behavior.
+
+## Live typing and floating heads
+
+The live typing supervisor in [live_typing.rs](../../apps/desktop/src-tauri/src/live_typing.rs) reconnects with backoff capped at 60 seconds (`LIVE_MAX_BACKOFF`). A context-change wake waits no sooner than 5 seconds after the previous attempt. Each socket close prints one content-free `peppy: live typing ...` counter line.
+
+Floating heads on macOS and Windows show a contact's typing as a pill in the unread badge slot. The rule is in the [frontend style guide](../frontend-style-guide.md#windows-drafts-and-layout). It is unit-tested only and has not been seen running.

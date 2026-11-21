@@ -495,6 +495,21 @@ This reference records non-obvious Peppy domain constraints.
 - Typing sharing gates only the user's vault-device-origin frames; it does not
   gate Google-contact display frames. After the off transition commits, it seals
   no typing frame. See [typing admission](../crates/client-core/src/ephemeral_v2.rs).
+- Typing seal and receive share one eligibility check (`typing_eligible` in
+  [ephemeral_v2.rs](../crates/client-core/src/ephemeral_v2.rs)). A device that
+  holds the group mapping requires it to be Live and owned by that gateway; any
+  other device requires the gateway's published eligibility.
+- Typing frames share the server's 120-frames-per-minute limit per device on
+  `/v1/live`. The sender's per-generation sum is 119: 50 starts and stops, 40
+  acks, 20 challenges, 6 re-sends, and 3 phone membership challenges. The
+  re-send budget constant and the test that sums the budgets live in
+  [ephemeral_v2_control.rs](../crates/client-core/src/ephemeral_v2_control.rs).
+  Any new frame source on `/v1/live` must be added to that sum. Re-enabling
+  resets the budgets, so several re-enables in one minute can exceed the limit;
+  this is a known gap.
+- Receiver admission (session confirmation, sequence floor, lease) must not be
+  loosened to recover lost first frames. The sender re-sends its active starts
+  after a challenge for that case.
 - Google conversation scans report incomplete when records lack IDs or contain
   conflicting duplicates. See [conversation scans](../apps/android/googlemessages/gmlink/conversations.go).
 
@@ -578,7 +593,8 @@ This reference records non-obvious Peppy domain constraints.
   no webview fallback.
 - Native floating-head click-through needs real input-region/focus evidence;
   CSS rounding or webview hit testing does not establish it. Preserve a usable
-  main-window/composer fallback.
+  main-window/composer fallback. The head typing pill needs the same native
+  runtime evidence; none is recorded for macOS or Windows.
 
 ## Browser runtime boundary
 
@@ -606,6 +622,12 @@ This reference records non-obvious Peppy domain constraints.
   private worker RPC; same-origin JavaScript can access browser secret forms.
   Do not describe this as the native secure-control boundary. See
   [worker host](../packages/browser-runtime/src/host.ts).
+- Typing core commands (`_worker_typing_*`) run on the serialized read path
+  (`session.query`), which does not checkpoint. They must stay read-only on
+  SQLite. The typing trust context (roster, gateway, per-conversation target) is
+  derived in Rust from the verified server context (`_worker_apply_server_context`).
+  The worker passes none, and no renderer-reachable command can set it. See
+  [typing controller](packages/browser-runtime.md#typing-controller).
 
 ## Workspace and evidence boundaries
 

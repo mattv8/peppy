@@ -16,13 +16,15 @@ Serve artifacts from `PEPPY_WEB_CLIENT_DIR`. Community sets `PEPPY_WEB_CLIENT_RO
 
 Community has no hosted account or billing site. Its Compose configuration maps `WEB_UI_ENABLED` to root mode; set `WEB_UI_ENABLED=false` to disable browser messaging. The browser client uses `https://PUBLIC_HOST/`; delete the legacy separate-browser-host setting and remove its hostname and DNS record. `WEB_CLIENT_ACCOUNT_URL` still configures external account navigation.
 
+`PEPPY_WEB_LIVE_TRUSTED_ORIGIN` takes the browser app's canonical HTTPS origin, and its rules are in the [self-host section of the README](../../README.md#self-host). An explicit default port, such as `https://host:443`, is rejected, as is any other non-empty value that is not that canonical origin; the server then does not start.
+
 ## Origin and security
 
 Use same-origin HTTPS enforcement. Keep passphrase input out of React state and plaintext logs through imperative browser dialogs. Credential import uses an imperative file control and sends selected credentials directly to the worker, outside React state. The worker must not return device tokens or encryption keys in snapshots or renderer RPC results. Rust owns domain state; the worker stores encrypted checkpoints. API errors never render as HTML or fall back to SPA routes. Static non-GET/HEAD requests return errors without `index.html` fallback.
 
 ## Not claimed
 
-This build does not prove production deployment, real-device carrier execution, native integration, or phone enrollment. Test it with a real browser against the generated WASM, phone enrollment on the canonical API origin with a maintained simulator or real server, and carrier-outcome reconciliation separate from app startup.
+This build does not prove production deployment, real-device carrier execution, native integration, or phone enrollment. Browser typing is implemented in the worker but is not verified in a real browser; see [browser runtime](../packages/browser-runtime.md#typing-controller). Test it with a real browser against the generated WASM, phone enrollment on the canonical API origin with a maintained simulator or real server, and carrier-outcome reconciliation separate from app startup.
 
 Deployment, DNS, TLS, reverse-proxy configuration, and release integration are operator work. See the [backup, restore and hosting runbook](../ops/backup-restore.md).
 
