@@ -1,3 +1,5 @@
+import { UPDATE_ERROR } from "@peppy/desktop-ui";
+
 /** Why deleting a removed phone's book for every device is unavailable right now, in priority order. */
 export const DELETE_LOCKED_REASON = "Unlock sync to delete this book for all devices.";
 export const DELETE_OFFLINE_REASON = "Connect to the server to delete this book for all devices.";
@@ -9,6 +11,7 @@ export function deleteRefusalText(code: string | undefined): string | undefined 
     case "locked": return DELETE_LOCKED_REASON;
     case "offline": return DELETE_OFFLINE_REASON;
     case "sync-not-current": return DELETE_SYNCING_REASON;
+    case "update-in-progress": return UPDATE_ERROR;
     default: return undefined;
   }
 }

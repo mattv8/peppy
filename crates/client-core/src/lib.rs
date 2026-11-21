@@ -2775,6 +2775,7 @@ impl Client {
     /// `{"status":"deleted","book_id","contacts"}`.
     pub fn delete_contact_book(&self, input: &str) -> Result<String, Error> {
         let mut store = self.lock()?;
+        ensure_recovery_complete(&store)?;
         let (conn, ctx) = store.parts();
         contact_book_deletion::delete(conn, &ctx, input)
     }

@@ -142,6 +142,16 @@ describe("removed book delete actions", () => {
     expect(document.getElementById("contacts-book-delete-reason")).toHaveTextContent(UNLOCK_REASON);
   });
 
+  it("gives the update pause priority over the locked reason", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([removedBook, mockContactBook]);
+    render(<ContactsView writesPaused toneDisabled serverConnected={false} />);
+    const button = await screen.findByRole("button", { name: "Delete for all devices…" });
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(document.getElementById("contacts-book-delete-reason")).toHaveTextContent("Paused while Peppy updates your messages.");
+    fireEvent.click(button);
+    expect(deleteDialog()).not.toBeInTheDocument();
+  });
+
   it("gives the offline reason priority over syncing", async () => {
     vi.mocked(bridge.list_contact_books).mockResolvedValue([removedBook, mockContactBook]);
     render(<ContactsView serverConnected={false} sync={{ repairRequired: true }} />);
@@ -238,6 +248,7 @@ describe("delete for all devices dialog", () => {
     ["locked", UNLOCK_REASON],
     ["offline", OFFLINE_REASON],
     ["sync-not-current", SYNCING_REASON],
+    ["update-in-progress", "Peppy is updating your messages. Try again when it finishes."],
     [undefined, "Couldn't delete this book for all devices. Try again."],
   ])("keeps the dialog open and explains a %s failure", async (code, message) => {
     vi.mocked(bridge.delete_contact_book).mockRejectedValue(code ? { code, message: "native" } : new Error("offline"));

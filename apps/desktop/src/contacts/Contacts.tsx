@@ -987,8 +987,9 @@ export function ContactsView({ books: initialBooks = [], sync, serverConnected =
   );
 
   // Deleting a removed phone's book for every device needs unlocked sync, a live connection and a settled contacts sync.
-  // The strip and menu show the first reason that applies: locked, then offline, then syncing.
-  const deleteDisabledReason = toneDisabled || sync?.readiness?.state === "needs_unlock" ? DELETE_LOCKED_REASON
+  // The strip and menu show the first reason that applies: updating, then locked, then offline, then syncing.
+  const deleteDisabledReason = writesPaused ? UPDATE_PAUSED_DESCRIPTION
+    : toneDisabled || sync?.readiness?.state === "needs_unlock" ? DELETE_LOCKED_REASON
     : !serverConnected ? DELETE_OFFLINE_REASON
     : contactsRepairState ? DELETE_SYNCING_REASON
     : undefined;

@@ -561,6 +561,15 @@ fn fenced_calls(envelope: &Envelope) -> Vec<FencedCall<'_>> {
             Box::new(|c: &Client| c.set_conversation_pinned(ConversationId::new(), true)),
         ),
         (
+            "delete_contact_book",
+            Box::new(|c: &Client| {
+                c.delete_contact_book(
+                    r#"{"book_id":"book","revoked_device_ids":[],"sync_current":true}"#,
+                )
+                .map(drop)
+            }),
+        ),
+        (
             "set_conversation_tone",
             Box::new(|c: &Client| c.set_conversation_tone("seed", None)),
         ),
