@@ -1874,6 +1874,149 @@ fn snapshot_contact_publication_generation_converges_across_deletion_order() {
 }
 
 #[test]
+fn snapshot_generation_two_tombstone_survives_generation_one_records_in_either_order() {
+    for member_first in [false, true] {
+        let mut p = pair();
+        capture(
+            &p.owner,
+            &book(&p.owner_cfg, BOOK),
+            vec![contact(BOOK, "c1", "Ada")],
+        );
+        p.server.upload(&p.owner);
+        let original = p.server.log[0].clone();
+        let make = |producer: DeviceId, sequence: u64, payload: PrivatePayload| {
+            let mut envelope = original.clone();
+            envelope.envelope_id = EnvelopeId::new();
+            envelope.producer_device_id = producer;
+            envelope.producer_sequence = SourceSequence(sequence);
+            reseal_snapshot_payload(&p.vault, &mut envelope, &payload);
+            envelope
+        };
+        // Owner removes Ada at generation 2; the generation-1 member and fence arrive late.
+        let mut restored = contact(BOOK, "c1", "Ada");
+        restored["revision"] = json!("2");
+        let mut continued = book(&p.owner_cfg, BOOK);
+        continued["generation"] = json!("2");
+        let tombstone = make(
+            p.owner_cfg.device_id,
+            100,
+            PrivatePayload::ContactRemoved {
+                book_id: BOOK.into(),
+                contact_id: "c1".into(),
+                tombstone: json!({
+                    "contact_id": "c1",
+                    "revision": "2",
+                    "deleted_at": 5,
+                    "restored_contact": restored,
+                    "book": continued,
+                }),
+            },
+        );
+        let owner = p.owner_cfg.device_id.to_string();
+        let member = make(
+            DeviceId::new(),
+            1,
+            PrivatePayload::ContactBookDeletedMember {
+                book_id: BOOK.into(),
+                contact_id: "c1".into(),
+                owner_device_id: owner.clone(),
+                generation: "1".into(),
+            },
+        );
+        let fence = make(
+            DeviceId::new(),
+            2,
+            PrivatePayload::ContactBookDeleted {
+                book_id: BOOK.into(),
+                owner_device_id: owner,
+                generation: "1".into(),
+                deleted_at_ms: 1,
+            },
+        );
+        let mut log = p.server.log.clone();
+        if member_first {
+            log.extend([member, fence, tombstone]);
+        } else {
+            log.extend([tombstone, member, fence]);
+        }
+        let name = if member_first {
+            "member-first"
+        } else {
+            "tombstone-first"
+        };
+        let receiver_config = config(&p._dir, name, &p.vault);
+        let receiver = unlocked(&receiver_config, &p.vault);
+        import(&receiver, &full(&log), log.len(), Some(95));
+        settle(&receiver);
+
+        assert_eq!(
+            state(&receiver),
+            Some((SnapshotProjectionState::Promoted, None))
+        );
+        let row: (i64, i64) = crate::contact_book_deletion::sqlcipher(
+            &receiver_config.database_path,
+        )
+        .query_row(
+            "SELECT deleted_at IS NOT NULL, publication_generation FROM contacts WHERE id='c1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+        assert_eq!(row, (1, 2), "{name}: the generation-2 tombstone survives");
+    }
+}
+
+#[test]
+fn snapshot_promotion_moves_a_book_named_by_a_succeeded_owner_to_its_successor() {
+    let mut p = pair();
+    capture(
+        &p.owner,
+        &book(&p.owner_cfg, BOOK),
+        vec![contact(BOOK, "c1", "Ada")],
+    );
+    p.server.upload(&p.owner);
+    let receiver_config = config(&p._dir, "succeeded", &p.vault);
+    let receiver = unlocked(&receiver_config, &p.vault);
+    let path = &receiver_config.database_path;
+    let predecessor = p.owner_cfg.device_id;
+    let successor = DeviceId::new();
+    // This device already knows the owner was succeeded, so the staged book names a predecessor.
+    crate::contact_book_deletion::sqlcipher(path)
+        .execute_batch(&format!(
+            "INSERT INTO device_successions(predecessor,successor,platform,hint_tag,key_epoch) VALUES('{predecessor}','{successor}','android','hint',1)"
+        ))
+        .unwrap();
+
+    import(
+        &receiver,
+        &full(&p.server.log),
+        p.server.log.len(),
+        Some(96),
+    );
+    settle(&receiver);
+
+    assert_eq!(
+        state(&receiver),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    let connection = crate::contact_book_deletion::sqlcipher(path);
+    let book_owner: String = connection
+        .query_row("SELECT owner_device_id FROM contact_books", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let contact_owner: String = connection
+        .query_row(
+            "SELECT publication_owner FROM contacts WHERE id='c1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(book_owner, successor.to_string());
+    assert_eq!(contact_owner, successor.to_string());
+}
+
+#[test]
 fn a_member_before_or_after_a_continued_upsert_stages_the_same_contact() {
     let mut p = pair();
     deleted_by_another_device(&mut p);

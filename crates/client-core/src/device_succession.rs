@@ -305,24 +305,40 @@ fn accept(
         })?
         .collect::<Result<_, _>>()?;
     for (book_id, body) in books {
-        let mut body: serde_json::Value =
-            serde_json::from_str(&body).map_err(|_| Error::Database)?;
-        body["owner_device_id"] = serde_json::Value::String(terminal.to_string());
-        conn.execute(
-            "INSERT OR IGNORE INTO inherited_contact_books(book_id,predecessor) VALUES(?,?)",
-            params![book_id, predecessor.to_string()],
-        )?;
-        conn.execute(
-            "UPDATE contact_books SET owner_device_id=?,body=? WHERE id=?",
-            params![
-                terminal.to_string(),
-                serde_json::to_string(&body).map_err(|_| Error::Database)?,
-                book_id
-            ],
-        )?;
+        transfer_book(conn, &book_id, &predecessor.to_string(), &body, &terminal)?;
     }
     crate::requeue_successor_invalid_payload(conn, &terminal)?;
     Ok(true)
+}
+
+/// Hands a book from its succeeded owner to `terminal`. Its contacts follow the book so that
+/// a deletion of the terminal's book matches them; their publication generations are kept.
+fn transfer_book(
+    conn: &Connection,
+    book_id: &str,
+    predecessor: &str,
+    body: &str,
+    terminal: &DeviceId,
+) -> Result<(), Error> {
+    let mut body: serde_json::Value = serde_json::from_str(body).map_err(|_| Error::Database)?;
+    body["owner_device_id"] = serde_json::Value::String(terminal.to_string());
+    conn.execute(
+        "INSERT OR IGNORE INTO inherited_contact_books(book_id,predecessor) VALUES(?,?)",
+        params![book_id, predecessor],
+    )?;
+    conn.execute(
+        "UPDATE contact_books SET owner_device_id=?,body=? WHERE id=?",
+        params![
+            terminal.to_string(),
+            serde_json::to_string(&body).map_err(|_| Error::Database)?,
+            book_id
+        ],
+    )?;
+    conn.execute(
+        "UPDATE contacts SET publication_owner=? WHERE book_id=?",
+        params![terminal.to_string(), book_id],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn complete_takeover_scan(conn: &Connection, book_id: &str) -> Result<(), Error> {
@@ -357,6 +373,16 @@ fn terminal_successor(
 
 /// Repairs books written by older reverse-delivery code from the authenticated stored chain.
 fn reconcile_terminal_book_owners(conn: &Connection) -> Result<(), Error> {
+    for terminal in move_stale_book_owners(conn)? {
+        crate::requeue_successor_invalid_payload(conn, &terminal)?;
+    }
+    Ok(())
+}
+
+/// Moves each stored book whose owner was succeeded to its terminal successor, contacts included.
+/// Returns the terminal successor of every book moved. Snapshot promotion calls this too, since it
+/// can store a book under a predecessor it names. It is idempotent.
+pub(crate) fn move_stale_book_owners(conn: &Connection) -> Result<Vec<DeviceId>, Error> {
     let books = conn
         .prepare("SELECT id,owner_device_id,body FROM contact_books")?
         .query_map([], |row| {
@@ -367,6 +393,7 @@ fn reconcile_terminal_book_owners(conn: &Connection) -> Result<(), Error> {
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
+    let mut terminals = Vec::new();
     for (book_id, owner, body) in books {
         let owner: DeviceId = owner.parse().map_err(|_| Error::Database)?;
         let Some(terminal) = terminal_successor(conn, &owner, &owner)? else {
@@ -375,24 +402,10 @@ fn reconcile_terminal_book_owners(conn: &Connection) -> Result<(), Error> {
         if terminal == owner {
             continue;
         }
-        let mut body: serde_json::Value =
-            serde_json::from_str(&body).map_err(|_| Error::Database)?;
-        body["owner_device_id"] = serde_json::Value::String(terminal.to_string());
-        conn.execute(
-            "INSERT OR IGNORE INTO inherited_contact_books(book_id,predecessor) VALUES(?,?)",
-            params![book_id, owner.to_string()],
-        )?;
-        conn.execute(
-            "UPDATE contact_books SET owner_device_id=?,body=? WHERE id=?",
-            params![
-                terminal.to_string(),
-                serde_json::to_string(&body).map_err(|_| Error::Database)?,
-                book_id
-            ],
-        )?;
-        crate::requeue_successor_invalid_payload(conn, &terminal)?;
+        transfer_book(conn, &book_id, &owner.to_string(), &body, &terminal)?;
+        terminals.push(terminal);
     }
-    Ok(())
+    Ok(terminals)
 }
 
 pub(crate) fn local_hint_registered(conn: &Connection) -> Result<bool, Error> {

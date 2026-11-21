@@ -860,6 +860,232 @@ fn member_before_contact_blocks_old_upsert_but_not_continuation() {
     );
 }
 
+const HINT: &[u8] = b"reinstall-stable-android-id";
+
+fn capture_owned(client: &Client, owner: DeviceId) {
+    client
+        .capture_contact_book(
+            &json!({
+                "schema_version": 1,
+                "book": book(owner, "1"),
+                "contacts": [contact("ada", "Ada"), contact("bea", "Bea")]
+            })
+            .to_string(),
+        )
+        .unwrap();
+}
+
+/// A tombstone for Ada at `revision` that embeds `book` as the owner published it.
+fn ada_tombstone(book: Value, revision: &str) -> PrivatePayload {
+    let mut restored = contact("ada", "Ada");
+    restored["revision"] = json!(revision);
+    PrivatePayload::ContactRemoved {
+        book_id: BOOK.into(),
+        contact_id: "ada".into(),
+        tombstone: json!({
+            "contact_id": "ada",
+            "revision": revision,
+            "deleted_at": 5,
+            "restored_contact": restored,
+            "book": book,
+        }),
+    }
+}
+
+fn ada_member(owner: DeviceId, generation: &str) -> PrivatePayload {
+    PrivatePayload::ContactBookDeletedMember {
+        book_id: BOOK.into(),
+        contact_id: "ada".into(),
+        owner_device_id: owner.to_string(),
+        generation: generation.into(),
+    }
+}
+
+#[test]
+fn deletion_after_succession_removes_the_inherited_book_and_its_contacts() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let a_cfg = config(&dir, "android-before-reinstall", &vault);
+    let b_cfg = config(&dir, "android-after-reinstall", &vault);
+    let c_cfg = config(&dir, "observer", &vault);
+    let a = unlocked(&a_cfg, &vault);
+    let b = unlocked(&b_cfg, &vault);
+    let c = unlocked(&c_cfg, &vault);
+    capture_owned(&a, a_cfg.device_id);
+    a.register_device_hint("android", HINT).unwrap();
+    let a_events = a.pending_outbox().unwrap();
+    sync(&a_events, &b);
+    b.observe_server_high_water(Cursor(a_events.len() as u64))
+        .unwrap();
+    b.register_device_hint("android", HINT).unwrap();
+    let b_events = b.pending_outbox().unwrap();
+    sync(&a_events, &c);
+    sync(&b_events, &c);
+
+    // B inherits A's book unchanged, so the book and its contacts are B's to delete.
+    let path = &c_cfg.database_path;
+    assert_eq!(
+        count(
+            path,
+            &format!(
+                "SELECT COUNT(*) FROM contacts WHERE publication_owner='{}'",
+                b_cfg.device_id
+            )
+        ),
+        2,
+        "inherited contacts publish under the successor"
+    );
+
+    let deleted = c
+        .delete_contact_book(&delete_input(&[b_cfg.device_id.to_string()]))
+        .unwrap();
+    assert!(deleted.contains("\"deleted\""), "{deleted}");
+    assert!(book_ids(&c).is_empty());
+    assert_eq!(count(path, "SELECT COUNT(*) FROM contacts"), 0);
+    assert_eq!(count(path, "SELECT COUNT(*) FROM contact_books"), 0);
+}
+
+#[test]
+fn live_generation_two_tombstone_survives_a_delayed_generation_one_member_and_fence() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    let deleter = DeviceId::new();
+    let report = sync(
+        &[sealed(
+            &vault,
+            owner,
+            4,
+            ada_tombstone(book(owner, "2"), "2"),
+        )],
+        &observer,
+    );
+    assert_eq!(report.quarantined, 0);
+    let path = &config.database_path;
+    let tombstones = "SELECT COUNT(*) FROM contacts WHERE id='ada' AND deleted_at IS NOT NULL";
+    assert_eq!(count(path, tombstones), 1);
+
+    sync(
+        &[
+            sealed(&vault, deleter, 1, ada_member(owner, "1")),
+            sealed(&vault, deleter, 2, fence(owner, "1")),
+        ],
+        &observer,
+    );
+    assert_eq!(
+        count(path, tombstones),
+        1,
+        "the generation-2 tombstone stays"
+    );
+    assert_eq!(book_ids(&observer), vec![BOOK.to_owned()]);
+}
+
+#[test]
+fn old_tombstone_after_a_retained_member_recreates_nothing() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    sync(
+        &[sealed(&vault, DeviceId::new(), 1, ada_member(owner, "1"))],
+        &observer,
+    );
+    let path = &config.database_path;
+    assert_eq!(
+        count(path, "SELECT COUNT(*) FROM contacts WHERE id='ada'"),
+        0
+    );
+
+    let report = sync(
+        &[sealed(
+            &vault,
+            owner,
+            4,
+            ada_tombstone(book(owner, "1"), "2"),
+        )],
+        &observer,
+    );
+    assert_eq!(report.quarantined, 0);
+    assert_eq!(
+        count(path, "SELECT COUNT(*) FROM contacts WHERE id='ada'"),
+        0,
+        "a covered tombstone is an applied no-op"
+    );
+}
+
+/// Pre-provenance rows keep an unknown generation: a deletion judges them by the book's current
+/// generation, so a generation-1 fence removes them only while the book is still generation 1.
+#[test]
+fn legacy_contacts_with_unknown_generation_follow_the_book_generation() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    drop(observer);
+    let conn = sqlcipher(&config.database_path);
+    conn.execute(
+        "UPDATE contacts SET publication_owner=NULL,publication_generation=NULL",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let observer = unlocked(&config, &vault);
+    let path = &config.database_path;
+    assert_eq!(
+        count(
+            path,
+            &format!(
+                "SELECT COUNT(*) FROM contacts WHERE publication_generation IS NULL AND publication_owner='{owner}'"
+            )
+        ),
+        2,
+        "the owner is backfilled, the generation stays unknown"
+    );
+
+    // The book continues at generation 2 without republishing: its legacy contacts are not
+    // covered by a generation-1 fence, but a generation-2 fence removes them.
+    let deleter = DeviceId::new();
+    sync(
+        &[sealed(
+            &vault,
+            owner,
+            4,
+            PrivatePayload::ContactBookState {
+                book: book(owner, "2"),
+            },
+        )],
+        &observer,
+    );
+    sync(&[sealed(&vault, deleter, 1, fence(owner, "1"))], &observer);
+    assert_eq!(count(path, "SELECT COUNT(*) FROM contacts"), 2);
+    sync(&[sealed(&vault, deleter, 2, fence(owner, "2"))], &observer);
+    assert_eq!(count(path, "SELECT COUNT(*) FROM contacts"), 0);
+    assert_eq!(count(path, "SELECT COUNT(*) FROM contact_books"), 0);
+}
+
+#[test]
+fn legacy_contacts_beneath_generation_one_are_removed_by_a_generation_one_fence() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    drop(observer);
+    let conn = sqlcipher(&config.database_path);
+    conn.execute(
+        "UPDATE contacts SET publication_owner=NULL,publication_generation=NULL",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let _observer = unlocked(&config, &vault);
+
+    sync(
+        &[sealed(&vault, DeviceId::new(), 1, fence(owner, "1"))],
+        &_observer,
+    );
+    assert_eq!(
+        count(&config.database_path, "SELECT COUNT(*) FROM contacts"),
+        0
+    );
+    assert_eq!(
+        count(&config.database_path, "SELECT COUNT(*) FROM contact_books"),
+        0
+    );
+}
+
 #[test]
 fn legacy_contacts_are_backfilled_from_their_book_on_reopen() {
     let dir = TempDir::new().unwrap();
@@ -874,7 +1100,7 @@ fn legacy_contacts_are_backfilled_from_their_book_on_reopen() {
     drop(conn);
     let _observer = unlocked(&config, &vault);
     let conn = sqlcipher(&config.database_path);
-    let (stored_owner, generation): (String, i64) = conn
+    let (stored_owner, generation): (String, Option<i64>) = conn
         .query_row(
             "SELECT publication_owner,publication_generation FROM contacts WHERE id='bea'",
             [],
@@ -882,7 +1108,7 @@ fn legacy_contacts_are_backfilled_from_their_book_on_reopen() {
         )
         .unwrap();
     assert_eq!(stored_owner, owner.to_string());
-    assert_eq!(generation, 1);
+    assert_eq!(generation, None, "a legacy generation stays unknown");
 }
 
 #[test]

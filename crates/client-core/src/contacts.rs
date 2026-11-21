@@ -392,8 +392,11 @@ CREATE TABLE IF NOT EXISTS deleted_contact_members(book_id TEXT NOT NULL, contac
             )?;
         }
     }
+    // Legacy rows predate publication provenance. Their publishing owner is the book's owner, but
+    // their generation stays unknown (NULL): deletion then judges them by the book's current
+    // generation, never by a generation the row was not shown to publish at.
     conn.execute(
-        "UPDATE contacts SET publication_owner=(SELECT owner_device_id FROM contact_books WHERE id=contacts.book_id), publication_generation=(SELECT generation FROM contact_books WHERE id=contacts.book_id) WHERE publication_owner IS NULL OR publication_generation IS NULL",
+        "UPDATE contacts SET publication_owner=(SELECT owner_device_id FROM contact_books WHERE id=contacts.book_id) WHERE publication_owner IS NULL",
         [],
     )?;
     let has_key_epoch = conn
@@ -540,9 +543,18 @@ fn tombstone_owned(
     let rev = rev.checked_add(1).ok_or(Error::Database)?;
     let mut body: Value = serde_json::from_str(&body).map_err(|_| Error::Database)?;
     body["revision"] = Value::String(rev.to_string());
+    let book = book_body(conn, book_id)?;
     conn.execute(
-        "UPDATE contacts SET revision=?,body=?,deleted_at=? WHERE book_id=? AND id=?",
-        params![rev, encoded(&body)?, deleted_at, book_id, id],
+        "UPDATE contacts SET revision=?,body=?,deleted_at=?,publication_owner=?,publication_generation=? WHERE book_id=? AND id=?",
+        params![
+            rev,
+            encoded(&body)?,
+            deleted_at,
+            req(&book, "owner_device_id")?,
+            revision(&book, "generation")?,
+            book_id,
+            id
+        ],
     )?;
     // Self-contained: the book lets a fresh receiver (compacted [removal, book] order)
     // keep the 90-day restore data; receivers gate it like any book state.
@@ -551,7 +563,7 @@ fn tombstone_owned(
         "revision": rev.to_string(),
         "deleted_at": deleted_at,
         "restored_contact": body,
-        "book": book_body(conn, book_id)?,
+        "book": book,
     });
     enqueue(
         conn,
@@ -591,9 +603,17 @@ fn mark_restored(
     let mut body: Value = serde_json::from_str(&body).map_err(|_| Error::Database)?;
     body["revision"] = Value::String(rev.to_string());
     body["restored_to"] = json!(new_id);
+    let book = book_body(conn, book_id)?;
     conn.execute(
-        "UPDATE contacts SET revision=?,body=? WHERE book_id=? AND id=?",
-        params![rev, encoded(&body)?, book_id, old_id],
+        "UPDATE contacts SET revision=?,body=?,publication_owner=?,publication_generation=? WHERE book_id=? AND id=?",
+        params![
+            rev,
+            encoded(&body)?,
+            req(&book, "owner_device_id")?,
+            revision(&book, "generation")?,
+            book_id,
+            old_id
+        ],
     )?;
     enqueue(
         conn,
@@ -609,7 +629,7 @@ fn mark_restored(
                 "revision": rev.to_string(),
                 "deleted_at": deleted_at,
                 "restored_contact": body,
-                "book": book_body(conn, book_id)?,
+                "book": book,
             }),
         },
     )?;
@@ -2372,6 +2392,34 @@ pub(crate) fn owner_or_successor(
     Ok(false)
 }
 
+/// The device that holds `owner`'s books now: the end of its succession chain, or `owner`.
+/// Publication provenance records this device, so a successor-era record that still names the
+/// predecessor is attributed to the successor, as the book itself is.
+pub(crate) fn terminal_owner(conn: &Connection, owner: &str) -> Result<String, Error> {
+    let mut current = owner.to_owned();
+    for _ in 0..64 {
+        let next: Option<String> = conn
+            .query_row(
+                "SELECT successor FROM device_successions WHERE predecessor=?",
+                [&current],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(next) = next else { break };
+        current = next;
+    }
+    Ok(current)
+}
+
+/// Generation of the stored book, which a live record of that book must have.
+fn stored_generation(conn: &Connection, book_id: &str) -> Result<i64, Error> {
+    Ok(conn.query_row(
+        "SELECT generation FROM contact_books WHERE id=?",
+        [book_id],
+        |r| r.get(0),
+    )?)
+}
+
 pub(crate) fn visible_book_ids(conn: &Connection) -> Result<BTreeSet<String>, Error> {
     let books = conn
         .prepare("SELECT id,owner_device_id,state FROM contact_books WHERE forgotten=0")?
@@ -2431,13 +2479,13 @@ fn apply_peer(
             }
             let (id, rev, body) = peer_contact(contact, req(book, "id")?)?;
             let book_id = req(book, "id")?;
-            let owner = req(book, "owner_device_id")?;
+            let owner = terminal_owner(conn, req(book, "owner_device_id")?)?;
             let book_generation = revision(book, "generation")?;
             if crate::contact_book_deletion::member_covers(
                 conn,
                 book_id,
                 &id,
-                owner,
+                &owner,
                 book_generation,
             )? {
                 return Ok(true);
@@ -2466,11 +2514,14 @@ fn apply_peer(
             // is the fence owner the removal is judged against.
             let (fence_owner, book_generation) = match tombstone.get("book") {
                 Some(book) => (
-                    req(book, "owner_device_id")?.to_owned(),
+                    terminal_owner(conn, req(book, "owner_device_id")?)?,
                     Some(revision(book, "generation")?),
                 ),
                 None => (
-                    stored_owner(conn, book_id)?.unwrap_or_else(|| producer.to_owned()),
+                    terminal_owner(
+                        conn,
+                        &stored_owner(conn, book_id)?.unwrap_or_else(|| producer.to_owned()),
+                    )?,
                     None,
                 ),
             };
@@ -2495,9 +2546,24 @@ fn apply_peer(
             if id != *contact_id || body_rev != rev {
                 return Ok(false);
             }
+            // Covered like a live upsert: a removal at or below a retained member is an applied
+            // no-op, so it recreates neither the tombstone nor its restore and photo state.
+            let generation = match book_generation {
+                Some(generation) => generation,
+                None => stored_generation(conn, book_id)?,
+            };
+            if crate::contact_book_deletion::member_covers(
+                conn,
+                book_id,
+                &id,
+                &fence_owner,
+                generation,
+            )? {
+                return Ok(true);
+            }
             conn.execute(
-                "INSERT INTO contacts(id,book_id,revision,body,deleted_at) VALUES(?,?,?,?,?) ON CONFLICT(book_id,id) DO UPDATE SET revision=excluded.revision,body=excluded.body,deleted_at=excluded.deleted_at WHERE excluded.revision > contacts.revision",
-                params![id, book_id, rev, encoded(&body)?, deleted_at],
+                "INSERT INTO contacts(id,book_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,?,?,?) ON CONFLICT(book_id,id) DO UPDATE SET revision=CASE WHEN excluded.revision>contacts.revision THEN excluded.revision ELSE contacts.revision END,body=CASE WHEN excluded.revision>contacts.revision THEN excluded.body ELSE contacts.body END,deleted_at=CASE WHEN excluded.revision>contacts.revision THEN excluded.deleted_at ELSE contacts.deleted_at END,publication_owner=excluded.publication_owner,publication_generation=CASE WHEN contacts.publication_owner=excluded.publication_owner THEN MAX(COALESCE(contacts.publication_generation,0),excluded.publication_generation) ELSE excluded.publication_generation END WHERE excluded.revision>=contacts.revision",
+                params![id, book_id, rev, encoded(&body)?, deleted_at, fence_owner, generation],
             )?;
             Ok(true)
         }
@@ -2634,7 +2700,7 @@ fn apply_book(conn: &Connection, producer: &str, book: &Value) -> Result<bool, E
         "INSERT INTO contact_books(id,owner_device_id,generation,state,body,forgotten) VALUES(?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET owner_device_id=excluded.owner_device_id,generation=excluded.generation,state=excluded.state,body=excluded.body",
         params![
             id,
-            producer,
+            terminal_owner(conn, producer)?,
             generation,
             book.get("state").and_then(Value::as_str).unwrap_or("active"),
             encoded(&body)?
