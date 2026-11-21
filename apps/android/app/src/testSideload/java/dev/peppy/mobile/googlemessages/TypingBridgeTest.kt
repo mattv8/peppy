@@ -159,6 +159,66 @@ class TypingBridgeTest {
         assertEquals(listOf("challenge"), transport.sent)
     }
 
+    @Test fun `reply precedes follow ups and replay is recorded once`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        val transport = FakeTransport(calls)
+        val bridge = bridge(core, transport, calls)
+        bridge.start(credentials())
+        transport.enable(listOf("gateway"), "gateway")
+        core.nextOpen = outcome(reply = "ack", followUps = listOf("first", "second"))
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            bridge.onFrame("challenge")
+        }
+        assertEquals(listOf("ack", "first", "second"), transport.sent)
+        assertEquals(listOf(338, 325).map { "event=27 session=1 timestamp_ms=10 trace=0 29=$it" }, records)
+    }
+
+    @Test fun `follow ups stop after refused send including reply refusal`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        val attempts = mutableListOf<String>()
+        var refused = "second"
+        val transport = object : TypingTransport {
+            override fun start(credentials: LiveTypingCredentials, listener: LiveTypingListener) = Unit
+            override fun stop() = Unit
+            override fun send(frameJson: String): Boolean { attempts += frameJson; return frameJson != refused }
+        }
+        val bridge = TypingBridge(ApplicationProvider.getApplicationContext(), transport, Executor(Runnable::run),
+            { core }, TypingSharingPreferences(ApplicationProvider.getApplicationContext()))
+        bridge.start(credentials())
+        bridge.onEnabled(LiveTypingEnableContext(listOf("gateway"), "gateway"))
+        core.nextOpen = outcome(reply = "ack", followUps = listOf("first", "second", "third"))
+        val records = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, records::add) {
+            bridge.onFrame("challenge")
+            refused = "ack"
+            bridge.onFrame("challenge")
+        }
+        assertEquals(listOf("ack", "first", "second", "ack"), attempts)
+        assertEquals(1, records.count { it.endsWith("29=338") })
+        assertEquals(2, records.count { it.endsWith("29=321") })
+    }
+
+    @Test fun `retired authority sends neither reply nor follow ups`() {
+        val calls = mutableListOf<String>()
+        val core = FakeCore(calls)
+        val transport = FakeTransport(calls)
+        val executor = QueuedExecutor()
+        val bridge = TypingBridge(ApplicationProvider.getApplicationContext(), transport, executor,
+            { core }, TypingSharingPreferences(ApplicationProvider.getApplicationContext()))
+        bridge.start(credentials())
+        executor.runAll()
+        transport.enable(listOf("gateway"), "gateway")
+        executor.runAll()
+        core.nextOpen = outcome(reply = "ack", followUps = listOf("first"))
+        bridge.onFrame("challenge")
+        bridge.stop()
+        executor.runAll()
+        assertTrue(transport.sent.isEmpty())
+    }
+
     @Test fun `outbound typing resolves the Google conversation id before the effect`() {
         val calls = mutableListOf<String>()
         val core = FakeCore(calls)
@@ -248,7 +308,7 @@ class TypingBridgeTest {
             bridge.onFrame("empty")
             core.nextOpen = outcome(action = display)
             bridge.onFrame("display")
-            core.nextOpen = NativeLiveOutcome(2UL, null, null, null)
+            core.nextOpen = NativeLiveOutcome(2UL, null, null, null, emptyList())
             bridge.onFrame("stale")
             core.nextOpen = outcome(reply = "reply")
             bridge.onFrame("reply")
@@ -337,7 +397,7 @@ class TypingBridgeTest {
             }
             override fun open(frameJson: String, clock: NativeLiveClock): NativeLiveOutcome {
                 if (openFails) error("open")
-                return NativeLiveOutcome(2UL, null, null, "reply")
+                return NativeLiveOutcome(2UL, null, null, "reply", emptyList())
             }
         }
         val transport = FakeTransport(calls)
@@ -775,7 +835,7 @@ class TypingBridgeTest {
     private fun credentials(generation: Long = 1) = TypingCredentials("https://example.test", "bearer", "gateway", generation)
     private fun session() = NativeLiveSessionUpdate("peer", null, 1UL, 1UL)
     private fun intent(sequence: ULong = 1UL, deadline: ULong = 9_999_999UL) = NativeLiveAction.GatewayTypingIntent("peer", 1UL, sequence, "conversation", null, NativeTypingState.STARTED, deadline)
-    private fun outcome(update: NativeLiveSessionUpdate? = null, action: NativeLiveAction? = null, reply: String? = null) = NativeLiveOutcome(1UL, update, action, reply)
+    private fun outcome(update: NativeLiveSessionUpdate? = null, action: NativeLiveAction? = null, reply: String? = null, followUps: List<String> = emptyList()) = NativeLiveOutcome(1UL, update, action, reply, followUps)
 
     private class FakeTransport(private val calls: MutableList<String>) : TypingTransport {
         lateinit var listener: LiveTypingListener
@@ -793,7 +853,7 @@ class TypingBridgeTest {
         var sealed: NativeLiveOutbound? = NativeLiveOutbound(1UL, "frame")
         var sealedState: NativeTypingState? = null
         var sealedParticipant: String? = null
-        var nextOpen = NativeLiveOutcome(1UL, null, null, null)
+        var nextOpen = NativeLiveOutcome(1UL, null, null, null, emptyList())
         var ownedGoogleId: String? = "google-conversation"
         override fun enable(context: NativeLiveEnableContext, clock: NativeLiveClock): ULong { calls += "core.enable"; enableContext = context; return 1UL }
         override fun setSharing(enabled: Boolean) { calls += "core.share" }

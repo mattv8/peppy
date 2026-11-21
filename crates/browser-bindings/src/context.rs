@@ -65,7 +65,7 @@ impl BrowserCore {
             self.context.snapshot_too_large = input.snapshot_too_large;
             self.context.sync_current = sync_current;
             if !matches!(self.context.connection.as_deref(), Some("offline")) {
-                self.context.rcs_roster_validated = false;
+                self.drop_verified_roster();
             }
             return Ok(
                 json!({"connection": self.context.connection, "deviceRole": self.context.device_role, "gateways": self.context.gateways}),
@@ -83,7 +83,7 @@ impl BrowserCore {
         }
         let device_id = self.own_context_device_id()?;
         let Some(role) = gateways::extract_device_role(&devices, &device_id) else {
-            self.context.rcs_roster_validated = false;
+            self.drop_verified_roster();
             return Err(Failure::new(
                 "device-revoked",
                 "This browser device is no longer active.",
@@ -105,12 +105,24 @@ impl BrowserCore {
             .filter(|device| device.revoked)
             .map(|device| device.device_id.clone())
             .collect();
+        self.context.rcs_live_roster = devices
+            .devices
+            .iter()
+            .filter(|device| !device.revoked)
+            .filter_map(|device| device.device_id.parse().ok())
+            .collect();
         self.context.rcs_roster_validated = true;
         self.gateways_known = true;
         serde_json::to_value(
             json!({"connection": self.context.connection, "deviceRole": role, "gateways": views}),
         )
         .map_err(|_| core(CoreError::Database))
+    }
+
+    /// Every path that stops trusting the roster must clear both the flag and the device list.
+    fn drop_verified_roster(&mut self) {
+        self.context.rcs_roster_validated = false;
+        self.context.rcs_live_roster.clear();
     }
 
     fn own_context_device_id(&self) -> Result<String, Failure> {

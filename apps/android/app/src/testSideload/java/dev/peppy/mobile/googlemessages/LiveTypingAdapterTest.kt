@@ -203,7 +203,7 @@ class LiveTypingAdapterTest {
         generation: ULong,
         update: NativeLiveSessionUpdate? = null,
         action: NativeLiveAction? = null,
-    ) = NativeLiveOutcome(generation, update, action, null)
+    ) = NativeLiveOutcome(generation, update, action, null, emptyList())
 
     private fun session(token: ULong = 8UL, revision: ULong = 1UL) =
         NativeLiveSessionUpdate("peer", null, token, revision)

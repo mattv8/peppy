@@ -124,6 +124,48 @@ pub fn snapshot_at(
     )
 }
 
+/// The one current linked gateway, or none when there are zero or several.
+pub fn unique_current_linked_gateway(snapshot: &RcsStatusSnapshot) -> Option<DeviceId> {
+    unique(
+        snapshot
+            .gateways
+            .iter()
+            .filter(|gateway| gateway.current && gateway.state == RcsGatewayState::Linked)
+            .filter_map(|gateway| gateway.gateway_id.parse().ok())
+            .collect(),
+    )
+}
+
+/// The one current linked gateway that reports the conversation eligible, or none.
+pub fn typing_target(
+    snapshot: &RcsStatusSnapshot,
+    conversation_id: ConversationId,
+) -> Option<DeviceId> {
+    let candidates: Vec<_> = snapshot
+        .eligibilities
+        .iter()
+        .filter(|eligibility| {
+            eligibility.conversation_id == conversation_id.to_string()
+                && eligibility.eligibility == RcsEligibilityState::Eligible
+                && snapshot.gateways.iter().any(|gateway| {
+                    gateway.gateway_id == eligibility.gateway_id
+                        && gateway.current
+                        && gateway.state == RcsGatewayState::Linked
+                })
+        })
+        .filter_map(|eligibility| eligibility.gateway_id.parse().ok())
+        .collect();
+    unique(candidates)
+}
+
+fn unique(candidates: Vec<DeviceId>) -> Option<DeviceId> {
+    let candidate = candidates.first()?.to_owned();
+    candidates
+        .iter()
+        .all(|other| *other == candidate)
+        .then_some(candidate)
+}
+
 fn validated_gateway_ids(
     gateways: &[GatewayView],
     revoked_device_ids: &HashSet<String>,
@@ -420,6 +462,152 @@ mod tests {
         assert!(snapshot.gateways[0].current);
         assert!(!snapshot.gateways[0].healthy);
         assert!(snapshot.eligibilities.is_empty());
+    }
+
+    fn gateway_entry(gateway: DeviceId, state: RcsGatewayState, current: bool) -> RcsGatewayStatus {
+        RcsGatewayStatus {
+            gateway_id: gateway.to_string(),
+            state,
+            current,
+            available: true,
+            healthy: true,
+            phone_responsive: true,
+            observed_at_ms: "1".into(),
+            capability_revision: "1".into(),
+            expires_at_ms: None,
+        }
+    }
+
+    fn eligibility_entry(
+        conversation: ConversationId,
+        gateway: DeviceId,
+        eligibility: RcsEligibilityState,
+    ) -> RcsConversationEligibility {
+        RcsConversationEligibility {
+            conversation_id: conversation.to_string(),
+            gateway_id: gateway.to_string(),
+            eligibility,
+            observed_at_ms: "1".into(),
+            mapping_revision: "1".into(),
+            expires_at_ms: None,
+        }
+    }
+
+    fn snapshot_of(
+        gateways: Vec<RcsGatewayStatus>,
+        eligibilities: Vec<RcsConversationEligibility>,
+    ) -> RcsStatusSnapshot {
+        RcsStatusSnapshot {
+            gateways,
+            eligibilities,
+        }
+    }
+
+    #[test]
+    fn unique_gateway_is_none_without_a_current_linked_gateway() {
+        let empty = snapshot_of(Vec::new(), Vec::new());
+        assert_eq!(unique_current_linked_gateway(&empty), None);
+
+        let unlinked = snapshot_of(
+            vec![gateway_entry(
+                DeviceId::new(),
+                RcsGatewayState::Unlinked,
+                true,
+            )],
+            Vec::new(),
+        );
+        assert_eq!(unique_current_linked_gateway(&unlinked), None);
+    }
+
+    #[test]
+    fn unique_gateway_returns_the_single_current_linked_gateway() {
+        let gateway = DeviceId::new();
+        let snapshot = snapshot_of(
+            vec![gateway_entry(gateway, RcsGatewayState::Linked, true)],
+            Vec::new(),
+        );
+        assert_eq!(unique_current_linked_gateway(&snapshot), Some(gateway));
+    }
+
+    #[test]
+    fn unique_gateway_rejects_two_current_linked_gateways() {
+        let snapshot = snapshot_of(
+            vec![
+                gateway_entry(DeviceId::new(), RcsGatewayState::Linked, true),
+                gateway_entry(DeviceId::new(), RcsGatewayState::Linked, true),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(unique_current_linked_gateway(&snapshot), None);
+    }
+
+    #[test]
+    fn linked_but_not_current_gateway_is_not_selected() {
+        let gateway = DeviceId::new();
+        let snapshot = snapshot_of(
+            vec![gateway_entry(gateway, RcsGatewayState::Linked, false)],
+            Vec::new(),
+        );
+        assert_eq!(unique_current_linked_gateway(&snapshot), None);
+
+        let conversation = ConversationId::new();
+        let eligible = snapshot_of(
+            vec![gateway_entry(gateway, RcsGatewayState::Linked, false)],
+            vec![eligibility_entry(
+                conversation,
+                gateway,
+                RcsEligibilityState::Eligible,
+            )],
+        );
+        assert_eq!(typing_target(&eligible, conversation), None);
+    }
+
+    #[test]
+    fn typing_target_resolves_through_exactly_one_current_linked_gateway() {
+        let conversation = ConversationId::new();
+        let gateway = DeviceId::new();
+        let snapshot = snapshot_of(
+            vec![gateway_entry(gateway, RcsGatewayState::Linked, true)],
+            vec![eligibility_entry(
+                conversation,
+                gateway,
+                RcsEligibilityState::Eligible,
+            )],
+        );
+        assert_eq!(typing_target(&snapshot, conversation), Some(gateway));
+    }
+
+    #[test]
+    fn typing_target_is_none_without_an_eligible_gateway() {
+        let conversation = ConversationId::new();
+        let gateway = DeviceId::new();
+        let snapshot = snapshot_of(
+            vec![gateway_entry(gateway, RcsGatewayState::Linked, true)],
+            vec![eligibility_entry(
+                conversation,
+                gateway,
+                RcsEligibilityState::NotEligible,
+            )],
+        );
+        assert_eq!(typing_target(&snapshot, conversation), None);
+    }
+
+    #[test]
+    fn typing_target_is_none_when_two_current_linked_gateways_are_eligible() {
+        let conversation = ConversationId::new();
+        let first = DeviceId::new();
+        let second = DeviceId::new();
+        let snapshot = snapshot_of(
+            vec![
+                gateway_entry(first, RcsGatewayState::Linked, true),
+                gateway_entry(second, RcsGatewayState::Linked, true),
+            ],
+            vec![
+                eligibility_entry(conversation, first, RcsEligibilityState::Eligible),
+                eligibility_entry(conversation, second, RcsEligibilityState::Eligible),
+            ],
+        );
+        assert_eq!(typing_target(&snapshot, conversation), None);
     }
 
     #[test]

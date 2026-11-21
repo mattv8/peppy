@@ -82,6 +82,8 @@ pub struct NativeLiveOutcome {
     pub session_update: Option<NativeLiveSessionUpdate>,
     pub action: Option<NativeLiveAction>,
     pub reply_frame_json: Option<String>,
+    /// Frames to transmit after `reply_frame_json`, in order; empty when none.
+    pub follow_up_frames_json: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -189,6 +191,11 @@ pub(crate) fn outcome_view(value: LiveOutcome) -> Result<NativeLiveOutcome, Nati
             .reply
             .map(|frame| serde_json::to_string(&frame).map_err(|_| NativeLiveTypingError::Crypto))
             .transpose()?,
+        follow_up_frames_json: value
+            .follow_ups
+            .iter()
+            .map(|frame| serde_json::to_string(frame).map_err(|_| NativeLiveTypingError::Crypto))
+            .collect::<Result<Vec<_>, _>>()?,
     })
 }
 
@@ -449,18 +456,19 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        let challenge = fixture
+        let challenged = fixture
             .receiver
             .open_typing_signal_v2(typing.frame_json, clock(1_001))
-            .unwrap()
-            .reply_frame_json
             .unwrap();
-        let acknowledgement = fixture
+        assert!(challenged.follow_up_frames_json.is_empty());
+        let challenge = challenged.reply_frame_json.unwrap();
+        let answered = fixture
             .sender
             .open_typing_signal_v2(challenge, clock(1_002))
-            .unwrap()
-            .reply_frame_json
             .unwrap();
+        // The challenge was answered while the start was active: one fresh start follows the ack.
+        assert_eq!(answered.follow_up_frames_json.len(), 1);
+        let acknowledgement = answered.reply_frame_json.unwrap();
         let installed = fixture
             .receiver
             .open_typing_signal_v2(acknowledgement, clock(1_003))
@@ -497,7 +505,7 @@ mod tests {
             } => {
                 assert_eq!(peer_device_id, fixture.sender_id.to_string());
                 assert!(session_token > 0);
-                assert_eq!(sequence, 3);
+                assert_eq!(sequence, 4);
                 assert_eq!(conversation_id, fixture.conversation.to_string());
                 assert_eq!(participant, None);
                 assert_eq!(state, NativeTypingState::Started);
@@ -588,18 +596,20 @@ mod tests {
                 deadline_mono: value,
             }),
             reply: None,
+            follow_ups: Vec::new(),
         })
         .unwrap();
         let json = serde_json::to_value(&outcome).unwrap();
         assert_eq!(json["generation"], value);
         assert_eq!(json["action"]["Display"]["sequence"], value);
         let fields = json.as_object().unwrap();
-        assert_eq!(fields.len(), 4);
+        assert_eq!(fields.len(), 5);
         assert!(
             fields.contains_key("generation")
                 && fields.contains_key("session_update")
                 && fields.contains_key("action")
                 && fields.contains_key("reply_frame_json")
+                && fields.contains_key("follow_up_frames_json")
         );
         assert!(
             !json.to_string().contains("ciphertext") && !json.to_string().contains("event_key")

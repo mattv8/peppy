@@ -7,7 +7,7 @@ const WINDOW_MS: u64 = 60_000;
 const RESERVATION_MS: u64 = 15_000;
 const START_INTERVAL_MS: u64 = 3_000;
 const BURST_WINDOW_MS: u64 = 1_000;
-const MAX_OCCUPANCY: usize = 50;
+pub(crate) const MAX_OCCUPANCY: usize = 50;
 const MAX_CONVERSATIONS: usize = 256;
 
 /// Sender repeat-suppression key: one slot per conversation and roster participant.

@@ -7937,14 +7937,22 @@ public struct NativeLiveOutcome: Equatable, Hashable {
     public var sessionUpdate: NativeLiveSessionUpdate?
     public var action: NativeLiveAction?
     public var replyFrameJson: String?
+    /**
+     * Frames to transmit after `reply_frame_json`, in order; empty when none.
+     */
+    public var followUpFramesJson: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(generation: UInt64, sessionUpdate: NativeLiveSessionUpdate?, action: NativeLiveAction?, replyFrameJson: String?) {
+    public init(generation: UInt64, sessionUpdate: NativeLiveSessionUpdate?, action: NativeLiveAction?, replyFrameJson: String?, 
+        /**
+         * Frames to transmit after `reply_frame_json`, in order; empty when none.
+         */followUpFramesJson: [String]) {
         self.generation = generation
         self.sessionUpdate = sessionUpdate
         self.action = action
         self.replyFrameJson = replyFrameJson
+        self.followUpFramesJson = followUpFramesJson
     }
 
     
@@ -7966,7 +7974,8 @@ public struct FfiConverterTypeNativeLiveOutcome: FfiConverterRustBuffer {
                 generation: FfiConverterUInt64.read(from: &buf), 
                 sessionUpdate: FfiConverterOptionTypeNativeLiveSessionUpdate.read(from: &buf), 
                 action: FfiConverterOptionTypeNativeLiveAction.read(from: &buf), 
-                replyFrameJson: FfiConverterOptionString.read(from: &buf)
+                replyFrameJson: FfiConverterOptionString.read(from: &buf), 
+                followUpFramesJson: FfiConverterSequenceString.read(from: &buf)
         )
     }
 
@@ -7975,6 +7984,7 @@ public struct FfiConverterTypeNativeLiveOutcome: FfiConverterRustBuffer {
         FfiConverterOptionTypeNativeLiveSessionUpdate.write(value.sessionUpdate, into: &buf)
         FfiConverterOptionTypeNativeLiveAction.write(value.action, into: &buf)
         FfiConverterOptionString.write(value.replyFrameJson, into: &buf)
+        FfiConverterSequenceString.write(value.followUpFramesJson, into: &buf)
     }
 }
 

@@ -225,7 +225,7 @@ class LinkRuntimeTest {
             adapterDone.countDown()
         }
         adapter.activate(7UL)
-        adapter.consume(NativeLiveOutcome(7UL, NativeLiveSessionUpdate("peer", null, 8UL, 1UL), null, null))
+        adapter.consume(NativeLiveOutcome(7UL, NativeLiveSessionUpdate("peer", null, 8UL, 1UL), null, null, emptyList()))
         adapter.consume(
             NativeLiveOutcome(
                 7UL,
@@ -234,6 +234,7 @@ class LinkRuntimeTest {
                     "peer", 8UL, 1UL, "conversation", null, NativeTypingState.STARTED, 200UL,
                 ),
                 null,
+                emptyList(),
             ),
         )
 
@@ -246,7 +247,7 @@ class LinkRuntimeTest {
             Thread { executor.runAll() }.start()
             assertTrue(adapterEffectStarted.await(1, TimeUnit.SECONDS))
             Thread {
-                adapter.consume(NativeLiveOutcome(7UL, NativeLiveSessionUpdate("peer", null, 9UL, 2UL), null, null))
+                adapter.consume(NativeLiveOutcome(7UL, NativeLiveSessionUpdate("peer", null, 9UL, 2UL), null, null, emptyList()))
                 retirementDone.countDown()
             }.start()
 

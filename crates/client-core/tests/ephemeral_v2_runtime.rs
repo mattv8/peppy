@@ -250,6 +250,866 @@ fn v2_is_disabled_until_a_trusted_context_enables_and_then_seals_a_real_frame() 
 }
 
 #[test]
+fn cold_start_replays_after_ack_in_both_directions() {
+    for contact_origin in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::new();
+        let gateway_config = config(&directory, "replay-gateway", &vault);
+        let desktop_config = config(&directory, "replay-desktop", &vault);
+        let gateway = unlocked(&gateway_config, &vault);
+        let desktop = unlocked(&desktop_config, &vault);
+        let conversation = ConversationId::new();
+        publish_pair_eligibility(
+            &desktop,
+            &gateway,
+            gateway_config.device_id,
+            conversation,
+            1_000,
+        );
+        let clock = |time| LiveClock {
+            wall_ms: time,
+            mono_ms: time as u64,
+        };
+        enable_pair(
+            &desktop,
+            desktop_config.device_id,
+            &gateway,
+            gateway_config.device_id,
+            clock(1_000),
+            clock(1_000),
+        );
+        let (sender, receiver, origin) = if contact_origin {
+            (&gateway, &desktop, TypingOriginV2::GoogleContact)
+        } else {
+            (&desktop, &gateway, TypingOriginV2::VaultDevice)
+        };
+        let initial = sender
+            .seal_typing_signal_v2(
+                conversation,
+                gateway_config.device_id,
+                origin,
+                None,
+                TypingStateV2::Started,
+                clock(1_001),
+            )
+            .unwrap()
+            .unwrap()
+            .signal;
+        let first = receiver
+            .open_typing_signal_v2(&initial, clock(1_001))
+            .unwrap();
+        assert!(first.action.is_none());
+        let response = sender
+            .open_typing_signal_v2(&first.reply.unwrap(), clock(1_002))
+            .unwrap();
+        let ack = response.reply.unwrap();
+        assert_eq!(response.follow_ups.len(), 1);
+        let follow_up = &response.follow_ups[0];
+        assert!(follow_up.sequence.parse::<u64>().unwrap() > ack.sequence.parse::<u64>().unwrap());
+        assert_eq!(follow_up.expires_at_ms, initial.expires_at_ms);
+        receiver.open_typing_signal_v2(&ack, clock(1_003)).unwrap();
+        let outcome = receiver
+            .open_typing_signal_v2(follow_up, clock(1_004))
+            .unwrap();
+        let deadline = match (contact_origin, outcome.action) {
+            (
+                true,
+                Some(LiveAction::Display {
+                    conversation_id,
+                    deadline_mono,
+                    ..
+                }),
+            )
+            | (
+                false,
+                Some(LiveAction::GatewayTypingIntent {
+                    conversation_id,
+                    deadline_mono,
+                    ..
+                }),
+            ) => {
+                assert_eq!(conversation_id, conversation);
+                deadline_mono
+            }
+            other => panic!("unexpected action: {other:?}"),
+        };
+        assert!(deadline <= initial.expires_at_ms.parse().unwrap());
+    }
+}
+
+#[test]
+fn stopped_or_sharing_disabled_before_challenge_prevents_vault_replay() {
+    for stop in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::new();
+        let gateway_config = config(&directory, "stop-gateway", &vault);
+        let desktop_config = config(&directory, "stop-desktop", &vault);
+        let gateway = unlocked(&gateway_config, &vault);
+        let desktop = unlocked(&desktop_config, &vault);
+        let conversation = ConversationId::new();
+        publish_pair_eligibility(
+            &desktop,
+            &gateway,
+            gateway_config.device_id,
+            conversation,
+            1_000,
+        );
+        let clock = |time| LiveClock {
+            wall_ms: time,
+            mono_ms: time as u64,
+        };
+        enable_pair(
+            &desktop,
+            desktop_config.device_id,
+            &gateway,
+            gateway_config.device_id,
+            clock(1_000),
+            clock(1_000),
+        );
+        let first = seal(
+            &desktop,
+            conversation,
+            gateway_config.device_id,
+            TypingStateV2::Started,
+            1_001,
+            1_001,
+        )
+        .unwrap();
+        let challenge = gateway
+            .open_typing_signal_v2(&first.signal, clock(1_001))
+            .unwrap()
+            .reply
+            .unwrap();
+        if stop {
+            seal(
+                &desktop,
+                conversation,
+                gateway_config.device_id,
+                TypingStateV2::Stopped,
+                1_002,
+                1_002,
+            )
+            .unwrap();
+        } else {
+            desktop.set_typing_sharing(false).unwrap();
+        }
+        let response = desktop
+            .open_typing_signal_v2(&challenge, clock(1_003))
+            .unwrap();
+        assert!(response.reply.is_some());
+        assert!(response.follow_ups.is_empty());
+    }
+}
+
+#[test]
+fn replay_renewals_over_a_minute_have_a_bounded_frame_count() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "burst-gateway", &vault);
+    let desktop_config = config(&directory, "burst-desktop", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    let conversation = ConversationId::new();
+    publish_pair_eligibility(
+        &desktop,
+        &gateway,
+        gateway_config.device_id,
+        conversation,
+        1_000,
+    );
+    let clock = |time: i64| LiveClock {
+        wall_ms: time,
+        mono_ms: time as u64,
+    };
+    enable_pair(
+        &desktop,
+        desktop_config.device_id,
+        &gateway,
+        gateway_config.device_id,
+        clock(1_000),
+        clock(1_000),
+    );
+    let mut controls = 0;
+    let mut replays = 0;
+    let mut displays = 0;
+    let mut last_challenge = None;
+    for time in (1_001..61_001).step_by(3_200) {
+        let frame = seal(
+            &desktop,
+            conversation,
+            gateway_config.device_id,
+            TypingStateV2::Started,
+            time,
+            time as u64,
+        )
+        .unwrap()
+        .signal;
+        let outcome = gateway.open_typing_signal_v2(&frame, clock(time)).unwrap();
+        displays += usize::from(outcome.action.is_some());
+        if let Some(challenge) = outcome.reply {
+            if let Some(last) = last_challenge {
+                assert!(time - last >= 10_000, "challenge before renewal window");
+            }
+            last_challenge = Some(time);
+            let response = desktop
+                .open_typing_signal_v2(&challenge, clock(time))
+                .unwrap();
+            assert!(
+                !response.follow_ups.is_empty(),
+                "active start must be replayed"
+            );
+            controls += 2;
+            replays += response.follow_ups.len();
+            gateway
+                .open_typing_signal_v2(&response.reply.unwrap(), clock(time))
+                .unwrap();
+            for follow_up in response.follow_ups {
+                let replay = gateway
+                    .open_typing_signal_v2(&follow_up, clock(time))
+                    .unwrap();
+                assert!(replay.reply.is_none(), "replay triggered another challenge");
+                displays += usize::from(replay.action.is_some());
+            }
+        }
+    }
+    assert!(
+        (3..=18).contains(&(controls + replays)),
+        "{controls} control frames and {replays} replays"
+    );
+    assert!(replays > 0);
+    assert!(displays > 0);
+}
+
+#[test]
+fn three_lost_acknowledgements_preserve_sixty_second_cooldown() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "lost-gateway", &vault);
+    let desktop_config = config(&directory, "lost-desktop", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    let conversation = ConversationId::new();
+    publish_pair_eligibility(
+        &desktop,
+        &gateway,
+        gateway_config.device_id,
+        conversation,
+        1_000,
+    );
+    let clock = |time: i64| LiveClock {
+        wall_ms: time,
+        mono_ms: time as u64,
+    };
+    enable_pair(
+        &desktop,
+        desktop_config.device_id,
+        &gateway,
+        gateway_config.device_id,
+        clock(1_000),
+        clock(1_000),
+    );
+    for time in [1_001, 11_001, 21_001] {
+        let frame = seal(
+            &desktop,
+            conversation,
+            gateway_config.device_id,
+            TypingStateV2::Started,
+            time,
+            time as u64,
+        )
+        .unwrap()
+        .signal;
+        let challenge = gateway
+            .open_typing_signal_v2(&frame, clock(time))
+            .unwrap()
+            .reply
+            .unwrap();
+        let response = desktop
+            .open_typing_signal_v2(&challenge, clock(time))
+            .unwrap();
+        assert!(response.reply.is_some());
+        assert_eq!(response.follow_ups.len(), 1);
+        // Both the acknowledgement and the follow-up are lost.
+    }
+    for (time, expect_challenge) in [(31_001, false), (87_999, false), (91_001, true)] {
+        let frame = seal(
+            &desktop,
+            conversation,
+            gateway_config.device_id,
+            TypingStateV2::Started,
+            time,
+            time as u64,
+        )
+        .unwrap()
+        .signal;
+        let result = gateway.open_typing_signal_v2(&frame, clock(time)).unwrap();
+        assert_eq!(result.reply.is_some(), expect_challenge, "time {time}");
+    }
+}
+
+#[test]
+fn challenge_replays_only_two_most_recent_active_starts() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "many-gateway", &vault);
+    let desktop_config = config(&directory, "many-desktop", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    let conversations: Vec<_> = (0..5).map(|_| ConversationId::new()).collect();
+    for conversation in &conversations {
+        publish_eligible(&gateway, gateway_config.device_id, *conversation);
+    }
+    let mut server = Server::default();
+    server.upload(&gateway);
+    server.sync(&desktop);
+    let clock = |time: i64| LiveClock {
+        wall_ms: time,
+        mono_ms: time as u64,
+    };
+    enable_pair(
+        &desktop,
+        desktop_config.device_id,
+        &gateway,
+        gateway_config.device_id,
+        clock(1_000),
+        clock(1_000),
+    );
+    let frames: Vec<_> = conversations
+        .iter()
+        .enumerate()
+        .map(|(index, conversation)| {
+            let time = 1_001 + index as i64;
+            seal(
+                &desktop,
+                *conversation,
+                gateway_config.device_id,
+                TypingStateV2::Started,
+                time,
+                time as u64,
+            )
+            .unwrap()
+            .signal
+        })
+        .collect();
+    let challenge = gateway
+        .open_typing_signal_v2(&frames[0], clock(1_006))
+        .unwrap()
+        .reply
+        .unwrap();
+    let response = desktop
+        .open_typing_signal_v2(&challenge, clock(1_006))
+        .unwrap();
+    assert!(response.reply.is_some());
+    let expiries: Vec<_> = response
+        .follow_ups
+        .iter()
+        .map(|frame| frame.expires_at_ms.as_str())
+        .collect();
+    let expected: Vec<_> = frames
+        .iter()
+        .rev()
+        .take(2)
+        .map(|frame| frame.expires_at_ms.as_str())
+        .collect();
+    assert_eq!(expiries, expected);
+    assert!(
+        gateway
+            .open_typing_signal_v2(&response.reply.unwrap(), clock(1_006))
+            .unwrap()
+            .session_update
+            .is_some()
+    );
+    for follow_up in &response.follow_ups {
+        assert!(matches!(
+            gateway
+                .open_typing_signal_v2(follow_up, clock(1_006))
+                .unwrap()
+                .action,
+            Some(LiveAction::GatewayTypingIntent {
+                state: TypingStateV2::Started,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn challenge_not_addressed_to_this_device_has_no_response() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "address-gateway", &vault);
+    let desktop_config = config(&directory, "address-desktop", &vault);
+    let third_config = config(&directory, "address-third", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    let third = unlocked(&third_config, &vault);
+    let conversation = ConversationId::new();
+    publish_pair_eligibility(
+        &desktop,
+        &gateway,
+        gateway_config.device_id,
+        conversation,
+        1_000,
+    );
+    let clock = |time: i64| LiveClock {
+        wall_ms: time,
+        mono_ms: time as u64,
+    };
+    let roster = vec![
+        gateway_config.device_id,
+        desktop_config.device_id,
+        third_config.device_id,
+    ];
+    for (client, executor) in [
+        (&gateway, LiveExecutor::CurrentGateway),
+        (&desktop, LiveExecutor::None),
+        (&third, LiveExecutor::None),
+    ] {
+        client
+            .enable_live_typing(
+                LiveEnableContext {
+                    trusted_roster: roster.clone(),
+                    local_gateway_device_id: gateway_config.device_id,
+                    local_executor: executor,
+                },
+                clock(1_000),
+            )
+            .unwrap();
+    }
+    let initial = seal(
+        &desktop,
+        conversation,
+        gateway_config.device_id,
+        TypingStateV2::Started,
+        1_001,
+        1_001,
+    )
+    .unwrap();
+    let challenge = gateway
+        .open_typing_signal_v2(&initial.signal, clock(1_001))
+        .unwrap()
+        .reply
+        .unwrap();
+    let wrong = third
+        .open_typing_signal_v2(&challenge, clock(1_002))
+        .unwrap();
+    assert!(wrong.reply.is_none());
+    assert!(wrong.follow_ups.is_empty());
+    let correct = desktop
+        .open_typing_signal_v2(&challenge, clock(1_002))
+        .unwrap();
+    assert!(correct.reply.is_some());
+    assert_eq!(correct.follow_ups.len(), 1);
+}
+
+#[test]
+fn refreshing_start_does_not_reset_replay_spacing() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "spacing-gateway", &vault);
+    let desktop_config = config(&directory, "spacing-desktop", &vault);
+    let third_config = config(&directory, "spacing-third", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    let third = unlocked(&third_config, &vault);
+    let conversation = ConversationId::new();
+    publish_eligible(&gateway, gateway_config.device_id, conversation);
+    let mut server = Server::default();
+    server.upload(&gateway);
+    server.sync(&desktop);
+    server.sync(&third);
+    let clock = |time: i64| LiveClock {
+        wall_ms: time,
+        mono_ms: time as u64,
+    };
+    let roster = vec![
+        gateway_config.device_id,
+        desktop_config.device_id,
+        third_config.device_id,
+    ];
+    for (client, executor) in [
+        (&gateway, LiveExecutor::CurrentGateway),
+        (&desktop, LiveExecutor::None),
+        (&third, LiveExecutor::None),
+    ] {
+        client
+            .enable_live_typing(
+                LiveEnableContext {
+                    trusted_roster: roster.clone(),
+                    local_gateway_device_id: gateway_config.device_id,
+                    local_executor: executor,
+                },
+                clock(1_000),
+            )
+            .unwrap();
+    }
+    let start = gateway
+        .seal_typing_signal_v2(
+            conversation,
+            gateway_config.device_id,
+            TypingOriginV2::GoogleContact,
+            None,
+            TypingStateV2::Started,
+            clock(1_001),
+        )
+        .unwrap()
+        .unwrap()
+        .signal;
+    let first = desktop
+        .open_typing_signal_v2(&start, clock(1_002))
+        .unwrap()
+        .reply
+        .unwrap();
+    let second = third
+        .open_typing_signal_v2(&start, clock(1_002))
+        .unwrap()
+        .reply
+        .unwrap();
+    let response = gateway.open_typing_signal_v2(&first, clock(4_000)).unwrap();
+    assert!(response.reply.is_some());
+    assert_eq!(response.follow_ups.len(), 1);
+    assert!(
+        gateway
+            .seal_typing_signal_v2(
+                conversation,
+                gateway_config.device_id,
+                TypingOriginV2::GoogleContact,
+                None,
+                TypingStateV2::Started,
+                clock(4_001)
+            )
+            .unwrap()
+            .is_some()
+    );
+    let response = gateway
+        .open_typing_signal_v2(&second, clock(4_002))
+        .unwrap();
+    assert!(response.reply.is_some());
+    assert!(response.follow_ups.is_empty());
+}
+
+#[test]
+fn four_challengers_share_a_six_frame_rolling_replay_budget() {
+    const MEMBERSHIP_CHALLENGES_PER_MINUTE: usize = 3;
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "budget-gateway", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let peers: Vec<_> = (0..4)
+        .map(|index| {
+            let config = config(&directory, &format!("budget-peer-{index}"), &vault);
+            let client = unlocked(&config, &vault);
+            (config, client)
+        })
+        .collect();
+    let inbound_peers: Vec<_> = (0..20)
+        .map(|index| {
+            let config = config(&directory, &format!("inbound-peer-{index}"), &vault);
+            let client = unlocked(&config, &vault);
+            (config, client)
+        })
+        .collect();
+    let conversations: Vec<_> = (0..8).map(|_| ConversationId::new()).collect();
+    for conversation in &conversations {
+        publish_eligible(&gateway, gateway_config.device_id, *conversation);
+    }
+    let mut server = Server::default();
+    server.upload(&gateway);
+    for (_, peer) in &peers {
+        server.sync(peer);
+    }
+    for (_, peer) in &inbound_peers {
+        server.sync(peer);
+    }
+    let clock = |time: i64| LiveClock {
+        wall_ms: time,
+        mono_ms: time as u64,
+    };
+    let mut roster = vec![gateway_config.device_id];
+    roster.extend(peers.iter().map(|(config, _)| config.device_id));
+    roster.extend(inbound_peers.iter().map(|(config, _)| config.device_id));
+    let context = |executor| LiveEnableContext {
+        trusted_roster: roster.clone(),
+        local_gateway_device_id: gateway_config.device_id,
+        local_executor: executor,
+    };
+    gateway
+        .enable_live_typing(context(LiveExecutor::CurrentGateway), clock(1_000))
+        .unwrap();
+    let mut starts = vec![None; conversations.len()];
+    let (mut start_count, mut stop_count, mut ack_count, mut challenge_count, mut replay_count) =
+        (0, 0, 0, 0, 0);
+    for offset in (0..60_000).step_by(500) {
+        let time = 1_000 + offset;
+        let cycle = offset % 12_000;
+        if cycle == 0 || cycle == 1_000 {
+            let range = if cycle == 0 { 0..5 } else { 5..8 };
+            for index in range {
+                starts[index] = Some(
+                    gateway
+                        .seal_typing_signal_v2(
+                            conversations[index],
+                            gateway_config.device_id,
+                            TypingOriginV2::GoogleContact,
+                            None,
+                            TypingStateV2::Started,
+                            clock(time),
+                        )
+                        .unwrap()
+                        .unwrap()
+                        .signal,
+                );
+                start_count += 1;
+            }
+        }
+        if offset >= 3_000 && (offset - 3_000) % 1_500 == 0 {
+            let index = ((offset - 3_000) / 1_500) as usize % peers.len();
+            let peer = &peers[index].1;
+            peer.enable_live_typing(context(LiveExecutor::None), clock(time))
+                .unwrap();
+            let challenge = peer
+                .open_typing_signal_v2(starts[0].as_ref().unwrap(), clock(time))
+                .unwrap()
+                .reply
+                .unwrap();
+            let response = gateway
+                .open_typing_signal_v2(&challenge, clock(time))
+                .unwrap();
+            assert!(response.reply.is_some());
+            ack_count += 1;
+            replay_count += response.follow_ups.len();
+        }
+        if offset >= 500 && (offset - 500) % 2_500 == 0 {
+            let index = ((offset - 500) / 2_500) as usize;
+            if let Some((_, peer)) = inbound_peers.get(index) {
+                peer.enable_live_typing(context(LiveExecutor::None), clock(time))
+                    .unwrap();
+                let frame = seal(
+                    peer,
+                    conversations[0],
+                    gateway_config.device_id,
+                    TypingStateV2::Started,
+                    time,
+                    time as u64,
+                )
+                .unwrap()
+                .signal;
+                assert!(
+                    gateway
+                        .open_typing_signal_v2(&frame, clock(time))
+                        .unwrap()
+                        .reply
+                        .is_some()
+                );
+                challenge_count += 1;
+            }
+        }
+        if offset == 50_500 {
+            for conversation in &conversations {
+                assert!(
+                    gateway
+                        .seal_typing_signal_v2(
+                            *conversation,
+                            gateway_config.device_id,
+                            TypingOriginV2::GoogleContact,
+                            None,
+                            TypingStateV2::Stopped,
+                            clock(time)
+                        )
+                        .unwrap()
+                        .is_some()
+                );
+                stop_count += 1;
+            }
+        }
+    }
+    let counts = format!(
+        "starts={start_count}, stops={stop_count}, acks={ack_count}, challenges={challenge_count}, follow_ups={replay_count}"
+    );
+    assert_eq!(start_count, 40, "{counts}");
+    assert_eq!(stop_count, 8, "{counts}");
+    assert_eq!(ack_count, 38, "{counts}");
+    assert_eq!(challenge_count, 20, "{counts}");
+    assert_eq!(replay_count, 6, "{counts}");
+    assert!(
+        start_count
+            + stop_count
+            + ack_count
+            + challenge_count
+            + replay_count
+            + MEMBERSHIP_CHALLENGES_PER_MINUTE
+            <= 120,
+        "{counts}"
+    );
+}
+
+#[test]
+fn replay_seen_by_an_already_confirmed_device_never_extends_expiry() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "third-gateway", &vault);
+    let desktop_config = config(&directory, "third-desktop", &vault);
+    let third_config = config(&directory, "third-observer", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    let third = unlocked(&third_config, &vault);
+    let conversation = ConversationId::new();
+    publish_eligible(&gateway, gateway_config.device_id, conversation);
+    let mut server = Server::default();
+    server.upload(&gateway);
+    server.sync(&desktop);
+    server.sync(&third);
+    let clock = |time: i64| LiveClock {
+        wall_ms: time,
+        mono_ms: time as u64,
+    };
+    let roster = vec![
+        gateway_config.device_id,
+        desktop_config.device_id,
+        third_config.device_id,
+    ];
+    for (client, executor) in [
+        (&gateway, LiveExecutor::CurrentGateway),
+        (&desktop, LiveExecutor::None),
+        (&third, LiveExecutor::None),
+    ] {
+        client
+            .enable_live_typing(
+                LiveEnableContext {
+                    trusted_roster: roster.clone(),
+                    local_gateway_device_id: gateway_config.device_id,
+                    local_executor: executor,
+                },
+                clock(1_000),
+            )
+            .unwrap();
+    }
+    let initial = gateway
+        .seal_typing_signal_v2(
+            conversation,
+            gateway_config.device_id,
+            TypingOriginV2::GoogleContact,
+            None,
+            TypingStateV2::Started,
+            clock(1_001),
+        )
+        .unwrap()
+        .unwrap()
+        .signal;
+    let third_challenge = third
+        .open_typing_signal_v2(&initial, clock(1_001))
+        .unwrap()
+        .reply
+        .unwrap();
+    let first_response = gateway
+        .open_typing_signal_v2(&third_challenge, clock(1_002))
+        .unwrap();
+    third
+        .open_typing_signal_v2(&first_response.reply.unwrap(), clock(1_002))
+        .unwrap();
+    assert!(
+        third
+            .open_typing_signal_v2(&first_response.follow_ups[0], clock(1_002))
+            .unwrap()
+            .action
+            .is_some()
+    );
+    let challenge = desktop
+        .open_typing_signal_v2(&initial, clock(4_002))
+        .unwrap()
+        .reply
+        .unwrap();
+    let response = gateway
+        .open_typing_signal_v2(&challenge, clock(4_002))
+        .unwrap();
+    assert_eq!(response.follow_ups.len(), 1);
+    let observed = third
+        .open_typing_signal_v2(&response.follow_ups[0], clock(4_002))
+        .unwrap();
+    if let Some(LiveAction::Display { deadline_mono, .. }) = observed.action {
+        assert!(deadline_mono <= initial.expires_at_ms.parse::<u64>().unwrap());
+    } else {
+        assert!(observed.action.is_none());
+    }
+}
+
+#[test]
+fn challenge_ack_survives_when_conversation_becomes_ineligible() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "ineligible-gateway", &vault);
+    let desktop_config = config(&directory, "ineligible-desktop", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    let conversation = ConversationId::new();
+    publish_pair_eligibility(
+        &desktop,
+        &gateway,
+        gateway_config.device_id,
+        conversation,
+        1_000,
+    );
+    let clock = |time: i64| LiveClock {
+        wall_ms: time,
+        mono_ms: time as u64,
+    };
+    enable_pair(
+        &desktop,
+        desktop_config.device_id,
+        &gateway,
+        gateway_config.device_id,
+        clock(1_000),
+        clock(1_000),
+    );
+    let initial = gateway
+        .seal_typing_signal_v2(
+            conversation,
+            gateway_config.device_id,
+            TypingOriginV2::GoogleContact,
+            None,
+            TypingStateV2::Started,
+            clock(1_001),
+        )
+        .unwrap()
+        .unwrap()
+        .signal;
+    let challenge = desktop
+        .open_typing_signal_v2(&initial, clock(1_001))
+        .unwrap()
+        .reply
+        .unwrap();
+    gateway
+        .publish_rcs_capability(
+            &RcsLinkStatusEvent {
+                gateway_device_id: gateway_config.device_id,
+                state: RcsCapabilityState::Unlinked,
+                availability: false,
+                health: false,
+                phone_responsive: false,
+                observed_at_ms: 1_002,
+                capability_revision: 2,
+                feature_bits: 0,
+                linked_since_ms: None,
+            },
+            &[RcsEligibilityProjection {
+                conversation_id: conversation,
+                eligibility: RcsEligibility::NotEligible,
+                feature_bits: 0,
+                mapping_revision: 2,
+                observed_at_ms: 1_002,
+                gateway_device_id: gateway_config.device_id,
+            }],
+            1_002,
+        )
+        .unwrap();
+    let response = gateway
+        .open_typing_signal_v2(&challenge, clock(1_002))
+        .unwrap();
+    assert!(response.reply.is_some());
+    assert!(response.follow_ups.is_empty());
+}
+
+#[test]
 fn authenticated_two_client_typing_reaches_a_tagged_gateway_intent() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();

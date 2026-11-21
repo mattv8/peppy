@@ -344,6 +344,7 @@ internal object GoogleMessagesLinkDiagnosticReason {
         ("typing" to "enable_retry") to 335L,
         ("typing" to "frame_ignored") to 336L,
         ("typing" to "outcome_not_current") to 337L,
+        ("typing" to "replayed") to 338L,
     )
 }
 

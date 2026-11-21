@@ -2357,6 +2357,7 @@ mod tests {
             generation: LiveEnableGeneration(generation),
             session_update: None,
             reply: None,
+            follow_ups: Vec::new(),
             action: Some(LiveAction::Display {
                 peer_device_id: peer,
                 session_token: token,
@@ -2685,6 +2686,7 @@ mod tests {
             generation: LiveEnableGeneration(1),
             session_update: None,
             reply: None,
+            follow_ups: Vec::new(),
             action: Some(LiveAction::GatewayTypingIntent {
                 peer_device_id: peer,
                 session_token: 1,
