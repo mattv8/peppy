@@ -171,6 +171,28 @@ describe("LiveSupervisor", () => {
 });
 
 describe("LiveTypingEngine", () => {
+  it("sends no follow-ups after a refused reply", async () => {
+    const invoke = vi.fn().mockResolvedValueOnce({ generation: "1" }).mockResolvedValueOnce({
+      generation: "1", replyFrameJson: "reply", followUpFramesJson: ["first", "second"],
+    });
+    const transmit = vi.fn((_frame: string) => false);
+    const engine = new LiveTypingEngine({ invoke }, { transmit }, () => ({ wallMs: 1, monoMs: 1 }), vi.fn());
+    await engine.enable();
+    await engine.receive("frame");
+    expect(transmit.mock.calls.map(call => call[0])).toEqual(["reply"]);
+  });
+
+  it("stops the follow-up sequence at the first refused frame", async () => {
+    const invoke = vi.fn().mockResolvedValueOnce({ generation: "1" }).mockResolvedValueOnce({
+      generation: "1", replyFrameJson: "reply", followUpFramesJson: ["first", "second", "third"],
+    });
+    const transmit = vi.fn((frame: string) => frame !== "first");
+    const engine = new LiveTypingEngine({ invoke }, { transmit }, () => ({ wallMs: 1, monoMs: 1 }), vi.fn());
+    await engine.enable();
+    await engine.receive("frame");
+    expect(transmit.mock.calls.map(call => call[0])).toEqual(["reply", "first"]);
+  });
+
   it("uses core sharing admission and rejects a stale sealed generation at transmit", async () => {
     const mutate = vi.fn()
       .mockResolvedValueOnce({ generation: "7" })
