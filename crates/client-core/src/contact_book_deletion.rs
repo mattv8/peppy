@@ -117,12 +117,12 @@ pub(crate) fn apply(conn: &Connection, payload: &PrivatePayload) -> Result<bool,
             }
             // A terminal record from elsewhere settles this device's own obligation for the contact.
             cancel_completion(conn, book_id, owner_device_id, contact_id, generation)?;
-            if !covers(conn, book_id, owner_device_id, Some(generation))? {
-                conn.execute(
-                    "INSERT INTO deleted_contact_members(book_id,contact_id,owner_device_id,generation) VALUES(?,?,?,?) ON CONFLICT(book_id,contact_id,owner_device_id) DO UPDATE SET generation=MAX(generation,excluded.generation)",
-                    params![book_id, contact_id, owner_device_id, generation],
-                )?;
-            }
+            // Recorded even when the fence covers it: a live record of this contact that arrives later
+            // is then known to be settled, and must not owe a second member.
+            conn.execute(
+                "INSERT INTO deleted_contact_members(book_id,contact_id,owner_device_id,generation) VALUES(?,?,?,?) ON CONFLICT(book_id,contact_id,owner_device_id) DO UPDATE SET generation=MAX(generation,excluded.generation)",
+                params![book_id, contact_id, owner_device_id, generation],
+            )?;
             let covered: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM contacts c JOIN contact_books b ON b.id=c.book_id WHERE c.book_id=? AND c.id=? AND COALESCE(c.publication_owner,b.owner_device_id)=? AND COALESCE(c.publication_generation,b.generation)<=?)",
                 params![book_id, contact_id, owner_device_id, generation],
@@ -362,6 +362,63 @@ pub(crate) fn observe_replay_head(conn: &Connection, cursor: u64) -> Result<(), 
     if newer {
         set_meta(conn, REPLAY_HEAD_META, &cursor.to_string())?;
     }
+    Ok(())
+}
+
+/// Whether owed members wait only for a newer replay head. Nothing here can be applied, so it is not
+/// pending apply. A host that receives records over a live socket never sees a head from HTTP
+/// replay, so it requests one bounded replay when this holds. `false` while locked or without owed
+/// work, so an idle or locked host never asks.
+pub(crate) fn completion_needs_replay_head(
+    conn: &Connection,
+    ctx: &Ctx<'_>,
+) -> Result<bool, Error> {
+    if !completion_ready(conn, ctx)? {
+        return Ok(false);
+    }
+    let head = get_meta(conn, REPLAY_HEAD_META)?
+        .map(|head| head.parse::<u64>().map_err(|_| Error::Database))
+        .transpose()?;
+    let fences: Vec<(String, i64)> = conn
+        .prepare(
+            "SELECT w.owner_device_id,w.gate_cursor FROM contact_book_deletion_completion w WHERE EXISTS(SELECT 1 FROM contact_book_deletion_completion_contacts p WHERE p.book_id=w.book_id AND p.owner_device_id=w.owner_device_id)",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    let me = ctx.device_id.to_string();
+    for (owner, gate) in fences {
+        if owner == me || has_successor(conn, &owner)? {
+            continue;
+        }
+        match head {
+            None => return Ok(true),
+            Some(head) if to_i64(head)? < gate => return Ok(true),
+            Some(_) => {}
+        }
+    }
+    Ok(false)
+}
+
+/// Records a contact of a fenced book that a live record delivered and that the fence covers. The
+/// record is an applied no-op, so the contact is not materialised. The deleter may have covered it
+/// only after the fence, so its member is owed like one captured by the fence: it drains through the
+/// same head gate, and drain-time dedup, owner and successor exclusions and the superseded check
+/// still apply. The gate moves to the receive frontier now, so the head must cover this record.
+pub(crate) fn owe_covered_contact(
+    conn: &Connection,
+    book_id: &str,
+    owner: &str,
+    contact_id: &str,
+) -> Result<(), Error> {
+    let gate = to_i64(receive_cursor(conn)?)?;
+    conn.execute(
+        "INSERT INTO contact_book_deletion_completion(book_id,owner_device_id,generation,gate_cursor) SELECT book_id,owner_device_id,generation,?3 FROM deleted_contact_books WHERE book_id=?1 AND owner_device_id=?2 ON CONFLICT(book_id,owner_device_id) DO UPDATE SET gate_cursor=MAX(gate_cursor,excluded.gate_cursor)",
+        params![book_id, owner, gate],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO contact_book_deletion_completion_contacts(book_id,owner_device_id,contact_id) SELECT w.book_id,w.owner_device_id,?3 FROM contact_book_deletion_completion w WHERE w.book_id=?1 AND w.owner_device_id=?2",
+        params![book_id, owner, contact_id],
+    )?;
     Ok(())
 }
 

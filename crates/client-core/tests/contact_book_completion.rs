@@ -874,3 +874,247 @@ fn a_fresh_import_owes_an_uncovered_staged_contact_whatever_the_record_order() {
     assert!(fresh_import_queues(vault, &complete_first).is_empty());
     assert!(fresh_import_queues(vault, &complete_fence_first).is_empty());
 }
+
+/// A live upsert of `contact` from `owner` at book generation `generation`.
+fn live_upsert(
+    vault: &Vault,
+    owner: DeviceId,
+    sequence: u64,
+    contact: &str,
+    generation: &str,
+) -> Envelope {
+    seal(
+        vault,
+        owner,
+        sequence,
+        &PrivatePayload::ContactUpserted {
+            book: book(owner, generation),
+            contact: contact_body(contact),
+        },
+    )
+}
+
+/// A live removal of `contact` from `owner`'s book at generation 1, with the book embedded.
+fn live_removal(vault: &Vault, owner: DeviceId, sequence: u64, contact: &str) -> Envelope {
+    let mut restored = contact_body(contact);
+    restored["revision"] = json!("2");
+    seal(
+        vault,
+        owner,
+        sequence,
+        &PrivatePayload::ContactRemoved {
+            book_id: BOOK.into(),
+            contact_id: contact.into(),
+            tombstone: json!({
+                "contact_id": contact,
+                "revision": "2",
+                "deleted_at": 5,
+                "restored_contact": restored,
+                "book": book(owner, "1"),
+            }),
+        },
+    )
+}
+
+/// Rows of `contact` materialised in the live table.
+fn contact_rows(path: &Path, contact: &str) -> i64 {
+    count(
+        path,
+        &format!("SELECT COUNT(*) FROM contacts WHERE book_id='{BOOK}' AND id='{contact}'"),
+    )
+}
+
+#[test]
+fn a_live_upsert_after_the_fence_owes_a_member_for_the_contact_the_deleter_missed() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let owner = DeviceId::new();
+    let (config, client) = receiver(&dir, &vault, "receiver");
+    ingest_and_apply(&owners_book(&vault, owner, &[("c1", "1")]), &client);
+    let deleter = DeviceId::new();
+    ingest_and_apply(
+        &[
+            fence(&vault, deleter, 1, owner),
+            member(&vault, deleter, 2, owner, "c1"),
+        ],
+        &client,
+    );
+    assert!(queued_members(&client, &vault).is_empty());
+
+    // c2 was never held before the fence; it arrives live, covered, and the deleter never sent it.
+    let report = ingest_and_apply(&[live_upsert(&vault, owner, 3, "c2", "1")], &client);
+
+    assert_eq!(report.quarantined, 0);
+    assert_eq!(queued_members(&client, &vault), vec!["c2"]);
+    assert_eq!(owed(&config.database_path), 0);
+    assert_eq!(
+        contact_rows(&config.database_path, "c2"),
+        0,
+        "a covered live contact is not materialised"
+    );
+}
+
+#[test]
+fn a_covered_live_upsert_waits_for_a_head_that_covers_its_receipt() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let owner = DeviceId::new();
+    let (config, client) = receiver(&dir, &vault, "receiver");
+    ingest_and_apply(&owners_book(&vault, owner, &[("c1", "1")]), &client);
+    let deleter = DeviceId::new();
+    ingest_and_apply(
+        &[
+            fence(&vault, deleter, 1, owner),
+            member(&vault, deleter, 2, owner, "c1"),
+        ],
+        &client,
+    );
+
+    // Split page: the covered upsert is received without a head that covers its receipt.
+    ingest_only(&[live_upsert(&vault, owner, 3, "c2", "1")], &client);
+    client.apply_pending(100).unwrap();
+    assert!(queued_members(&client, &vault).is_empty());
+    assert_eq!(owed(&config.database_path), 1);
+    assert!(client.completion_needs_replay_head().unwrap());
+    assert!(
+        !client.sync_work_status().unwrap().pending_apply,
+        "owed work that waits for a head is not pending apply"
+    );
+
+    let receipt = client.receive_cursor().unwrap();
+    client.observe_replay_head(receipt).unwrap();
+    client.apply_pending(100).unwrap();
+
+    assert_eq!(queued_members(&client, &vault), vec!["c2"]);
+    assert_eq!(owed(&config.database_path), 0);
+    assert!(!client.completion_needs_replay_head().unwrap());
+}
+
+#[test]
+fn a_live_tombstone_after_the_fence_owes_a_member_for_the_contact_the_deleter_missed() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let owner = DeviceId::new();
+    let (config, client) = receiver(&dir, &vault, "receiver");
+    ingest_and_apply(&owners_book(&vault, owner, &[("c1", "1")]), &client);
+    let deleter = DeviceId::new();
+    ingest_and_apply(
+        &[
+            fence(&vault, deleter, 1, owner),
+            member(&vault, deleter, 2, owner, "c1"),
+        ],
+        &client,
+    );
+
+    ingest_and_apply(&[live_removal(&vault, owner, 3, "c2")], &client);
+
+    assert_eq!(queued_members(&client, &vault), vec!["c2"]);
+    assert_eq!(owed(&config.database_path), 0);
+    assert_eq!(contact_rows(&config.database_path, "c2"), 0);
+}
+
+#[test]
+fn a_covered_upsert_whose_member_is_already_known_queues_nothing() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let owner = DeviceId::new();
+    let (config, client) = receiver(&dir, &vault, "receiver");
+    ingest_and_apply(&owners_book(&vault, owner, &[("c1", "1")]), &client);
+    let deleter = DeviceId::new();
+    ingest_and_apply(
+        &[
+            fence(&vault, deleter, 1, owner),
+            member(&vault, deleter, 2, owner, "c1"),
+            member(&vault, deleter, 3, owner, "c2"),
+        ],
+        &client,
+    );
+
+    ingest_and_apply(&[live_upsert(&vault, owner, 4, "c2", "1")], &client);
+
+    assert!(queued_members(&client, &vault).is_empty());
+    assert_eq!(owed(&config.database_path), 0);
+}
+
+#[test]
+fn a_member_arriving_after_a_covered_live_upsert_settles_it_without_a_second_member() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let owner = DeviceId::new();
+    let (config, client) = receiver(&dir, &vault, "receiver");
+    ingest_and_apply(&owners_book(&vault, owner, &[("c1", "1")]), &client);
+    let deleter = DeviceId::new();
+    ingest_and_apply(
+        &[
+            fence(&vault, deleter, 1, owner),
+            member(&vault, deleter, 2, owner, "c1"),
+        ],
+        &client,
+    );
+    // Received before any head covers it, so the owed member is not emitted yet.
+    ingest_only(&[live_upsert(&vault, owner, 3, "c2", "1")], &client);
+    client.apply_pending(100).unwrap();
+    assert_eq!(owed(&config.database_path), 1);
+
+    // The deleter's own member for c2 reaches this device before a head covers the upsert.
+    ingest_and_apply(&[member(&vault, deleter, 4, owner, "c2")], &client);
+
+    assert!(queued_members(&client, &vault).is_empty());
+    assert_eq!(owed(&config.database_path), 0);
+}
+
+#[test]
+fn a_higher_generation_upsert_after_the_fence_is_applied_not_owed() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let owner = DeviceId::new();
+    let (config, client) = receiver(&dir, &vault, "receiver");
+    ingest_and_apply(&owners_book(&vault, owner, &[("c1", "1")]), &client);
+    let deleter = DeviceId::new();
+    ingest_and_apply(
+        &[
+            fence(&vault, deleter, 1, owner),
+            member(&vault, deleter, 2, owner, "c1"),
+        ],
+        &client,
+    );
+
+    ingest_and_apply(&[live_upsert(&vault, owner, 3, "c2", "2")], &client);
+
+    assert!(queued_members(&client, &vault).is_empty());
+    assert_eq!(owed(&config.database_path), 0);
+    assert_eq!(
+        contact_rows(&config.database_path, "c2"),
+        1,
+        "a continuation past the fence is a live contact"
+    );
+}
+
+#[test]
+fn a_fence_received_over_a_socket_without_a_head_waits_for_one_replay() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let owner = DeviceId::new();
+    let (_config, client) = receiver(&dir, &vault, "receiver");
+    // The last HTTP replay proved the head before the fence arrived.
+    ingest_and_apply(
+        &owners_book(&vault, owner, &[("c1", "1"), ("c2", "1")]),
+        &client,
+    );
+
+    // Socket delivery: records are ingested and applied with no replay head reported.
+    ingest_only(&deleter_covering_c1_only(&vault, owner), &client);
+    client.apply_pending(100).unwrap();
+    assert!(queued_members(&client, &vault).is_empty());
+    assert!(client.completion_needs_replay_head().unwrap());
+    assert!(!client.sync_work_status().unwrap().pending_apply);
+
+    // The one replay a live host requests reports the head; nothing else is needed.
+    let head = client.receive_cursor().unwrap();
+    client.observe_replay_head(head).unwrap();
+    client.apply_pending(100).unwrap();
+
+    assert_eq!(queued_members(&client, &vault), vec!["c2"]);
+    assert!(!client.completion_needs_replay_head().unwrap());
+    assert!(!client.sync_work_status().unwrap().pending_apply);
+}

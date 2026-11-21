@@ -5382,6 +5382,15 @@ impl Client {
         Ok(())
     }
 
+    /// Whether owed contact-deletion members wait only for a newer replay head. A host that receives
+    /// records over a live socket requests one HTTP replay when this is true, then stops asking until
+    /// new records arrive. Owed work is not reported as pending apply for this, so hosts cannot spin.
+    pub fn completion_needs_replay_head(&self) -> Result<bool, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        contact_book_deletion::completion_needs_replay_head(conn, &ctx)
+    }
+
     /// Whether replay and the message-origin backfill have reached the initial server watermark.
     pub fn initial_replay_caught_up(&self) -> Result<bool, Error> {
         let mut store = self.lock()?;

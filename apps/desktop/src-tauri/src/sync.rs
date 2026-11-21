@@ -3132,6 +3132,17 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                         if drain_apply(session, APPLY_STEPS).await.is_err() {
                             return ended("core");
                         }
+                        // Socket records carry no replay head. Owed deletion members that wait only
+                        // for one get it from the live loop's next HTTP round. The notify coalesces,
+                        // and nothing asks again until another record arrives.
+                        let c = client(session);
+                        match blocking(move || c.completion_needs_replay_head().map_err(core_error))
+                            .await
+                        {
+                            Ok(true) => session.replay_wake.notify_one(),
+                            Ok(false) => {}
+                            Err(error) => return ended(error.code),
+                        }
                         let _ = observe_history_progress(session).await;
                         continue 'frames;
                     }

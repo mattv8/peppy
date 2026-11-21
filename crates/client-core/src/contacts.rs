@@ -2521,6 +2521,12 @@ fn apply_peer(
                 return Ok(false);
             }
             if book_fenced(conn, book)? {
+                // Covered: an applied no-op that stores nothing. Its contact may still owe the
+                // deleter's member, so it is recorded as owed work. A malformed record stays a no-op.
+                if let Ok((id, _, _)) = peer_contact(contact, book_id) {
+                    let owner = publication_owner(conn, book)?;
+                    crate::contact_book_deletion::owe_covered_contact(conn, book_id, &owner, &id)?;
+                }
                 return Ok(true);
             }
             let (id, rev, body) = peer_contact(contact, book_id)?;
@@ -2575,6 +2581,16 @@ fn apply_peer(
                 ),
             };
             if crate::contact_book_deletion::covers(conn, book_id, &fence_owner, book_generation)? {
+                // Covered like an upsert: a no-op that owes the deleter's member, for an authorised
+                // producer only.
+                if owner_or_successor(conn, &fence_owner, producer)? {
+                    crate::contact_book_deletion::owe_covered_contact(
+                        conn,
+                        book_id,
+                        &fence_owner,
+                        contact_id,
+                    )?;
+                }
                 return Ok(true);
             }
             let owner = stored_owner(conn, book_id)?;
