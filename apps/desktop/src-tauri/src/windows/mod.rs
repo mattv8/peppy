@@ -46,6 +46,7 @@ pub struct HeadSpec {
     /// Accessible name for the head; already privacy-filtered by the runtime.
     pub label: String,
     pub unread: u64,
+    pub typing: bool,
     pub position: HeadPosition,
 }
 

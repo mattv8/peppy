@@ -18,7 +18,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     str::FromStr,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Listener, Manager, WindowEvent};
 use tokio::sync::{mpsc, oneshot};
@@ -43,10 +43,50 @@ struct ActiveHead {
     unread: u64,
 }
 
+const TYPING_MIN_VISIBLE: Duration = Duration::from_millis(600);
+const TYPING_LINGER: Duration = Duration::from_millis(300);
+
+/// The typing flag the native head shows, kept apart from the raw flag the typing actor reports.
+/// Raw is true exactly while `stopped_at` is `None`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TypingDisplay {
+    shown_at: Instant,
+    /// When raw went false; `None` while raw is true.
+    stopped_at: Option<Instant>,
+    /// Drawn from `TypingDisplays::next_epoch` whenever `stopped_at` changes, so a pending hide
+    /// can tell it was superseded.
+    epoch: u64,
+}
+
+/// Displayed typing state per conversation id. Independent of `heads`, so a head created or
+/// re-popped while typing shows the pill, and timers hold no head clone. An entry exists exactly
+/// while the displayed flag is true.
+#[derive(Default)]
+struct TypingDisplays {
+    entries: HashMap<String, TypingDisplay>,
+    /// Global and never reused, so a stale timer cannot match a newer entry's epoch.
+    next_epoch: u64,
+}
+
+#[derive(Debug, PartialEq)]
+enum TypingTransition {
+    /// A new entry was created: the displayed flag became true.
+    Shown,
+    /// The entry was removed without a linger (app locked): the displayed flag became false.
+    Hidden,
+    Unchanged,
+    /// Raw went false: expire the entry after `delay` if `epoch` is still current.
+    HideAfter {
+        delay: Duration,
+        epoch: u64,
+    },
+}
+
 struct RuntimeState {
     binding: Option<Binding>,
     session: Option<Arc<crate::session::Session>>,
     heads: HashMap<String, ActiveHead>,
+    typing: TypingDisplays,
     generation: u64,
     refreshing: bool,
     queued: bool,
@@ -66,6 +106,7 @@ impl RuntimeState {
             binding: None,
             session: None,
             heads: HashMap::new(),
+            typing: TypingDisplays::default(),
             generation,
             refreshing: false,
             queued: false,
@@ -110,6 +151,152 @@ fn adopt_active_head(
         color: head.color,
         label: head.label.clone(),
         unread: head.unread,
+    }
+}
+
+/// Time left before a pill shown at `shown_at` and stopped at `stopped_at` may hide.
+fn typing_hide_delay(shown_at: Instant, stopped_at: Instant, now: Instant) -> Duration {
+    (shown_at + TYPING_MIN_VISIBLE)
+        .max(stopped_at + TYPING_LINGER)
+        .saturating_duration_since(now)
+}
+
+impl TypingDisplays {
+    fn displayed(&self, conversation_id: &str) -> bool {
+        self.entries.contains_key(conversation_id)
+    }
+
+    fn fresh_epoch(&mut self) -> u64 {
+        self.next_epoch += 1;
+        self.next_epoch
+    }
+
+    /// Applies one raw typing report.
+    fn apply_raw(&mut self, conversation_id: &str, typing: bool, now: Instant) -> TypingTransition {
+        let Some(entry) = self.entries.get(conversation_id).copied() else {
+            if !typing {
+                return TypingTransition::Unchanged;
+            }
+            let epoch = self.fresh_epoch();
+            let entry = TypingDisplay {
+                shown_at: now,
+                stopped_at: None,
+                epoch,
+            };
+            self.entries.insert(conversation_id.to_owned(), entry);
+            return TypingTransition::Shown;
+        };
+        if typing {
+            // Resuming during a linger gets a new epoch, which cancels the pending hide.
+            if entry.stopped_at.is_some() {
+                let epoch = self.fresh_epoch();
+                let resumed = TypingDisplay {
+                    stopped_at: None,
+                    epoch,
+                    ..entry
+                };
+                self.entries.insert(conversation_id.to_owned(), resumed);
+            }
+            return TypingTransition::Unchanged;
+        }
+        if entry.stopped_at.is_some() {
+            // A hide is already pending for this stop.
+            return TypingTransition::Unchanged;
+        }
+        let epoch = self.fresh_epoch();
+        let stopped = TypingDisplay {
+            stopped_at: Some(now),
+            epoch,
+            ..entry
+        };
+        self.entries.insert(conversation_id.to_owned(), stopped);
+        TypingTransition::HideAfter {
+            delay: typing_hide_delay(entry.shown_at, now, now),
+            epoch,
+        }
+    }
+
+    /// While the app is locked no typing reaches the displayed state: an entry is dropped and the
+    /// report is ignored, so nothing reappears after unlock without fresh raw typing.
+    fn apply_report(
+        &mut self,
+        locked: bool,
+        conversation_id: &str,
+        typing: bool,
+        now: Instant,
+    ) -> TypingTransition {
+        if locked {
+            return if self.entries.remove(conversation_id).is_some() {
+                TypingTransition::Hidden
+            } else {
+                TypingTransition::Unchanged
+            };
+        }
+        self.apply_raw(conversation_id, typing, now)
+    }
+
+    /// Removes the entry if its pending hide still applies.
+    fn expire(&mut self, conversation_id: &str, epoch: u64, now: Instant) -> bool {
+        let Some(entry) = self.entries.get(conversation_id) else {
+            return false;
+        };
+        let Some(stopped_at) = entry.stopped_at else {
+            return false;
+        };
+        if entry.epoch != epoch || !typing_hide_delay(entry.shown_at, stopped_at, now).is_zero() {
+            return false;
+        }
+        self.entries.remove(conversation_id);
+        true
+    }
+
+    /// An unread change during the linger ends it at once, so the native update that carries the
+    /// new count also carries `typing = false`. Returns whether the entry was removed.
+    fn end_linger_on_unread_change(
+        &mut self,
+        conversation_id: &str,
+        previous_unread: u64,
+        unread: u64,
+    ) -> bool {
+        let lingering = self
+            .entries
+            .get(conversation_id)
+            .is_some_and(|entry| entry.stopped_at.is_some());
+        if lingering && previous_unread != unread {
+            self.entries.remove(conversation_id);
+            return true;
+        }
+        false
+    }
+
+    /// Drops every entry. The epoch counter keeps counting, so stale timers stay unmatched.
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Drops every entry when the binding, session or generation was replaced. Returns the
+    /// conversations whose pill was showing, so their native heads can be cleared.
+    fn reset_for_replacement(&mut self, replaced: bool) -> Vec<String> {
+        if !replaced {
+            return Vec::new();
+        }
+        let ids = self.entries.keys().cloned().collect();
+        self.entries.clear();
+        ids
+    }
+}
+
+/// The spec a native head draws, with the displayed typing flag from the map.
+fn head_spec(typing: &TypingDisplays, conversation_id: &str, head: &ActiveHead) -> HeadSpec {
+    HeadSpec {
+        conversation_id: conversation_id.to_owned(),
+        generation: head.generation,
+        glyph: head.glyph.clone(),
+        color: head.color,
+        label: head.label.clone(),
+        unread: head.unread,
+        typing: typing.displayed(conversation_id),
+        position: head.position.clone(),
     }
 }
 
@@ -446,6 +633,100 @@ fn runtime(app: &AppHandle) -> tauri::State<'_, HeadRuntime> {
     app.state::<HeadRuntime>()
 }
 
+/// Pushes the displayed typing flag of one head to the native layer on the main thread.
+fn push_typing_update(app: &AppHandle, token: RuntimeToken, conversation_id: String) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if !token_valid_sync(&handle, &token) {
+            return;
+        }
+        let spec = runtime(&handle).state.lock().ok().and_then(|state| {
+            state
+                .heads
+                .get(&conversation_id)
+                .filter(|head| head.generation == token.generation)
+                .map(|head| head_spec(&state.typing, &conversation_id, head))
+        });
+        if let Some(spec) = spec {
+            let _ = windows::update_head(&handle, &spec);
+        }
+    });
+}
+
+/// Ends a linger after `delay` unless raw typing resumed or the runtime moved on.
+fn schedule_typing_expiry(
+    app: &AppHandle,
+    token: RuntimeToken,
+    conversation_id: String,
+    delay: Duration,
+    epoch: u64,
+) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(delay).await;
+        if !token_valid_sync(&handle, &token) {
+            return;
+        }
+        let has_head = {
+            let runtime = runtime(&handle);
+            let Ok(mut state) = runtime.state.lock() else {
+                return;
+            };
+            if !state.typing.expire(&conversation_id, epoch, Instant::now()) {
+                return;
+            }
+            state.heads.contains_key(&conversation_id)
+        };
+        if has_head {
+            push_typing_update(&handle, token, conversation_id);
+        }
+    });
+}
+
+/// Records raw typing for a conversation, whether or not it has a head, and pushes the displayed
+/// flag only when a head exists and the displayed flag changed.
+pub(crate) fn typing_changed(app: &AppHandle, conversation_id: &str, typing: bool) {
+    let (transition, token, has_head) = {
+        let runtime = runtime(app);
+        let Ok(mut state) = runtime.state.lock() else {
+            return;
+        };
+        if state.stopped {
+            return;
+        }
+        let (Some(binding), Some(session)) = (state.binding.clone(), state.session.clone()) else {
+            return;
+        };
+        let locked = app
+            .state::<AppState>()
+            .app_locked
+            .load(std::sync::atomic::Ordering::Acquire);
+        let transition = state
+            .typing
+            .apply_report(locked, conversation_id, typing, Instant::now());
+        if transition == TypingTransition::Unchanged {
+            return;
+        }
+        let token = RuntimeToken {
+            binding,
+            session,
+            generation: state.generation,
+        };
+        (transition, token, state.heads.contains_key(conversation_id))
+    };
+    if has_head
+        && matches!(
+            transition,
+            TypingTransition::Shown | TypingTransition::Hidden
+        )
+    {
+        push_typing_update(app, token.clone(), conversation_id.to_owned());
+    }
+    if let TypingTransition::HideAfter { delay, epoch } = transition {
+        schedule_typing_expiry(app, token, conversation_id.to_owned(), delay, epoch);
+    }
+}
+
 fn schedule_refresh(app: &AppHandle) {
     if app
         .state::<AppState>()
@@ -701,14 +982,16 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         let mut specs = Vec::with_capacity(wanted.len());
         for (id, (pin, head)) in wanted {
             let existing = state.heads.get(&id).cloned();
+            if let Some(active) = existing.as_ref() {
+                state
+                    .typing
+                    .end_linger_on_unread_change(&id, active.unread, head.unread);
+            }
             let position = existing
                 .as_ref()
                 .map(|active| active.position.clone())
                 .unwrap_or(pin.position);
-            state.heads.insert(
-                id.clone(),
-                adopt_active_head(existing.as_ref(), position.clone(), token.generation, &head),
-            );
+            let active = adopt_active_head(existing.as_ref(), position, token.generation, &head);
             let changed = existing.as_ref().is_none_or(|active| {
                 active.glyph != head.glyph
                     || active.color != head.color
@@ -716,19 +999,9 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
                     || active.unread != head.unread
             });
             if changed {
-                specs.push((
-                    HeadSpec {
-                        conversation_id: id,
-                        generation: token.generation,
-                        glyph: head.glyph,
-                        color: head.color,
-                        label: head.label,
-                        unread: head.unread,
-                        position,
-                    },
-                    existing.is_some(),
-                ));
+                specs.push((head_spec(&state.typing, &id, &active), existing.is_some()));
             }
+            state.heads.insert(id, active);
         }
         (to_hide, specs)
     };
@@ -744,9 +1017,12 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         })
         .await;
     }
-    for (spec, existed) in specs {
+    for (mut spec, existed) in specs {
         let spec_id = spec.conversation_id.clone();
         let result = on_main_if_current(app, token.clone(), move |app| {
+            if let Ok(state) = runtime(app).state.lock() {
+                spec.typing = state.typing.displayed(&spec.conversation_id);
+            }
             if existed {
                 windows::update_head(app, &spec)
             } else {
@@ -1237,6 +1513,9 @@ fn begin_binding(
             fence.current()
         }
     };
+    // A replaced session takes its pending typing with it: its linger timers carry the old token
+    // and would bail, so the entries must go now, and heads that kept a pill get a native clear.
+    let replaced = binding_changed || session_changed || state.generation != generation;
     let stale = if binding_changed || state.generation != generation {
         let stale = state.heads.keys().cloned().collect();
         state.generation = generation;
@@ -1247,6 +1526,7 @@ fn begin_binding(
     } else {
         Vec::new()
     };
+    let typing_cleared = state.typing.reset_for_replacement(replaced);
     if binding_changed || session_changed {
         state.recent_entries = None;
     }
@@ -1259,6 +1539,9 @@ fn begin_binding(
     drop(state);
     if binding_changed || session_changed {
         clear_photos(app);
+    }
+    for id in typing_cleared {
+        push_typing_update(app, token.clone(), id);
     }
     Ok((token, stale, binding_changed || session_changed))
 }
@@ -1737,16 +2020,7 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
         .or_else(|| persisted.as_ref().map(|pin| pin.position.clone()))
         .or_else(|| saved_layout.and_then(|layout| layout.head))
         .unwrap_or_else(|| next_position(saved.len()));
-    let spec = HeadSpec {
-        conversation_id: head.id.clone(),
-        generation: token.generation,
-        glyph: head.glyph.clone(),
-        color: head.color,
-        label: head.label.clone(),
-        unread: head.unread,
-        position: position.clone(),
-    };
-    {
+    let spec = {
         let rt = runtime(app);
         let mut state = rt.state.lock().map_err(|_| BridgeError::host_state())?;
         if !token_matches_state(app, &state, &token) {
@@ -1769,10 +2043,14 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
                 unread: head.unread,
             },
         );
-    }
+        head_spec(&state.typing, &head.id, &state.heads[&head.id])
+    };
 
-    let spec_for_ui = spec.clone();
+    let mut spec_for_ui = spec.clone();
     let native = on_main_if_current(app, token.clone(), move |app| {
+        if let Ok(state) = runtime(app).state.lock() {
+            spec_for_ui.typing = state.typing.displayed(&spec_for_ui.conversation_id);
+        }
         windows::show_head(app, &spec_for_ui, callback(app))
     })
     .await?;
@@ -2247,6 +2525,7 @@ pub async fn reset(app: &AppHandle) -> BridgeResult<()> {
             .invalidate();
         state.generation = generation;
         state.heads.clear();
+        state.typing.clear();
         state.binding = None;
         state.session = None;
         state.queued = false;
@@ -2269,6 +2548,7 @@ pub fn clear_on_exit(app: &AppHandle) {
         state.refreshing = false;
         state.queued = false;
         state.heads.clear();
+        state.typing.clear();
         state.binding = None;
         state.session = None;
         state.recent_entries = None;
@@ -2322,6 +2602,7 @@ fn clear_visible_state(state: &mut RuntimeState, generation: u64) -> Vec<String>
         .map(|(id, _)| format!("{}{}", tray::COMPOSER_PREFIX, id))
         .collect::<Vec<_>>();
     state.heads.clear();
+    state.typing.clear();
     state.binding = None;
     state.session = None;
     state.recent_entries = None;
@@ -3281,6 +3562,282 @@ mod tests {
         assert!(adopted.panel);
         assert_eq!(adopted.frame.unwrap().x, frame.x);
         assert_eq!(adopted.name, "New");
+    }
+
+    fn typing_at(base: Instant, millis: u64) -> Instant {
+        base + Duration::from_millis(millis)
+    }
+
+    fn test_head(generation: u64, unread: u64) -> ActiveHead {
+        ActiveHead {
+            position: position(),
+            frame: None,
+            generation,
+            panel: false,
+            name: "Ada".into(),
+            glyph: HeadGlyph::Person,
+            color: [1, 2, 3],
+            label: "Ada".into(),
+            unread,
+        }
+    }
+
+    #[test]
+    fn typing_hide_delay_honors_minimum_visible_and_linger() {
+        let base = Instant::now();
+        // A 100 ms blip is held to the 600 ms minimum, then nothing more.
+        assert_eq!(
+            typing_hide_delay(base, typing_at(base, 100), typing_at(base, 100)),
+            Duration::from_millis(500)
+        );
+        // A long burst only lingers 300 ms after the stop.
+        assert_eq!(
+            typing_hide_delay(base, typing_at(base, 5_000), typing_at(base, 5_000)),
+            Duration::from_millis(300)
+        );
+        // Once both windows have passed the delay is zero.
+        assert_eq!(
+            typing_hide_delay(base, typing_at(base, 100), typing_at(base, 900)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn typing_show_stop_expire_removes_entry() {
+        let base = Instant::now();
+        let mut map = TypingDisplays::default();
+        assert_eq!(
+            map.apply_raw("conversation", true, base),
+            TypingTransition::Shown
+        );
+        let TypingTransition::HideAfter { delay, epoch } =
+            map.apply_raw("conversation", false, typing_at(base, 2_000))
+        else {
+            panic!("raw false after a shown pill must schedule a hide");
+        };
+        assert_eq!(delay, TYPING_LINGER);
+        assert!(!map.expire("conversation", epoch, typing_at(base, 2_299)));
+        assert!(map.expire("conversation", epoch, typing_at(base, 2_300)));
+        assert!(map.entries.is_empty());
+    }
+
+    #[test]
+    fn stop_delays_for_a_blip_and_for_a_stop_at_the_minimum_visible_time() {
+        let base = Instant::now();
+        let mut map = TypingDisplays::default();
+        map.apply_raw("blip", true, base);
+        assert!(matches!(
+            map.apply_raw("blip", false, typing_at(base, 100)),
+            TypingTransition::HideAfter { delay, .. } if delay == Duration::from_millis(500)
+        ));
+        map.apply_raw("exact", true, base);
+        assert!(matches!(
+            map.apply_raw("exact", false, typing_at(base, 600)),
+            TypingTransition::HideAfter { delay, .. } if delay == Duration::from_millis(300)
+        ));
+    }
+
+    #[test]
+    fn typing_resume_during_linger_cancels_the_pending_hide() {
+        let base = Instant::now();
+        let mut map = TypingDisplays::default();
+        map.apply_raw("conversation", true, base);
+        let TypingTransition::HideAfter { epoch: stale, .. } =
+            map.apply_raw("conversation", false, typing_at(base, 2_000))
+        else {
+            panic!("expected a hide");
+        };
+        assert_eq!(
+            map.apply_raw("conversation", true, typing_at(base, 2_100)),
+            TypingTransition::Unchanged
+        );
+        // The old timer fires after the original linger but is a no-op: raw is true again.
+        assert!(!map.expire("conversation", stale, typing_at(base, 2_400)));
+        assert!(map.displayed("conversation"));
+        // A later stop schedules a fresh hide with a new epoch that does expire.
+        let TypingTransition::HideAfter { epoch, .. } =
+            map.apply_raw("conversation", false, typing_at(base, 3_000))
+        else {
+            panic!("expected a second hide");
+        };
+        assert_ne!(epoch, stale);
+        assert!(!map.expire("conversation", stale, typing_at(base, 3_300)));
+        assert!(map.expire("conversation", epoch, typing_at(base, 3_300)));
+    }
+
+    #[test]
+    fn stale_epoch_never_matches_a_newer_entry() {
+        let base = Instant::now();
+        let mut map = TypingDisplays::default();
+        map.apply_raw("conversation", true, base);
+        let TypingTransition::HideAfter { epoch: first, .. } =
+            map.apply_raw("conversation", false, typing_at(base, 1_000))
+        else {
+            panic!("expected a hide");
+        };
+        // The entry goes away through an unread change, then a new one starts and stops.
+        assert!(map.end_linger_on_unread_change("conversation", 1, 2));
+        map.apply_raw("conversation", true, typing_at(base, 5_000));
+        let TypingTransition::HideAfter { epoch: second, .. } =
+            map.apply_raw("conversation", false, typing_at(base, 6_000))
+        else {
+            panic!("expected a hide");
+        };
+        assert_ne!(first, second);
+        // Even once the newer entry is due, the first timer cannot expire it.
+        assert!(!map.expire("conversation", first, typing_at(base, 9_000)));
+        assert!(map.displayed("conversation"));
+        assert!(map.expire("conversation", second, typing_at(base, 9_000)));
+    }
+
+    #[test]
+    fn expire_is_a_no_op_while_raw_is_true_or_epoch_is_wrong() {
+        let base = Instant::now();
+        let mut map = TypingDisplays::default();
+        map.apply_raw("conversation", true, base);
+        assert!(!map.expire("conversation", 0, typing_at(base, 10_000)));
+        let TypingTransition::HideAfter { epoch, .. } =
+            map.apply_raw("conversation", false, typing_at(base, 10_000))
+        else {
+            panic!("expected a hide");
+        };
+        assert!(!map.expire("conversation", epoch + 1, typing_at(base, 20_000)));
+        assert!(map.displayed("conversation"));
+        assert!(!map.expire("missing", epoch, typing_at(base, 20_000)));
+    }
+
+    #[test]
+    fn entry_without_head_shows_in_the_spec_a_later_refresh_or_popout_builds() {
+        let base = Instant::now();
+        let mut typing = TypingDisplays::default();
+        assert_eq!(
+            typing.apply_raw("conversation", true, base),
+            TypingTransition::Shown
+        );
+        // refresh and popout both build their spec through head_spec, from the head they insert.
+        let head = test_head(4, 0);
+        assert!(head_spec(&typing, "conversation", &head).typing);
+        assert!(!head_spec(&typing, "other", &head).typing);
+    }
+
+    #[test]
+    fn unread_change_during_linger_ends_it_and_the_spec_carries_the_new_count() {
+        let base = Instant::now();
+        let mut map = TypingDisplays::default();
+        map.apply_raw("conversation", true, base);
+        // Raw true: an unread change keeps the pill.
+        assert!(!map.end_linger_on_unread_change("conversation", 1, 2));
+        assert!(map.displayed("conversation"));
+        map.apply_raw("conversation", false, typing_at(base, 1_000));
+        // Same unread during the linger keeps it until the timer runs out.
+        assert!(!map.end_linger_on_unread_change("conversation", 2, 2));
+        assert!(map.displayed("conversation"));
+        // A changed unread during the linger ends it at once, and the spec for that update
+        // carries typing = false with the new count.
+        assert!(map.end_linger_on_unread_change("conversation", 2, 3));
+        assert!(map.entries.is_empty());
+        let updated = test_head(4, 3);
+        let spec = head_spec(&map, "conversation", &updated);
+        assert!(!spec.typing);
+        assert_eq!(spec.unread, 3);
+        assert!(!map.end_linger_on_unread_change("conversation", 3, 4));
+    }
+
+    #[test]
+    fn locked_app_hides_typing_and_nothing_reappears_after_unlock() {
+        let base = Instant::now();
+        let mut map = TypingDisplays::default();
+        map.apply_raw("conversation", true, base);
+        // Locking removes the shown pill: the caller must push a native clear for it.
+        assert_eq!(
+            map.apply_report(true, "conversation", true, typing_at(base, 100)),
+            TypingTransition::Hidden
+        );
+        assert!(map.entries.is_empty());
+        // Typing reported while locked creates nothing, and a second locked report is quiet.
+        assert_eq!(
+            map.apply_report(true, "other", true, typing_at(base, 200)),
+            TypingTransition::Unchanged
+        );
+        assert!(!map.displayed("other"));
+        // After unlock a stale stop does not show anything, and only fresh raw true does.
+        assert_eq!(
+            map.apply_report(false, "conversation", false, typing_at(base, 300)),
+            TypingTransition::Unchanged
+        );
+        assert!(map.entries.is_empty());
+        assert_eq!(
+            map.apply_report(false, "conversation", true, typing_at(base, 400)),
+            TypingTransition::Shown
+        );
+    }
+
+    #[test]
+    fn session_replacement_drops_pending_typing_and_returns_the_pills_to_clear() {
+        let base = Instant::now();
+        let mut map = TypingDisplays::default();
+        map.apply_raw("linger", true, base);
+        let TypingTransition::HideAfter { epoch, .. } =
+            map.apply_raw("linger", false, typing_at(base, 1_000))
+        else {
+            panic!("expected a hide");
+        };
+        map.apply_raw("live", true, base);
+        // A session change with the same binding keeps the entries (the same-session case).
+        assert!(map.reset_for_replacement(false).is_empty());
+        assert!(map.displayed("linger") && map.displayed("live"));
+        // A replaced session drops them and reports the conversations whose pill was showing.
+        let mut cleared = map.reset_for_replacement(true);
+        cleared.sort();
+        assert_eq!(cleared, vec!["linger".to_owned(), "live".to_owned()]);
+        assert!(map.entries.is_empty());
+        // The old session's linger timer is now a no-op, and the new session starts fresh.
+        assert!(!map.expire("linger", epoch, typing_at(base, 2_000)));
+        assert_eq!(
+            map.apply_raw("linger", false, typing_at(base, 2_000)),
+            TypingTransition::Unchanged
+        );
+        assert_eq!(
+            map.apply_raw("live", true, typing_at(base, 2_000)),
+            TypingTransition::Shown
+        );
+    }
+
+    #[test]
+    fn head_removed_during_linger_expires_normally_without_a_head() {
+        let (fixture, session, _) = locally_saved_draft_without_sync_unlock();
+        let mut state = RuntimeState::new(4);
+        state.binding = Some(fixture.binding);
+        state.session = Some(session);
+        state.heads.insert("conversation".into(), test_head(4, 0));
+        let base = Instant::now();
+        state.typing.apply_raw("conversation", true, base);
+        let TypingTransition::HideAfter { delay, epoch } =
+            state
+                .typing
+                .apply_raw("conversation", false, typing_at(base, 1_000))
+        else {
+            panic!("expected a hide");
+        };
+        assert_eq!(delay, TYPING_LINGER);
+        state.heads.remove("conversation");
+        // The timer still expires the entry on schedule; with no head the caller pushes nothing.
+        assert!(state
+            .typing
+            .expire("conversation", epoch, typing_at(base, 1_300)));
+        assert!(!state.typing.displayed("conversation"));
+        assert!(!state.heads.contains_key("conversation"));
+    }
+
+    #[test]
+    fn clear_visible_state_empties_typing_entries() {
+        let (fixture, session, _) = locally_saved_draft_without_sync_unlock();
+        let mut state = visible_runtime_state(fixture.binding, session, "conversation", 4);
+        state.typing.apply_raw("conversation", true, Instant::now());
+        state.typing.apply_raw("other", true, Instant::now());
+        clear_visible_state(&mut state, 5);
+        assert!(state.heads.is_empty());
+        assert!(state.typing.entries.is_empty());
     }
 
     #[test]
