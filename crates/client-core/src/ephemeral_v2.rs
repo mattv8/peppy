@@ -277,16 +277,7 @@ pub(crate) fn seal(
     {
         return Ok(None);
     }
-    let eligible = match crate::rcs_group::group_mapping(&store.conn, conversation_id)
-        .map_err(|_| LiveError::InvalidContext)?
-    {
-        // Group typing (both directions) flows only while the group mapping is Live (I7).
-        Some(mapping) => mapping.state == crate::rcs_group::GroupMappingState::Live,
-        None => {
-            matches!(rcs_capability::projection(&store.conn, conversation_id, gateway_device_id, effective_wall).map_err(|_| LiveError::InvalidContext)?, Some(projection) if projection.eligibility == RcsEligibility::Eligible)
-        }
-    };
-    if !eligible {
+    if !typing_eligible(store, conversation_id, gateway_device_id, effective_wall)? {
         return Ok(None);
     }
     let slot = typing_slot(conversation_id, typing.participant.as_deref());
@@ -415,8 +406,12 @@ pub(crate) fn open(
                 }
                 _ => return Ok(empty_outcome(store)),
             };
-            let eligible = matches!(rcs_capability::projection(&store.conn, ConversationId(typing.conversation_id), gateway, effective_wall).map_err(|_| LiveError::InvalidContext)?, Some(projection) if projection.eligibility == RcsEligibility::Eligible);
-            if !eligible {
+            if !typing_eligible(
+                store,
+                ConversationId(typing.conversation_id),
+                gateway,
+                effective_wall,
+            )? {
                 return Ok(empty_outcome(store));
             }
             let deadline = clock
@@ -594,6 +589,25 @@ pub(crate) fn open_json(
         return Ok(empty_outcome(store));
     };
     open(store, &frame, clock)
+}
+
+fn typing_eligible(
+    store: &Store,
+    conversation: ConversationId,
+    gateway: DeviceId,
+    now_ms: i64,
+) -> Result<bool, LiveError> {
+    match crate::rcs_group::group_mapping(&store.conn, conversation)
+        .map_err(|_| LiveError::InvalidContext)?
+    {
+        Some(mapping) => Ok(mapping.state == crate::rcs_group::GroupMappingState::Live
+            && mapping.gateway_device_id == gateway),
+        None => Ok(matches!(
+            rcs_capability::projection(&store.conn, conversation, gateway, now_ms)
+                .map_err(|_| LiveError::InvalidContext)?,
+            Some(projection) if projection.eligibility == RcsEligibility::Eligible
+        )),
+    }
 }
 
 fn typing_slot(conversation: ConversationId, participant: Option<&str>) -> TypingSlot {

@@ -474,3 +474,170 @@ fn group_typing_attributes_only_live_roster_members() {
         "outbound typing into a paused group is suppressed"
     );
 }
+
+#[test]
+fn live_group_typing_flows_between_gateway_and_desktop() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let gateway_config = config(&directory, "typing-gateway", &vault);
+    let desktop_config = config(&directory, "typing-desktop", &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let desktop = unlocked(&desktop_config, &vault);
+    publish_current_gateway(&gateway, &gateway_config);
+    authorize_local_link_gateway(&gateway, &gateway_config);
+    let now = now_ms();
+    gateway
+        .ingest_group_candidates(&snapshot(1, vec![group(&[ALEX, SAM], now)]), now)
+        .unwrap();
+    let context = gateway.rcs_receive_context(GOOGLE).unwrap().unwrap();
+    let conversation = context.conversation_id;
+    gateway
+        .publish_rcs_eligibility_from_lifecycle(&[conversation], now)
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&gateway);
+    server.sync(&desktop);
+    assert_eq!(
+        desktop
+            .rcs_eligibility_projection(conversation, gateway_config.device_id, now)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Eligible
+    );
+    let clock = |offset: u64| LiveClock {
+        wall_ms: now + offset as i64,
+        mono_ms: 1_000 + offset,
+    };
+    let roster = vec![gateway_config.device_id, desktop_config.device_id];
+    for (client, executor) in [
+        (&gateway, LiveExecutor::CurrentGateway),
+        (&desktop, LiveExecutor::None),
+    ] {
+        client
+            .enable_live_typing(
+                LiveEnableContext {
+                    trusted_roster: roster.clone(),
+                    local_gateway_device_id: gateway_config.device_id,
+                    local_executor: executor,
+                },
+                clock(0),
+            )
+            .unwrap();
+    }
+    let seal = |client: &Client, origin, participant: Option<&str>, offset| {
+        client
+            .seal_typing_signal_v2(
+                conversation,
+                gateway_config.device_id,
+                origin,
+                participant.map(str::to_owned),
+                TypingStateV2::Started,
+                clock(offset),
+            )
+            .unwrap()
+            .unwrap()
+            .signal
+    };
+    let first = seal(&gateway, TypingOriginV2::GoogleContact, Some(ALEX), 1);
+    let challenge = desktop
+        .open_typing_signal_v2(&first, clock(1))
+        .unwrap()
+        .reply
+        .unwrap();
+    let ack = gateway
+        .open_typing_signal_v2(&challenge, clock(2))
+        .unwrap()
+        .reply
+        .unwrap();
+    assert!(
+        desktop
+            .open_typing_signal_v2(&ack, clock(3))
+            .unwrap()
+            .session_update
+            .is_some()
+    );
+    let second = seal(&gateway, TypingOriginV2::GoogleContact, Some(ALEX), 3_001);
+    assert!(matches!(
+        desktop.open_typing_signal_v2(&second, clock(3_001)).unwrap().action,
+        Some(LiveAction::Display { participant: Some(member), .. }) if member == ALEX
+    ));
+
+    // The gateway's own mapping, not a self-projection, must admit inbound group typing.
+    let conn = sqlcipher(&gateway_config.database_path);
+    conn.execute_batch(
+        "CREATE TEMP TABLE saved_projection AS SELECT * FROM rcs_link_eligibility_projection",
+    )
+    .unwrap();
+    conn.execute(
+        "DELETE FROM rcs_link_eligibility_projection WHERE conversation_id=?",
+        [conversation.to_string()],
+    )
+    .unwrap();
+    let first = seal(&desktop, TypingOriginV2::VaultDevice, None, 3_002);
+    let challenge = gateway
+        .open_typing_signal_v2(&first, clock(3_002))
+        .unwrap()
+        .reply
+        .expect("live group must issue a challenge");
+    let ack = desktop
+        .open_typing_signal_v2(&challenge, clock(3_003))
+        .unwrap()
+        .reply
+        .unwrap();
+    assert!(
+        gateway
+            .open_typing_signal_v2(&ack, clock(3_004))
+            .unwrap()
+            .session_update
+            .is_some()
+    );
+    let second = seal(&desktop, TypingOriginV2::VaultDevice, None, 6_002);
+    assert!(matches!(
+        gateway.open_typing_signal_v2(&second, clock(6_002)).unwrap().action,
+        Some(LiveAction::GatewayTypingIntent { conversation_id, .. }) if conversation_id == conversation
+    ));
+    assert!(
+        gateway
+            .seal_typing_signal_v2(
+                conversation,
+                desktop_config.device_id,
+                TypingOriginV2::VaultDevice,
+                None,
+                TypingStateV2::Started,
+                clock(6_003),
+            )
+            .unwrap()
+            .is_none(),
+        "a live mapping must not authorize a different gateway"
+    );
+    conn.execute_batch(
+        "INSERT OR REPLACE INTO rcs_link_eligibility_projection SELECT * FROM saved_projection",
+    )
+    .unwrap();
+    gateway
+        .ingest_rcs_receive_observation(
+            conversation,
+            context.ownership_generation,
+            incoming("m-unknown-typing", "?"),
+            Some(RcsGroupSender::UnknownMember),
+            RcsObservationProvenance::Live,
+        )
+        .unwrap();
+    assert_eq!(
+        gateway
+            .rcs_eligibility_projection(conversation, gateway_config.device_id, now + 9_002)
+            .unwrap()
+            .unwrap()
+            .eligibility,
+        RcsEligibility::Eligible,
+        "the stale eligible projection must not override the paused mapping"
+    );
+    let paused = seal(&desktop, TypingOriginV2::VaultDevice, None, 9_002);
+    let outcome = gateway
+        .open_typing_signal_v2(&paused, clock(9_002))
+        .unwrap();
+    assert!(
+        outcome.action.is_none() && outcome.reply.is_none() && outcome.session_update.is_none()
+    );
+}
