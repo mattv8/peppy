@@ -37,6 +37,7 @@ class GatewayHttpRequestTest {
                 { http.get("/v1/events") },
                 { http.postJson("/v1/events", "{}") },
                 { http.deleteJson("/v1/events/test", "{}") },
+                { http.putJson("/v1/events/test", "{}") },
             )
             operations.forEach { operation -> assertSame(denial, assertThrows(IOException::class.java) { operation() }) }
         }
@@ -130,6 +131,19 @@ class GatewayHttpRequestTest {
             assertEquals("application/json", requests[1].headers["content-type"])
             assertEquals("application/json", requests[2].headers["content-type"])
             assertNull(requests[0].headers["content-type"])
+        }
+    }
+
+    @Test fun putJsonSendsPutWithJsonBody() {
+        val requests = mutableListOf<LoopbackHttpServer.Request>()
+        LoopbackHttpServer { request -> requests += request; LoopbackHttpServer.Response(204) }.use { server ->
+            val response = GatewayHttp(server.origin, "test-token").putJson("/v1/devices/self/name", "{\"name\":\"Phone\"}")
+
+            assertEquals(204, response.code)
+            assertEquals("PUT", requests.single().method)
+            assertEquals("/v1/devices/self/name", requests.single().target)
+            assertEquals("{\"name\":\"Phone\"}", requests.single().body)
+            assertEquals("application/json", requests.single().headers["content-type"])
         }
     }
 

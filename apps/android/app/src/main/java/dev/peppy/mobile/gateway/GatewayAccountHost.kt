@@ -18,8 +18,18 @@ import uniffi.peppy_mobile_bindings.attachmentRetentionStatusRequest
 import uniffi.peppy_mobile_bindings.classifyDeviceRetentionAvailability
 import uniffi.peppy_mobile_bindings.parseAttachmentRetentionStatus
 
-internal data class GatewayAccountDevice(val id: String, val role: String, val revoked: Boolean, val keyEpoch: Long)
+internal enum class DevicePresenceState { CONNECTED, SEEN, NEVER, UNKNOWN }
+internal data class DevicePresence(val state: DevicePresenceState, val lastSeenAgeSeconds: Long?)
+internal data class GatewayAccountDevice(
+    val id: String, val role: String, val revoked: Boolean, val keyEpoch: Long,
+    val name: String? = null, val kind: String? = null, val presence: DevicePresence? = null,
+)
 internal data class GatewayAccountState(val self: GatewayAccountDevice, val devices: List<GatewayAccountDevice>)
+internal sealed interface RenameResult {
+    data object Renamed : RenameResult
+    data object InvalidName : RenameResult
+    data object Failed : RenameResult
+}
 
 /** Authenticated account boundary. Credentials stay inside NativeGateway / GatewayHttp. */
 internal object GatewayAccountHost {
@@ -96,6 +106,24 @@ internal object GatewayAccountHost {
         } else result.ok
     }
 
+    fun rename(context: Context, target: String, name: String): RenameResult {
+        val trimmed = name.trim()
+        if (!isValidDeviceName(trimmed)) return RenameResult.InvalidName
+        if (!UUID_RE.matches(target)) return RenameResult.Failed
+        val identity = NativeGateway.accountIdentity(context) ?: return RenameResult.Failed
+        NativeGateway.currentAccountCredential(context, identity) ?: return RenameResult.Failed
+        val http = currentAccountHttp(context, identity) ?: return RenameResult.Failed
+        val result = try { http.putJson("/v1/devices/$target/name", JSONObject().put("name", trimmed).toString()) } catch (_: Exception) { return RenameResult.Failed }
+        return when {
+            result.ok -> RenameResult.Renamed
+            result.code == 400 && result.errorCode == "invalid_device_name" -> RenameResult.InvalidName
+            else -> RenameResult.Failed
+        }
+    }
+
+    private fun isValidDeviceName(trimmed: String) =
+        trimmed.isNotEmpty() && trimmed.toByteArray(Charsets.UTF_8).size <= 128 && trimmed.none { it.isISOControl() }
+
     fun deleteVault(context: Context): Boolean {
         val identity = NativeGateway.accountIdentity(context) ?: return false
         val credential = NativeGateway.currentAccountCredential(context, identity) ?: return false
@@ -128,8 +156,28 @@ internal object GatewayAccountHost {
             val item = getJSONObject(index); val id = item.getString("device_id")
             val role = item.getString("role").takeIf { it == "owner" || it == "gateway" || it == "device" } ?: continue
             if (!UUID_RE.matches(id)) continue
-            add(GatewayAccountDevice(id, role, item.optBoolean("revoked"), item.optLong("key_epoch", 0)))
+            add(
+                GatewayAccountDevice(
+                    id, role, item.optBoolean("revoked"), item.optLong("key_epoch", 0),
+                    name = item.optTrimmedString("name"),
+                    kind = item.optTrimmedString("kind"),
+                    presence = item.devicePresence(),
+                ),
+            )
         }
+    }
+    private fun JSONObject.optTrimmedString(key: String): String? =
+        if (isNull(key)) null else optString(key).trim().takeIf { it.isNotEmpty() }
+    private fun JSONObject.devicePresence(): DevicePresence? {
+        val presence = optJSONObject("presence") ?: return null
+        val state = when (presence.optString("state")) {
+            "connected" -> DevicePresenceState.CONNECTED
+            "seen" -> DevicePresenceState.SEEN
+            "never" -> DevicePresenceState.NEVER
+            else -> DevicePresenceState.UNKNOWN
+        }
+        val ageSeconds = (presence.opt("last_seen_age_seconds") as? Number)?.toLong()?.takeIf { it >= 0 }
+        return DevicePresence(state, ageSeconds)
     }
     private val UUID_RE = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", RegexOption.IGNORE_CASE)
 

@@ -58,6 +58,8 @@ class GatewayHttp(
 
     fun deleteJson(path: String, body: String): HttpResult = request("DELETE", path, body)
 
+    fun putJson(path: String, body: String): HttpResult = request("PUT", path, body)
+
     fun retentionEnabled(): Boolean = retentionHeader != null
     fun attachmentProducerReady(): Boolean = attachmentProducerReady
     fun setAttachmentProducerReady(ready: Boolean) { attachmentProducerReady = ready }
