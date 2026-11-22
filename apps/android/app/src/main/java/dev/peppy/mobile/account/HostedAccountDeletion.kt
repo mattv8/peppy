@@ -23,6 +23,7 @@ import uniffi.peppy_mobile_bindings.NativePlayBillingContext
 import dev.peppy.mobile.ui.ConsentSheet
 import dev.peppy.mobile.ui.DestructiveRow
 
+internal const val HOSTED_ACCOUNT_URL = "https://peppy.pro/account"
 internal const val HOSTED_ACCOUNT_DELETION_URL = "https://peppy.pro/account/delete"
 internal const val PLAY_SUBSCRIPTIONS_URL = "https://play.google.com/store/account/subscriptions"
 
@@ -32,6 +33,8 @@ private fun openExternalUrl(context: Context, url: String): Boolean = try {
 } catch (_: ActivityNotFoundException) {
     false
 }
+
+internal fun openHostedAccount(context: Context): Boolean = openExternalUrl(context, HOSTED_ACCOUNT_URL)
 
 internal fun openHostedAccountDeletion(context: Context): Boolean = openExternalUrl(context, HOSTED_ACCOUNT_DELETION_URL)
 

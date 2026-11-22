@@ -83,6 +83,7 @@ import dev.peppy.mobile.account.AccountRefreshTrigger
 import dev.peppy.mobile.account.AndroidHostedSecureStore
 import dev.peppy.mobile.account.HostedAccountClient
 import dev.peppy.mobile.account.HostedFailure
+import dev.peppy.mobile.account.openHostedAccount
 import dev.peppy.mobile.account.signInHostedAccount
 import dev.peppy.mobile.billing.PlayBillingCoordinator
 import dev.peppy.mobile.billing.PlaySubscriptionPanel
@@ -625,6 +626,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
                                 SubscriptionRouteFeedback.SIGN_IN -> stringResource(R.string.peppy_production_signin_failed)
                                 null -> null
                             },
+                            openAccountWebsite = ::openHostedAccount,
                         )
                     }
                 },

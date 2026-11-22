@@ -2,6 +2,7 @@ package dev.peppy.mobile.billing
 
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
@@ -37,13 +38,19 @@ import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.R
 import dev.peppy.mobile.account.AccountAccessState
 import dev.peppy.mobile.account.CachedAccountNotice
+import dev.peppy.mobile.ui.ExternalLinkRow
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import uniffi.peppy_mobile_bindings.NativeAccountNoticeKind
 
-/** Shared Play-only subscription surface. Direct builds must not compose this component. */
+/**
+ * Shared Play-only subscription surface. Direct builds must not compose this component.
+ *
+ * [openAccountWebsite] offers the hosted account page while Peppy's website bills the subscription.
+ * Sign-up flows pass null: Play policy bars them from leading users to another way to pay.
+ */
 @Composable
 internal fun PlaySubscriptionPanel(
     coordinator: PlayBillingCoordinator,
@@ -53,6 +60,7 @@ internal fun PlaySubscriptionPanel(
     onSignIn: () -> Unit,
     signInError: String? = null,
     showRestoreActions: Boolean = true,
+    openAccountWebsite: ((Context) -> Boolean)? = null,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -79,7 +87,10 @@ internal fun PlaySubscriptionPanel(
             PlaySubscriptionState.BillingUnavailable -> RecoverableStatus(R.string.peppy_play_billing_unavailable_body, coordinator::retry)
             PlaySubscriptionState.Reconnecting -> Status(R.string.peppy_play_reconnecting, "play-subscription-reconnecting")
             PlaySubscriptionState.NotOffered -> RecoverableStatus(R.string.peppy_play_not_offered_body, coordinator::retry)
-            PlaySubscriptionState.OtherProvider -> Status(R.string.peppy_play_other_provider_body)
+            PlaySubscriptionState.OtherProvider -> {
+                Status(R.string.peppy_play_other_provider_body)
+                openAccountWebsite?.let { AccountWebsiteLink(it) }
+            }
             PlaySubscriptionState.UnknownProvider -> RecoverableStatus(R.string.peppy_play_unknown_provider_body, coordinator::retry)
             is PlaySubscriptionState.VaultMismatch -> {
                 Text(stringResource(R.string.peppy_play_vault_mismatch_title), Modifier.testTag("play-subscription-status"))
@@ -212,6 +223,24 @@ internal fun PlaySubscriptionLoadEffect(
     Status(copy)
     OutlinedButton(onClick = onRetry, modifier = Modifier.testTag("play-billing-retry")) {
         Text(stringResource(R.string.peppy_try_again))
+    }
+}
+
+@Composable private fun AccountWebsiteLink(openAccountWebsite: (Context) -> Boolean) {
+    val context = LocalContext.current
+    var openFailed by remember { mutableStateOf(false) }
+    Column(Modifier.testTag("play-account-website"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        ExternalLinkRow(
+            tag = "play-account-website-link",
+            label = stringResource(R.string.peppy_production_manage_account),
+            onClick = { openFailed = !openAccountWebsite(context) },
+        )
+        if (openFailed) Text(
+            stringResource(R.string.peppy_toggle_android_link_unavailable),
+            Modifier.testTag("play-account-website-error").semantics { liveRegion = LiveRegionMode.Polite },
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+        )
     }
 }
 
