@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import type { ReactElement } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MarkAllReadAction } from "./MarkAllReadAction";
@@ -195,5 +196,72 @@ describe("MarkAllReadAction contract", () => {
     rerender(<MarkAllReadAction unreadCount={0} enabled markAllRead={vi.fn()} refresh={vi.fn()} onFocusFallback={focusFallback} />);
 
     await waitFor(() => expect(focusFallback).toHaveBeenCalledOnce());
+  });
+
+  describe("WebKit mouse activation inside the confirmation", () => {
+    const renderInShell = (ui: ReactElement) => render(<main id="test-shell" tabIndex={-1}>{ui}</main>);
+    const pressAndRelease = (target: HTMLElement) => {
+      const shell = document.getElementById("test-shell")!;
+      const focused = document.activeElement as HTMLElement;
+      const notPrevented = fireEvent.mouseDown(target);
+      // WebKit moves focus from the focused element to the nearest focusable ancestor unless the mousedown default is canceled.
+      if (notPrevented) {
+        fireEvent.blur(focused, { relatedTarget: shell });
+        shell.focus();
+      }
+      fireEvent.mouseUp(target);
+      fireEvent.click(target);
+    };
+
+    it("runs the confirmed mutation once when WebKit would move focus on mouse press", async () => {
+      const markAllRead = vi.fn().mockResolvedValue("2");
+      const refresh = vi.fn().mockResolvedValue(undefined);
+      renderInShell(<MarkAllReadAction unreadCount={2} enabled markAllRead={markAllRead} refresh={refresh} onFocusFallback={vi.fn()} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Mark all as read" }));
+      const confirmation = within(screen.getByRole("dialog")).getByRole("button", { name: "Mark all as read" });
+      await waitFor(() => expect(confirmation).toHaveFocus());
+      pressAndRelease(confirmation);
+
+      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("2"));
+      expect(markAllRead).toHaveBeenCalledOnce();
+      expect(refresh).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("keeps Cancel mouse activation from mutating and restores focus to the action", async () => {
+      const markAllRead = vi.fn().mockResolvedValue("2");
+      const refresh = vi.fn().mockResolvedValue(undefined);
+      renderInShell(<MarkAllReadAction unreadCount={2} enabled markAllRead={markAllRead} refresh={refresh} onFocusFallback={vi.fn()} />);
+
+      const action = screen.getByRole("button", { name: "Mark all as read" });
+      fireEvent.click(action);
+      const cancel = within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" });
+      await waitFor(() => expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Mark all as read" })).toHaveFocus());
+      pressAndRelease(cancel);
+
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      await waitFor(() => expect(action).toHaveFocus());
+      expect(markAllRead).not.toHaveBeenCalled();
+      expect(refresh).not.toHaveBeenCalled();
+    });
+
+    it("closes the open confirmation when the trigger is mouse-pressed, without reopening or mutating", async () => {
+      const markAllRead = vi.fn().mockResolvedValue("2");
+      const refresh = vi.fn().mockResolvedValue(undefined);
+      renderInShell(<MarkAllReadAction unreadCount={2} enabled markAllRead={markAllRead} refresh={refresh} onFocusFallback={vi.fn()} />);
+
+      const action = screen.getByRole("button", { name: "Mark all as read" });
+      fireEvent.click(action);
+      await waitFor(() => expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Mark all as read" })).toHaveFocus());
+      pressAndRelease(action);
+
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(action).toHaveAttribute("aria-expanded", "false");
+      await waitFor(() => expect(action).toHaveFocus());
+      expect(markAllRead).not.toHaveBeenCalled();
+      expect(refresh).not.toHaveBeenCalled();
+      expect(document.getElementById("thread-list-action-notice")).toBeEmptyDOMElement();
+    });
   });
 });
