@@ -125,7 +125,7 @@ export function resolveSystemRibbon(
   return notice && !isEndedNotice(notice, now) ? accountRibbonModel(notice, now, context) : null;
 }
 
-function isOpenableManageUrl(value: string): boolean {
+export function isOpenableManageUrl(value: string): boolean {
   try {
     const url = new URL(value);
     return url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname));

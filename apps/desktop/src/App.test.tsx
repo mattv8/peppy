@@ -5919,6 +5919,31 @@ describe("host state display", () => {
     await screen.findByRole("button", { name: /manage storage on the website/i });
   });
 
+  it.each([
+    ["a Peppy Hosted browser app", true, true],
+    ["a community browser app", false, false],
+  ])("offers feedback from browser account settings for %s", async (_case, hostedDeployment, expected) => {
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue({ ...(await fixtureBridge.hosted_account()), signedIn: true });
+    vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: false, website: true });
+    vi.spyOn(bridge, "billing_summary").mockResolvedValue({ provider: "none", manageableIn: "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
+    render(<App hostKind="browser" fixedOrigin="https://app.example.com" accountUrl="https://account.example.com/account" hostedDeployment={hostedDeployment} />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    const section = await waitFor(() => {
+      const element = document.getElementById("settings-account-billing");
+      expect(element).toBeInTheDocument();
+      return element!;
+    });
+    if (expected) {
+      const link = screen.getByRole("link", { name: /send feedback/i });
+      expect(section).toContainElement(link);
+      expect(link).toHaveAttribute("href", "https://account.example.com/feedback");
+    } else {
+      expect(screen.queryByRole("link", { name: /send feedback/i })).not.toBeInTheDocument();
+    }
+  });
+
   it("uses the selected native mode to expose only its connection controls", async () => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue({ ...(await fixtureBridge.hosted_account()), signedIn: true });
     vi.spyOn(bridge, "purchase_options").mockResolvedValue({ appStore: false, website: true });
