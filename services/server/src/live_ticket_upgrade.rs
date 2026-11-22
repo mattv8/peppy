@@ -66,10 +66,7 @@ pub fn classify_live_upgrade(
     let origin = origins[0]
         .to_str()
         .map_err(|_| UpgradeRejection::OriginForbidden)?;
-    let parsed: url::Url = origin
-        .parse()
-        .map_err(|_| UpgradeRejection::OriginForbidden)?;
-    if parsed.origin() != *trusted || parsed.origin().ascii_serialization() != origin {
+    if origin != trusted.ascii_serialization() {
         return Err(UpgradeRejection::OriginForbidden);
     }
     Ok(ticket)
@@ -189,5 +186,19 @@ mod tests {
         for (headers, trusted, expected) in cases {
             assert_eq!(classify_live_upgrade(&headers, trusted.as_ref()), expected);
         }
+    }
+
+    #[test]
+    fn deeply_nested_blob_origin_is_forbidden() {
+        let origin = format!(
+            "{}{}",
+            "blob:".repeat(2000),
+            trusted().ascii_serialization()
+        );
+        let headers = headers(Some(&ticket()), Some(&origin), false);
+        assert_eq!(
+            classify_live_upgrade(&headers, Some(&trusted())),
+            Err(UpgradeRejection::OriginForbidden)
+        );
     }
 }
