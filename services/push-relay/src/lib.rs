@@ -407,7 +407,14 @@ impl AppState {
         kind: AdmissionKind,
         ip: SocketAddr,
     ) -> Result<String, AdmissionError> {
-        let now = SystemTime::now();
+        self.prefilter_admit_at(kind, ip, SystemTime::now()).await
+    }
+    async fn prefilter_admit_at(
+        &self,
+        kind: AdmissionKind,
+        ip: SocketAddr,
+        now: SystemTime,
+    ) -> Result<String, AdmissionError> {
         let window = admission_window(now);
         let key = match kind {
             AdmissionKind::Registration => admission_source(ip.ip()),
@@ -2534,47 +2541,68 @@ mod tests {
         assert!(entries.values().all(|entry| entry.count == 3));
     }
 
+    /// Mid-window, so filling the map and the checks after it never straddle a window boundary.
+    const FIXED_ADMISSION_TIME: Duration = Duration::from_secs(1_800_000_030);
+
+    fn ipv6_prefix_source(segment: u16) -> SocketAddr {
+        SocketAddr::new(
+            IpAddr::V6(std::net::Ipv6Addr::new(0x2001, segment, 0, 0, 0, 0, 0, 0)),
+            1,
+        )
+    }
+
+    async fn fill_registration_admissions_at(state: &AppState, now: SystemTime) {
+        for segment in 0..ADMISSION_MAP_CAP as u16 {
+            state
+                .prefilter_admit_at(
+                    AdmissionKind::Registration,
+                    ipv6_prefix_source(segment),
+                    now,
+                )
+                .await
+                .unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn admission_map_cap_protects_against_unbounded_ipv6_state() {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@localhost:1/unused")
             .unwrap();
         let state = AppState::with_provider(pool, Arc::new(FakeProvider::default()));
-        for segment in 0..ADMISSION_MAP_CAP as u16 {
-            state
-                .prefilter_admit(
-                    AdmissionKind::Registration,
-                    SocketAddr::new(
-                        IpAddr::V6(std::net::Ipv6Addr::new(0x2001, segment, 0, 0, 0, 0, 0, 0)),
-                        1,
-                    ),
-                )
-                .await
-                .unwrap();
-        }
+        let now = SystemTime::UNIX_EPOCH + FIXED_ADMISSION_TIME;
+        fill_registration_admissions_at(&state, now).await;
         assert!(
             state
-                .prefilter_admit(
-                    AdmissionKind::Registration,
-                    SocketAddr::new(
-                        IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0)),
-                        1,
-                    )
-                )
+                .prefilter_admit_at(AdmissionKind::Registration, ipv6_prefix_source(0), now)
                 .await
                 .is_ok()
         );
         assert!(
             state
-                .prefilter_admit(
-                    AdmissionKind::Registration,
-                    SocketAddr::new(
-                        IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 4096, 0, 0, 0, 0, 0, 0)),
-                        1,
-                    )
-                )
+                .prefilter_admit_at(AdmissionKind::Registration, ipv6_prefix_source(4096), now)
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_map_cap_frees_capacity_in_the_next_window() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost:1/unused")
+            .unwrap();
+        let state = AppState::with_provider(pool, Arc::new(FakeProvider::default()));
+        let now = SystemTime::UNIX_EPOCH + FIXED_ADMISSION_TIME;
+        fill_registration_admissions_at(&state, now).await;
+        assert!(
+            state
+                .prefilter_admit_at(
+                    AdmissionKind::Registration,
+                    ipv6_prefix_source(4096),
+                    now + ADMISSION_WINDOW,
+                )
+                .await
+                .is_ok()
         );
     }
 
