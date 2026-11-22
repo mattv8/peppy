@@ -46,6 +46,7 @@ import dev.peppy.mobile.about.LicensesScreen
 import dev.peppy.mobile.about.ThirdPartyNotices
 import dev.peppy.mobile.account.AccountAccessState
 import dev.peppy.mobile.account.AccountSettingsPolicy
+import dev.peppy.mobile.account.HOSTED_ACCOUNT_URL
 import dev.peppy.mobile.attachments.AttachmentStorageLoad
 import dev.peppy.mobile.attachments.AttachmentStorageSettingsController
 import dev.peppy.mobile.attachments.AttachmentStorageUiState
@@ -62,7 +63,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val HOSTED_ORIGIN = "https://peppy.pro"
-private const val HOSTED_ACCOUNT_URL = "https://peppy.pro/account"
 
 /** Drop-in Account destination; the parent renders it on the Account tab only. */
 @Composable

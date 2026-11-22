@@ -1,6 +1,9 @@
 package dev.peppy.mobile.billing
 
 import android.app.Activity
+import android.app.Application
+import android.content.Context
+import android.content.Intent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -10,6 +13,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
+import androidx.test.core.app.ApplicationProvider
+import dev.peppy.mobile.account.openHostedAccount
 import dev.peppy.mobile.testing.ComposeTestActivityRule
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
@@ -18,6 +24,7 @@ import org.junit.Test
 import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -102,12 +109,59 @@ class PlaySubscriptionPanelComposeTest {
         }
     }
 
+    private fun composeAccountPanel(coordinator: PlayBillingCoordinator, openAccountWebsite: ((Context) -> Boolean)?) {
+        compose.setContent {
+            MaterialTheme {
+                PlaySubscriptionPanel(coordinator, "account", onSignIn = {}, openAccountWebsite = openAccountWebsite)
+            }
+        }
+    }
+
+    @Test fun websiteBilledAccountPageOpensTheHostedAccountPage() {
+        composeAccountPanel(panelCoordinator(provider = NativeBillingProvider.STRIPE), ::openHostedAccount)
+
+        compose.onNodeWithTag("play-subscription-status").fetchSemanticsNode()
+        compose.onNodeWithTag("play-account-website-link").performClick()
+
+        val started = shadowOf(ApplicationProvider.getApplicationContext<Application>()).nextStartedActivity
+        assertEquals(Intent.ACTION_VIEW, started.action)
+        assertEquals("https://peppy.pro/account", started.dataString)
+        compose.onNodeWithTag("play-account-website-error").assertDoesNotExist()
+    }
+
+    @Test fun websiteBilledEnrollmentPanelOffersNoWebsiteLink() {
+        composePanel(panelCoordinator(provider = NativeBillingProvider.STRIPE))
+
+        compose.onNodeWithTag("play-subscription-status").fetchSemanticsNode()
+        compose.onNodeWithTag("play-account-website").assertDoesNotExist()
+    }
+
+    @Test fun websiteLinkShowsInlineFailureUntilAnOpenSucceeds() {
+        val attempts = AtomicInteger()
+        composeAccountPanel(panelCoordinator(provider = NativeBillingProvider.STRIPE)) { attempts.incrementAndGet() > 1 }
+
+        compose.onNodeWithTag("play-account-website-link").performClick()
+        compose.onNodeWithTag("play-account-website-error").fetchSemanticsNode()
+        compose.onNodeWithTag("play-account-website-link").performClick()
+        compose.onNodeWithTag("play-account-website-error").assertDoesNotExist()
+        compose.runOnIdle { assertEquals(2, attempts.get()) }
+    }
+
+    @Test fun purchasablePanelNeverOffersWebsiteLink() {
+        composeAccountPanel(panelCoordinator()) { true }
+
+        compose.onNodeWithTag("play-subscribe-button").fetchSemanticsNode()
+        compose.onNodeWithTag("play-account-website").assertDoesNotExist()
+    }
+
     private fun panelCoordinator(
         purchases: List<BillingPurchase> = emptyList(),
         outcome: NativePlayLinkOutcome = NativePlayLinkOutcome.LINKED,
+        provider: NativeBillingProvider = NativeBillingProvider.NONE,
     ): PlayBillingCoordinator {
         val snapshot = BillingSessionSnapshot("account", "session", null)
-        val context = NativePlayBillingContext("account", true, "peppy.monthly", listOf("monthly"), "binding", NativeBillingProvider.NONE)
+        val purchasable = provider == NativeBillingProvider.NONE
+        val context = NativePlayBillingContext("account", purchasable, "peppy.monthly", listOf("monthly"), "binding", provider)
         return PlayBillingCoordinator(
             PanelHost(snapshot, context, outcome),
             PanelGateway(purchases),
