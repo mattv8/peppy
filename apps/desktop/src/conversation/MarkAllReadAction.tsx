@@ -1,4 +1,4 @@
-import { type FocusEvent, useEffect, useRef, useState } from "react";
+import { type FocusEvent, type MouseEvent, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { CheckCheck, X } from "@peppy/desktop-ui";
 import { TOAST_DISMISS_MS } from "../notices/useNoticeDismissal";
@@ -186,11 +186,12 @@ export function MarkAllReadAction({ unreadCount, enabled, markAllRead, refresh, 
     if (nextFocus instanceof Node && event.currentTarget.contains(nextFocus)) return;
     setConfirming(false);
   };
+  const keepFocusOnConfirmationPress = (event: MouseEvent<HTMLElement>) => event.preventDefault();
 
   return <div id="mark-all-read-boundary" className="titlebar-action-anchor" onBlur={confirming ? closeConfirmationOnFocusOut : undefined}>
-    <button ref={actionRef} id="mark-all-read" type="button" aria-label="Mark all as read" {...(unreadCount > 0 ? { "aria-describedby": "mark-all-read-count" } : {})} title={actionTitle} aria-haspopup="dialog" aria-expanded={confirming} {...(confirming ? { "aria-controls": "mark-all-read-confirmation" } : {})} disabled={!enabled || pending || unreadCount === 0} aria-busy={pending || undefined} onFocus={trackFocus} onBlur={trackBlur} onClick={() => setConfirming(current => !current)}><CheckCheck size={16} strokeWidth={1.75} aria-hidden />{unreadCount > 0 && <span className="titlebar-action-dot" aria-hidden />}</button>
+    <button ref={actionRef} id="mark-all-read" type="button" aria-label="Mark all as read" {...(unreadCount > 0 ? { "aria-describedby": "mark-all-read-count" } : {})} title={actionTitle} aria-haspopup="dialog" aria-expanded={confirming} {...(confirming ? { "aria-controls": "mark-all-read-confirmation" } : {})} disabled={!enabled || pending || unreadCount === 0} aria-busy={pending || undefined} onFocus={trackFocus} onBlur={trackBlur} onMouseDown={confirming ? keepFocusOnConfirmationPress : undefined} onClick={() => confirming ? closeConfirmation() : setConfirming(true)}><CheckCheck size={16} strokeWidth={1.75} aria-hidden />{unreadCount > 0 && <span className="titlebar-action-dot" aria-hidden />}</button>
     {unreadCount > 0 && <span id="mark-all-read-count" className="visually-hidden">{unreadCount.toLocaleString()} unread message{unreadCount === 1 ? "" : "s"}</span>}
-    {confirming && <div ref={popoverRef} id="mark-all-read-confirmation" role="dialog" aria-label="Confirm mark all as read" onFocus={trackFocus} onBlur={trackBlur}><p>Mark {unreadCount.toLocaleString()} unread message{unreadCount === 1 ? "" : "s"} as read in all synced conversations?</p><div><button ref={confirmRef} className="primary-button" type="button" disabled={pending} onClick={() => void run()}>Mark all as read</button><button className="secondary-button" type="button" disabled={pending} onClick={closeConfirmation}>Cancel</button></div></div>}
+    {confirming && <div ref={popoverRef} id="mark-all-read-confirmation" role="dialog" aria-label="Confirm mark all as read" onFocus={trackFocus} onBlur={trackBlur} onMouseDown={keepFocusOnConfirmationPress}><p>Mark {unreadCount.toLocaleString()} unread message{unreadCount === 1 ? "" : "s"} as read in all synced conversations?</p><div><button ref={confirmRef} className="primary-button" type="button" disabled={pending} onClick={() => void run()}>Mark all as read</button><button className="secondary-button" type="button" disabled={pending} onClick={closeConfirmation}>Cancel</button></div></div>}
     {createPortal(toast, toastHost ?? document.body)}
   </div>;
 }
