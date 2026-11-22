@@ -701,8 +701,12 @@ it("keeps the macOS status after a rejected refresh", async () => {
   render(<NotificationSettings {...props()} persistenceSettings={settings} />);
 
   expect(await screen.findByRole("status")).toHaveTextContent("Current style: Banners. They fade on their own.");
-  fireEvent.focus(window);
-  await waitFor(() => expect(settings.load).toHaveBeenCalledTimes(2));
+  // The focus listener is installed after the status renders, so focus until a refresh runs.
+  await waitFor(() => {
+    if (settings.load.mock.calls.length < 2) fireEvent.focus(window);
+    expect(settings.load).toHaveBeenCalledTimes(2);
+  });
+  await act(async () => undefined);
   expect(screen.getByRole("status")).toHaveTextContent("Current style: Banners. They fade on their own.");
 });
 
