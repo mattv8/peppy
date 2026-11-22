@@ -406,6 +406,9 @@
 #hosted-account-delete p { color: var(--peppy-text-secondary); font-size: 12px; }
 #hosted-account-delete { padding: 16px 0 0; margin-top: 8px; border: 0; border-top: 1px solid var(--peppy-border); border-radius: 0; }
 #hosted-account-delete-title { color: var(--peppy-text-strong); font-size: 13px; font-weight: 600; line-height: 1.4; }
+#settings-feedback { display: grid; gap: 4px; justify-items: start; padding: 16px 0 0; margin-top: 8px; border: 0; border-top: 1px solid var(--peppy-border); border-radius: 0; }
+#settings-feedback > p { margin: 0; }
+#settings-feedback-title { margin: 0; color: var(--peppy-text-strong); font-size: 13px; font-weight: 600; line-height: 1.4; }
 #hosted-account-sign-out,
 #hosted-account-delete-cancel,
 #hosted-account-delete-open { flex: 0 0 auto; width: auto; min-height: 28px; padding: 4px 10px; font-size: 13px; line-height: 1.4; white-space: normal; }
@@ -540,6 +543,7 @@
 @media (forced-colors: active) {
   #attachment-storage.settings-card { border-top-color: CanvasText; }
   #hosted-account-delete { border-top-color: CanvasText; }
+  #settings-feedback { border-top-color: CanvasText; }
   #settings-account-billing #attachment-storage > #billing-elsewhere-notice,
   #settings-account-billing #attachment-storage-google-play-notice,
   #settings-account-billing #attachment-storage-addons,

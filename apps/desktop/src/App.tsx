@@ -124,6 +124,7 @@ import { DevicesSettings } from "./settings/DevicesSettings";
 import { McpConnectHelp } from "./settings/McpConnectHelp";
 import { McpAuthorizationConsent } from "./settings/McpAuthorizationConsent";
 import { AttachmentStorageSettingsHost, HostedAccountSettings } from "./settings/HostedAccountSettings";
+import { FeedbackSettings } from "./settings/FeedbackSettings";
 import { PrivacySettings } from "./settings/PrivacySettings";
 import { RcsFeaturesSettings } from "./settings/RcsFeaturesSettings";
 import { AdvancedSettings } from "./settings/AdvancedSettings";
@@ -1721,6 +1722,7 @@ function SettingsView({
   onAppLock,
   browserHost = false,
   accountUrl,
+  hostedDeployment = false,
   sessionScopeId,
   canRevealVaultSecret = false,
   serverOffline = false,
@@ -1780,6 +1782,7 @@ function SettingsView({
   onAppLock(enabled: boolean): Promise<boolean>;
   browserHost?: boolean;
   accountUrl?: string;
+  hostedDeployment?: boolean;
   sessionScopeId?: string;
   canRevealVaultSecret?: boolean;
   serverOffline?: boolean;
@@ -2182,7 +2185,10 @@ function SettingsView({
         {!browserHost && purchaseOptions?.appStore && billingSummary && (billingSummary.provider === "none" || billingSummary.provider === "apple") && <p>{peppyCopy.account_billing_intro_app_store}</p>}
         {billingSummary?.provider === "google_play" && billingSummary.manageableIn === "google_play" && <p id="account-billing-intro-google-play">{peppyCopy.account_billing_intro_google_play}</p>}
         {browserHost && accountUrl && <a id="settings-account-portal-link" className="secondary-button" href={accountUrl} target="_blank" rel="noopener noreferrer">{peppyCopy.account_portal_cta}<span className="visually-hidden"> (opens in a new tab)</span></a>}
-        {browserHost ? <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} /> : <HostedAccountSettings sessionScopeId={sessionScopeId} onAccountDeleted={onAccountDeleted} onDeletionCanceled={onDeletionCanceled} />}
+        {browserHost ? <>
+          <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} manageStorageUrl={accountUrl} />
+          {hostedDeployment && <FeedbackSettings browserHost accountUrl={accountUrl} bridge={bridge} />}
+        </> : <HostedAccountSettings sessionScopeId={sessionScopeId} onAccountDeleted={onAccountDeleted} onDeletionCanceled={onDeletionCanceled} />}
       </section>}
       {typingShare !== undefined && <RcsFeaturesSettings typingShare={{ enabled: typingShare, onChange: onTypingShare, error: typingShareError }} />}
       <AdvancedSettings sessionKey={sessionScopeId ?? "unavailable"} unlocked={encryption === "unlocked"} serverOffline={serverOffline} browserHost={browserHost} onOpenDevices={() => { selectSection("devices"); window.setTimeout(() => document.getElementById("mcp-custody-review")?.focus(), 0); }} />
@@ -6852,6 +6858,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
                onAppLock={changeAppLock}
                browserHost={browserHost}
               accountUrl={accountUrl}
+              hostedDeployment={hostedDeployment}
               canRevealVaultSecret={!browserHost && snapshot?.deviceRole === "owner" && snapshot.connection.state === "connected"}
                serverOffline={serverOffline}
                accountReadOnly={accountReadOnly}

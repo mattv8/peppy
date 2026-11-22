@@ -4,6 +4,7 @@ import { bridge, type AttachmentRetentionStatusResult, type BillingSummaryView, 
 import { formatCopy, peppyCopy } from "../generated/peppyCopy";
 import { formatDeletionDeadline } from "../notices/systemRibbonModel";
 import { DeleteAccountDialog, type AccountDeletionResult } from "./DeleteAccountDialog";
+import { FeedbackSettings } from "./FeedbackSettings";
 
 type SignInProvider = "apple" | "google";
 
@@ -131,6 +132,7 @@ export function HostedAccountSettings({ sessionScopeId, onAccountDeleted, onDele
     {loading && account === null && <p id="hosted-account-loading" role="status" className="settings-note">Account loading…</p>}
     {!loading && loadFailed && <><p id="hosted-account-error" role="alert" className="settings-error">Could not load account status.</p><button id="hosted-account-retry" type="button" className="secondary-button" onClick={() => void load()}>Retry</button></>}
     {!loadFailed && account?.signedIn && <><div id="hosted-account-sign-out-row"><div className="hosted-account-row-copy">{account.accountLabel && <p id="hosted-account-label">{account.accountLabel}</p>}<p id="hosted-account-sign-out-scope" className="settings-note">Signing out ends this app’s account session. Your vault connection and saved data remain.</p></div><button id="hosted-account-sign-out" type="button" className="secondary-button" disabled={signingOut} aria-busy={signingOut || undefined} onClick={() => void signOut()}>Sign out of Peppy</button></div>{signOutError && <p id="hosted-account-sign-out-error" role="alert" className="settings-error">Sign-out was not completed. Try again.</p>}<AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} onManageStorage={bridge.hosted_open_billing} />
+      {phase === "none" && <FeedbackSettings browserHost={false} bridge={bridge} />}
       <div id="hosted-account-delete" data-account-delete data-deletion-phase={phase}><div className="hosted-account-row-copy">
         <p id="hosted-account-delete-announcer" className="visually-hidden" role="status">{announcement}</p>
         <h3 id="hosted-account-delete-title">{phase === "none" ? peppyCopy.settings_server_delete : phase === "scheduled" ? peppyCopy.account_delete_pending_title : peppyCopy.account_delete_processing_title}</h3>

@@ -193,6 +193,41 @@ describe("HostedAccountSettings", () => {
     expect(document.getElementById("hosted-account-delete")).toContainElement(document.getElementById("hosted-account-delete-open"));
   });
 
+  it("places the feedback link after storage and before account deletion when signed in", async () => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true, accountLabel: "Ada" }));
+    render(<HostedAccountSettings />);
+
+    const feedback = await waitFor(() => {
+      const element = document.getElementById("settings-feedback");
+      expect(element).toBeInTheDocument();
+      return element!;
+    });
+    expect(feedback).toContainElement(screen.getByRole("button", { name: /send feedback/i }));
+    const storage = document.getElementById("attachment-storage");
+    const deletion = document.getElementById("hosted-account-delete");
+    expect(storage?.compareDocumentPosition(feedback)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(feedback.compareDocumentPosition(deletion!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it.each([
+    ["scheduled", { executeAfter: "2026-11-26T18:00:00Z", cancellable: true }],
+    ["processing", { executeAfter: "2026-11-26T18:00:00Z", cancellable: false }],
+  ] as const)("hides the feedback link while account deletion is %s", async (phase, status) => {
+    vi.mocked(bridge.hosted_account).mockResolvedValue(account({ signedIn: true, accountLabel: "Ada" }));
+    vi.mocked(bridge.hosted_deletion_status).mockResolvedValue(status);
+    render(<HostedAccountSettings />);
+
+    await waitFor(() => expect(document.getElementById("hosted-account-delete")).toHaveAttribute("data-deletion-phase", phase));
+    expect(document.getElementById("settings-feedback")).not.toBeInTheDocument();
+  });
+
+  it("omits the feedback link when signed out", async () => {
+    render(<HostedAccountSettings />);
+
+    await waitFor(() => expect(document.getElementById("hosted-account-sign-in-options")).toBeInTheDocument());
+    expect(document.getElementById("settings-feedback")).not.toBeInTheDocument();
+  });
+
   it("refreshes to the signed-out state after sign-out and focuses its action", async () => {
     vi.mocked(bridge.hosted_account)
       .mockResolvedValueOnce(account({ signedIn: true, accountLabel: "Ada" }))
