@@ -2325,7 +2325,7 @@ export function hasInFlightAttachmentPreparation(
   );
 }
 
-export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind?: "native" | "browser"; fixedOrigin?: string; accountUrl?: string } = {}) {
+export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeployment = false }: { hostKind?: "native" | "browser"; fixedOrigin?: string; accountUrl?: string; hostedDeployment?: boolean } = {}) {
   const launchProgress = useLaunchProgress(bridge);
   const platform = detectPlatform();
   const browserHost = hostKind === "browser";
@@ -5625,6 +5625,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const ribbonActionContext: RibbonActionContext = { browserHost, billing: ribbonFacts };
   const systemRibbon = resolveSystemRibbon(serverOffline, accountNoticeShown, Date.now(), ribbonActionContext);
   const accountReadOnly = accountNoticeShown?.severity === "error";
+  /* Only the hosted browser app links to the account website, and only while the account can send. */
+  const titlebarAccountUrl = browserHost && hostedDeployment && enrolled && !showSetup && accountNotice.accessLevel === "read_write" ? accountUrl : undefined;
   const openRibbonAction = () => {
     const opened = systemRibbon?.actionTarget === "appStore"
       ? bridge.open_store_subscriptions().then(() => true, () => false)
@@ -6494,6 +6496,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     >
       {isWritesPaused(snapshot) && <p id="update-paused-description" className="sr-only">{UPDATE_PAUSED_DESCRIPTION}</p>}
       <AppTitlebar
+        accountUrl={titlebarAccountUrl}
         onMinimize={browserHost ? undefined : () => void bridge.window("minimize")}
         onMaximize={browserHost ? undefined : () => void bridge.window("maximize")}
         onClose={browserHost ? undefined : () => void closeAfterSave(() => bridge.window("close"))}

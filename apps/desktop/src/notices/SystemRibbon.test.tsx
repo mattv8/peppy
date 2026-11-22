@@ -412,6 +412,56 @@ describe("useAccountNotice", () => {
     expect(accountRibbonModel(result.current.notice!, NOW, websiteAllowed).title).toBe(peppyCopy.account_read_only_canceled_title);
     expect(accountRibbonModel(result.current.notice!, NOW, websiteAllowed).dismissible).toBe(false);
   });
+
+  it("reports read-write access for no notice and warnings, and read-only for errors", async () => {
+    vi.mocked(bridge.account_access!)
+      .mockResolvedValueOnce({ kind: "none" })
+      .mockResolvedValueOnce({ kind: "notice", notice: graceNotice() })
+      .mockResolvedValueOnce({ kind: "notice", notice: notice() });
+    const { result } = renderHook(() => useAccountNotice("device-a"));
+    expect(result.current.accessLevel).toBe("unknown");
+    await act(async () => undefined);
+    expect(result.current.accessLevel).toBe("read_write");
+    vi.setSystemTime(NOW + MINUTE_MS);
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(result.current.accessLevel).toBe("read_write");
+    vi.setSystemTime(NOW + 2 * MINUTE_MS);
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(result.current.accessLevel).toBe("read_only");
+  });
+
+  it("keeps the access level through a temporary failure and forgets it when unsupported or the identity changes", async () => {
+    vi.mocked(bridge.account_access!)
+      .mockResolvedValueOnce({ kind: "none" })
+      .mockResolvedValueOnce({ kind: "temporarily_unavailable" })
+      .mockResolvedValueOnce({ kind: "unsupported" })
+      .mockResolvedValueOnce({ kind: "none" })
+      .mockResolvedValueOnce({ kind: "temporarily_unavailable" });
+    const { result, rerender } = renderHook(({ identity }) => useAccountNotice(identity), { initialProps: { identity: "device-a" } });
+    await act(async () => undefined);
+    expect(result.current.accessLevel).toBe("read_write");
+    vi.setSystemTime(NOW + MINUTE_MS);
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(result.current.accessLevel).toBe("read_write");
+    vi.setSystemTime(NOW + 2 * MINUTE_MS);
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(result.current.accessLevel).toBe("unknown");
+    vi.setSystemTime(NOW + 3 * MINUTE_MS);
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(result.current.accessLevel).toBe("read_write");
+    rerender({ identity: "device-b" });
+    await act(async () => undefined);
+    expect(result.current.accessLevel).toBe("unknown");
+  });
+
+  it("keeps read-write access while a warning is snoozed", async () => {
+    vi.mocked(bridge.account_access!).mockResolvedValue({ kind: "notice", notice: graceNotice() });
+    const { result } = renderHook(() => useAccountNotice("device-a"));
+    await act(async () => undefined);
+    act(() => result.current.dismiss());
+    expect(result.current.notice).toBeNull();
+    expect(result.current.accessLevel).toBe("read_write");
+  });
 });
 
 describe("openAccountManageUrl", () => {

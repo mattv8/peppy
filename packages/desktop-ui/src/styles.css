@@ -332,6 +332,25 @@ select:focus-visible {
 #titlebar-actions > .titlebar-action-anchor > button svg { pointer-events: none; }
 .titlebar-action-dot { position: absolute; top: 4px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--peppy-accent); pointer-events: none; }
 @media (forced-colors: active) { .titlebar-action-dot { background: CanvasText; } }
+#titlebar-account-link { position: relative; display: inline-flex; flex: none; align-items: center; gap: 4px; height: 26px; padding: 0 6px; border-radius: var(--peppy-control-radius); color: var(--peppy-text-secondary); font-size: 12px; line-height: 1; text-decoration: none; white-space: nowrap; }
+#titlebar-account-link:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+#titlebar-account-link:active { background: var(--peppy-surface-active); }
+#titlebar-account-link:focus-visible { outline: 2px solid var(--peppy-focus); }
+#titlebar-account-link svg { flex: none; pointer-events: none; }
+#titlebar-account-link .titlebar-account-external { opacity: .7; }
+@container titlebar (width <= 760px) {
+  #titlebar-account-link { width: 26px; padding: 0; justify-content: center; }
+  #titlebar-account-link .titlebar-account-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+  #titlebar-account-link .titlebar-account-external { display: none; }
+}
+/* Settings keeps the account link when title-bar navigation leaves no room on a phone. */
+@media (max-width: 360px) {
+  .titlebar[data-navigation-placement] #titlebar-account-link { display: none; }
+}
+@media (forced-colors: active) {
+  #titlebar-account-link, #titlebar-account-link:hover { color: LinkText; }
+  #titlebar-account-link:hover { text-decoration: underline; }
+}
 #titlebar-navigation {
   display: flex;
   flex-shrink: 0;

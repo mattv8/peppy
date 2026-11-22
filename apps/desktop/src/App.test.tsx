@@ -7448,6 +7448,45 @@ describe("account ribbon action", () => {
   });
 });
 
+describe("hosted titlebar account link", () => {
+  const accountUrl = "https://account.example.com/account";
+  const linkName = "Account (opens in a new tab)";
+  const pastDue = { kind: "read_only_past_due", severity: "error", deadline: null, manageUrl: accountUrl, dismissible: false, snoozeKey: "read_only_past_due:none" } as const;
+  const grace = { kind: "payment_failed_grace", severity: "warning", deadline: null, manageUrl: accountUrl, dismissible: true, snoozeKey: "payment_failed_grace:none" } as const;
+  const hostedBrowser = { hostKind: "browser", fixedOrigin: "https://app.example.com", accountUrl, hostedDeployment: true } as const;
+
+  it.each([
+    ["an active account", { kind: "none" }],
+    ["a failed payment in its grace period", { kind: "notice", notice: grace }],
+  ] as const)("links the hosted browser app to the account website for %s", async (_case, access) => {
+    vi.spyOn(bridge, "account_access").mockResolvedValue(access);
+    render(<App {...hostedBrowser} />);
+    await screen.findByText("Hello from Aurora");
+    const link = await screen.findByRole("link", { name: linkName });
+    expect(link).toHaveAttribute("id", "titlebar-account-link");
+    expect(link).toHaveAttribute("href", accountUrl);
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(document.getElementById("desktop-titlebar")).toContainElement(link);
+  });
+
+  it.each([
+    ["the account is read-only", hostedBrowser, { kind: "notice", notice: pastDue }],
+    ["the server reports no account access", hostedBrowser, { kind: "unsupported" }],
+    ["account access is not known yet", hostedBrowser, { kind: "temporarily_unavailable" }],
+    ["a community server serves the browser app", { ...hostedBrowser, hostedDeployment: false }, { kind: "none" }],
+    ["no account URL is configured", { ...hostedBrowser, accountUrl: undefined }, { kind: "none" }],
+    ["it runs as the desktop app", { accountUrl, hostedDeployment: true }, { kind: "none" }],
+  ] as const)("shows no account link when %s", async (_case, props, access) => {
+    const accountAccess = vi.spyOn(bridge, "account_access").mockResolvedValue(access);
+    render(<App {...props} />);
+    await screen.findByText("Hello from Aurora");
+    await waitFor(() => expect(accountAccess).toHaveBeenCalled());
+    await act(async () => undefined);
+    expect(screen.queryByRole("link", { name: linkName })).not.toBeInTheDocument();
+  });
+});
+
 describe("development fixture bridge", () => {
   beforeEach(() => vi.restoreAllMocks());
 

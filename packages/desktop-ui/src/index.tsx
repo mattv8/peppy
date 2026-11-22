@@ -28,6 +28,7 @@ import {
   Square,
   SquarePen,
   Trash2,
+  User,
   Users,
   X,
 } from "lucide-react";
@@ -840,6 +841,7 @@ export function AppTitlebar({
   search,
   viewSwitch,
   actions,
+  accountUrl,
 }: {
   onMinimize?(): void;
   onMaximize?(): void;
@@ -860,6 +862,8 @@ export function AppTitlebar({
   search?: ReactNode;
   viewSwitch?: ReactNode;
   actions?: ReactNode;
+  /** Hosted account website. The host decides when to pass it; the composer never shows it. */
+  accountUrl?: string;
 }) {
   const titlebarRef = useRef<HTMLElement>(null);
   const macos = (platform ?? detectPlatform()) === "macos";
@@ -969,6 +973,18 @@ export function AppTitlebar({
       <div className="titlebar-spacer" data-tauri-drag-region />
       {isComposer && viewSwitch && <div id="titlebar-view-switch" className="titlebar-view-switch">{viewSwitch}</div>}
       {status && <div id="titlebar-status" className="titlebar-status">{status}</div>}
+      {!isComposer && accountUrl && <a
+        id="titlebar-account-link"
+        href={accountUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        title="Manage your account"
+      >
+        <User size={16} strokeWidth={1.75} aria-hidden />
+        <span className="titlebar-account-label">Account</span>
+        <span className="sr-only"> (opens in a new tab)</span>
+        <ExternalLink className="titlebar-account-external" size={12} strokeWidth={1.75} aria-hidden />
+      </a>}
       {!macos && (onClose || (!isComposer && (onMinimize || onMaximize))) && <div
         id="window-controls"
         className="window-controls window-controls-windows"
