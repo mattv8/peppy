@@ -44,6 +44,16 @@ impl WebClientConfig {
         self.all_hosts
     }
 
+    /// The HTTPS origin browsers load the app from and may open ticketed live sockets from.
+    pub fn browser_origin(&self) -> Option<url::Origin> {
+        let url = if self.all_hosts {
+            self.api_origin.clone()
+        } else {
+            Url::parse(&format!("https://{}", self.host)).ok()?
+        };
+        (url.scheme() == "https").then(|| url.origin())
+    }
+
     fn configured(
         host: String,
         asset_dir: PathBuf,
