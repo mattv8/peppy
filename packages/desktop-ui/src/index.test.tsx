@@ -1210,6 +1210,35 @@ describe("desktop UI controls", () => {
     expect(titlebar.firstElementChild).toBe(document.getElementById("titlebar-navigation"));
   });
 
+  it("renders the hosted account link after the status and before trailing navigation", () => {
+    const navigation = <NavButtons orientation="titlebar" activeView="conversations" onView={() => {}} />;
+    render(<AppTitlebar platform="macos" accountUrl="https://account.example.test/account" status={<span>Status node</span>} navigation={navigation} />);
+    const link = screen.getByRole("link", { name: "Account (opens in a new tab)" });
+    expect(link).toHaveAttribute("id", "titlebar-account-link");
+    expect(link).toHaveAttribute("href", "https://account.example.test/account");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(link).toHaveAttribute("title", "Manage your account");
+    expect(link.querySelector("svg.lucide-user")).toBeInTheDocument();
+    expect(link.querySelector("svg.lucide-external-link")).toBeInTheDocument();
+    expect(link.previousElementSibling).toHaveAttribute("id", "titlebar-status");
+    expect(link.nextElementSibling).toHaveAttribute("id", "titlebar-navigation");
+  });
+
+  it("keeps the hosted account link outside the conversation controls", () => {
+    render(<AppTitlebar accountUrl="https://account.example.test/account" onNewMessage={() => {}} />);
+    const link = document.getElementById("titlebar-account-link")!;
+    expect(document.getElementById("titlebar-actions")).not.toContainElement(link);
+    expect(document.querySelector(".titlebar-spacer")!.nextElementSibling).toBe(link);
+  });
+
+  it("omits the hosted account link without a URL and in the composer", () => {
+    const { rerender } = render(<AppTitlebar />);
+    expect(document.getElementById("titlebar-account-link")).not.toBeInTheDocument();
+    rerender(<AppTitlebar isComposer accountUrl="https://account.example.test/account" />);
+    expect(document.getElementById("titlebar-account-link")).not.toBeInTheDocument();
+  });
+
   it("ignores titlebar navigation in the composer", () => {
     render(<AppTitlebar isComposer platform="macos" navigation={<NavButtons orientation="titlebar" activeView="conversations" onView={() => {}} />} />);
     expect(document.getElementById("titlebar-navigation")).not.toBeInTheDocument();

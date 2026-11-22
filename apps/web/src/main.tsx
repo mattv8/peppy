@@ -108,7 +108,7 @@ function BrowserApp({ bridge, config }: { bridge: BrowserBridge; config: HostedW
   }, [bridge]);
 
   if (location.pathname === "/manage") return <InstanceManagement bridge={bridge} accountUrl={accountUrl} />;
-  return <div id="browser-app"><App hostKind="browser" fixedOrigin={apiOrigin} accountUrl={accountUrl} />{enrollment?.mode === "community" && enrollment.owner && <a id="browser-manage-server-link" href="/manage">Manage server</a>}</div>;
+  return <div id="browser-app"><App hostKind="browser" fixedOrigin={apiOrigin} accountUrl={accountUrl} hostedDeployment={enrollment?.mode === "hosted"} />{enrollment?.mode === "community" && enrollment.owner && <a id="browser-manage-server-link" href="/manage">Manage server</a>}</div>;
 }
 
 function boot(): void {
