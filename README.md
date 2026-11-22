@@ -115,7 +115,7 @@ The Compose file needs only a `.env` beside it.
    `:latest` server image by default. You may pin `PEPPY_SERVER_IMAGE` or
    `PEPPY_MCP_IMAGE` to a version tag or digest instead.
 
-   To show typing indicators in the browser app, set `PEPPY_WEB_LIVE_TRUSTED_ORIGIN` to exactly the HTTPS origin of the browser app, such as `https://peppy.example.com`, with no path and no trailing slash. It has no default. Unset or empty leaves browser typing off. Any other non-empty value, including `http://` or a trailing slash, stops the server from starting.
+   Browser typing works when the browser app is served over HTTPS. The server accepts its live connection only from the address it serves the app at, `PUBLIC_API_URL` (`https://PUBLIC_HOST` by default).
 
 2. Start the server.
 
@@ -131,7 +131,7 @@ The Compose file needs only a `.env` beside it.
    docker compose -f docker-compose.yml -f infra/compose/compose.caddy.yml up -d
    ```
 
-   Caddy publishes ports 80 and 443 and serves the browser app at `https://PUBLIC_HOST`, the origin for `PEPPY_WEB_LIVE_TRUSTED_ORIGIN`. If you use another reverse proxy, set `TRUSTED_PROXY_CIDRS` to that proxy's addresses only.
+   Caddy publishes ports 80 and 443 and serves the browser app at `https://PUBLIC_HOST`. If you use another reverse proxy, set `TRUSTED_PROXY_CIDRS` to that proxy's addresses only.
 
 4. Open the address in a browser, or enter it in a desktop or mobile app, and finish setup.
 

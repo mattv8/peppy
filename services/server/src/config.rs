@@ -27,6 +27,7 @@ pub struct Config {
     pub mcp_worker_url: Option<Url>,
     pub mcp_worker_token_file: Option<PathBuf>,
     pub web_client: Option<WebClientConfig>,
+    /// Trusted browser live origin derived from the web-client configuration.
     pub web_live_trusted_origin: Option<Origin>,
 }
 
@@ -177,26 +178,9 @@ impl Config {
             _ => return Err(ConfigError::IncompleteMcpWorker),
         };
         let web_client = web_client_config(&get, public_api_url.as_ref())?;
-        let web_live_trusted_origin = get("PEPPY_WEB_LIVE_TRUSTED_ORIGIN")
-            .filter(|value| !value.is_empty())
-            .map(|value| {
-                let url: Url =
-                    value
-                        .parse()
-                        .map_err(|source: url::ParseError| ConfigError::Invalid {
-                            name: "PEPPY_WEB_LIVE_TRUSTED_ORIGIN",
-                            message: source.to_string(),
-                        })?;
-                let origin = url.origin();
-                if url.scheme() != "https" || origin.ascii_serialization() != value {
-                    return Err(ConfigError::Invalid {
-                        name: "PEPPY_WEB_LIVE_TRUSTED_ORIGIN",
-                        message: "must be a canonical HTTPS origin".into(),
-                    });
-                }
-                Ok(origin)
-            })
-            .transpose()?;
+        let web_live_trusted_origin = web_client
+            .as_ref()
+            .and_then(WebClientConfig::browser_origin);
         let trusted_proxy_cidrs = get("TRUSTED_PROXY_CIDRS")
             .unwrap_or_default()
             .split(',')
@@ -442,6 +426,119 @@ mod tests {
         match name {
             "DATABASE_URL" => Some("postgres://peppy:secret@localhost/peppy".into()),
             _ => None,
+        }
+    }
+
+    #[test]
+    fn live_origin_uses_dedicated_web_client_host() {
+        let assets = tempfile::tempdir().unwrap();
+        let config = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_HOST" => Some("app.example.com".into()),
+            "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+            "PUBLIC_API_URL" => Some("https://api.example.com".into()),
+            _ => base(name),
+        })
+        .unwrap();
+        assert_eq!(
+            config.web_live_trusted_origin,
+            Some(Url::parse("https://app.example.com").unwrap().origin())
+        );
+    }
+
+    #[test]
+    fn live_origin_uses_https_root_web_client_origin() {
+        let assets = tempfile::tempdir().unwrap();
+        let config = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_ROOT" => Some("true".into()),
+            "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+            "PUBLIC_API_URL" => Some("https://peppy.example.com".into()),
+            _ => base(name),
+        })
+        .unwrap();
+        assert_eq!(
+            config.web_live_trusted_origin,
+            Some(Url::parse("https://peppy.example.com").unwrap().origin())
+        );
+    }
+
+    #[test]
+    fn live_origin_uses_the_normalized_dedicated_host() {
+        let assets = tempfile::tempdir().unwrap();
+        let config = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_HOST" => Some("App.Example.com.".into()),
+            "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+            "PUBLIC_API_URL" => Some("https://api.example.com".into()),
+            _ => base(name),
+        })
+        .unwrap();
+        assert_eq!(
+            config.web_live_trusted_origin,
+            Some(Url::parse("https://app.example.com").unwrap().origin())
+        );
+    }
+
+    #[test]
+    fn live_origin_keeps_the_root_port_with_an_account_url() {
+        let assets = tempfile::tempdir().unwrap();
+        let config = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_ROOT" => Some("true".into()),
+            "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+            "PEPPY_WEB_CLIENT_ACCOUNT_URL" => Some("https://account.example.com/account".into()),
+            "PUBLIC_API_URL" => Some("https://peppy.example.com:8443".into()),
+            _ => base(name),
+        })
+        .unwrap();
+        assert_eq!(
+            config.web_live_trusted_origin,
+            Some(
+                Url::parse("https://peppy.example.com:8443")
+                    .unwrap()
+                    .origin()
+            )
+        );
+    }
+
+    #[test]
+    fn live_origin_is_absent_for_http_root_and_missing_web_client() {
+        let assets = tempfile::tempdir().unwrap();
+        let config = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_ROOT" => Some("true".into()),
+            "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+            "PUBLIC_API_URL" => Some("http://127.0.0.1:7000".into()),
+            _ => base(name),
+        })
+        .unwrap();
+        assert!(config.web_live_trusted_origin.is_none());
+        assert!(
+            Config::from_get(base)
+                .unwrap()
+                .web_live_trusted_origin
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn obsolete_live_origin_setting_is_ignored() {
+        let assets = tempfile::tempdir().unwrap();
+        for value in ["https://other.example.com", "http://x/"] {
+            let config = Config::from_get(|name| match name {
+                "PEPPY_WEB_CLIENT_ROOT" => Some("true".into()),
+                "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+                "PUBLIC_API_URL" => Some("https://peppy.example.com".into()),
+                "PEPPY_WEB_LIVE_TRUSTED_ORIGIN" => Some(value.into()),
+                _ => base(name),
+            })
+            .unwrap();
+            assert_eq!(
+                config.web_live_trusted_origin,
+                Some(Url::parse("https://peppy.example.com").unwrap().origin())
+            );
+            let config = Config::from_get(|name| match name {
+                "PEPPY_WEB_LIVE_TRUSTED_ORIGIN" => Some(value.into()),
+                _ => base(name),
+            })
+            .unwrap();
+            assert!(config.web_live_trusted_origin.is_none());
         }
     }
 

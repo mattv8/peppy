@@ -16,7 +16,7 @@ Serve artifacts from `PEPPY_WEB_CLIENT_DIR`. Community sets `PEPPY_WEB_CLIENT_RO
 
 Community has no hosted account or billing site. Its Compose configuration maps `WEB_UI_ENABLED` to root mode; set `WEB_UI_ENABLED=false` to disable browser messaging. The browser client uses `https://PUBLIC_HOST/`; delete the legacy separate-browser-host setting and remove its hostname and DNS record. `WEB_CLIENT_ACCOUNT_URL` still configures external account navigation.
 
-`PEPPY_WEB_LIVE_TRUSTED_ORIGIN` takes the browser app's canonical HTTPS origin, and its rules are in the [self-host section of the README](../../README.md#self-host). An explicit default port, such as `https://host:443`, is rejected, as is any other non-empty value that is not that canonical origin; the server then does not start.
+The server derives the trusted browser live origin from the web-client configuration. Root mode uses the origin of `PUBLIC_API_URL`; dedicated-host mode uses `https://PEPPY_WEB_CLIENT_HOST`. Only HTTPS origins are trusted.
 
 ## Origin and security
 
