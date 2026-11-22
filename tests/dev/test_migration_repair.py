@@ -190,8 +190,8 @@ class MigrationRepairTests(unittest.TestCase):
         with mock.patch.object(repair.subprocess, "run", return_value=success) as run:
             repair.bootstrap_development_roles(Path("/repo"))
         self.assertEqual(
-            run.call_args.args[0][-4:],
-            ["exec", "-T", "postgres", "/docker-entrypoint-initdb.d/10-peppy-roles.sh"],
+            run.call_args.args[0][-5:],
+            ["exec", "-T", "postgres", "sh", "/docker-entrypoint-initdb.d/10-peppy-roles.sh"],
         )
 
     def test_local_role_bootstrap_failure_does_not_expose_command_output(self):

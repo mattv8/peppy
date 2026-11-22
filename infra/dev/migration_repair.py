@@ -379,7 +379,7 @@ def verify_development_compose(root: Path) -> None:
 
 def bootstrap_development_roles(root: Path) -> None:
     result = subprocess.run(
-        compose_command(root) + ["exec", "-T", "postgres", "/docker-entrypoint-initdb.d/10-peppy-roles.sh"],
+        compose_command(root) + ["exec", "-T", "postgres", "sh", "/docker-entrypoint-initdb.d/10-peppy-roles.sh"],
         text=True,
         capture_output=True,
     )
