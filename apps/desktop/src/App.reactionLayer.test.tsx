@@ -9,10 +9,11 @@ let snapshot: DesktopSnapshot;
 const rectOf = (top: number, bottom: number, left: number, right: number) => ({ top, bottom, left, right, width: right - left, height: bottom - top, x: left, y: top, toJSON() {} });
 
 /** jsdom has no layout: give the list and every message article a fixed rectangle. */
-function stubLayout() {
+function stubLayout(tallMessage?: string) {
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
     if (this.id === "message-list") return rectOf(0, 800, 0, 400);
     if (this.id === "composer-area") return rectOf(700, 780, 0, 400);
+    if (this.getAttribute("data-message-id") === tallMessage) return rectOf(-40, 720, 16, 300);
     if (this.getAttribute("data-message-id")) return rectOf(200, 260, 16, 300);
     return rectOf(0, 0, 0, 0);
   });
@@ -132,6 +133,30 @@ describe("reaction layer", () => {
     // A mouse hover, as the browser dispatches it: pointerover bubbles from the text into the article.
     fireEvent(target, Object.assign(new Event("pointerover", { bubbles: true }), { pointerType: "mouse" }));
     await waitFor(() => expect(bar()).toHaveAttribute("data-reaction-bar", "reaction-group-dinner"));
+  });
+
+  it("keeps a hover bar within the message's padded edge", async () => {
+    const realStyle = window.getComputedStyle;
+    vi.spyOn(window, "getComputedStyle").mockImplementation((element, pseudo) => {
+      const style = realStyle(element, pseudo);
+      if (!element.hasAttribute("data-message-id")) return style;
+      return new Proxy(style, { get: (target, key) => key === "paddingTop" || key === "paddingBottom" ? "10px" : key === "borderTopWidth" || key === "borderBottomWidth" ? "1px" : Reflect.get(target, key) });
+    });
+    await openConversation("conv-reaction-states");
+    fireEvent(article("reaction-group-dinner"), Object.assign(new Event("pointerover", { bubbles: true }), { pointerType: "mouse" }));
+    await waitFor(() => expect(bar()).not.toBeNull());
+    expect(document.getElementById("message-reaction-layer")).toHaveStyle({ top: "179px" });
+    expect(bar()).toHaveAttribute("data-reaction-placement", "straddle");
+  });
+
+  it("hides a tall message's hover bar but permits keyboard opening", async () => {
+    stubLayout("reaction-group-dinner");
+    await openConversation("conv-reaction-states");
+    fireEvent(article("reaction-group-dinner"), Object.assign(new Event("pointerover", { bubbles: true }), { pointerType: "mouse" }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 200)); });
+    expect(bar()).toBeNull();
+    keyOpen("reaction-group-dinner");
+    await waitFor(() => expect(bar()).not.toBeNull());
   });
 
   it("opens from the keyboard onto the user's current native reaction and returns focus on Escape", async () => {
