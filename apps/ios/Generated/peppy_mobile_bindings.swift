@@ -1150,6 +1150,12 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func restoreContactJson(input: String) throws  -> String
     
     /**
+     * Retires the books this phone superseded after taking over its previous enrollment's book.
+     * Call once per contacts pass, before `contact_book_selection`. Returns core's JSON result.
+     */
+    func retireSupersededContactBooks() throws  -> String
+    
+    /**
      * Retires commands a snapshot swallowed as history on this gateway. Returns how many.
      */
     func retireSwallowedCommands() throws  -> UInt32
@@ -3326,6 +3332,19 @@ open func restoreContactJson(input: String)throws  -> String  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_restore_contact_json(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(input),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Retires the books this phone superseded after taking over its previous enrollment's book.
+     * Call once per contacts pass, before `contact_book_selection`. Returns core's JSON result.
+     */
+open func retireSupersededContactBooks()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_retire_superseded_contact_books(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -21651,6 +21670,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_restore_contact_json() != 61758) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_retire_superseded_contact_books() != 36891) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_retire_swallowed_commands() != 18107) {

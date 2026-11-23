@@ -3176,6 +3176,12 @@ impl NativeClient {
         with_client(&self.client, Client::register_no_device_hint)
     }
 
+    /// Retires the books this phone superseded after taking over its previous enrollment's book.
+    /// Call once per contacts pass, before `contact_book_selection`. Returns core's JSON result.
+    pub fn retire_superseded_contact_books(&self) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, Client::retire_superseded_contact_books)
+    }
+
     pub fn contact_book_selection(
         &self,
     ) -> Result<NativeContactBookSelection, MobileBindingsError> {

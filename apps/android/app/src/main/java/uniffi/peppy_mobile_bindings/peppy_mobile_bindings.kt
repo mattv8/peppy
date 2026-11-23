@@ -1173,6 +1173,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_restore_contact_json(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_retire_superseded_contact_books(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_retire_swallowed_commands(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_retire_unattempted_commands_from_producers(
@@ -1802,6 +1804,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_send_cancellation(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_restore_contact_json(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_retire_superseded_contact_books(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_retire_swallowed_commands(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
@@ -3107,6 +3111,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_restore_contact_json() and 0xFFFF) != 61758) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_retire_superseded_contact_books() and 0xFFFF) != 36891) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_retire_swallowed_commands() and 0xFFFF) != 18107) {
@@ -4486,6 +4493,12 @@ public interface NativeClientInterface {
     fun `requestSendCancellation`(`messageId`: kotlin.String): NativeSendCancellationView
     
     fun `restoreContactJson`(`input`: kotlin.String): kotlin.String
+    
+    /**
+     * Retires the books this phone superseded after taking over its previous enrollment's book.
+     * Call once per contacts pass, before `contact_book_selection`. Returns core's JSON result.
+     */
+    fun `retireSupersededContactBooks`(): kotlin.String
     
     /**
      * Retires commands a snapshot swallowed as history on this gateway. Returns how many.
@@ -7581,6 +7594,24 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterString.lower(`input`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Retires the books this phone superseded after taking over its previous enrollment's book.
+     * Call once per contacts pass, before `contact_book_selection`. Returns core's JSON result.
+     */
+    @Throws(MobileBindingsException::class)override fun `retireSupersededContactBooks`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_retire_superseded_contact_books(
+        it,
+        _status)
 }
     }
     )

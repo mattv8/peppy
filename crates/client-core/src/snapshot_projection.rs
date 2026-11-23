@@ -1347,10 +1347,13 @@ fn stage_book(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    // Same rule as live apply: record order is not authoritative within a generation.
+    // Same rules as live apply: record order is not authoritative within a generation, and a
+    // replaced book is terminal at any generation.
     if let Some((staged_generation, staged_body)) = staged {
         let staged_body: Value = serde_json::from_str(&staged_body).map_err(|_| Error::Database)?;
-        if !contacts::book_supersedes(staged_generation, &staged_body, book_generation, book)? {
+        if contacts::replaced(&staged_body)
+            || !contacts::book_supersedes(staged_generation, &staged_body, book_generation, book)?
+        {
             return Ok(true);
         }
     } else {
@@ -1533,6 +1536,15 @@ fn promote(
     conn.execute(
         "INSERT INTO contact_books(id,owner_device_id,generation,state,body,forgotten) SELECT book_id,owner_device_id,book_generation,state,body,0 FROM projection_books WHERE generation=?2 AND json_extract(body,'$.owner_device_id')!=?1 ON CONFLICT(id) DO UPDATE SET generation=excluded.generation,state=excluded.state,body=excluded.body WHERE contact_books.owner_device_id=excluded.owner_device_id AND (excluded.generation>contact_books.generation OR (excluded.generation=contact_books.generation AND contact_books.state!='retired' AND CAST(COALESCE(json_extract(excluded.body,'$.state_revision'),'0') AS INTEGER)>=CAST(COALESCE(json_extract(contact_books.body,'$.state_revision'),'0') AS INTEGER)))",
         params![me, generation],
+    )?;
+    // A replaced book never regains contacts: its live staged contacts are dropped, so the next
+    // statement also removes their live rows. Removals keep their restore data.
+    conn.execute(
+        &format!(
+            "DELETE FROM projection_contacts WHERE generation=?1 AND deleted_at IS NULL AND book_id IN (SELECT book_id FROM projection_books WHERE generation=?1 AND {})",
+            contacts::REPLACED_BOOK_SQL
+        ),
+        [generation],
     )?;
     conn.execute(
         "DELETE FROM contacts WHERE book_id IN (SELECT id FROM contact_books WHERE owner_device_id!=?1) AND NOT EXISTS(SELECT 1 FROM projection_contacts s WHERE s.generation=?2 AND s.book_id=contacts.book_id AND s.contact_id=contacts.id)",

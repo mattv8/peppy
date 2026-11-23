@@ -122,7 +122,7 @@ struct ContactFields {
 pub(crate) fn invalid() -> Error {
     Error::InvalidRequest("invalid contact request")
 }
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -485,6 +485,37 @@ fn book_body(conn: &Connection, book_id: &str) -> Result<Value, Error> {
     serde_json::from_str(&body).map_err(|_| Error::Database)
 }
 
+/// Whether a book body is a replaced book: retired with `superseded_by` (see
+/// `contact_book_supersession`). A replaced book is terminal on every device: it never changes
+/// state again and never regains contacts; only removals still apply.
+pub(crate) fn replaced(body: &Value) -> bool {
+    body.get("state").and_then(Value::as_str) == Some("retired")
+        && body
+            .get("superseded_by")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+}
+
+/// [`replaced`] over a book row's `state` and `body` columns. The state test comes first, so
+/// the body of a book that is not retired is never parsed.
+pub(crate) const REPLACED_BOOK_SQL: &str = "state='retired' AND json_type(body,'$.superseded_by')='text' AND json_extract(body,'$.superseded_by')!=''";
+
+/// Whether the stored book `book_id` is a replaced book.
+pub(crate) fn stored_replaced(conn: &Connection, book_id: &str) -> Result<bool, Error> {
+    Ok(conn
+        .prepare_cached(&format!(
+            "SELECT EXISTS(SELECT 1 FROM contact_books WHERE id=? AND {REPLACED_BOOK_SQL})"
+        ))?
+        .query_row([book_id], |r| r.get(0))?)
+}
+
+fn refuse_replaced(body: &Value) -> Result<(), Error> {
+    if replaced(body) {
+        return Err(Error::InvalidRequest("contact book was replaced"));
+    }
+    Ok(())
+}
+
 /// Owner-side upsert: mints `revision = previous + 1` only when the digest changed (or the
 /// row is new/deleted) and publishes the sanitized contact. Returns the stored body.
 fn upsert_owned(
@@ -540,6 +571,28 @@ fn tombstone_owned(
     id: &str,
     deleted_at: i64,
 ) -> Result<Option<Value>, Error> {
+    tombstone_owned_with(conn, ctx, book_id, id, deleted_at, true)
+}
+
+/// `tombstone_owned` without sealing, for a caller that seals a large batch in its transaction.
+pub(crate) fn tombstone_owned_unsealed(
+    conn: &Connection,
+    ctx: &Ctx<'_>,
+    book_id: &str,
+    id: &str,
+    deleted_at: i64,
+) -> Result<Option<Value>, Error> {
+    tombstone_owned_with(conn, ctx, book_id, id, deleted_at, false)
+}
+
+fn tombstone_owned_with(
+    conn: &Connection,
+    ctx: &Ctx<'_>,
+    book_id: &str,
+    id: &str,
+    deleted_at: i64,
+    seal: bool,
+) -> Result<Option<Value>, Error> {
     let Some((rev, body)): Option<(i64, String)> = conn
         .query_row(
             "SELECT revision,body FROM contacts WHERE book_id=? AND id=? AND deleted_at IS NULL",
@@ -575,18 +628,16 @@ fn tombstone_owned(
         "restored_contact": body,
         "book": book,
     });
-    enqueue(
-        conn,
-        ctx,
-        EnvelopePurpose::Event,
-        None,
-        None,
-        &PrivatePayload::ContactRemoved {
-            book_id: book_id.to_owned(),
-            contact_id: id.to_owned(),
-            tombstone: tombstone.clone(),
-        },
-    )?;
+    let removed = PrivatePayload::ContactRemoved {
+        book_id: book_id.to_owned(),
+        contact_id: id.to_owned(),
+        tombstone: tombstone.clone(),
+    };
+    if seal {
+        enqueue(conn, ctx, EnvelopePurpose::Event, None, None, &removed)?;
+    } else {
+        crate::enqueue_without_sealing(conn, ctx, EnvelopePurpose::Event, None, None, &removed)?;
+    }
     Ok(Some(tombstone))
 }
 
@@ -732,6 +783,8 @@ pub(crate) fn capture_tx(
     let obj = public.as_object_mut().ok_or_else(invalid)?;
     obj.remove("state_revision");
     obj.insert("state_revision".into(), json!("0"));
+    // Only core marks a book replaced (`contact_book_supersession`).
+    obj.remove("superseded_by");
     if let Some((owner, stored_generation, stored_body)) = stored {
         if !owner_or_successor(tx, &owner, &ctx.device_id.to_string())?
             || generation < stored_generation
@@ -741,6 +794,7 @@ pub(crate) fn capture_tx(
         // Owner settings (contact_settings_json) are authoritative over captured policy;
         // otherwise a capture that omits policy keeps the stored one.
         let stored_body: Value = serde_json::from_str(&stored_body).map_err(|_| Error::Database)?;
+        refuse_replaced(&stored_body)?;
         if let Some(inventory) = stored_body.get("inventory") {
             public["inventory"] = inventory.clone();
         }
@@ -955,7 +1009,7 @@ pub(crate) fn begin_scan(conn: &Connection, ctx: &Ctx<'_>, input: &str) -> Resul
         .get("authoritative")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    owned_book(conn, ctx, book_id)?;
+    refuse_replaced(&owned_book(conn, ctx, book_id)?.0)?;
     let existing: Option<(String, i64, String, bool, bool)> = conn
         .query_row(
             "SELECT book_id,generation,access,authoritative,complete FROM contact_scans WHERE scan_id=?",
@@ -1019,6 +1073,7 @@ pub(crate) fn observe_scan(
         return Err(Error::InvalidRequest("contact scan already finished"));
     }
     let (book, _) = owned_book(&tx, ctx, &book_id)?;
+    refuse_replaced(&book)?;
     // Either the legacy contact DTO or a platform `source` entry mapped by core.
     let contact = observed_contact(&tx, &v, "contact", "source", &book_id)?;
     let (id, body, provenance) = native_contact(&contact, &book_id)?;
@@ -1695,7 +1750,7 @@ pub(crate) fn submit_request(
 }
 
 /// Records a durable owner decision and publishes it to the requester.
-fn finalize(
+pub(crate) fn finalize(
     conn: &Connection,
     ctx: &Ctx<'_>,
     id: &str,
@@ -1822,6 +1877,16 @@ pub(crate) fn next_permit(
             finalize(&tx, ctx, id, &book_id, status, reason, observed)?;
             Ok(json!({"status":status,"request_id":id,"reason":reason}).to_string())
         };
+    // A replaced book never authorizes another OS write.
+    if replaced(&book) {
+        let out = decide(
+            "rejected",
+            Some(crate::contact_book_supersession::BOOK_REPLACED),
+            None,
+        )?;
+        tx.commit()?;
+        return Ok(out);
+    }
     if key_epoch != ctx.active_epoch {
         let out = decide("rejected", Some("retired_epoch"), None)?;
         tx.commit()?;
@@ -1983,6 +2048,7 @@ pub(crate) fn reconcile(
         return Err(Error::InvalidRequest("contact edit already reconciled"));
     }
     let (book, _) = owned_book(&tx, ctx, &book_id)?;
+    refuse_replaced(&book)?;
     let request: Value = serde_json::from_str(&body).map_err(|_| Error::Database)?;
     if req(&request, "target_owner")? != ctx.device_id.to_string() {
         return Err(Error::InvalidRequest("not contact edit target"));
@@ -2520,6 +2586,10 @@ fn apply_peer(
             if !apply_book(conn, producer, book)? {
                 return Ok(false);
             }
+            // A replaced book never regains contacts, whatever the record's generation or revision.
+            if stored_replaced(conn, book_id)? {
+                return Ok(true);
+            }
             if book_fenced(conn, book)? {
                 // Covered: an applied no-op that stores nothing. Its contact may still owe the
                 // deleter's member, so it is recorded as owed work. A malformed record stays a no-op.
@@ -2766,6 +2836,10 @@ fn apply_book(conn: &Connection, producer: &str, book: &Value) -> Result<bool, E
             return Ok(false);
         }
         let stored_body: Value = serde_json::from_str(&stored_body).map_err(|_| Error::Database)?;
+        // A replaced book is terminal: any later state, at any generation, is a no-op.
+        if replaced(&stored_body) {
+            return Ok(true);
+        }
         // Ownership is valid; an older or equal state is accepted as a no-op.
         if !book_supersedes(stored_generation, &stored_body, generation, book)? {
             return Ok(true);
