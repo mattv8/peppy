@@ -427,6 +427,8 @@ fn composer_window_config(
         focus: true,
         transparent: false,
         always_on_top: head_panel,
+        // An inactive always-on-top panel would spend its first click activating itself.
+        accept_first_mouse: head_panel,
         ..Default::default()
     }
 }
@@ -756,6 +758,7 @@ mod tests {
         assert!(config.focus);
         assert!(!config.transparent);
         assert_eq!(config.always_on_top, head_panel);
+        assert_eq!(config.accept_first_mouse, head_panel);
 
         #[cfg(target_os = "macos")]
         {
