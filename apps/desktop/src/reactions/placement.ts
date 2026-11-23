@@ -16,6 +16,10 @@ export type ReactionPlacementInput = {
   /** Measured bar size for the current route, pointer and width (see barMetrics). */
   width: number;
   height: number;
+  /** How far the bar may overlap each edge without reaching text or a control. */
+  reach: { top: number; bottom: number };
+  /** Explicitly requested bars may cover the message when neither edge has room. */
+  allowCover: boolean;
   /** Coarse pointers get a menu above the bubble (below when there is no room), never a straddle. */
   touch: boolean;
   /** Bottom of the chip row under the bubble, when the row has chips. A `below` bar starts under it. */
@@ -24,14 +28,14 @@ export type ReactionPlacementInput = {
 
 export type ReactionPlacement = { left: number; top: number; placement: "straddle" | "above" | "below" };
 
-/** Fine pointers: 16px of the 32px bar sits above the bubble edge, the rest overlaps the bubble. */
+/** Maximum fine-pointer overlap at an anchor edge, also used by the covering fallback. */
 export const BAR_OVERHANG = 16;
 const SIDE_INSET = 8;
 const EDGE = 4;
-/** A bubble this close to the list top is partly scrolled off: the bar goes below its bottom edge. */
+/** Covering fallback switches below when the bubble is this close to the list top. */
 const PARTLY_SCROLLED = 8;
 
-/** Returns null when the bar must be hidden: the bubble is off-screen or under the composer. */
+/** Returns null when the bubble is out of view or no safe edge fits for a hover bar. */
 export function placeReactionBar(input: ReactionPlacementInput): ReactionPlacement | null {
   const { anchor, list, composerTop, viewport, width, height, outgoing } = input;
   if (anchor.bottom <= list.top || anchor.top >= viewport.bottom || anchor.top >= composerTop - EDGE) return null;
@@ -46,6 +50,19 @@ function horizontalStart({ anchor, label }: ReactionPlacementInput): number {
 }
 
 function finePlacement(input: ReactionPlacementInput, left: number): ReactionPlacement | null {
+  const { anchor, list, composerTop, height, reach, chipsBottom } = input;
+  const fits = (top: number) => top >= list.top && top + height <= composerTop - EDGE;
+  const atTop = anchor.top + overlapFor(reach.top) - height;
+  if (fits(atTop)) return { left, top: atTop, placement: "straddle" };
+  const underChips = chipsBottom === undefined ? Number.NEGATIVE_INFINITY : chipsBottom + EDGE;
+  const atBottom = Math.max(anchor.bottom - overlapFor(reach.bottom), underChips);
+  if (fits(atBottom)) return { left, top: atBottom, placement: "below" };
+  return input.allowCover ? coveringPlacement(input, left) : null;
+}
+
+const overlapFor = (limit: number) => Math.max(0, Math.min(BAR_OVERHANG, limit));
+
+function coveringPlacement(input: ReactionPlacementInput, left: number): ReactionPlacement | null {
   const { anchor, list, composerTop, height } = input;
   let top: number;
   let placement: ReactionPlacement["placement"] = "straddle";

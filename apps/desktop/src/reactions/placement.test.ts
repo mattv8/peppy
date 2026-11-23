@@ -10,15 +10,17 @@ const base: ReactionPlacementInput = {
   width: 212,
   height: 32,
   touch: false,
+  reach: { top: 11, bottom: 11 },
+  allowCover: false,
 };
 
 describe("placeReactionBar, fine pointer", () => {
   it("straddles the top edge of an incoming bubble, 8px inside its left edge", () => {
-    expect(placeReactionBar(base)).toEqual({ left: 108, top: 184, placement: "straddle" });
+    expect(placeReactionBar(base)).toEqual({ left: 108, top: 179, placement: "straddle" });
   });
 
   it("anchors an outgoing bubble to its right edge", () => {
-    expect(placeReactionBar({ ...base, outgoing: true })).toEqual({ left: 300 - 8 - 212, top: 184, placement: "straddle" });
+    expect(placeReactionBar({ ...base, outgoing: true })).toEqual({ left: 300 - 8 - 212, top: 179, placement: "straddle" });
   });
 
   it("starts incoming bars 8px from the bubble in group rows too, with no sender-gutter offset", () => {
@@ -31,13 +33,12 @@ describe("placeReactionBar, fine pointer", () => {
     expect(placed?.left).toBe(238);
   });
 
-  it("keeps the bar's top at the list top with no 4px pin, so the first row's text stays clear", () => {
-    // The first bubble sits 16px below the list top: the straddle lands exactly on the list top.
-    expect(placeReactionBar({ ...base, anchor: { top: 16, bottom: 76, left: 100, right: 300 } })).toEqual({ left: 108, top: 0, placement: "straddle" });
+  it("moves below the first row when its top edge cannot fit", () => {
+    expect(placeReactionBar({ ...base, anchor: { top: 16, bottom: 76, left: 100, right: 300 } })).toEqual({ left: 108, top: 65, placement: "below" });
   });
 
   it("moves below the bubble when it is partly scrolled off the top, instead of covering its text", () => {
-    expect(placeReactionBar({ ...base, anchor: { top: -10, bottom: 50, left: 100, right: 300 } })).toEqual({ left: 108, top: 34, placement: "below" });
+    expect(placeReactionBar({ ...base, anchor: { top: -10, bottom: 50, left: 100, right: 300 } })).toEqual({ left: 108, top: 39, placement: "below" });
   });
 
   it("starts a below bar under the chip row, not over its last chip", () => {
@@ -51,7 +52,31 @@ describe("placeReactionBar, fine pointer", () => {
   });
 
   it("clamps above the composer top when the bar would overlap it", () => {
-    expect(placeReactionBar({ ...base, anchor: { top: 690, bottom: 720, left: 100, right: 300 } })?.top).toBe(700 - 4 - 32);
+    expect(placeReactionBar({ ...base, anchor: { top: 690, bottom: 720, left: 100, right: 300 } })).toBeNull();
+    expect(placeReactionBar({ ...base, allowCover: true, anchor: { top: 690, bottom: 720, left: 100, right: 300 } })?.top).toBe(664);
+  });
+
+  it("caps overlap at the edge and at controls", () => {
+    expect(placeReactionBar({ ...base, reach: { top: 24, bottom: 11 } })?.top).toBe(184);
+    expect(placeReactionBar({ ...base, reach: { top: 4, bottom: 11 } })?.top).toBe(172);
+    expect(placeReactionBar({ ...base, reach: { top: 0, bottom: 0 } })?.top).toBe(168);
+  });
+
+  it("hides a hover bar for a tall bubble but allows explicitly requested covering", () => {
+    const anchor = { top: -40, bottom: 720, left: 100, right: 300 };
+    expect(placeReactionBar({ ...base, anchor })).toBeNull();
+    expect(placeReactionBar({ ...base, anchor, allowCover: true })?.top).toBe(664);
+  });
+
+  it("keeps every visible hover bar outside text and within vertical bounds", () => {
+    for (const height of [60, 300]) for (let top = -100; top <= 760; top += 10) {
+      const anchor = { top, bottom: top + height, left: 100, right: 300 };
+      const placed = placeReactionBar({ ...base, anchor });
+      if (!placed) continue;
+      expect(placed.top).toBeGreaterThanOrEqual(0);
+      expect(placed.top + 32).toBeLessThanOrEqual(696);
+      expect(placed.top + 32 <= anchor.top + 11 || placed.top >= anchor.bottom - 11).toBe(true);
+    }
   });
 
   it("keeps the bar inside the list's horizontal bounds with an 8px inset", () => {

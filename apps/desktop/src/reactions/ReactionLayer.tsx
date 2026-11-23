@@ -6,7 +6,7 @@ import type { MessageView, ReactionRoute, ReactionSubmitView, ReactionSupport } 
 import { ALREADY_REACTION_COPY, pickAnnouncement, REFUSAL_COPY, UNREACHABLE_COPY, withFirstEmojiNote } from "./announcements";
 import { QUICK_REACTIONS } from "./emoji";
 import { ReactionCapture } from "./ReactionCapture";
-import { barMetrics, placeReactionBar, type ReactionPlacement } from "./placement";
+import { BAR_OVERHANG, barMetrics, placeReactionBar, type ReactionPlacement } from "./placement";
 import type { ReactionTargetControls } from "./useReactionTarget";
 
 export type BarNotice = "offline" | "update-needed" | "unconfirmed" | "busy";
@@ -45,6 +45,29 @@ export function nativeSelection(message: MessageView): string | undefined {
 
 function isCoarsePointer(): boolean {
   return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+}
+
+const BUBBLE_CONTROLS = "a[href], button, input, select, textarea, summary, [tabindex]:not([tabindex='-1'])";
+const MEDIA_CONTROLS = "a[href], [data-message-cancel]";
+const CHROMELESS_CONTROLS = "a[href], button, [data-message-caption], [data-message-cancel]";
+const MEDIA_ANCHOR = "[data-media-message-content], [data-media-slide], .message-bubble[data-chromeless]";
+
+/** Limit overlap to the anchor edge and keep controls clear. Media retains a 16px edge. */
+export function measureReach(anchor: HTMLElement): { top: number; bottom: number } {
+  const media = anchor.matches(MEDIA_ANCHOR);
+  const style = window.getComputedStyle(anchor);
+  const px = (value: string) => Number.parseFloat(value) || 0;
+  const box = anchor.getBoundingClientRect();
+  let top = media ? BAR_OVERHANG : px(style.borderTopWidth) + px(style.paddingTop);
+  let bottom = media ? BAR_OVERHANG : px(style.borderBottomWidth) + px(style.paddingBottom);
+  const controls = anchor.matches(".message-bubble[data-chromeless]") ? CHROMELESS_CONTROLS : media ? MEDIA_CONTROLS : BUBBLE_CONTROLS;
+  for (const control of anchor.querySelectorAll<HTMLElement>(controls)) {
+    const rect = control.getBoundingClientRect();
+    if (!rect.width && !rect.height) continue;
+    top = Math.min(top, Math.max(0, rect.top - box.top));
+    bottom = Math.min(bottom, Math.max(0, box.bottom - rect.bottom));
+  }
+  return { top, bottom };
 }
 
 /** The first tabbable element after `anchor` in document order, outside it. */
@@ -176,6 +199,8 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
       width: metrics.width,
       height: metrics.height,
       touch: coarse,
+      reach: measureReach(anchor),
+      allowCover: target.origin !== "pointer" || mode === "capture",
     }));
   }, [coarse, message, mode, route, target]);
 
