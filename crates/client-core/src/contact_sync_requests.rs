@@ -435,6 +435,35 @@ pub(crate) fn set_capability(
     Ok(json!({"bookId":book_id,"canSync":enabled}).to_string())
 }
 
+/// Ends this owner's open scan requests for a book it retired as replaced.
+pub(crate) fn end_for_retired_book(
+    conn: &Connection,
+    ctx: &Ctx<'_>,
+    book_id: &str,
+) -> Result<usize, Error> {
+    let open = conn
+        .prepare("SELECT request_id,generation,key_epoch FROM contact_scan_requests WHERE book_id=? AND target_owner=? AND historical=0 AND status IN ('waiting','scanning')")?
+        .query_map(params![book_id, ctx.device_id.to_string()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, u32>(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (request_id, generation, request_epoch) in &open {
+        publish_terminal(
+            conn,
+            ctx,
+            RequestIdentity {
+                request_id,
+                book_id,
+                generation: *generation,
+                request_epoch: *request_epoch,
+            },
+            "blocked",
+            "source_retired",
+        )?;
+    }
+    Ok(open.len())
+}
+
 pub(crate) fn on_scan_started(
     conn: &Connection,
     ctx: &Ctx<'_>,

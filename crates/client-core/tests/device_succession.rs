@@ -906,21 +906,23 @@ fn predecessor_contact_events_after_succession_are_rejected() {
     assert_eq!(observer.quarantine_count().unwrap(), 2);
 }
 
-/// Decrypted payloads of `client`'s pending outbox, in order.
-fn published(vault: &Vault, client: &Client) -> Vec<PrivatePayload> {
+fn opened(vault: &Vault, envelope: &Envelope) -> PrivatePayload {
     let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
     let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    let (nonce, ciphertext) = envelope.ciphertext.split_at(24);
+    let encrypted = EncryptedEnvelope {
+        nonce: nonce.try_into().unwrap(),
+        ciphertext: ciphertext.to_vec(),
+    };
+    let plain = decrypt(&key, &envelope.aad_bytes().unwrap(), &encrypted).unwrap();
+    serde_json::from_slice(&plain).unwrap()
+}
+
+/// Decrypted payloads of `client`'s pending outbox, in order.
+fn published(vault: &Vault, client: &Client) -> Vec<PrivatePayload> {
     queued(client)
-        .into_iter()
-        .map(|envelope| {
-            let (nonce, ciphertext) = envelope.ciphertext.split_at(24);
-            let encrypted = EncryptedEnvelope {
-                nonce: nonce.try_into().unwrap(),
-                ciphertext: ciphertext.to_vec(),
-            };
-            let plain = decrypt(&key, &envelope.aad_bytes().unwrap(), &encrypted).unwrap();
-            serde_json::from_slice(&plain).unwrap()
-        })
+        .iter()
+        .map(|envelope| opened(vault, envelope))
         .collect()
 }
 
@@ -1056,4 +1058,730 @@ fn selection_mints_after_replay_when_no_device_hint_is_available() {
         ContactBookSelection::Mint
     );
     assert!(client.pending_outbox().unwrap().is_empty());
+}
+
+/// When the successor learned of its predecessor relative to minting its own book.
+#[derive(Clone, Copy)]
+enum MintOrder {
+    /// Minted with no hint, then learned of the predecessor and registered the shared hint.
+    LateHint,
+    /// Registered the shared hint before minting; succession is accepted when the predecessor's
+    /// hint arrives, before its book does.
+    EarlyHint,
+    /// Decided to mint before succession, but captured only after it was accepted.
+    MintAfterAcceptance,
+}
+
+/// A successor B that inherited predecessor A's book X and still owns its own book Y, with a
+/// desktop C in the same vault. Nothing has run X's takeover scan yet.
+struct Superseded {
+    dir: TempDir,
+    vault: Vault,
+    b_cfg: ClientConfig,
+    c_cfg: ClientConfig,
+    b: Client,
+    c: Client,
+    server: Server,
+}
+
+fn superseded_mint(order: MintOrder, minted: usize, book_fields: &Value) -> Superseded {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let a_cfg = config(&dir, "superseded-predecessor", &vault);
+    let b_cfg = config(&dir, "superseded-successor", &vault);
+    let c_cfg = config(&dir, "superseded-desktop", &vault);
+    let a = unlocked(&a_cfg, &vault);
+    let b = unlocked(&b_cfg, &vault);
+    let c = unlocked(&c_cfg, &vault);
+    capture(&a, &a_cfg, "X");
+    a.register_device_hint("android", HINT).unwrap();
+    // B has completed an empty initial replay before predecessor history is learned.
+    b.observe_server_high_water(Cursor(0)).unwrap();
+    if matches!(order, MintOrder::EarlyHint) {
+        b.register_device_hint("android", HINT).unwrap();
+    } else {
+        b.register_no_device_hint().unwrap();
+    }
+    assert_eq!(
+        b.contact_book_selection().unwrap(),
+        ContactBookSelection::Mint
+    );
+    if !matches!(order, MintOrder::MintAfterAcceptance) {
+        mint(&b, &b_cfg, minted, book_fields);
+    }
+    let mut server = Server::default();
+    server.upload(&a);
+    server.upload(&b);
+    // With an already-registered hint, the first late X upsert transfers X to B. Later A-authored
+    // X records then fail stored-owner validation; the takeover scan repairs them, as on the phone.
+    let quarantined = server.sync(&b).quarantined;
+    assert_eq!(
+        quarantined,
+        if matches!(order, MintOrder::EarlyHint) {
+            2
+        } else {
+            0
+        }
+    );
+    b.register_device_hint("android", HINT).unwrap();
+    if matches!(order, MintOrder::MintAfterAcceptance) {
+        assert_eq!(
+            b.contact_book_selection().unwrap(),
+            ContactBookSelection::Inherited {
+                book_id: "X".into(),
+                retire_book_ids: vec![]
+            }
+        );
+        mint(&b, &b_cfg, minted, book_fields);
+        server.upload(&b);
+    }
+    assert_eq!(
+        b.contact_book_selection().unwrap(),
+        ContactBookSelection::Inherited {
+            book_id: "X".into(),
+            retire_book_ids: vec!["Y".into()]
+        }
+    );
+    Superseded {
+        dir,
+        vault,
+        b_cfg,
+        c_cfg,
+        b,
+        c,
+        server,
+    }
+}
+
+/// B mints its own book Y with `minted` contacts and accepts scan requests for it.
+fn mint(b: &Client, b_cfg: &ClientConfig, minted: usize, book_fields: &Value) {
+    let mut y = book(b_cfg, "Y");
+    for (key, value) in book_fields.as_object().unwrap() {
+        y[key] = value.clone();
+    }
+    let contacts: Vec<Value> = (0..minted)
+        .map(|i| contact("Y", &format!("mint-{i}"), &format!("Mint {i}")))
+        .collect();
+    b.capture_contact_book(
+        &json!({"schema_version": 1, "book": y, "contacts": contacts}).to_string(),
+    )
+    .unwrap();
+    b.set_contact_scan_request_capability(r#"{"book_id":"Y","enabled":true}"#)
+        .unwrap();
+}
+
+/// B's complete authoritative takeover scan of X.
+fn take_over(b: &Client) {
+    let generation = listed(b, "X")["generation"].clone();
+    b.begin_contact_scan(
+        &json!({"schema_version": 1, "scan_id": "takeover-X", "book_id": "X",
+            "generation": generation, "access": "full", "authoritative": true})
+        .to_string(),
+    )
+    .unwrap();
+    for (id, name) in [("ada", "Ada"), ("bea", "Bea")] {
+        b.observe_contact_scan(
+            &json!({"schema_version": 1, "scan_id": "takeover-X", "contact": contact("X", id, name)})
+                .to_string(),
+        )
+        .unwrap();
+    }
+    let finished: Value = serde_json::from_str(
+        &b.finish_contact_scan(
+            &json!({"schema_version": 1, "scan_id": "takeover-X", "complete": true}).to_string(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(finished["held"], 0);
+}
+
+fn retire(client: &Client) -> Value {
+    let out: Value =
+        serde_json::from_str(&client.retire_superseded_contact_books().unwrap()).unwrap();
+    out["retired"].clone()
+}
+
+fn listed(client: &Client, id: &str) -> Value {
+    books(client)["books"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|book| book["id"] == id)
+        .cloned()
+        .unwrap()
+}
+
+#[test]
+fn superseded_mint_retires_after_takeover_when_the_hint_arrives_late() {
+    retires_after_takeover(MintOrder::LateHint);
+}
+
+#[test]
+fn superseded_mint_retires_after_takeover_when_the_hint_came_first() {
+    retires_after_takeover(MintOrder::EarlyHint);
+}
+
+#[test]
+fn superseded_mint_retires_after_takeover_when_captured_after_acceptance() {
+    retires_after_takeover(MintOrder::MintAfterAcceptance);
+}
+
+fn retires_after_takeover(order: MintOrder) {
+    let mut t = superseded_mint(order, 11, &json!({}));
+    assert_eq!(
+        retire(&t.b),
+        json!([]),
+        "nothing retires before the takeover scan"
+    );
+    take_over(&t.b);
+    t.server.upload(&t.b);
+    assert_eq!(t.server.sync(&t.c).quarantined, 0);
+    t.c.request_contact_sync(r#"{"book_id":"Y"}"#).unwrap();
+    t.server.upload(&t.c);
+    assert_eq!(t.server.sync(&t.b).quarantined, 0);
+
+    assert_eq!(
+        retire(&t.b),
+        json!([{"book_id": "Y", "replaced_by": "X", "contacts_removed": 11}])
+    );
+    let held: i64 = sqlcipher(&t.b_cfg.database_path)
+        .query_row(
+            "SELECT COUNT(*) FROM contact_scan_holds WHERE book_id='Y' AND status='awaiting_approval'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(held, 0, "retirement asks for no approval");
+    let y = listed(&t.b, "Y");
+    assert_eq!(y["state"], "retired");
+    assert_eq!(y["superseded_by"], "X");
+    assert_eq!(y["contact_count"], 0);
+    assert_eq!(
+        t.b.contact_book_selection().unwrap(),
+        ContactBookSelection::Owned {
+            book_id: "X".into()
+        }
+    );
+    assert_eq!(retire(&t.b), json!([]), "retirement runs once");
+
+    t.server.upload(&t.b);
+    assert_eq!(t.server.sync(&t.c).quarantined, 0);
+    let y = listed(&t.c, "Y");
+    assert_eq!(y["state"], "retired");
+    assert_eq!(y["superseded_by"], "X");
+    assert_eq!(y["contact_count"], 0);
+    assert_eq!(listed(&t.c, "X")["state"], "active");
+    let request: Value = serde_json::from_str(
+        &t.c.contact_sync_request_status(r#"{"book_id":"Y"}"#)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(request["state"], "blocked");
+    assert_eq!(request["reason"], "source_retired");
+}
+
+#[test]
+fn retiring_the_inherited_book_keeps_the_superseded_mint() {
+    let t = superseded_mint(MintOrder::LateHint, 11, &json!({}));
+    take_over(&t.b);
+    // Stop and retire publishes the phone's current book retired.
+    let mut retired = book(&t.b_cfg, "X");
+    retired["state"] = json!("retired");
+    t.b.capture_contact_book(
+        &json!({"schema_version": 1, "book": retired, "contacts": []}).to_string(),
+    )
+    .unwrap();
+
+    assert_eq!(retire(&t.b), json!([]));
+    let y = listed(&t.b, "Y");
+    assert_eq!(y["state"], "active");
+    assert_eq!(y["contact_count"], 11);
+    assert_eq!(
+        t.b.contact_book_selection().unwrap(),
+        ContactBookSelection::Owned {
+            book_id: "Y".into()
+        }
+    );
+}
+
+#[test]
+fn retirement_closes_the_superseded_books_open_requests() {
+    let mut t = superseded_mint(
+        MintOrder::LateHint,
+        11,
+        &json!({"capabilities": {"read": true, "write": true}, "policy": {"remote_edits": "auto"}}),
+    );
+    t.server.upload(&t.b);
+    assert_eq!(t.server.sync(&t.c).quarantined, 0);
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + 86_400;
+    for (id, contact_id) in [
+        ("r-new", "mint-0"),
+        ("r-open", "mint-1"),
+        ("r-done", "mint-2"),
+    ] {
+        t.c.request_contact_edit(
+            &json!({"schema_version": 1, "request_id": id,
+                "target_owner": t.b_cfg.device_id.to_string(), "book_id": "Y", "kind": "update",
+                "contact_id": contact_id, "base_revision": "1", "expires_at": expires_at,
+                "patches": [{"op": "replace", "path": "name.given", "value": "Renamed"}]})
+            .to_string(),
+        )
+        .unwrap();
+    }
+    t.server.upload(&t.c);
+    assert_eq!(t.server.sync(&t.b).quarantined, 0);
+    let permit = |id: &str| -> Value {
+        serde_json::from_str(
+            &t.b.next_contact_apply_permit(
+                &json!({"schema_version": 1, "request_id": id}).to_string(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(permit("r-open")["status"], "permit");
+    assert_eq!(permit("r-done")["status"], "permit");
+    t.b.reconcile_contact_apply(
+        &json!({"schema_version": 1, "request_id": "r-done", "outcome": "failed"}).to_string(),
+    )
+    .unwrap();
+    take_over(&t.b);
+
+    assert_eq!(retire(&t.b)[0]["contacts_removed"], 11);
+    let ledger = |id: &str| -> (String, Option<String>) {
+        sqlcipher(&t.b_cfg.database_path)
+            .query_row(
+                "SELECT status,json_extract(observed,'$.reason') FROM contact_edit_ledger WHERE request_id=?",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        ledger("r-new"),
+        ("rejected".into(), Some("book_replaced".into()))
+    );
+    assert_eq!(
+        ledger("r-open"),
+        ("failed".into(), Some("book_replaced".into())),
+        "an issued write that never reconciled is resolved, never retried"
+    );
+    let (done_status, done_reason) = ledger("r-done");
+    assert_eq!(done_status, "failed");
+    assert_ne!(done_reason.as_deref(), Some("book_replaced"));
+    assert_eq!(permit("r-new")["status"], "rejected");
+    assert_eq!(permit("r-open")["status"], "failed");
+
+    t.server.upload(&t.b);
+    assert_eq!(t.server.sync(&t.c).quarantined, 0);
+    let requests: Value = serde_json::from_str(
+        &t.c.list_contact_requests_json(
+            &json!({"schema_version": 1, "requester": t.c_cfg.device_id.to_string()}).to_string(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let state = |id: &str| {
+        requests["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|request| request["request_id"] == id)
+            .unwrap()["state"]
+            .clone()
+    };
+    assert_eq!(state("r-new"), "rejected");
+    assert_eq!(state("r-open"), "failed");
+    assert_eq!(state("r-done"), "failed");
+}
+
+#[test]
+fn retiring_a_thousand_contact_superseded_book() {
+    let t = superseded_mint(MintOrder::LateHint, 1_000, &json!({}));
+    take_over(&t.b);
+    let started = std::time::Instant::now();
+    let retired = retire(&t.b);
+    eprintln!(
+        "retired a 1,000-contact superseded book in {:?}",
+        started.elapsed()
+    );
+    assert_eq!(retired[0]["contacts_removed"], 1_000);
+    assert!(t.b.pending_outbox().unwrap().len() > 1_000);
+}
+
+/// Retires Y on B after the takeover and delivers everything to C.
+fn replaced_on_both(t: &mut Superseded) {
+    take_over(&t.b);
+    assert_eq!(retire(&t.b)[0]["book_id"], "Y");
+    t.server.upload(&t.b);
+    assert_eq!(t.server.sync(&t.c).quarantined, 0);
+    assert_eq!(listed(&t.c, "Y")["superseded_by"], "X");
+}
+
+fn active_y(b_cfg: &ClientConfig, generation: &str) -> Value {
+    let mut y = book(b_cfg, "Y");
+    y["generation"] = json!(generation);
+    y
+}
+
+/// A Y contact at a revision above any B published, as a delayed or forged record would carry.
+fn late_contact(id: &str) -> Value {
+    let mut late = contact("Y", id, "Late");
+    late["revision"] = json!("9");
+    late
+}
+
+fn in_a_day() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + 86_400
+}
+
+fn ledger_status(b_cfg: &ClientConfig, request_id: &str) -> (String, Option<String>) {
+    sqlcipher(&b_cfg.database_path)
+        .query_row(
+            "SELECT status,json_extract(observed,'$.reason') FROM contact_edit_ledger WHERE request_id=?",
+            [request_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+}
+
+#[test]
+fn a_replaced_book_refuses_owner_capture_and_scans() {
+    let mut t = superseded_mint(MintOrder::LateHint, 11, &json!({}));
+    let open_scan = |mut input: Value| {
+        input["schema_version"] = json!(1);
+        input["scan_id"] = json!("open-Y");
+        input.to_string()
+    };
+    t.b.begin_contact_scan(&open_scan(json!({"book_id": "Y", "generation": "1",
+        "access": "full", "authoritative": true})))
+        .unwrap();
+    replaced_on_both(&mut t);
+    let replaced = Error::InvalidRequest("contact book was replaced");
+    assert_eq!(
+        t.b.observe_contact_scan(&open_scan(
+            json!({"contact": contact("Y", "mint-0", "Mint 0")})
+        ))
+        .unwrap_err(),
+        replaced,
+        "a scan under way when the book was replaced observes nothing"
+    );
+    let finished: Value = serde_json::from_str(
+        &t.b.finish_contact_scan(&open_scan(json!({"complete": true})))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (finished["deleted"].clone(), finished["held"].clone()),
+        (json!(0), json!(0))
+    );
+    for generation in ["1", "2"] {
+        assert_eq!(
+            t.b.capture_contact_book(
+                &json!({"schema_version": 1, "book": active_y(&t.b_cfg, generation),
+                    "contacts": [contact("Y", "mint-0", "Mint 0")]})
+                .to_string(),
+            )
+            .unwrap_err(),
+            replaced
+        );
+    }
+    assert_eq!(
+        t.b.begin_contact_scan(
+            &json!({"schema_version": 1, "scan_id": "late-Y", "book_id": "Y", "generation": "1",
+                "access": "full", "authoritative": true})
+            .to_string(),
+        )
+        .unwrap_err(),
+        replaced
+    );
+    let y = listed(&t.b, "Y");
+    assert_eq!(y["state"], "retired");
+    assert_eq!(y["superseded_by"], "X");
+    assert_eq!(y["contact_count"], 0);
+    // Only core marks a book replaced.
+    let mut x = book(&t.b_cfg, "X");
+    x["superseded_by"] = json!("Y");
+    t.b.capture_contact_book(&json!({"schema_version": 1, "book": x, "contacts": []}).to_string())
+        .unwrap();
+    assert!(listed(&t.b, "X").get("superseded_by").is_none());
+}
+
+#[test]
+fn late_requests_for_a_replaced_book_never_get_a_permit() {
+    let mut t = superseded_mint(
+        MintOrder::LateHint,
+        11,
+        &json!({"capabilities": {"read": true, "write": true}, "policy": {"remote_edits": "auto"}}),
+    );
+    replaced_on_both(&mut t);
+    let target = t.b_cfg.device_id.to_string();
+    let update = json!({"schema_version": 1, "request_id": "r-late", "target_owner": target,
+        "book_id": "Y", "kind": "update", "contact_id": "mint-0", "base_revision": "1",
+        "expires_at": in_a_day(),
+        "patches": [{"op": "replace", "path": "name.given", "value": "Renamed"}]});
+    let restore = json!({"schema_version": 1, "request_id": "r-late-restore",
+        "target_owner": target, "book_id": "Y", "kind": "create", "expires_at": in_a_day(),
+        "display_name": "Mint 1", "name": {"given": "Mint 1"}, "phones": [], "emails": [],
+        "addresses": [], "provenance": {"restored_from": "mint-1"}});
+    let late: Vec<Envelope> = [update, restore]
+        .into_iter()
+        .zip(9_000..)
+        .map(|(request, sequence)| {
+            sealed(
+                &t.vault,
+                t.c_cfg.device_id,
+                sequence,
+                PrivatePayload::ContactEditRequest { request },
+            )
+        })
+        .collect();
+    assert_eq!(sync(&late, &t.b).quarantined, 0);
+
+    let permit: Value = serde_json::from_str(
+        &t.b.next_contact_apply_permit(r#"{"schema_version":1,"request_id":"r-late"}"#)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(permit["status"], "rejected");
+    assert_eq!(permit["reason"], "book_replaced");
+    // The next retirement pass closes what the host never asked a permit for.
+    assert_eq!(retire(&t.b), json!([]));
+    assert_eq!(
+        ledger_status(&t.b_cfg, "r-late-restore"),
+        ("rejected".into(), Some("book_replaced".into()))
+    );
+    let claims: i64 = sqlcipher(&t.b_cfg.database_path)
+        .query_row(
+            "SELECT COUNT(*) FROM contact_restore_claims WHERE book_id='Y'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(claims, 0, "no restore was ever claimed");
+}
+
+#[test]
+fn retirement_releases_an_unresolved_restore_claim() {
+    let mut t = superseded_mint(
+        MintOrder::LateHint,
+        11,
+        &json!({"capabilities": {"read": true, "write": true}, "policy": {"remote_edits": "auto"}}),
+    );
+    // Before the takeover, B's own scan of Y removes mint-0 and mint-1.
+    t.b.begin_contact_scan(
+        &json!({"schema_version": 1, "scan_id": "scan-Y", "book_id": "Y", "generation": "1",
+            "access": "full", "authoritative": true})
+        .to_string(),
+    )
+    .unwrap();
+    for i in 2..11 {
+        t.b.observe_contact_scan(
+            &json!({"schema_version": 1, "scan_id": "scan-Y",
+                "contact": contact("Y", &format!("mint-{i}"), &format!("Mint {i}"))})
+            .to_string(),
+        )
+        .unwrap();
+    }
+    t.b.finish_contact_scan(r#"{"schema_version":1,"scan_id":"scan-Y","complete":true}"#)
+        .unwrap();
+    t.server.upload(&t.b);
+    assert_eq!(t.server.sync(&t.c).quarantined, 0);
+    let restore: Value = serde_json::from_str(
+        &t.c.restore_contact_json(r#"{"book_id":"Y","contact_id":"mint-0"}"#)
+            .unwrap(),
+    )
+    .unwrap();
+    let request_id = restore["request_id"].as_str().unwrap().to_owned();
+    t.server.upload(&t.c);
+    assert_eq!(t.server.sync(&t.b).quarantined, 0);
+    let permit: Value = serde_json::from_str(
+        &t.b.next_contact_apply_permit(
+            &json!({"schema_version": 1, "request_id": request_id}).to_string(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(permit["status"], "permit");
+    take_over(&t.b);
+
+    assert_eq!(retire(&t.b)[0]["contacts_removed"], 9);
+    let claim: String = sqlcipher(&t.b_cfg.database_path)
+        .query_row(
+            "SELECT status FROM contact_restore_claims WHERE book_id='Y' AND tombstone_id='mint-0'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(claim, "failed");
+    assert_eq!(
+        ledger_status(&t.b_cfg, &request_id),
+        ("failed".into(), Some("book_replaced".into()))
+    );
+    assert!(
+        t.b.reconcile_contact_apply(
+            &json!({"schema_version": 1, "request_id": request_id, "outcome": "applied",
+                "observed": contact("Y", "mint-0", "Mint 0")})
+            .to_string(),
+        )
+        .is_err(),
+        "a late reconcile never repopulates the replaced book"
+    );
+    assert_eq!(listed(&t.b, "Y")["contact_count"], 0);
+}
+
+#[test]
+fn peers_ignore_late_records_for_a_replaced_book() {
+    let mut t = superseded_mint(MintOrder::LateHint, 11, &json!({}));
+    replaced_on_both(&mut t);
+    let late = [
+        PrivatePayload::ContactUpserted {
+            book: active_y(&t.b_cfg, "1"),
+            contact: late_contact("mint-0"),
+        },
+        PrivatePayload::ContactUpserted {
+            book: active_y(&t.b_cfg, "2"),
+            contact: late_contact("late-contact"),
+        },
+        PrivatePayload::ContactBookState {
+            book: active_y(&t.b_cfg, "3"),
+        },
+    ]
+    .into_iter()
+    .zip(9_000..)
+    .map(|(payload, sequence)| sealed(&t.vault, t.b_cfg.device_id, sequence, payload))
+    .collect::<Vec<_>>();
+    assert_eq!(sync(&late, &t.c).quarantined, 0);
+    let y = listed(&t.c, "Y");
+    assert_eq!(y["state"], "retired");
+    assert_eq!(y["superseded_by"], "X");
+    assert_eq!(y["contact_count"], 0);
+}
+
+/// A copy of `template`, a real record with compaction metadata, that carries `payload`.
+fn resealed(
+    vault: &Vault,
+    template: &Envelope,
+    sequence: u64,
+    payload: &PrivatePayload,
+) -> Envelope {
+    let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
+    let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    let mut envelope = template.clone();
+    envelope.envelope_id = EnvelopeId::new();
+    envelope.producer_sequence = SourceSequence(sequence);
+    let mut plain = serde_json::to_value(payload).unwrap();
+    plain["compaction"] = serde_json::to_value(&envelope.compaction).unwrap();
+    let encrypted = encrypt(
+        &key,
+        &envelope.aad_bytes().unwrap(),
+        &serde_json::to_vec(&plain).unwrap(),
+    )
+    .unwrap();
+    envelope.ciphertext = [encrypted.nonce.as_slice(), &encrypted.ciphertext].concat();
+    envelope
+}
+
+/// A fresh device named `name` that imported `log` as one compacted resync snapshot.
+fn fresh_import(t: &Superseded, name: &str, log: &[Envelope]) -> Client {
+    let fresh = unlocked(&config(&t.dir, name, &t.vault), &t.vault);
+    let records: Vec<SnapshotRecord> = log
+        .iter()
+        .zip(1..)
+        .map(|(envelope, cursor)| SnapshotRecord {
+            cursor: Cursor(cursor),
+            envelope: envelope.clone(),
+        })
+        .collect();
+    let session = fresh
+        .begin_snapshot_with_compaction(
+            Cursor(records.len() as u64),
+            records.len() as u64,
+            SnapshotPurpose::Resync,
+            Some(9),
+        )
+        .unwrap();
+    fresh
+        .append_snapshot_page(session.generation, &records)
+        .unwrap();
+    fresh.finish_snapshot(session.generation).unwrap();
+    loop {
+        let step = fresh.apply_pending(1_000).unwrap();
+        if step.applied + step.drained + step.quarantined + step.superseded == 0
+            && step.snapshot_remaining == 0
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        fresh
+            .snapshot_projection_status()
+            .unwrap()
+            .map(|status| status.state),
+        Some(SnapshotProjectionState::Promoted)
+    );
+    fresh
+}
+
+#[test]
+fn a_fresh_import_never_repopulates_a_replaced_book() {
+    let mut t = superseded_mint(MintOrder::LateHint, 11, &json!({}));
+    replaced_on_both(&mut t);
+    let template = t
+        .server
+        .log
+        .iter()
+        .find(|envelope| {
+            envelope.producer_device_id == t.b_cfg.device_id
+                && matches!(
+                    opened(&t.vault, envelope),
+                    PrivatePayload::ContactUpserted { ref book, .. } if book["id"] == "Y"
+                )
+        })
+        .unwrap();
+    let stray = |generation: &str| {
+        resealed(
+            &t.vault,
+            template,
+            9_000,
+            &PrivatePayload::ContactUpserted {
+                book: active_y(&t.b_cfg, generation),
+                contact: late_contact("late-contact"),
+            },
+        )
+    };
+    let log = &t.server.log;
+    let cases: [(&str, Vec<Envelope>); 3] = [
+        // A delayed record staged before the replaced state.
+        (
+            "stray-first",
+            [stray("1")].iter().chain(log).cloned().collect(),
+        ),
+        (
+            "stray-last",
+            log.iter().chain([&stray("1")]).cloned().collect(),
+        ),
+        // A later capture at a new generation, as an app without the owner fence would publish.
+        (
+            "recapture-last",
+            log.iter().chain([&stray("2")]).cloned().collect(),
+        ),
+    ];
+    for (name, log) in cases {
+        let fresh = fresh_import(&t, name, &log);
+        let y = listed(&fresh, "Y");
+        assert_eq!(y["state"], "retired", "{name}");
+        assert_eq!(y["superseded_by"], "X", "{name}");
+        assert_eq!(y["contact_count"], 0, "{name}");
+        assert_eq!(listed(&fresh, "X")["state"], "active", "{name}");
+    }
 }
