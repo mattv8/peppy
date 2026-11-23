@@ -480,27 +480,80 @@ async fn refresh_vault(session: &Arc<Session>) -> BridgeResult<()> {
     Ok(())
 }
 
+#[derive(Default)]
+pub(crate) struct GatewayRefreshState {
+    last_applied: u64,
+    capabilities: Option<CapabilitiesResponse>,
+}
+
 pub async fn refresh_gateways(session: &Arc<Session>) -> BridgeResult<()> {
+    let sequence = session
+        .gateway_refresh_sequence
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
     let devices: DevicesResponse = session
         .api
         .get_json("/v1/devices", MAX_JSON_BYTES)
         .await
         .map_err(sync_net_error)?;
-    let capabilities: CapabilitiesResponse = session
+    let capabilities: BridgeResult<CapabilitiesResponse> = session
         .api
         .get_json("/v1/capabilities", MAX_JSON_BYTES)
         .await
-        .map_err(sync_net_error)?;
-    apply_gateway_refresh(session, &devices, &capabilities);
-    Ok(())
+        .map_err(sync_net_error);
+    let (accepted, result) = match capabilities {
+        Ok(response) => (Some(response), Ok(())),
+        Err(error) => (None, Err(error)),
+    };
+    let mut state = session
+        .gateway_refresh_state
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if sequence > state.last_applied {
+        state.last_applied = sequence;
+        if let Some(capabilities) = accepted {
+            // The accepted snapshot must advance even if the actor coalesces this refresh.
+            state.capabilities = Some(capabilities);
+        }
+        let views = if let Some(capabilities) = &state.capabilities {
+            gateway_views(&devices, capabilities)
+        } else {
+            let qualifying_ids: std::collections::HashSet<_> = gateway_views(
+                &devices,
+                &CapabilitiesResponse { capabilities: Vec::new() },
+            )
+            .into_iter()
+            .map(|view| view.id)
+            .collect();
+            let mut views = session
+                .status
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .gateways
+                .clone();
+            views.retain(|view| qualifying_ids.contains(&view.id));
+            views
+        };
+        submit_gateway_views(session, &devices, views);
+    }
+    result
 }
 
+#[cfg(test)]
 pub(crate) fn apply_gateway_refresh(
     session: &Session,
     devices: &DevicesResponse,
     capabilities: &CapabilitiesResponse,
 ) {
     let views = gateway_views(devices, capabilities);
+    submit_gateway_views(session, devices, views);
+}
+
+fn submit_gateway_views(
+    session: &Session,
+    devices: &DevicesResponse,
+    views: Vec<peppy_desktop_api::GatewayView>,
+) {
     let device_role = extract_device_role(devices, &session.binding.device_id);
     let rcs_roster_validated = device_role.is_some();
     let rcs_live_roster = if rcs_roster_validated {
