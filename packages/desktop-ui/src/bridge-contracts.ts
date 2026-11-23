@@ -166,7 +166,7 @@ export const notificationPersistence = (value: unknown): NotificationPersistence
 export type ContactBookState = "active" | "limited" | "unavailable" | "retired";
 /** Native values: requests go to the owner phone, so `canRestore` follows `canWrite`; `supportsNotes`/`supportsBirthday` follow the phone's platform (iOS has no notes). */
 export type BookCapabilities = { canWrite: boolean; canDelete: boolean; supportsNotes: boolean; supportsPhoto: boolean; canRestore?: boolean; supportsBirthday?: boolean; canSync?: boolean };
-export type ContactBookView = { id: string; deviceName: string; state: ContactBookState; capabilities: BookCapabilities; contactCount: number; defaultAccountLabel?: string; lastSyncAt?: string; stalenessNote?: string; pendingEditCount: number; ownerDeviceId?: string; sourceRevoked?: boolean; lookupExcluded?: boolean };
+export type ContactBookView = { id: string; deviceName: string; state: ContactBookState; capabilities: BookCapabilities; contactCount: number; defaultAccountLabel?: string; lastSyncAt?: string; stalenessNote?: string; pendingEditCount: number; ownerDeviceId?: string; sourceRevoked?: boolean; lookupExcluded?: boolean; /** IDs of books this book replaced, hidden from the list. */ replacedBookIds?: string[] };
 /** A contact that could supply a name for an address; `bookId`/`contactId` identify it for pinning. */
 export type ContactNameCandidate = { bookId: string; contactId: string; displayName: string };
 export type ContactNameCandidates = { candidates: ContactNameCandidate[]; pinned: { bookId: string; contactId: string } | null; moreIndexing: boolean };
