@@ -127,6 +127,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .head-panel-shell #composer-area { padding: 0 8px 8px; }
 #head-panel-header button:disabled { opacity: .5; }
 #notifications-view {
+  position: relative;
   display: flex;
   flex: 1;
   min-height: 0;
@@ -146,6 +147,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .notification-chip-count { color: var(--peppy-text-muted); font-size: 11px; }
 .notification-filter-chips button[aria-pressed="true"] .notification-chip-count { color: inherit; }
 #notifications-feed { flex: 1; min-height: 0; overflow-y: auto; }
+#notifications-view:has(#notifications-action-notice:not(:empty)) #notifications-feed { padding-bottom: 56px; }
 .notif-section ul, .notification-stack ul { padding: 0; margin: 0; list-style: none; }
 .notif-section ul > li, .notification-stack ul > li { position: relative; }
 .notif-section ul > li + li::before, .notification-stack ul > li + li::before { position: absolute; z-index: 1; top: 0; right: 0; left: 58px; height: 1px; background: var(--peppy-border-strong); content: ""; pointer-events: none; }

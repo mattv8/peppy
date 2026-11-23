@@ -10,6 +10,7 @@ import { NotificationEmptyState, NotificationLockedState } from "./NotificationE
 import { NotificationFilterBar, notificationFilterChips } from "./NotificationFilterBar";
 import { NotificationSections, NotificationStacks } from "./NotificationStack";
 import type { NotificationLabels } from "./NotificationRow";
+import { NotificationActionNotice } from "./NotificationActionNotice";
 
 export { notificationMuteKey, notificationTuple } from "./notificationIdentity";
 
@@ -42,7 +43,7 @@ export function dismissibleNotifications(notifications: MirroredNotification[], 
 
 export function NotificationsView({
   notifications, filters, sources, locked, writesPaused = false, onDismiss, onMute, onSeen, onCopyOneTimeCode, onSettings, onManageApps,
-  onDismissMany, query, onClearQuery, appFilter, onAppFilter, focusRequest, onFocusResult, displayTitle, dismissAll,
+  onDismissMany, query, onClearQuery, appFilter, onAppFilter, focusRequest, onFocusResult, displayTitle, dismissAll, actionNotice, onDismissActionNotice,
 }: {
   notifications: MirroredNotification[];
   filters: AppFilter[];
@@ -64,6 +65,8 @@ export function NotificationsView({
   onFocusResult?(requestId: string, found: boolean): void;
   displayTitle(title: string): string;
   dismissAll?: { label: string; disabled: boolean; onDismissAll(): void };
+  actionNotice?: NotificationActionNotice;
+  onDismissActionNotice(): void;
 }) {
   const feedRef = useRef<HTMLDivElement>(null);
   const visible = useRef(new Map<string, NotificationTarget>());
@@ -239,5 +242,6 @@ export function NotificationsView({
         ? <NotificationSections notifications={shown} {...feedProps} />
         : <NotificationStacks stacks={stacks} expanded={expandedStacks} focusStackKey={focusStackKey} onExpanded={key => setExpandedStacks(current => current.has(key) ? new Set([...current].filter(value => value !== key)) : new Set([...current, key]))} onDismissMany={onDismissMany} {...feedProps} />}
     </div>}
+    <NotificationActionNotice notice={actionNotice} onDismiss={onDismissActionNotice} />
   </section>;
 }

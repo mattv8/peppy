@@ -36,6 +36,7 @@ const props = (notifications: MirroredNotification[]) => ({
   appFilter: null,
   onAppFilter: vi.fn(),
   displayTitle: (title: string) => title,
+  onDismissActionNotice: vi.fn(),
 });
 
 afterEach(() => {
@@ -48,6 +49,14 @@ afterEach(() => {
 });
 
 describe("NotificationsView", () => {
+  it("shows the action notice toast only while unlocked", () => {
+    const notice = { kind: "error" as const, message: "Could not dismiss notification. offline" };
+    const { rerender } = render(<NotificationsView {...props([])} actionNotice={notice} />);
+    expect(document.getElementById("notifications-action-notice")).toHaveTextContent(notice.message);
+    rerender(<NotificationsView {...props([])} locked actionNotice={notice} />);
+    expect(document.getElementById("notifications-action-notice")).toBeNull();
+  });
+
   it("focuses and highlights only the exact tuple before reporting success without marking it seen", () => {
     vi.useFakeTimers();
     const scroll = vi.fn();
