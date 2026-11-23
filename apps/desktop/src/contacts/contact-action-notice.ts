@@ -4,6 +4,8 @@ import type { ReactNode } from "react";
 export type ContactActionNotice = {
   kind: "success" | "error";
   message: ReactNode;
+  /** Overrides the default success fade delay; errors do not fade. */
+  holdMs?: number;
   retry?: () => void;
 };
 

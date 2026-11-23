@@ -304,6 +304,51 @@ pub fn book_view(
     Some(view)
 }
 
+/// Whether core retired this book because a re-enrolled phone's replacement took it over. Same
+/// rule as core's `replaced`.
+fn replaced_book(book: &Value) -> bool {
+    str_field(book, "state") == Some("retired")
+        && str_field(book, "superseded_by").is_some_and(|id| !id.is_empty())
+}
+
+/// The contact book list a host shows. Replaced books are hidden; each remaining book names the
+/// hidden books it replaced in `replacedBookIds`, so the UI can move a selection to it.
+pub fn book_list_view(
+    books: &[Value],
+    own_device: &str,
+    device_names: &HashMap<String, String>,
+    pending: &HashMap<String, usize>,
+    revoked: &HashSet<String>,
+) -> Vec<Value> {
+    let mut replaced_by: HashMap<&str, Vec<&str>> = HashMap::new();
+    for book in books.iter().filter(|book| replaced_book(book)) {
+        if let (Some(id), Some(replacement)) = (
+            str_field(book, "id").filter(|id| valid_id(id)),
+            str_field(book, "superseded_by"),
+        ) {
+            replaced_by.entry(replacement).or_default().push(id);
+        }
+    }
+    books
+        .iter()
+        .filter(|book| !replaced_book(book))
+        .filter_map(|book| {
+            let mut view = book_view(book, own_device, device_names, pending)?;
+            if let Some(ids) = str_field(book, "id").and_then(|id| replaced_by.get(id)) {
+                view["replacedBookIds"] = json!(ids);
+            }
+            if view
+                .get("ownerDeviceId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| revoked.contains(id))
+            {
+                view["sourceRevoked"] = json!(true);
+            }
+            Some(view)
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum List {
     Phones,
@@ -1558,4 +1603,97 @@ pub fn sync_status(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod book_list_tests {
+    use super::*;
+
+    fn list(books: &[Value], revoked: &[&str]) -> Vec<Value> {
+        let revoked = revoked.iter().map(|id| id.to_string()).collect();
+        book_list_view(books, "phone", &HashMap::new(), &HashMap::new(), &revoked)
+    }
+
+    fn book(id: &str, state: &str, contacts: u64) -> Value {
+        json!({"id": id, "state": state, "owner_device_id": "phone", "contact_count": contacts})
+    }
+
+    fn replaced(id: &str, by: Value) -> Value {
+        let mut value = book(id, "retired", 0);
+        value["superseded_by"] = by;
+        value
+    }
+
+    fn ids(views: &[Value]) -> Vec<&str> {
+        views
+            .iter()
+            .map(|view| view["id"].as_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn replaced_book_is_hidden_and_replacement_names_it() {
+        let views = list(&[replaced("y", json!("x")), book("x", "active", 3)], &[]);
+        assert_eq!(ids(&views), ["x"]);
+        assert_eq!(views[0]["replacedBookIds"], json!(["y"]));
+    }
+
+    #[test]
+    fn ordinary_retired_books_are_kept_with_and_without_contacts() {
+        let views = list(&[book("a", "retired", 0), book("b", "retired", 2)], &[]);
+        assert_eq!(ids(&views), ["a", "b"]);
+        assert!(
+            views
+                .iter()
+                .all(|view| view.get("replacedBookIds").is_none())
+        );
+    }
+
+    #[test]
+    fn replacement_keeps_core_order_for_several_replaced_books() {
+        let views = list(
+            &[
+                replaced("y1", json!("x")),
+                replaced("y2", json!("x")),
+                book("x", "active", 1),
+            ],
+            &[],
+        );
+        assert_eq!(ids(&views), ["x"]);
+        assert_eq!(views[0]["replacedBookIds"], json!(["y1", "y2"]));
+    }
+
+    #[test]
+    fn superseded_by_on_a_book_that_is_not_retired_is_ignored() {
+        let mut active = book("y", "active", 1);
+        active["superseded_by"] = json!("x");
+        let views = list(&[active, book("x", "active", 0)], &[]);
+        assert_eq!(ids(&views), ["y", "x"]);
+        assert!(
+            views
+                .iter()
+                .all(|view| view.get("replacedBookIds").is_none())
+        );
+    }
+
+    #[test]
+    fn replaced_book_without_listed_replacement_is_hidden_unannotated() {
+        let views = list(&[replaced("y", json!("gone")), book("x", "active", 0)], &[]);
+        assert_eq!(ids(&views), ["x"]);
+        assert!(views[0].get("replacedBookIds").is_none());
+    }
+
+    #[test]
+    fn empty_or_non_string_superseded_by_does_not_hide() {
+        for by in [json!(""), json!(null), json!(7)] {
+            let views = list(&[replaced("y", by), book("x", "active", 0)], &[]);
+            assert_eq!(ids(&views), ["y", "x"]);
+        }
+    }
+
+    #[test]
+    fn revoked_source_is_still_marked() {
+        let views = list(&[book("x", "active", 0)], &["phone"]);
+        assert_eq!(views[0]["sourceRevoked"], json!(true));
+    }
 }

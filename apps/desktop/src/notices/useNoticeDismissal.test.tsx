@@ -1,9 +1,10 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConversationFolderNotice } from "../conversation/ConversationFolderNotice";
 import { SenderUnblockNotice } from "../conversation/SenderUnblockNotice";
 import { NotificationMuteNotice } from "../notifications/NotificationMuteNotice";
 import { useMemo } from "react";
+import { useNoticeDismissal } from "./useNoticeDismissal";
 
 type CaseProps = { kind: "success" | "error"; revision: number; onDismiss(): void; toastHost?: HTMLElement };
 
@@ -85,4 +86,23 @@ describe.each(cases)("%s notice lifecycle", (_name, Notice) => {
     act(() => { vi.advanceTimersByTime(4000); });
     expect(dismiss).not.toHaveBeenCalled();
   });
+});
+
+it("uses the requested hold and pauses it while hovered", () => {
+  vi.useFakeTimers();
+  const dismiss = vi.fn();
+  const notice = { kind: "success" as const, holdMs: 8000 };
+  const { result } = renderHook(() => useNoticeDismissal(notice, dismiss));
+  act(() => vi.advanceTimersByTime(4000));
+  expect(dismiss).not.toHaveBeenCalled();
+  act(() => result.current.setHovered(true));
+  act(() => vi.advanceTimersByTime(10000));
+  expect(dismiss).not.toHaveBeenCalled();
+  act(() => result.current.setHovered(false));
+  act(() => result.current.setFocused(true));
+  act(() => vi.advanceTimersByTime(10000));
+  expect(dismiss).not.toHaveBeenCalled();
+  act(() => result.current.setFocused(false));
+  act(() => vi.advanceTimersByTime(8000));
+  expect(dismiss).toHaveBeenCalledTimes(1);
 });
