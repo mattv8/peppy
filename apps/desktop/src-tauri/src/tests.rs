@@ -128,6 +128,221 @@ pub(crate) fn open(f: &Fixture, binding: &Binding, epochs: &[u32]) -> Session {
     session
 }
 
+#[test]
+fn reopened_session_restores_revoked_device_ids() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    let revoked = uuid::Uuid::new_v4().to_string();
+    std::fs::write(
+        session.data_dir.join("revoked-devices.json"),
+        serde_json::to_vec(&vec![&revoked]).unwrap(),
+    )
+    .unwrap();
+    drop(session);
+    let reopened = open(&fixture, &fixture.binding, &[]);
+    assert!(reopened
+        .status
+        .lock()
+        .unwrap()
+        .revoked_device_ids
+        .contains(&revoked));
+}
+
+#[test]
+fn reopened_session_rejects_invalid_revoked_device_cache() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    let path = session.data_dir.join("revoked-devices.json");
+    drop(session);
+    let too_many = serde_json::to_vec(&vec![uuid::Uuid::new_v4().to_string(); 1025]).unwrap();
+    for bytes in [
+        b"not json".to_vec(),
+        vec![b' '; 64 * 1024 + 1],
+        too_many,
+        br#"["not-a-uuid"]"#.to_vec(),
+    ] {
+        std::fs::write(&path, bytes).unwrap();
+        let reopened = open(&fixture, &fixture.binding, &[]);
+        assert!(reopened
+            .status
+            .lock()
+            .unwrap()
+            .revoked_device_ids
+            .is_empty());
+    }
+}
+
+#[test]
+fn reopened_session_prunes_revoked_cached_gateways() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    let revoked = uuid::Uuid::new_v4().to_string();
+    let active = uuid::Uuid::new_v4().to_string();
+    session.persist_gateways(&[
+        gateway(&revoked, true, false),
+        gateway(&active, true, false),
+    ]);
+    std::fs::write(
+        session.data_dir.join("revoked-devices.json"),
+        serde_json::to_vec(&vec![&revoked]).unwrap(),
+    )
+    .unwrap();
+    drop(session);
+    let reopened = open(&fixture, &fixture.binding, &[]);
+    let status = reopened.status.lock().unwrap();
+    assert_eq!(status.gateways.len(), 1);
+    assert_eq!(status.gateways[0].id, active);
+}
+
+#[test]
+fn oversized_revoked_roster_is_applied_without_overwriting_cache() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    let path = session.data_dir.join("revoked-devices.json");
+    std::fs::write(&path, b"[]").unwrap();
+    let mut devices = vec![serde_json::json!({
+        "device_id": fixture.binding.device_id, "role": "device", "revoked": false
+    })];
+    devices.extend((0..1025).map(|_| serde_json::json!({
+        "device_id": uuid::Uuid::new_v4().to_string(), "role": "gateway", "revoked": true
+    })));
+    crate::sync::apply_gateway_refresh(
+        &session,
+        &serde_json::from_value(serde_json::json!({"devices": devices})).unwrap(),
+        &serde_json::from_value(serde_json::json!({"capabilities": []})).unwrap(),
+    );
+    assert_eq!(session.revoked_devices().len(), 1025);
+    assert_eq!(std::fs::read(path).unwrap(), b"[]");
+}
+
+#[test]
+fn later_gateway_refresh_replaces_stored_revocations() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    let old = uuid::Uuid::new_v4().to_string();
+    let current = uuid::Uuid::new_v4().to_string();
+    let capabilities = serde_json::from_value(serde_json::json!({"capabilities": []})).unwrap();
+    for revoked in [&old, &current] {
+        let devices = serde_json::from_value(serde_json::json!({"devices": [
+            {"device_id": fixture.binding.device_id, "role": "device", "revoked": false},
+            {"device_id": revoked, "role": "gateway", "revoked": true}
+        ]}))
+        .unwrap();
+        crate::sync::apply_gateway_refresh(&session, &devices, &capabilities);
+    }
+    drop(session);
+    let reopened = open(&fixture, &fixture.binding, &[]);
+    assert_eq!(reopened.revoked_devices(), [current].into_iter().collect());
+}
+
+#[tokio::test]
+async fn gateway_refresh_applies_devices_when_capabilities_fail() {
+    use axum::{routing::get, Json, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fixture = fixture_at(&format!("http://{}", listener.local_addr().unwrap()));
+    let owner = uuid::Uuid::new_v4().to_string();
+    let roster = serde_json::json!({"devices": [
+        {"device_id": fixture.binding.device_id, "role": "device", "revoked": false},
+        {"device_id": owner, "role": "owner", "kind": "android", "revoked": true}
+    ]});
+    let app = Router::new()
+        .route("/v1/devices", get(move || {
+            let roster = roster.clone();
+            async move { Json(roster) }
+        }))
+        .route("/v1/capabilities", get(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let session = std::sync::Arc::new(open(&fixture, &fixture.binding, &[]));
+    session.client.unlock(&fixture.profile, &fixture.header, PHRASE).unwrap();
+    let owner_dir = tempfile::tempdir().unwrap();
+    let owner_client = Client::open(
+        ClientConfig {
+            database_path: owner_dir.path().join("owner.db"),
+            vault_id: fixture.binding.vault_id.parse().unwrap(),
+            device_id: owner.parse().unwrap(),
+        },
+        DatabaseKey::new(&[3; 32]).unwrap(),
+    ).unwrap();
+    owner_client.unlock(&fixture.profile, &fixture.header, PHRASE).unwrap();
+    owner_client.set_server_compaction_state(true, true).unwrap();
+    owner_client.capture_contact_book(&serde_json::json!({
+        "schema_version": 1,
+        "book": {"id": "revoked-book", "owner_device_id": owner, "generation": "1", "state": "active", "region": "US"},
+        "contacts": []
+    }).to_string()).unwrap();
+    while owner_client.seal_pending_batch(100).unwrap() > 0 {}
+    for (index, envelope) in owner_client.pending_outbox().unwrap().iter().enumerate() {
+        session.client.ingest(envelope, Cursor(index as u64 + 1)).unwrap();
+    }
+    session.client.apply_pending(100).unwrap();
+    session.set_status(|status| status.gateways = vec![gateway(&owner, true, false)]);
+    assert!(crate::sync::refresh_gateways(&session).await.is_err());
+    assert!(session.revoked_devices().contains(&owner));
+    assert!(session.gateways().0.is_empty());
+    assert_eq!(crate::contacts::list_books(&session).unwrap()[0]["sourceRevoked"], true);
+    drop(session);
+    let reopened = open(&fixture, &fixture.binding, &[]);
+    assert_eq!(crate::contacts::list_books(&reopened).unwrap()[0]["sourceRevoked"], true);
+    server.abort();
+}
+
+#[tokio::test]
+async fn older_gateway_refresh_cannot_overwrite_newer_roster() {
+    use axum::{routing::get, Json, Router};
+    use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fixture = fixture_at(&format!("http://{}", listener.local_addr().unwrap()));
+    let peer = uuid::Uuid::new_v4().to_string();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let app = Router::new()
+        .route("/v1/devices", get({
+            let calls = calls.clone();
+            let own = fixture.binding.device_id.clone();
+            let peer = peer.clone();
+            move || {
+                let revoked = calls.fetch_add(1, Ordering::SeqCst) > 0;
+                let own = own.clone();
+                let peer = peer.clone();
+                async move { Json(serde_json::json!({"devices": [
+                    {"device_id": own, "role":"device", "revoked":false},
+                    {"device_id": peer, "role":"gateway", "revoked":revoked}
+                ]})) }
+            }
+        }))
+        .route("/v1/capabilities", get({
+            let entered = entered.clone();
+            let release = release.clone();
+            let calls = Arc::new(AtomicUsize::new(0));
+            move || {
+                let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                let entered = entered.clone();
+                let release = release.clone();
+                async move {
+                    if first {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                    Json(serde_json::json!({"capabilities":[]}))
+                }
+            }
+        }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    let older = tokio::spawn({
+        let session = session.clone();
+        async move { crate::sync::refresh_gateways(&session).await }
+    });
+    entered.notified().await;
+    crate::sync::refresh_gateways(&session).await.unwrap();
+    release.notify_one();
+    older.await.unwrap().unwrap();
+    assert!(session.revoked_devices().contains(&peer));
+    assert!(session.gateways().0.is_empty());
+    server.abort();
+}
+
 pub(crate) fn open_deferred(f: &Fixture, binding: &Binding, epochs: &[u32]) -> Session {
     open_session(f.dir.path(), &f.store, binding, epochs, noop()).unwrap()
 }

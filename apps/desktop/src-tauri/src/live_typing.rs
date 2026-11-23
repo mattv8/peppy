@@ -1104,6 +1104,8 @@ impl TypingActor {
     /// queued under the old incarnation is rejected even when the latest payload matches it.
     fn apply_refresh(&mut self, pending: PendingRefresh) {
         if apply_gateway_status(&self.session, &pending.refresh) {
+            self.session
+                .persist_revoked_devices(&pending.refresh.revoked_device_ids);
             self.session.persist_gateways(&pending.refresh.gateways);
             self.session.notify();
         }
@@ -1513,6 +1515,7 @@ fn apply_gateway_status(session: &Session, refresh: &GatewayRefresh) -> bool {
 /// notification as the actor handler.
 fn apply_gateway_refresh_now(session: &Session, refresh: &GatewayRefresh) {
     if apply_gateway_status(session, refresh) {
+        session.persist_revoked_devices(&refresh.revoked_device_ids);
         session.persist_gateways(&refresh.gateways);
         session.notify();
     }
@@ -3347,6 +3350,49 @@ mod tests {
         let (_, session, _) = session_with_linked_eligible_gateway();
         let status = session.status.lock().unwrap();
         assert!(resolve_typing_target(&status, inputs(&session), ConversationId::new()).is_none());
+    }
+
+    #[tokio::test]
+    async fn coalesced_devices_only_refresh_keeps_pending_capabilities() {
+        use axum::{routing::get, Json, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fixture = crate::tests::fixture_at(&format!("http://{}", listener.local_addr().unwrap()));
+        let peer = uuid::Uuid::new_v4().to_string();
+        let devices = serde_json::json!({"devices": [
+            {"device_id": fixture.binding.device_id, "role": "device", "revoked": false},
+            {"device_id": peer, "role": "gateway", "revoked": false}
+        ]});
+        let capabilities = serde_json::json!({"capabilities": [{
+            "device_id": peer, "simulator": false,
+            "capabilities": {"sims": [{"subscription_id": "sim", "sms": "available", "mms": "unavailable"}]}
+        }]});
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/v1/devices", get(move || {
+                let devices = devices.clone();
+                async move { Json(devices) }
+            }))
+            .route("/v1/capabilities", get(move || {
+                let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                let capabilities = capabilities.clone();
+                async move {
+                    if first {
+                        (axum::http::StatusCode::OK, Json(capabilities))
+                    } else {
+                        (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({})))
+                    }
+                }
+            }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session = Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]));
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        session.live_typing.install(sender);
+        crate::sync::refresh_gateways(&session).await.unwrap();
+        assert!(crate::sync::refresh_gateways(&session).await.is_err());
+        let pending = session.live_typing.take_refresh().unwrap();
+        assert!(pending.superseded);
+        assert!(pending.refresh.gateways.iter().any(|view| view.id == peer && view.supports_sms));
+        server.abort();
     }
 
     #[test]
