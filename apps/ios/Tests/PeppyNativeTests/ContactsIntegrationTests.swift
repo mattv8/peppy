@@ -248,7 +248,7 @@ func sampleContacts(_ count: Int) -> [PlatformContact] {
         #expect(try client.contactBookSelection() == .owned(bookId: bookId))
     }
 
-    @Test func inheritedSelectionRetiresTheSupersededMintOnlyAfterItsFullScopeRemoval() async throws {
+    @Test func inheritedSelectionRetiresTheSupersededMintAfterTheTakeoverScan() async throws {
         let server = try FakeServer(passphrase: passphrase)
         let hint = Data(repeating: 3, count: 32)
         let predecessorId = UUID().uuidString.lowercased()
@@ -272,7 +272,7 @@ func sampleContacts(_ count: Int) -> [PlatformContact] {
         try successor.observeServerHighWater(highWaterCursor: "0")
         _ = try await ForegroundSync(client: successor, server: serverClient(server), vaultId: server.vaultId).run()
         let successorProvider = WritableFakeProvider()
-        await successorProvider.configure { $0.book = sampleContacts(1) }
+        await successorProvider.configure { $0.book = sampleContacts(12) }
         let successorCoordinator = NativeContactsCoordinator(
             client: successor, deviceId: successorId, provider: successorProvider,
             preferences: InMemoryContactsPreferences(ContactsPreferences(enabled: true))
@@ -286,7 +286,37 @@ func sampleContacts(_ count: Int) -> [PlatformContact] {
         let report = try await successorCoordinator.run(reason: .foreground, isCancelled: { false })
         #expect(report.bookId == inheritedBookId && report.authoritative)
         let books = try NativeContactsCoordinator.object(successor.listContactBooksJson())["books"] as? [[String: Any]] ?? []
-        #expect(books.first { $0["id"] as? String == supersededBookId }?["state"] as? String == "retired")
+        let old = try #require(books.first { $0["id"] as? String == supersededBookId })
+        #expect(old["state"] as? String == "retired")
+        #expect(old["superseded_by"] as? String == inheritedBookId)
+        #expect(old["contact_count"] as? Int == 0)
+        let requests = try NativeContactsCoordinator.object(successor.listContactRequestsJson(input: NativeContactsCoordinator.json(["book_id": supersededBookId])))
+        #expect(!(requests["requests"] as? [[String: Any]] ?? []).contains { $0["kind"] as? String == "scan_deletions" })
+        #expect(try successor.contactBookSelection() == .owned(bookId: inheritedBookId))
+        #expect(try await successorCoordinator.run(reason: .foreground, isCancelled: { false }).bookId == inheritedBookId)
+    }
+
+    @Test func selectionResolverReselectsMissingOwnedBook() throws {
+        let existing = NativeContactsCoordinator.OwnedBook(id: "existing", generation: "1")
+        var selections: [NativeContactBookSelection] = [.owned(bookId: "gone"), .owned(bookId: "existing")]
+        let result = try NativeContactsCoordinator.resolveSelection(select: { selections.removeFirst() }, book: { $0 == "existing" ? existing : nil })
+        guard case let .selected(book, id, inherited) = result else { Issue.record("expected existing book"); return }
+        #expect(book == existing && id == "existing" && !inherited)
+    }
+
+    @Test func selectionResolverDoesNotMintForMissingOwnedBook() throws {
+        var calls = 0
+        let result = try NativeContactsCoordinator.resolveSelection(select: { calls += 1; return .owned(bookId: "gone") }, book: { _ in nil })
+        guard case .unavailable = result else { Issue.record("expected unavailable"); return }
+        #expect(calls == 2)
+    }
+
+    @Test func selectionResolverMintsOrWaits() throws {
+        let minted = try NativeContactsCoordinator.resolveSelection(select: { .mint }, book: { _ in nil })
+        guard case let .selected(book, id, inherited) = minted else { Issue.record("expected mint"); return }
+        #expect(book == nil && UUID(uuidString: id) != nil && !inherited)
+        let waiting = try NativeContactsCoordinator.resolveSelection(select: { .wait }, book: { _ in nil })
+        guard case .wait = waiting else { Issue.record("expected wait"); return }
     }
 
     @Test func inactiveCompactionRosterPausesRetentionButDoesNotBlockContacts() async throws {

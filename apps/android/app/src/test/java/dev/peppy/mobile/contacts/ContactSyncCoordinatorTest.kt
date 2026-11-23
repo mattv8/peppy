@@ -31,6 +31,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeContactBookSelection
 
@@ -204,13 +205,29 @@ class ContactSyncCoordinatorTest : GatewayTestBase() {
         assertEquals(1, JSONObject(gateway.listContactBooksJson()).getJSONArray("books").length())
     }
 
-    @Test fun contactBookSelectionInheritedRemovesOldBookMembersBeforeRetiring() {
+    @Test fun contactBookSelectionInheritedLeavesTheOldBookToCore() {
         val (gateway, oldBookId) = setUpBook()
         repeat(9) { index -> os.add((index + 3).toLong(), "Old Contact $index", "+12025550${(200 + index).toString().padStart(3, '0')}") }
         assertTrue(coordinator(gateway).run(charging = false, forceFull = true).scanComplete)
         val inheritedBookId = UUID.randomUUID().toString()
-        val core = SelectingCore(NativeContactCore(gateway)) {
+        val selected = SelectingCore(NativeContactCore(gateway)) {
             NativeContactBookSelection.Inherited(inheritedBookId, listOf(oldBookId))
+        }
+        val calls = mutableListOf<String>()
+        val scans = mutableListOf<String>()
+        val core = object : ContactCore by selected {
+            override fun retireSupersededContactBooks(): JSONObject {
+                calls.add("retire")
+                return selected.retireSupersededContactBooks()
+            }
+            override fun contactBookSelection(): NativeContactBookSelection {
+                calls.add("select")
+                return selected.contactBookSelection()
+            }
+            override fun beginScan(input: JSONObject): JSONObject {
+                scans.add(input.getString("book_id"))
+                return selected.beginScan(input)
+            }
         }
 
         val report = coordinator(core).run(charging = false)
@@ -222,14 +239,20 @@ class ContactSyncCoordinatorTest : GatewayTestBase() {
         assertEquals("active", oldBook.getString("state"))
         val holds = JSONObject(gateway.listContactRequestsJson(JSONObject().put("book_id", oldBookId).toString()))
             .getJSONArray("requests")
-        val hold = (0 until holds.length()).map { holds.getJSONObject(it) }.single { it.getString("kind") == "scan_deletions" }
-        gateway.contactApprovalJson(JSONObject().put("scan_id", hold.getString("scan_id")).put("approve", true).toString())
+        assertEquals(11, view(gateway, oldBookId).length())
+        assertTrue((0 until holds.length()).none { holds.getJSONObject(it).optString("kind") == "scan_deletions" })
+        assertFalse(scans.contains(oldBookId))
+        assertEquals(listOf("retire", "select", "retire"), calls)
+    }
 
+    @Test fun retirementFailureDoesNotStopThePass() {
+        val gateway = enrollAndUnlock()
+        gateway.setServerCompactionState(true, true)
+        val selected = SelectingCore(NativeContactCore(gateway)) { NativeContactBookSelection.Mint }
+        val core = object : ContactCore by selected {
+            override fun retireSupersededContactBooks(): JSONObject = throw MobileBindingsException.InvalidRequest()
+        }
         assertTrue(coordinator(core).run(charging = false).scanComplete)
-        val retiredBooks = JSONObject(gateway.listContactBooksJson()).getJSONArray("books")
-        val retiredBook = (0 until retiredBooks.length()).map { retiredBooks.getJSONObject(it) }
-            .single { it.getString("id") == oldBookId }
-        assertEquals("retired", retiredBook.getString("state"))
     }
 
     @Test fun remotePendingRequestRunsFreshNoChangeFullScanAndCompletes() {

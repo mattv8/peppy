@@ -5,6 +5,7 @@ import android.provider.ContactsContract.CommonDataKinds.Nickname
 import android.provider.ContactsContract.CommonDataKinds.Note
 import android.provider.ContactsContract.CommonDataKinds.Organization
 import android.provider.ContactsContract.CommonDataKinds.StructuredName
+import android.util.Log
 import dev.peppy.mobile.contacts.AndroidContactsProvider.Contact
 import dev.peppy.mobile.contacts.AndroidContactsProvider.Failure
 import dev.peppy.mobile.contacts.AndroidContactsProvider.Field
@@ -97,6 +98,7 @@ internal class ContactSyncCoordinator(
 
     fun run(charging: Boolean, forceFull: Boolean = false): ContactPassReport {
         recoverPhotoScratch()
+        retireSupersededBooks()
         val selection = core.contactBookSelection()
         if (selection is NativeContactBookSelection.Wait) {
             return ContactPassReport(ContactPassReport.Outcome.WAITING)
@@ -129,7 +131,7 @@ internal class ContactSyncCoordinator(
         }
         report = processRequests(book, bookId, defaultAccountId, report)
         if (inherited != null && report.scanComplete) {
-            inherited.retireBookIds.forEach(::retireAfterFullScopeRemoval)
+            retireSupersededBooks()
         }
         // A request received after this scan began remains waiting for the next full scan. Keep a
         // bounded gateway pass queued, but do not replace the associated scan on every pass.
@@ -829,7 +831,7 @@ internal class ContactSyncCoordinator(
         return retireBook(book.id)
     }
 
-    /** Retires an obsolete local book only after the inherited book's authoritative full scan. */
+    /** Retires the selected owned book without deleting OS contacts. */
     private fun retireBook(bookId: String): Boolean {
         val book = ownedBook(bookId) ?: return false
         val body = bookBody(book.id, book.generation, ContactsAccess(read = false, write = false), isNew = false, state = "retired")
@@ -837,20 +839,16 @@ internal class ContactSyncCoordinator(
         return true
     }
 
-    /** Removes a superseded book's members under the normal authoritative full-scan policy first. */
-    private fun retireAfterFullScopeRemoval(bookId: String): Boolean {
-        val book = ownedBook(bookId) ?: return true
-        val scanId = UUID.randomUUID().toString()
-        core.beginScan(
-            JSONObject().put("schema_version", 1).put("scan_id", scanId).put("book_id", book.id)
-                .put("generation", book.generation).put("access", "full").put("authoritative", true),
-        )
-        val finished = finish(scanId, complete = true)
-        if (finished.optInt("held") > 0 || finished.optString("state") == "awaiting_approval") return false
-        return retireBook(bookId)
+    private fun retireSupersededBooks() {
+        try {
+            core.retireSupersededContactBooks()
+        } catch (_: MobileBindingsException) {
+            runCatching { Log.w(TAG, "Contact book retirement failed") }
+        }
     }
 
     companion object {
+        private const val TAG = "ContactSyncCoordinator"
         const val BATCH = 200
         const val PAGE = 200
         const val PASS_CONTACTS = 600
