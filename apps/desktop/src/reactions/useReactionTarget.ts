@@ -100,9 +100,14 @@ export function useReactionTarget(
     if (!enabled || !content) return undefined;
     const isInside = (node: EventTarget | null) => node instanceof Node && (content.contains(node) || Boolean(barRef.current?.contains(node)));
     let pointerType = "mouse";
+    let modality: "pointer" | "keyboard" | undefined;
     let swallowClick = false;
     let pressedArticle: HTMLElement | null = null;
 
+    const onDocumentPointerDown = () => { modality = "pointer"; };
+    const onDocumentKeyDown = (event: KeyboardEvent) => {
+      if (!["Meta", "Control", "Alt", "Shift", "CapsLock", "Fn"].includes(event.key)) modality = "keyboard";
+    };
     const onPointerOver = (event: PointerEvent) => {
       pointerType = event.pointerType;
       if (event.pointerType === "touch") return;
@@ -159,8 +164,9 @@ export function useReactionTarget(
       }
       const article = reactableOf(event.target);
       if (!article || !content.contains(article)) return;
-      // A screen-reader activation is a click with detail 0: open the bar and move focus into it.
+      // A screen-reader activation on plain text opens the bar and moves focus into it.
       if (event.detail === 0) {
+        if ((event.target as Element).closest(TEXT_CONTROL)) return;
         reveal(article, "keyboard");
         return;
       }
@@ -169,9 +175,11 @@ export function useReactionTarget(
       }
     };
     const onFocusIn = (event: FocusEvent) => {
-      if (restoring.current) return;
+      if (restoring.current || modality === "pointer") return;
       const article = reactableOf(event.target);
       if (!article || !content.contains(article)) return;
+      const control = event.target instanceof Element ? event.target.closest(TEXT_CONTROL) : null;
+      if (control && control !== article && article.contains(control)) return;
       if (current.current?.origin === "keyboard" && current.current.article === article) return;
       reveal(article, "focus");
     };
@@ -192,6 +200,8 @@ export function useReactionTarget(
       }
     };
 
+    document.addEventListener("pointerdown", onDocumentPointerDown, true);
+    document.addEventListener("keydown", onDocumentKeyDown, true);
     content.addEventListener("pointerover", onPointerOver);
     content.addEventListener("pointerout", onPointerOut);
     content.addEventListener("pointerdown", onPointerDown);
@@ -203,6 +213,8 @@ export function useReactionTarget(
     content.addEventListener("keydown", onKeyDown);
     content.addEventListener("scroll", onScroll);
     return () => {
+      document.removeEventListener("pointerdown", onDocumentPointerDown, true);
+      document.removeEventListener("keydown", onDocumentKeyDown, true);
       content.removeEventListener("pointerover", onPointerOver);
       content.removeEventListener("pointerout", onPointerOut);
       content.removeEventListener("pointerdown", onPointerDown);
