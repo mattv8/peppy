@@ -109,6 +109,7 @@ import {
 } from "./bridge/bridge";
 import { useMaximizeButtonRegion } from "./shell/useMaximizeButtonRegion";
 import { dismissibleNotifications, notificationAppName, notificationMuteKey, notificationSourceName, NotificationsView, notificationTuple, visibleNotifications } from "./notifications/Notifications";
+import type { NotificationActionNotice as NotificationActionNoticeState } from "./notifications/NotificationActionNotice";
 import { useNotificationSearch } from "./notifications/useNotificationSearch";
 import { useScopedSearch } from "./search/useScopedSearch";
 import { NotificationMuteNotice, type NotificationMuteNotice as NotificationMuteNoticeState } from "./notifications/NotificationMuteNotice";
@@ -2634,7 +2635,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   const noticeActionOwnedFocusRef = useRef(false);
   const noticeActionBusyRef = useRef(false);
   const [noticeActionBusy, setNoticeActionBusy] = useState(false);
-  const [notificationActionNotice, setNotificationActionNotice] = useState("");
+  const [notificationActionNotice, setNotificationActionNotice] = useState<NotificationActionNoticeState | undefined>();
   const [notificationMuteNotice, setNotificationMuteNotice] = useState<NotificationMuteNoticeState>();
   const [notificationMutePending, setNotificationMutePending] = useState(false);
   const notificationMutePendingRef = useRef(false);
@@ -3828,7 +3829,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
         await refresh();
         if (!await valid()) return;
         setContactTarget(undefined);
-        setNotificationActionNotice("");
+        setNotificationActionNotice(undefined);
         setNotice("");
         flushSync(() => {
           setActiveViewNow("notifications");
@@ -3846,7 +3847,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       navigationGeneration.current += 1;
       loadSequence.current += 1;
       setContactTarget(undefined);
-      setNotificationActionNotice("");
+      setNotificationActionNotice(undefined);
       if (destination.kind !== "conversation") return;
       // A merged-away notification target opens its survivor, with the draft moved along.
       const redirect = state.requestedRedirect?.from === conversationId ? state.requestedRedirect : undefined;
@@ -3916,6 +3917,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   }, [activeView]);
   useEffect(() => {
     if (activeView === "notifications") return;
+    setNotificationActionNotice(undefined);
     notificationFocusContext.current = undefined;
     setNotificationFocus(undefined);
     setNotificationAppFilter(null);
@@ -3924,14 +3926,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   const notificationFocusResult = (requestId: string, found: boolean) => {
     const pending = notificationFocusContext.current;
     if (pending?.requestId !== requestId) {
-      if (!found && requestId.startsWith("omni-")) setNotificationActionNotice("This notification is no longer available.");
+      if (!found && requestId.startsWith("omni-")) setNotificationActionNotice({ kind: "info", message: "This notification is no longer available." });
       return;
     }
     if (pending.reported) return;
     pending.reported = true;
     void (async () => {
       if (!await pending.context.validate()) return;
-      if (!found) setNotificationActionNotice("This notification is no longer available.");
+      if (!found) setNotificationActionNotice({ kind: "info", message: "This notification is no longer available." });
       await pending.context.complete();
     })().catch(reportAction("Could not open notification: "));
   };
@@ -5550,7 +5552,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     onOpenHit: target => navigateNotificationSearch(target),
     onShowAll: query => navigateNotificationSearch(undefined, query),
     onUnavailable: () => {
-      setNotificationActionNotice("This notification is no longer available.");
+      setNotificationActionNotice({ kind: "info", message: "This notification is no longer available." });
       navigateNotificationSearch(undefined);
     },
   });
@@ -6472,10 +6474,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     setNotificationQuery("");
     dismissingNotificationsRef.current = true;
     setDismissingNotifications(true);
-    setNotificationActionNotice("");
+    setNotificationActionNotice(undefined);
     void bridge.dismiss_all_notifications()
       .then(() => refresh())
-      .catch(error => setNotificationActionNotice(`Could not dismiss notifications. ${errorText(error)}`))
+      .catch(error => setNotificationActionNotice({ kind: "error", message: `Could not dismiss notifications. ${errorText(error)}` }))
       .finally(() => {
         dismissingNotificationsRef.current = false;
         setDismissingNotifications(false);
@@ -6786,7 +6788,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
             onConfirm={() => void requestSenderUnblock(senderUnblockConfirmation.id, senderUnblockConfirmation.name, senderUnblockConfirmation.trigger)}
             onCancel={() => setSenderUnblockConfirmation(undefined)}
           />}
-          {notificationsOpen && notificationActionNotice && <p id="notifications-action-notice" role="status">{notificationActionNotice}</p>}
           <NotificationMuteNotice
             notice={notificationMuteNotice}
             pending={notificationMutePending}
@@ -6877,6 +6878,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
              />
           ) : notificationsOpen ? (
             <NotificationsView
+              actionNotice={notificationActionNotice}
+              onDismissActionNotice={() => setNotificationActionNotice(undefined)}
               focusRequest={notificationFocus}
               onFocusResult={notificationFocusResult}
               notifications={snapshot?.notifications ?? []}
@@ -6887,12 +6890,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
               writesPaused={isWritesPaused(snapshot)}
               dismissAll={{ label: dismissibleNotificationsCount > 100 ? "Dismiss up to 100" : "Dismiss all", disabled: !dismissibleNotificationsCount || dismissingNotifications, onDismissAll: dismissAllNotifications }}
               onDismiss={target => {
-                setNotificationActionNotice("");
-                void bridge.dismiss_notification(target).then(() => refresh()).catch(error => setNotificationActionNotice(`Could not dismiss notification. ${errorText(error)}`));
+                setNotificationActionNotice(undefined);
+                void bridge.dismiss_notification(target).then(() => refresh()).catch(error => setNotificationActionNotice({ kind: "error", message: `Could not dismiss notification. ${errorText(error)}` }));
               }}
               onMute={filter => {
                 if (notificationsLocked || appLock?.locked || notificationMutePendingRef.current) return;
-                setNotificationActionNotice("");
+                setNotificationActionNotice(undefined);
                 const visible = visibleNotifications(snapshot?.notifications ?? [], snapshot?.appFilters ?? [], notificationsLocked);
                 const sourceIds = [...new Set(visible.map(notification => notification.target.sourceDeviceId))];
                 const label = sourceIds.length > 1
@@ -6903,7 +6906,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
               onCopyOneTimeCode={copyOneTimeCode}
               onSeen={targets => {
                 return bridge.mark_notifications_seen(targets).then(() => refresh()).catch(error => {
-                  setNotificationActionNotice(errorText(error));
+                  setNotificationActionNotice({ kind: "error", message: `Could not mark notifications as seen. ${errorText(error)}` });
                   throw error;
                 });
               }}
@@ -6916,7 +6919,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
                 let failure: unknown;
                 dismissingNotificationsRef.current = true;
                 setDismissingNotifications(true);
-                setNotificationActionNotice("");
+                setNotificationActionNotice(undefined);
                 try {
                   for (const target of pinnedTargets) {
                     await bridge.dismiss_notification(target);
@@ -6929,7 +6932,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
                   dismissingNotificationsRef.current = false;
                   setDismissingNotifications(false);
                 }
-                if (failure) setNotificationActionNotice(`Dismissed ${dismissed} of ${pinnedTargets.length}. ${errorText(failure)}`);
+                if (failure) setNotificationActionNotice({ kind: "error", message: `Dismissed ${dismissed} of ${pinnedTargets.length}. ${errorText(failure)}` });
               }}
               query={notificationQuery}
               onClearQuery={() => setNotificationQuery("")}
