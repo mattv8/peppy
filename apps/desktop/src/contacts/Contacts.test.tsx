@@ -819,7 +819,7 @@ describe("ContactsView", () => {
 
       render(<ContactsView />);
       await screen.findAllByText("Pixel 8");
-      expect(bridge.list_contacts_page).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenCalledTimes(1));
 
       fireEvent.click(screen.getByLabelText("New contact"));
 
