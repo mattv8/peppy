@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 export const TOAST_DISMISS_MS = 4000;
 
-export function useNoticeDismissal(notice: { kind: "success" | "error" } | undefined, onDismiss: () => void) {
+export function useNoticeDismissal(notice: { kind: "success" | "info" | "error" } | undefined, onDismiss: () => void) {
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const toastRef = useRef<HTMLDivElement>(null);
@@ -15,7 +15,7 @@ export function useNoticeDismissal(notice: { kind: "success" | "error" } | undef
   }, [notice]);
 
   useEffect(() => {
-    if (!notice || notice.kind !== "success" || hovered || focused) return;
+    if (!notice || notice.kind === "error" || hovered || focused) return;
     const timeout = window.setTimeout(() => onDismissRef.current(), TOAST_DISMISS_MS);
     return () => window.clearTimeout(timeout);
   }, [focused, hovered, notice]);
