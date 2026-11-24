@@ -1057,6 +1057,7 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
         conversations: vec![],
         notifications: vec![],
         app_filters: vec![],
+        notification_dismissal_blocks: vec![],
         notification_preferences: NotificationPreferences::default(),
         active_conversation_id: None,
         requested_redirect: None,

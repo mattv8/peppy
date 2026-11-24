@@ -25,6 +25,8 @@ pub mod images;
 pub mod mms_plan;
 pub mod notification_activation;
 pub use notification_activation::*;
+pub mod notification_dismissal;
+pub use notification_dismissal::{NotificationDismissalBlock, NotificationDismissalBlockReason};
 pub mod launch_progress;
 pub use launch_progress::*;
 pub mod quick_reply;
@@ -61,6 +63,8 @@ pub struct Snapshot {
     pub conversations: Vec<ConversationView>,
     pub notifications: Vec<MirroredNotification>,
     pub app_filters: Vec<AppFilter>,
+    /// Phones that cannot currently record dismissals. Empty while locked.
+    pub notification_dismissal_blocks: Vec<NotificationDismissalBlock>,
     pub notification_preferences: NotificationPreferences,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_conversation_id: Option<String>,

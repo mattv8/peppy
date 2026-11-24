@@ -734,6 +734,11 @@ impl BrowserCore {
             conversations: views,
             notifications: notices.notifications,
             app_filters: notices.app_filters,
+            notification_dismissal_blocks: notices
+                .dismissal_blocks
+                .into_iter()
+                .map(dto::NotificationDismissalBlock::from)
+                .collect(),
             notification_preferences: client
                 .notification_preferences()
                 .map_err(core)?
