@@ -192,6 +192,7 @@ jobs:
       - run: corepack enable && pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm audit --prod
       - run: python3 infra/audit/check-advisory-exceptions.py
+      - run: python3 infra/audit/test-check-advisory-exceptions.py
       - run: |
           scan=$(mktemp -d)
           trap 'rm -rf "$scan"' EXIT
@@ -248,6 +249,10 @@ jobs:
       - run: cargo run --locked -p peppy-protocol --bin generate-contracts -- --check
       - run: cargo run --locked -p peppy-desktop-api --bin generate-search-contracts -- --check
       - run: cargo run --locked -p peppy-desktop-api --bin generate-attachment-retention-contracts -- --check
+      - run: cargo run --locked -p peppy-desktop-api --bin generate-account-access-contracts -- --check
+      - run: cargo run --locked -p peppy-desktop-api --bin generate-rcs-status-contracts -- --check
+      - run: cargo run --locked -p peppy-desktop-api --bin generate-launch-progress-contracts -- --check
+      - run: cargo run --locked -p peppy-desktop-api --bin generate-notification-activation-contracts -- --check
       - run: cargo run --locked -p peppy-hosted-api --bin export-web-schema -- --check
       - run: cargo run --locked -p peppy-hosted-api --bin generate-mcp-contracts -- --check
       - run: cargo install cargo-deny --version 0.20.2 --locked
