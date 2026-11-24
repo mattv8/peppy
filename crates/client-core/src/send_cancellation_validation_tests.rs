@@ -499,102 +499,109 @@ fn wrong_executor_and_unbound_confirmations_never_confirm_or_hide_a_message() {
 
 #[test]
 fn only_the_designated_gateway_sent_status_blocks_a_cancellation_request() {
-    for designated_producer in [false, true] {
-        let fixture = Fixture::new();
-        let gateway = DeviceId::new();
-        let producer = if designated_producer {
-            gateway
-        } else {
-            DeviceId::new()
-        };
-        let queued = fixture
-            .client
-            .queue_send(
-                OutgoingSms {
-                    conversation_id: ConversationId::new(),
-                    recipients: vec!["+15555550100".into()],
-                    body: "executor-bound cancellation eligibility".into(),
-                },
-                GatewayRoute::Carrier {
-                    gateway_device_id: gateway,
-                    subscription_id: "sim-1".into(),
-                },
-            )
-            .unwrap();
-        let capability = fixture.event(
-            gateway,
-            1,
-            PrivatePayload::SendCancellationCapability { supported: true },
-        );
-        let report = fixture.apply(&capability, 1);
-        assert_eq!(report.applied, 1);
-        assert_eq!(report.quarantined, 0);
+    // Regression for review exception E4.
+    for state in [
+        SendState::SubmittedToOs,
+        SendState::Sent,
+        SendState::Delivered,
+    ] {
+        for designated_producer in [false, true] {
+            let fixture = Fixture::new();
+            let gateway = DeviceId::new();
+            let producer = if designated_producer {
+                gateway
+            } else {
+                DeviceId::new()
+            };
+            let queued = fixture
+                .client
+                .queue_send(
+                    OutgoingSms {
+                        conversation_id: ConversationId::new(),
+                        recipients: vec!["+15555550100".into()],
+                        body: "executor-bound cancellation eligibility".into(),
+                    },
+                    GatewayRoute::Carrier {
+                        gateway_device_id: gateway,
+                        subscription_id: "sim-1".into(),
+                    },
+                )
+                .unwrap();
+            let capability = fixture.event(
+                gateway,
+                1,
+                PrivatePayload::SendCancellationCapability { supported: true },
+            );
+            let report = fixture.apply(&capability, 1);
+            assert_eq!(report.applied, 1);
+            assert_eq!(report.quarantined, 0);
 
-        let status = fixture.event(
-            producer,
-            2,
-            PrivatePayload::SendStatus {
-                command_id: queued.command_id,
-                state: SendState::Sent,
-                at_ms: Some(1_725_363_180_000),
-                reason: None,
-            },
-        );
-        let report = fixture.apply(&status, 2);
-        assert_eq!(report.applied, 1);
-        assert_eq!(report.quarantined, 0);
-        {
-            let store = fixture.client.lock().unwrap();
-            let status_exists: bool = store
+            let status = fixture.event(
+                producer,
+                2,
+                PrivatePayload::SendStatus {
+                    command_id: queued.command_id,
+                    state,
+                    at_ms: Some(1_725_363_180_000),
+                    reason: None,
+                },
+            );
+            let report = fixture.apply(&status, 2);
+            assert_eq!(report.applied, 1);
+            assert_eq!(report.quarantined, 0);
+            {
+                let store = fixture.client.lock().unwrap();
+                let status_exists: bool = store
                 .conn
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM send_status WHERE command_id=? AND producer_device_id=? AND state='sent')",
-                    params![queued.command_id.to_string(), producer.to_string()],
+                    "SELECT EXISTS(SELECT 1 FROM send_status WHERE command_id=? AND producer_device_id=? AND state=?)",
+                    params![queued.command_id.to_string(), producer.to_string(), state_code(state)],
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert!(
-                status_exists,
-                "the producer filter must see a stored Sent row"
+                assert!(
+                    status_exists,
+                    "the producer filter must see the stored status"
+                );
+            }
+
+            let view = fixture
+                .client
+                .message_send_cancellation(queued.message_id)
+                .unwrap();
+            assert_eq!(view.state, SendCancellationState::None);
+            assert_eq!(view.can_request, !designated_producer);
+            assert!(!view.requires_gateway_update);
+            let outbox_before = fixture.client.pending_outbox().unwrap().len();
+            let requested = fixture
+                .client
+                .request_send_cancellation(queued.message_id)
+                .unwrap();
+            let expected_state = if designated_producer {
+                SendCancellationState::TooLate
+            } else {
+                SendCancellationState::Requested
+            };
+            assert_eq!(requested.state, expected_state);
+            assert!(!requested.can_request);
+            assert_eq!(
+                fixture.client.pending_outbox().unwrap().len(),
+                outbox_before + usize::from(!designated_producer)
+            );
+            let store = fixture.client.lock().unwrap();
+            let persisted_state: Option<String> = store
+                .conn
+                .query_row(
+                    "SELECT state FROM send_cancellations WHERE message_id=?",
+                    [queued.message_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap();
+            assert_eq!(
+                persisted_state,
+                (!designated_producer).then(|| "requested".to_string())
             );
         }
-
-        let view = fixture
-            .client
-            .message_send_cancellation(queued.message_id)
-            .unwrap();
-        assert_eq!(view.state, SendCancellationState::None);
-        assert_eq!(view.can_request, !designated_producer);
-        assert!(!view.requires_gateway_update);
-        let outbox_before = fixture.client.pending_outbox().unwrap().len();
-        let requested = fixture
-            .client
-            .request_send_cancellation(queued.message_id)
-            .unwrap();
-        let expected_state = if designated_producer {
-            SendCancellationState::TooLate
-        } else {
-            SendCancellationState::Requested
-        };
-        assert_eq!(requested.state, expected_state);
-        assert!(!requested.can_request);
-        assert_eq!(
-            fixture.client.pending_outbox().unwrap().len(),
-            outbox_before + usize::from(!designated_producer)
-        );
-        let store = fixture.client.lock().unwrap();
-        let persisted_state: Option<String> = store
-            .conn
-            .query_row(
-                "SELECT state FROM send_cancellations WHERE message_id=?",
-                [queued.message_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()
-            .unwrap();
-        assert_eq!(
-            persisted_state,
-            (!designated_producer).then(|| "requested".to_string())
-        );
     }
 }

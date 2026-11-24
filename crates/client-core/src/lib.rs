@@ -9535,7 +9535,7 @@ fn cancellation_request_eligible(conn: &Connection, command_id: CommandId) -> Re
         Some(SendState::SubmittedToOs | SendState::Sent | SendState::Delivered)
     );
     let remotely_submitted: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM send_status s JOIN commands c ON c.command_id=s.command_id WHERE s.command_id=? AND s.producer_device_id=c.gateway_device_id AND s.state IN ('submitted','sent','delivered'))",
+        "SELECT EXISTS(SELECT 1 FROM send_status s JOIN commands c ON c.command_id=s.command_id WHERE s.command_id=? AND s.producer_device_id=c.gateway_device_id AND s.state IN ('submitted_to_os','sent','delivered'))",
         [command_id.to_string()],
         |row| row.get(0),
     )?;
