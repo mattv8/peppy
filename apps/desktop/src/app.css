@@ -187,8 +187,11 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .notif-inline-action:focus-visible, .notif-dismiss-btn:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
 .notif-row:hover .notif-row-actions, .notif-row:focus-within .notif-row-actions, .notification-stack-header:hover .notif-inline-action, .notification-stack-header:hover .notif-stack-dismiss-btn, .notification-stack-header:focus-within .notif-inline-action, .notification-stack-header:focus-within .notif-stack-dismiss-btn { opacity: 1; }
 .notif-dismiss-btn:hover { background: var(--peppy-surface-active); }
-[data-dismiss-state="pending"] .notif-app-icon, [data-dismiss-state="pending"] .notif-app-icon-fallback, [data-dismiss-state="pending"] .notif-row-actions button { opacity: .4; }
-.notif-pending { display: inline-flex; align-items: center; gap: 4px; color: var(--peppy-warning-text); font-size: 12px; overflow-wrap: anywhere; }
+[data-dismiss-state="pending"] .notif-app-icon, [data-dismiss-state="pending"] .notif-app-icon-fallback { opacity: .4; }
+.notif-row-status { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; color: var(--peppy-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.notif-row-status > svg { flex: 0 0 auto; }
+.notif-row-status[data-row-status="failed"] { color: var(--peppy-error-text); }
+.notif-row-retry { min-height: 24px; padding: 0 8px; font-size: 12px; }
 .notif-phone-badge { padding: 1px 5px; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-radius-pill); color: var(--peppy-text-secondary); font-size: 11px; }
 .notification-stack { margin: 8px 12px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-md); overflow: hidden; }
 .notification-stack-header { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 8px; background: var(--peppy-surface-widget); }
@@ -216,7 +219,60 @@ mark { background: var(--peppy-warning-surface); color: var(--peppy-text-primary
   }
 }
 @media (forced-colors: active) { .notification-count-badge, .notification-filter-chips button[aria-pressed="true"], .notification-arrangement button[aria-pressed="true"] { border: 2px solid Highlight; color: CanvasText; background: Canvas; font-weight: 700; } .notif-row[data-read-state="unread"], .notif-row[data-read-state="unread"]:hover { border-left: 3px solid Highlight; padding-left: 13px; } .notif-row-actions { background: Canvas; } mark { color: HighlightText; background: Highlight; } .notification-arrangement button[aria-pressed="true"] { border: 0; outline: 2px solid Highlight; outline-offset: -2px; font-weight: 400; } }
-@media (prefers-reduced-motion: reduce) { .notif-row-actions, .notif-inline-action, .notif-stack-dismiss-btn { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .notif-row-actions, .notif-inline-action, .notif-stack-dismiss-btn { transition: none; } .notification-pending-chevron, .notification-phone-blocker-chevron { transition: none; } }
+
+/* Waiting for phone: toolbar control, blocked-phone banners, and locked groups */
+#notifications-pending-count { display: inline-flex; align-items: center; gap: 2px; min-width: 0; margin-left: auto; }
+#notifications-pending-count + .notification-arrangement { margin-left: 0; }
+.notification-pending-toggle { display: inline-flex; align-items: center; gap: 4px; min-width: 0; height: 24px; padding: 0 6px; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: var(--peppy-text-secondary); font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.notification-pending-toggle:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+.notification-pending-toggle:focus-visible, .notification-phone-blocker-toggle:focus-visible, .notif-row-retry:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
+.notification-pending-chevron, .notification-phone-blocker-chevron { flex: 0 0 auto; transition: transform var(--peppy-duration-fast) var(--peppy-ease-out); }
+.notification-pending-chevron[data-expanded], .notification-phone-blocker-chevron[data-expanded] { transform: rotate(180deg); }
+.notification-pending-toggle[aria-expanded="true"] { color: var(--peppy-text-primary); }
+.notification-phone-blockers { display: grid; }
+.notification-phone-blocker-text { flex-direction: column; gap: 2px; }
+.notification-phone-blocker-title { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.notification-phone-blocker-title .info-button { width: 24px; height: 24px; margin-block: -4px; }
+.notification-phone-blocker-text time, .notification-phone-blocker-meta { color: var(--peppy-text-secondary); }
+.notification-phone-blocker-toggle { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; font-size: 12px; }
+.notification-phone-blocker-group { flex-wrap: wrap; }
+.notification-phone-blocker-list { display: grid; flex: 0 0 100%; max-height: 190px; margin: 4px 0 0; padding: 0; overflow-y: auto; list-style: none; }
+.notification-phone-blocker-list[hidden] { display: none; }
+.notification-phone-blocker-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 8px; padding: 6px 0; border-top: 1px solid var(--peppy-border); }
+.notification-phone-blocker-item > svg { margin-top: 2px; }
+.notification-phone-blocker-item-text { display: grid; gap: 2px; min-width: 0; }
+.notification-phone-blocker-item-text > span { overflow-wrap: anywhere; }
+.notification-phone-blocker-meta { display: flex; flex-wrap: wrap; gap: 8px; }
+.notification-waiting-groups { display: grid; }
+.notification-hidden-group { border-bottom: 1px solid var(--peppy-border); background: var(--peppy-surface-widget); }
+.notification-hidden-group-header { display: flex; align-items: flex-start; gap: 8px; padding: 8px 12px 4px; color: var(--peppy-text-secondary); font-size: 12px; }
+.notification-hidden-group-header > svg { flex: 0 0 auto; margin-top: 2px; }
+.notification-hidden-group-header > div { display: grid; gap: 2px; min-width: 0; }
+.notification-hidden-group-header strong { color: var(--peppy-text-strong); font-weight: 600; }
+.notification-hidden-list { margin: 0; padding: 0; list-style: none; }
+.notification-hidden-list > li { position: relative; }
+.notification-hidden-list > li + li::before { position: absolute; z-index: 1; top: 0; right: 0; left: 58px; height: 1px; background: var(--peppy-border-strong); content: ""; pointer-events: none; }
+.notification-hidden-group > .notification-stack-toggle { margin: 2px 12px 8px; }
+.notification-notice-action { flex: none; min-height: 24px; font-size: 12px; white-space: nowrap; }
+.notif-dismiss-help-body p, .notif-dismiss-help-body ol { margin: 0 0 8px; }
+.notif-dismiss-help-body ol { padding-left: 20px; }
+@media (hover: none), (pointer: coarse) {
+  .notification-pending-toggle, .notification-phone-blocker-toggle, .notif-row-retry, .notification-notice-action { min-height: 44px; }
+  #notifications-pending-count .info-button, .notification-phone-blocker-title .info-button { width: 44px; min-width: 44px; height: 44px; }
+}
+@container notifications (max-width: 520px) {
+  .notification-pending-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .notification-pending-toggle { min-width: 44px; min-height: 44px; justify-content: center; padding: 0 8px; }
+  #notifications-pending-count .info-button { width: 44px; min-width: 44px; height: 44px; }
+  #notifications-pending-count { gap: 0; }
+  .notification-phone-blocker, .notification-phone-blocker-group { flex-wrap: wrap; }
+  .notification-phone-blocker .notification-phone-blocker-text, .notification-phone-blocker-group .notification-phone-blocker-text { flex: 1 1 calc(100% - 24px); }
+  .notification-phone-blocker .app-notice-actions, .notification-phone-blocker-group .app-notice-actions { flex: 0 0 100%; padding-left: 24px; }
+  .notification-phone-blocker-toggle { min-height: 44px; }
+  .notification-phone-blocker-item { grid-template-columns: auto minmax(0, 1fr); }
+  .notification-phone-blocker-item > .notification-phone-blocker-toggle { grid-column: 2; justify-self: start; }
+}
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 #notifications-empty-state, #notifications-locked-state { display: grid; height: 100%; place-content: center; justify-items: center; gap: 12px; padding: 32px; color: var(--peppy-text-secondary); text-align: center; }
 #notifications-empty-state .link-button { justify-self: center; }
@@ -390,6 +446,12 @@ mark { background: var(--peppy-warning-surface); color: var(--peppy-text-primary
 }
 .system-ribbon > svg { flex: 0 0 auto; margin-top: 2px; }
 .system-ribbon[data-system-ribbon-severity="error"] > svg { color: var(--peppy-error); }
+.system-ribbon[data-system-ribbon-severity="info"] {
+  border-bottom: 1px solid var(--peppy-border-strong);
+  background: var(--peppy-surface-widget);
+  color: var(--peppy-text-secondary);
+}
+.notification-phone-blocker-item[data-blocker-reason="waitingForWifi"] > svg { color: var(--peppy-text-secondary); }
 .system-ribbon-text { display: flex; flex: 1 1 auto; min-width: 0; gap: 4px; flex-wrap: wrap; }
 .system-ribbon-open-failed { flex: 1 0 100%; }
 .system-ribbon strong { color: var(--peppy-text-strong); }

@@ -195,7 +195,7 @@ it("excludes muted apps from global notification results and counts", async () =
 });
 
 it("clears a scoped query when dismissing all notifications", async () => {
-  vi.spyOn(bridge, "dismiss_all_notifications").mockResolvedValue();
+  const dismiss = vi.spyOn(bridge, "dismiss_notifications").mockImplementation(async targets => targets.map(target => ({ target, outcome: "recorded" as const })));
   render(<App />);
   await openNotifications();
   fireEvent.change(screen.getByRole("searchbox"), { target: { value: "searchable" } });
@@ -204,7 +204,8 @@ it("clears a scoped query when dismissing all notifications", async () => {
   fireEvent.click(screen.getByRole("button", { name: /Dismiss all/ }));
 
   expect(screen.getByRole("searchbox")).toHaveValue("");
-  expect(screen.getAllByRole("article")).toHaveLength(1);
+  expect(dismiss).toHaveBeenCalledWith([expect.objectContaining({ notificationKey: "notification-1" })]);
+  expect(screen.queryAllByRole("article")).toHaveLength(0);
 });
 
 it("flushes an unsaved draft before activating a notification hit", async () => {

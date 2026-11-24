@@ -1,7 +1,9 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dismissibleNotifications, NotificationsView } from "./Notifications";
+import { notificationKey } from "./notificationSections";
+import { TOAST_DISMISS_MS } from "../notices/useNoticeDismissal";
 import type { MirroredNotification, NotificationTarget } from "../bridge/bridge";
 
 const POSTED_AT = Date.now();
@@ -55,6 +57,21 @@ describe("NotificationsView", () => {
     expect(document.getElementById("notifications-action-notice")).toHaveTextContent(notice.message);
     rerender(<NotificationsView {...props([])} locked actionNotice={notice} />);
     expect(document.getElementById("notifications-action-notice")).toBeNull();
+  });
+
+  it("auto-dismisses an info notice even while the view keeps re-rendering", () => {
+    vi.useFakeTimers();
+    try {
+      const notice = { kind: "info" as const, message: "This notification is no longer available." };
+      const view = props([notification("phone-a")]);
+      const { rerender } = render(<NotificationsView {...view} actionNotice={notice} />);
+      act(() => { vi.advanceTimersByTime(TOAST_DISMISS_MS - 1000); });
+      rerender(<NotificationsView {...view} query="" actionNotice={notice} />);
+      act(() => { vi.advanceTimersByTime(1000); });
+      expect(view.onDismissActionNotice).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("focuses and highlights only the exact tuple before reporting success without marking it seen", () => {
@@ -214,11 +231,237 @@ describe("NotificationsView", () => {
     expect(screen.getByRole("article", { name: /Title phone-b/ })).toBeInTheDocument();
   });
 
-  it("keeps pending and non-dismissible notifications visible while disabling dismissal", () => {
-    render(<NotificationsView {...props([notification("phone-a", "chat", { dismissalPending: true }), notification("phone-b", "mail", { dismissible: false })])} />);
-    expect(screen.getByText("Waiting for phone")).toBeVisible();
-    expect(screen.getByRole("button", { name: /Dismiss Title phone-a from Chat on Pixel/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /Dismiss Title phone-b from Chat on Tablet/ })).toBeDisabled();
+  it("hides pending notifications behind the waiting control and keeps refused ones visible", () => {
+    render(<NotificationsView {...props([
+      notification("phone-a", "chat", { dismissalPending: true }),
+      notification("phone-b", "mail", { dismissible: false, dismissalPending: true }),
+    ])} />);
+    expect(screen.queryByRole("article", { name: /Title phone-a/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "1 waiting for phone" })).toBeVisible();
+    const refused = screen.getByRole("article", { name: /Title phone-b/ });
+    expect(refused).toHaveAttribute("data-dismiss-state", "refused");
+    expect(screen.queryByRole("button", { name: /Dismiss Title phone-b/ })).not.toBeInTheDocument();
+    expect(refused).toHaveTextContent("Can't be dismissed. Chat now keeps it pinned on your phone.");
+  });
+
+  it("reveals locked waiting rows from the waiting control without a Dismiss button", () => {
+    render(<NotificationsView {...props([notification("phone-a", "chat", { dismissalPending: true }), notification("phone-b", "mail")])} />);
+    fireEvent.click(screen.getByRole("button", { name: "1 waiting for phone" }));
+    const group = document.getElementById("notifications-waiting-groups")!;
+    expect(group).toHaveAttribute("data-waiting-groups", "count");
+    const waiting = within(group).getByRole("article");
+    expect(waiting).toHaveAttribute("data-dismiss-state", "pending");
+    expect(within(waiting).queryByRole("button", { name: /^Dismiss / })).not.toBeInTheDocument();
+    expect(within(waiting).getByRole("button", { name: "Mute Chat" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "1 waiting for phone" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("article", { name: /Title phone-b/ })).toBeInTheDocument();
+  });
+
+  it("shows a failed dismissal in its row with Try again", () => {
+    const onRetryDismiss = vi.fn();
+    const failed = notification("phone-a", "chat", { target: { sourceDeviceId: "phone-a", notificationKey: "failed", lifetime: "one" } });
+    render(<NotificationsView
+      {...props([failed])}
+      failures={new Map([[notificationKey(failed.target), { message: "Peppy couldn't save this.", canRetry: true }]])}
+      onRetryDismiss={onRetryDismiss}
+    />);
+    const row = screen.getByRole("article");
+    expect(row).toHaveAttribute("data-dismiss-state", "failed");
+    expect(row).toHaveAttribute("data-row-reason", "local-failure");
+    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't dismiss. Peppy couldn't save this.");
+    fireEvent.click(screen.getByRole("button", { name: "Try again to dismiss Title phone-a from Chat" }));
+    expect(onRetryDismiss).toHaveBeenCalledWith(notificationKey(failed.target));
+  });
+
+  it("groups a blocked phone's waiting rows under its banner, not under the waiting control", () => {
+    const blocked = notification("phone-a", "chat", { dismissalPending: true });
+    const other = notification("phone-b", "mail", { dismissalPending: true });
+    render(<NotificationsView
+      {...props([blocked, other])}
+      dismissalBlocks={[{ sourceDeviceId: "phone-a", reason: "notificationAccessOff", observedAtMs: Date.now() - 120_000 }]}
+    />);
+    const banner = document.getElementById("phone-blocker-phone_2d_a")!;
+    expect(banner).toHaveAttribute("data-blocker-reason", "notificationAccessOff");
+    expect(banner).toHaveTextContent("Notification access is off on Pixel");
+    expect(screen.getByRole("button", { name: "1 waiting for phone" })).toBeVisible();
+    fireEvent.click(document.getElementById("phone-blocker-phone_2d_a-toggle")!);
+    const group = document.getElementById("notifications-hidden-phone_2d_a")!;
+    expect(group).toHaveAttribute("data-hidden-source", "blocker");
+    expect(within(group).getByRole("article")).toHaveAttribute("data-dismiss-state", "pending");
+    expect(document.querySelectorAll("#notifications-hidden-phone_2d_a")).toHaveLength(1);
+    expect(document.getElementById("notifications-blocker-groups")).toContainElement(group);
+  });
+
+  it("collapses three or more blocked phones into one grouped banner", () => {
+    const sources = [{ id: "phone-a", name: "Pixel" }, { id: "phone-b", name: "Tablet" }, { id: "phone-c", name: "Work" }];
+    render(<NotificationsView
+      {...props(["phone-a", "phone-b", "phone-c"].map(id => notification(id, "chat", { dismissalPending: true })))}
+      sources={sources}
+      dismissalBlocks={[
+        { sourceDeviceId: "phone-a", reason: "mirroringOff", observedAtMs: Date.now() },
+        { sourceDeviceId: "phone-b", reason: "waitingForWifi", observedAtMs: Date.now() },
+        { sourceDeviceId: "phone-c", reason: "mirroringOff", observedAtMs: Date.now() },
+      ]}
+    />);
+    const group = document.getElementById("phone-blockers-group")!;
+    expect(group).toHaveAttribute("data-phone-blocker-group", "3");
+    expect(group).toHaveTextContent("3 phones can't clear notifications");
+    expect(document.getElementById("phone-blockers-list")).not.toBeVisible();
+    fireEvent.click(document.getElementById("phone-blockers-group-toggle")!);
+    expect(document.querySelectorAll("#phone-blockers-list > [data-phone-blocker]")).toHaveLength(3);
+  });
+
+  it("shows no banner for a blocked phone with nothing waiting, and leaves it out of the grouped count", () => {
+    const { rerender } = render(<NotificationsView
+      {...props([notification("phone-a")])}
+      dismissalBlocks={[{ sourceDeviceId: "phone-a", reason: "mirroringOff", observedAtMs: Date.now() }]}
+    />);
+    expect(document.getElementById("notifications-phone-blockers")).toBeNull();
+
+    const sources = [{ id: "phone-a", name: "Pixel" }, { id: "phone-b", name: "Tablet" }, { id: "phone-c", name: "Work" }];
+    rerender(<NotificationsView
+      {...props(["phone-a", "phone-b"].map(id => notification(id, "chat", { dismissalPending: true })))}
+      sources={sources}
+      dismissalBlocks={[
+        { sourceDeviceId: "phone-a", reason: "mirroringOff", observedAtMs: Date.now() },
+        { sourceDeviceId: "phone-b", reason: "mirroringOff", observedAtMs: Date.now() },
+        { sourceDeviceId: "phone-c", reason: "mirroringOff", observedAtMs: Date.now() },
+      ]}
+    />);
+    expect(document.getElementById("phone-blockers-group")).toBeNull();
+    expect(document.querySelectorAll("[data-phone-blocker]")).toHaveLength(2);
+    expect(document.querySelector("[data-phone-blocker-group]")).toBeNull();
+  });
+
+  it("ignores blocks for phones that are not known gateways", () => {
+    render(<NotificationsView
+      {...props([notification("phone-a")])}
+      dismissalBlocks={[{ sourceDeviceId: "unknown-phone", reason: "mirroringOff", observedAtMs: Date.now() }]}
+    />);
+    expect(document.getElementById("notifications-phone-blockers")).toBeNull();
+  });
+
+  it("announces a show and a hide of the waiting group through the action announcer, not the search status", async () => {
+    render(<NotificationsView {...props([notification("phone-a", "chat", { dismissalPending: true })])} />);
+    fireEvent.click(screen.getByRole("button", { name: "1 waiting for phone" }));
+    await waitFor(() => expect(document.getElementById("notifications-action-announcer")).toHaveTextContent("1 waiting notifications shown at the top of the list. They can't be undone."));
+    expect(document.getElementById("notifications-announcer")).toBeEmptyDOMElement();
+    fireEvent.click(screen.getByRole("button", { name: "1 waiting for phone" }));
+    await waitFor(() => expect(document.getElementById("notifications-action-announcer")).toHaveTextContent("Waiting notifications hidden."));
+  });
+
+  it("keeps the search status in the announcer and only that", () => {
+    render(<NotificationsView {...props([notification("phone-a")])} query="Title" />);
+    expect(document.getElementById("notifications-announcer")).toHaveTextContent("1 notifications match “Title”");
+    expect(document.getElementById("notifications-action-announcer")).toBeEmptyDOMElement();
+  });
+
+  it("re-announces a repeated message by clearing the action announcer before setting it again", async () => {
+    const view = props([]);
+    const { rerender } = render(<NotificationsView {...view} announcement={{ seq: 1, text: "Dismissed notification." }} />);
+    await waitFor(() => expect(document.getElementById("notifications-action-announcer")).toHaveTextContent("Dismissed notification."));
+    rerender(<NotificationsView {...view} announcement={{ seq: 2, text: "Dismissed notification." }} />);
+    expect(document.getElementById("notifications-action-announcer")).toBeEmptyDOMElement();
+    await waitFor(() => expect(document.getElementById("notifications-action-announcer")).toHaveTextContent("Dismissed notification."));
+  });
+
+  it("gives every aria-controls in the waiting and blocker controls a target in the page", () => {
+    const sources = [{ id: "phone-a", name: "Pixel" }, { id: "phone-b", name: "Tablet" }, { id: "phone-c", name: "Work" }];
+    render(<NotificationsView
+      {...props(["phone-a", "phone-b", "phone-c"].map(id => notification(id, "chat", { dismissalPending: true })))}
+      sources={sources}
+      dismissalBlocks={[
+        { sourceDeviceId: "phone-a", reason: "mirroringOff", observedAtMs: Date.now() },
+        { sourceDeviceId: "phone-b", reason: "waitingForWifi", observedAtMs: Date.now() },
+      ]}
+    />);
+    fireEvent.click(document.querySelector<HTMLElement>("#notifications-pending-toggle")!);
+    const controls = [...document.querySelectorAll<HTMLElement>("[aria-controls]")];
+    expect(controls.length).toBeGreaterThanOrEqual(3);
+    for (const control of controls) {
+      expect(document.getElementById(control.getAttribute("aria-controls")!), control.id).not.toBeNull();
+    }
+  });
+
+  it("moves focus to the first row when the waiting control's count reaches zero while focus is on it", () => {
+    const waiting = notification("phone-a", "chat", { target: { sourceDeviceId: "phone-a", notificationKey: "waiting", lifetime: "one" }, dismissalPending: true });
+    const normal = notification("phone-b", "mail", { target: { sourceDeviceId: "phone-b", notificationKey: "normal", lifetime: "one" } });
+    const { rerender } = render(<NotificationsView {...props([waiting, normal])} />);
+    document.querySelector<HTMLElement>("#notifications-pending-toggle")!.focus();
+    rerender(<NotificationsView {...props([normal])} />);
+    expect(document.querySelector("[data-notification-key='normal']")).toHaveFocus();
+  });
+
+  it("does not move focus when the waiting count reaches zero after focus left the control", () => {
+    const waiting = notification("phone-a", "chat", { target: { sourceDeviceId: "phone-a", notificationKey: "waiting", lifetime: "one" }, dismissalPending: true });
+    const normal = notification("phone-b", "mail", { target: { sourceDeviceId: "phone-b", notificationKey: "normal", lifetime: "one" } });
+    const { rerender } = render(<NotificationsView {...props([waiting, normal])} />);
+    const toggle = document.querySelector<HTMLElement>("#notifications-pending-toggle")!;
+    toggle.focus();
+    toggle.blur();
+    rerender(<NotificationsView {...props([normal])} />);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("moves focus to the neighbouring row when a failed row's Try again runs", () => {
+    const first = notification("phone-a", "chat", { target: { sourceDeviceId: "phone-a", notificationKey: "first", lifetime: "one" } });
+    const second = notification("phone-a", "mail", { target: { sourceDeviceId: "phone-a", notificationKey: "second", lifetime: "one" } });
+    const failures = new Map([[notificationKey(first.target), { message: "Peppy couldn't save this.", canRetry: true }]]);
+    const view = props([first, second]);
+    const onRetryDismiss = vi.fn();
+    const { rerender } = render(<NotificationsView {...view} failures={failures} onRetryDismiss={onRetryDismiss} />);
+    fireEvent.click(within(screen.getAllByRole("article")[0]).getByRole("button", { name: /Try again/ }));
+    expect(onRetryDismiss).toHaveBeenCalledWith(notificationKey(first.target));
+    rerender(<NotificationsView {...view} failures={failures} onRetryDismiss={onRetryDismiss} hiddenKeys={new Set([notificationKey(first.target)])} />);
+    expect(screen.getByRole("article")).toHaveFocus();
+    expect(screen.getByRole("article")).toHaveAttribute("data-notification-key", "second");
+  });
+
+  it("moves focus to the neighbouring row when a bulk notice's Try again runs", () => {
+    const first = notification("phone-a", "chat", { target: { sourceDeviceId: "phone-a", notificationKey: "first", lifetime: "one" } });
+    const second = notification("phone-a", "mail", { target: { sourceDeviceId: "phone-a", notificationKey: "second", lifetime: "one" } });
+    const onAction = vi.fn();
+    const view = props([first, second]);
+    const notice = { kind: "error" as const, message: "Couldn't dismiss 1 notification.", keys: [notificationKey(first.target)], action: { label: "Try again", onAction } };
+    const { rerender } = render(<NotificationsView {...view} actionNotice={notice} />);
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onAction).toHaveBeenCalledOnce();
+    rerender(<NotificationsView {...view} actionNotice={undefined} hiddenKeys={new Set([notificationKey(first.target)])} />);
+    expect(screen.getByRole("article")).toHaveFocus();
+  });
+
+  it("keeps a bulk notice's Try again disabled, with the paused description, while writes are paused", () => {
+    const notice = { kind: "error" as const, message: "Couldn't dismiss 2 notifications.", keys: [], action: { label: "Try again", onAction: vi.fn() } };
+    render(<NotificationsView {...props([notification("phone-a")])} actionNotice={notice} writesPaused />);
+    const action = screen.getByRole("button", { name: "Try again" });
+    expect(action).toBeDisabled();
+    expect(action).toHaveAttribute("aria-describedby", "update-paused-description");
+  });
+
+  it("moves focus to Dismiss all when the notice's close control is used", () => {
+    const notice = { kind: "error" as const, message: "Couldn't dismiss notification.", keys: [] };
+    const dismissAll = { label: "Dismiss all", disabled: false, onDismissAll: vi.fn() };
+    const view = props([notification("phone-a"), notification("phone-b", "mail")]);
+    const { rerender } = render(<NotificationsView {...view} dismissAll={dismissAll} actionNotice={notice} />);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+    rerender(<NotificationsView {...view} dismissAll={dismissAll} actionNotice={undefined} />);
+    expect(document.getElementById("notifications-dismiss-all")).toHaveFocus();
+  });
+
+  it("caps a stack's Dismiss N at the 100 newest rows", () => {
+    localStorage.setItem("peppy.notifications.v1", JSON.stringify({ arrangement: "app" }));
+    const items = Array.from({ length: 101 }, (_, index) => notification("phone-a", "chat", {
+      target: { sourceDeviceId: "phone-a", notificationKey: `k${index}`, lifetime: "one" },
+      postedAt: 1000 + index,
+    }));
+    const view = props(items);
+    render(<NotificationsView {...view} />);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss up to 100" }));
+    const sent = view.onDismissMany.mock.calls[0][0];
+    expect(sent).toHaveLength(100);
+    expect(sent[0].notificationKey).toBe("k100");
+    expect(sent[99].notificationKey).toBe("k1");
+    expect(sent.some((target: NotificationTarget) => target.notificationKey === "k0")).toBe(false);
   });
 
   it("binds the synced icon and derives a readable legacy package name", () => {
@@ -470,17 +713,31 @@ describe("NotificationsView", () => {
     ]);
   });
 
-  it("keeps focus on the row when a dismissal becomes pending", () => {
+  it("moves focus to the neighbouring row when a dismissal hides the row", () => {
+    const first = notification("phone-a", "chat", { target: { sourceDeviceId: "phone-a", notificationKey: "first", lifetime: "one" } });
+    const second = notification("phone-a", "mail", { target: { sourceDeviceId: "phone-a", notificationKey: "second", lifetime: "one" } });
+    const view = props([first, second]);
+    const { rerender } = render(<NotificationsView {...view} />);
+    const dismiss = screen.getAllByRole("button", { name: /^Dismiss / })[0];
+    dismiss.focus();
+    fireEvent.click(dismiss);
+    rerender(<NotificationsView {...view} hiddenKeys={new Set([notificationKey(first.target)])} />);
+
+    expect(screen.getAllByRole("article")).toHaveLength(1);
+    expect(screen.getByRole("article")).toHaveAttribute("data-notification-key", "second");
+    expect(screen.getByRole("article")).toHaveFocus();
+  });
+
+  it("moves focus to the empty-state heading when a dismissal hides the last row and nothing else is listed", () => {
     const item = notification("phone-a");
     const view = props([item]);
     const { rerender } = render(<NotificationsView {...view} />);
     const dismiss = screen.getByRole("button", { name: /^Dismiss / });
     dismiss.focus();
     fireEvent.click(dismiss);
-    dismiss.blur();
-    rerender(<NotificationsView {...view} notifications={[{ ...item, dismissalPending: true }]} />);
+    rerender(<NotificationsView {...view} hiddenKeys={new Set([notificationKey(item.target)])} />);
 
-    expect(screen.getByRole("article")).toHaveFocus();
+    expect(document.querySelector("#notifications-empty-state h2")).toHaveFocus();
   });
 
   it("excludes locked, muted, pending, and nondismissible notifications from bulk eligibility", () => {

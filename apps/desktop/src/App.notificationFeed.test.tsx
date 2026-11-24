@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { bridge, fixtureBridge, type DesktopSnapshot } from "./bridge/bridge";
 
@@ -188,40 +188,52 @@ it("drops a stale mute completion after the session locks", async () => {
   expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
 });
 
-it("dismisses pinned app-stack targets sequentially and reports a partial failure", async () => {
+it("dismisses app-stack targets in one bulk call", async () => {
   localStorage.setItem("peppy.notifications.v1", JSON.stringify({ arrangement: "app" }));
   snapshot.notifications = [notification(1), notification(2), notification(3)];
-  const dismiss = vi.spyOn(bridge, "dismiss_notification")
-    .mockResolvedValueOnce()
-    .mockRejectedValueOnce(new Error("offline"));
+  const dismiss = vi.spyOn(bridge, "dismiss_notifications").mockImplementation(async targets => targets.map(target => ({ target, outcome: "recorded" as const })));
   render(<App />);
   await openNotifications();
 
   fireEvent.click(screen.getByRole("button", { name: "Dismiss 3" }));
 
-  await waitFor(() => expect(dismiss).toHaveBeenCalledTimes(2));
-  expect(dismiss.mock.calls.map(([target]) => target.notificationKey)).toEqual(["notification-1", "notification-2"]);
-  await waitFor(() => expect(document.getElementById("notifications-action-notice")).toHaveTextContent("Dismissed 1 of 3."));
-  expect(bridge.load_state).toHaveBeenCalledTimes(2);
+  await waitFor(() => expect(dismiss).toHaveBeenCalledTimes(1));
+  expect(dismiss.mock.calls[0][0].map(target => target.notificationKey)).toEqual(["notification-1", "notification-2", "notification-3"]);
+  await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(2));
 });
 
-it("holds Dismiss all disabled until an app-stack dismissal and refresh finish", async () => {
+it("reports a failed app-stack bulk dismissal and returns its rows with Try again", async () => {
   localStorage.setItem("peppy.notifications.v1", JSON.stringify({ arrangement: "app" }));
-  snapshot.notifications = [notification(1), notification(2)];
-  const dismissal = deferred<void>();
-  const refresh = deferred<DesktopSnapshot>();
-  vi.spyOn(bridge, "dismiss_notification").mockReturnValue(dismissal.promise);
+  snapshot.notifications = [notification(1), notification(2), notification(3)];
+  vi.spyOn(bridge, "dismiss_notifications").mockRejectedValue(new Error("offline"));
   render(<App />);
   await openNotifications();
-  vi.mocked(bridge.load_state).mockReturnValueOnce(refresh.promise);
+
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss 3" }));
+
+  expect(await screen.findByText("Couldn't dismiss 3 notifications. Peppy couldn't save this.")).toBeVisible();
+  // A collapsed app stack shows its first two rows; the third returns behind "Show 1 more".
+  expect(screen.getAllByRole("article")).toHaveLength(2);
+  expect(screen.getByRole("button", { name: "Dismiss 3" })).toBeEnabled();
+});
+
+it("hides app-stack rows at once, disables Dismiss all, and sends no second dispatch", async () => {
+  localStorage.setItem("peppy.notifications.v1", JSON.stringify({ arrangement: "app" }));
+  snapshot.notifications = [notification(1), notification(2)];
+  const dismissal = deferred<{ target: DesktopSnapshot["notifications"][number]["target"]; outcome: "recorded" }[]>();
+  const dismiss = vi.spyOn(bridge, "dismiss_notifications").mockReturnValue(dismissal.promise);
+  render(<App />);
+  await openNotifications();
 
   fireEvent.click(screen.getByRole("button", { name: "Dismiss 2" }));
+  expect(screen.queryAllByRole("article")).toHaveLength(0);
   expect(document.getElementById("notifications-dismiss-all")).toBeDisabled();
-  await act(async () => dismissal.resolve());
+  expect(dismiss).toHaveBeenCalledTimes(1);
+
+  await act(async () => dismissal.resolve(dismiss.mock.calls[0][0].map(target => ({ target, outcome: "recorded" as const }))));
   await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(2));
+  expect(dismiss).toHaveBeenCalledTimes(1);
   expect(document.getElementById("notifications-dismiss-all")).toBeDisabled();
-  await act(async () => refresh.resolve(snapshot));
-  await waitFor(() => expect(document.getElementById("notifications-dismiss-all")).toBeEnabled());
 });
 
 it("opens the mirrored-app settings group from the muted caught-up state", async () => {
@@ -268,4 +280,141 @@ it("uses a resolved contact display name in the notification row accessible name
   await openNotifications();
 
   expect(await screen.findByRole("article", { name: "Ada Lovelace" })).toBeInTheDocument();
+});
+
+describe("notification dismissal integration", () => {
+  const recorded = (targets: { sourceDeviceId: string; notificationKey: string; lifetime: string }[]) =>
+    targets.map(target => ({ target, outcome: "recorded" as const }));
+
+  it("hides a dismissed row before the bridge resolves and announces it", async () => {
+    snapshot.notifications = [notification(1)];
+    const dismissal = deferred<ReturnType<typeof recorded>>();
+    vi.spyOn(bridge, "dismiss_notifications").mockReturnValue(dismissal.promise);
+    render(<App />);
+    await openNotifications();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Dismiss Message 1/ }));
+
+    expect(screen.queryAllByRole("article")).toHaveLength(0);
+    await waitFor(() => expect(document.getElementById("notifications-action-announcer")).toHaveTextContent("Dismissed Message 1 from Chat."));
+    expect(document.getElementById("notifications-announcer")).toBeEmptyDOMElement();
+    await act(async () => dismissal.resolve(recorded([notification(1).target])));
+  });
+
+  it("returns a row after a failed dismissal and retries it from Try again", async () => {
+    snapshot.notifications = [notification(1)];
+    const dismiss = vi.spyOn(bridge, "dismiss_notifications")
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockImplementationOnce(async targets => recorded(targets));
+    render(<App />);
+    await openNotifications();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Dismiss Message 1/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't dismiss. Peppy couldn't save this.");
+    const row = screen.getByRole("article");
+    expect(row).toHaveAttribute("data-dismiss-state", "failed");
+    fireEvent.click(screen.getByRole("button", { name: "Try again to dismiss Message 1 from Chat" }));
+    await waitFor(() => expect(dismiss).toHaveBeenCalledTimes(2));
+    expect(screen.queryAllByRole("article")).toHaveLength(0);
+  });
+
+  it("keeps the row hidden while an update in progress is retried", async () => {
+    snapshot.notifications = [notification(1)];
+    const busy = Object.assign(new Error("busy"), { code: "update-in-progress" });
+    const dismiss = vi.spyOn(bridge, "dismiss_notifications")
+      .mockRejectedValueOnce(busy)
+      .mockImplementationOnce(async targets => recorded(targets));
+    render(<App />);
+    await openNotifications();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Dismiss Message 1/ }));
+
+    expect(screen.queryAllByRole("article")).toHaveLength(0);
+    await waitFor(() => expect(dismiss).toHaveBeenCalledTimes(2), { timeout: 4000 });
+    expect(screen.queryAllByRole("article")).toHaveLength(0);
+  });
+
+  it("announces that a dismissed row of a blocked phone cannot clear yet", async () => {
+    const phone = snapshot.gateways[0].id;
+    snapshot.notifications = [notification(1, { target: { sourceDeviceId: phone, notificationKey: "blocked-1", lifetime: "1" } })];
+    snapshot.notificationDismissalBlocks = [{ sourceDeviceId: phone, reason: "mirroringOff", observedAtMs: Date.now() }];
+    vi.spyOn(bridge, "dismiss_notifications").mockImplementation(async targets => recorded(targets));
+    render(<App />);
+    await openNotifications();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Dismiss Message 1/ }));
+
+    await waitFor(() => expect(document.getElementById("notifications-action-announcer")).toHaveTextContent("Dismissed Message 1 from Chat. Pixel 8 can't clear it until the notice above is resolved."));
+  });
+
+  it("dismiss all sends the 100 newest eligible rows, not the first 100 in list order", async () => {
+    snapshot.notifications = Array.from({ length: 101 }, (_, index) => notification(index + 1));
+    const dismiss = vi.spyOn(bridge, "dismiss_notifications").mockImplementation(async targets => recorded(targets));
+    render(<App />);
+    await openNotifications();
+
+    fireEvent.click(document.getElementById("notifications-dismiss-all")!);
+
+    await waitFor(() => expect(dismiss).toHaveBeenCalledOnce());
+    const sent = dismiss.mock.calls[0][0].map(target => target.notificationKey);
+    expect(sent).toHaveLength(100);
+    expect(sent[0]).toBe("notification-1");
+    expect(sent[99]).toBe("notification-100");
+    expect(sent).not.toContain("notification-101");
+  });
+
+  it("disables every dismiss control while writes are paused", async () => {
+    snapshot.notifications = [notification(1), notification(2)];
+    snapshot.writesPaused = true;
+    render(<App />);
+    await openNotifications();
+
+    for (const button of screen.getAllByRole("button", { name: /^Dismiss / })) expect(button).toBeDisabled();
+    expect(document.getElementById("notifications-dismiss-all")).toBeDisabled();
+  });
+
+  it("shows a banner for a blocked phone from the snapshot and reveals its waiting rows", async () => {
+    const phone = snapshot.gateways[0].id;
+    snapshot.notifications = [notification(1, { target: { sourceDeviceId: phone, notificationKey: "waiting-1", lifetime: "1" }, dismissalPending: true })];
+    snapshot.notificationDismissalBlocks = [{ sourceDeviceId: phone, reason: "notificationAccessOff", observedAtMs: Date.now() - 180_000 }];
+    render(<App />);
+    await openNotifications();
+
+    const banner = document.querySelector<HTMLElement>("[data-phone-blocker]")!;
+    expect(banner).toHaveAttribute("data-blocker-reason", "notificationAccessOff");
+    expect(banner).toHaveTextContent("Notification access is off on Pixel 8");
+    expect(banner).toHaveTextContent("Reported 3m ago.");
+    fireEvent.click(within(banner).getByRole("button", { name: "Show 1 dismissed" }));
+    expect(document.querySelector("#notifications-blocker-groups [data-hidden-group]")).toHaveAttribute("data-hidden-source", "blocker");
+    expect(screen.queryByRole("button", { name: "1 waiting for phone" })).not.toBeInTheDocument();
+  });
+
+  it("reveals locked waiting rows from the waiting toggle", async () => {
+    snapshot.notifications = [notification(1, { dismissalPending: true }), notification(2)];
+    render(<App />);
+    await openNotifications();
+
+    fireEvent.click(screen.getByRole("button", { name: "1 waiting for phone" }));
+
+    const waiting = document.querySelector<HTMLElement>("#notifications-waiting-groups article")!;
+    expect(waiting).toHaveAttribute("data-dismiss-state", "pending");
+    expect(within(waiting).queryByRole("button", { name: /^Dismiss / })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("article")).toHaveLength(2);
+  });
+
+  it("collapses three blocked phones into one grouped banner", async () => {
+    const base = snapshot.gateways[0];
+    const phones = ["phone-x", "phone-y", "phone-z"].map((id, index) => ({ ...base, id, name: `Phone ${index + 1}` }));
+    snapshot.gateways = phones;
+    snapshot.notifications = phones.map((phone, index) => notification(index + 1, { target: { sourceDeviceId: phone.id, notificationKey: `waiting-${index}`, lifetime: "1" }, dismissalPending: true }));
+    snapshot.notificationDismissalBlocks = phones.map(phone => ({ sourceDeviceId: phone.id, reason: "mirroringOff", observedAtMs: Date.now() }));
+    render(<App />);
+    await openNotifications();
+
+    expect(document.querySelectorAll("[data-phone-blocker-group]")).toHaveLength(1);
+    expect(document.getElementById("phone-blockers-group")).toHaveAttribute("data-phone-blocker-group", "3");
+    expect(document.getElementById("phone-blockers-group")).toHaveTextContent("3 phones can't clear notifications");
+    expect(document.querySelectorAll("[data-phone-blocker]")).toHaveLength(0);
+  });
 });

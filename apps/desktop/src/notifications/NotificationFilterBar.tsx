@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { CheckCheck, Clock, Layers } from "@peppy/desktop-ui";
 import type { MirroredNotification } from "../bridge/bridge";
 import { NotificationAppIcon } from "./NotificationRow";
@@ -30,14 +31,16 @@ export function notificationFilterChips(
 }
 
 export function NotificationFilterBar({
-  chips, appFilter, onAppFilter, arrangement, onArrangement, dismissAll,
+  chips, appFilter, onAppFilter, arrangement, onArrangement, dismissAll, waiting,
 }: {
   chips: NotificationFilterChip[];
   appFilter: string | null;
   onAppFilter(packageName: string | null): void;
   arrangement: "time" | "app";
   onArrangement(arrangement: "time" | "app"): void;
-  dismissAll?: { label: string; disabled: boolean; onDismissAll(): void };
+  dismissAll?: { label: string; disabled: boolean; /** Explains a disabled action, such as writes paused; becomes its title and description. */ disabledReason?: string; onDismissAll(): void };
+  /** Slot between the app chips and the arrangement toggle, for the waiting-for-phone control. */
+  waiting?: ReactNode;
 }) {
   return <div id="notifications-toolbar">
     {(chips.length >= 2 || appFilter !== null) && <div id="notifications-filter-bar" role="group" aria-label="Filter by app" className="notification-filter-chips">
@@ -54,10 +57,11 @@ export function NotificationFilterBar({
         <span className="notification-chip-count">{chip.count}</span>
       </button>)}
     </div>}
+    {waiting}
     <div role="group" aria-label="Arrange by" className="notification-arrangement">
       <button type="button" title="Time" aria-pressed={arrangement === "time"} onClick={() => onArrangement("time")}><Clock size={14} aria-hidden /><span className="notification-toolbar-label">Time</span></button>
       <button type="button" title="App" aria-pressed={arrangement === "app"} onClick={() => onArrangement("app")}><Layers size={14} aria-hidden /><span className="notification-toolbar-label">App</span></button>
     </div>
-    {dismissAll && <button id="notifications-dismiss-all" type="button" title={dismissAll.label} disabled={dismissAll.disabled} onClick={dismissAll.onDismissAll}><CheckCheck size={14} aria-hidden /><span className="notification-toolbar-label">{dismissAll.label}</span></button>}
+    {dismissAll && <button id="notifications-dismiss-all" type="button" title={dismissAll.disabled && dismissAll.disabledReason ? dismissAll.disabledReason : dismissAll.label} disabled={dismissAll.disabled} aria-describedby={dismissAll.disabled && dismissAll.disabledReason ? "update-paused-description" : undefined} onClick={dismissAll.onDismissAll}><CheckCheck size={14} aria-hidden /><span className="notification-toolbar-label">{dismissAll.label}</span></button>}
   </div>;
 }
