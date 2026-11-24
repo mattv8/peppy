@@ -20,6 +20,7 @@ use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
+mod support;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_tungstenite::{connect_async, tungstenite};
 use url::Url;
@@ -179,7 +180,7 @@ async fn presence_batch_and_direct_lookup_keep_never_seen_devices_never() {
 struct TestServer {
     pool: PgPool,
     admin: PgPool,
-    schema: String,
+    schema: support::SchemaFixture,
     base_url: String,
     ws_url: String,
     task: JoinHandle<()>,
@@ -234,27 +235,10 @@ impl TestServer {
     ) -> Self {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL is required; integration tests never silently skip");
-        let admin = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&database_url)
-            .await
-            .unwrap();
-        let schema = format!("peppy_server_test_{}", Uuid::new_v4().simple());
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-
-        let mut isolated_url: Url = database_url.parse().unwrap();
-        isolated_url
-            .query_pairs_mut()
-            .append_pair("options", &format!("-csearch_path={schema}"));
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect(isolated_url.as_str())
-            .await
-            .unwrap();
-        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let schema =
+            support::SchemaFixture::new(&database_url, "peppy_server_test_", 2, 5, true).await;
+        let isolated_url = schema.url.clone();
+        let pool = schema.pool().clone();
 
         let (vault, profile, fingerprint, header) = match real {
             Some((profile, fingerprint, header, vault)) => (vault, profile, fingerprint, header),
@@ -305,7 +289,7 @@ impl TestServer {
         });
         Self {
             pool,
-            admin,
+            admin: schema.admin.clone(),
             schema,
             base_url: format!("http://{addr}"),
             ws_url: format!("ws://{addr}/v1/ws"),
@@ -359,21 +343,7 @@ impl TestServer {
     async fn shutdown(self) {
         self.task.abort();
         let _ = self.task.await;
-        self.pool.close().await;
-        let drop_schema = format!("DROP SCHEMA {} CASCADE", self.schema);
-        let first_attempt = sqlx::query(&drop_schema).execute(&self.admin).await;
-        if matches!(
-            &first_attempt,
-            Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("40P01")
-        ) {
-            sqlx::query(&drop_schema)
-                .execute(&self.admin)
-                .await
-                .unwrap();
-        } else {
-            first_attempt.unwrap();
-        }
-        self.admin.close().await;
+        self.schema.cleanup().await;
     }
 }
 
@@ -1485,21 +1455,12 @@ async fn hold_vault_lock(server: &TestServer) -> (sqlx::Transaction<'static, sql
 /// Waits until PostgreSQL reports a backend running `statement` blocked by `holder_pid`.
 /// Reaching the vault lock proves the request already authenticated.
 async fn wait_for_lock_waiter(server: &TestServer, holder_pid: i32, statement: &str) {
-    let pattern = format!("%{statement}%");
-    wait_until(5, "request blocked on the vault lock", || {
-        let admin = server.admin.clone();
-        let pattern = pattern.clone();
-        async move {
-            sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE $2)",
-            )
-            .bind(holder_pid)
-            .bind(pattern)
-            .fetch_one(&admin)
-            .await
-            .unwrap()
-        }
-    })
+    support::wait_blocked_by(
+        &server.admin,
+        holder_pid,
+        Some(statement),
+        Duration::from_secs(5),
+    )
     .await;
 }
 

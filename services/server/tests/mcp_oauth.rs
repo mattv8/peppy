@@ -16,6 +16,8 @@ use tower::ServiceExt;
 use url::Url;
 use uuid::Uuid;
 
+mod support;
+
 const ORIGIN: &str = "http://localhost:3000/";
 
 struct Fixture {
@@ -338,22 +340,6 @@ async fn refresh_request(app: Router, client_id: &str, refresh: &str) -> Respons
         &[("content-type", "application/x-www-form-urlencoded")],
     )
     .await
-}
-
-async fn wait_for_database_lock(pool: &PgPool) {
-    for _ in 0..100 {
-        let waiting: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='transactionid' AND NOT granted)",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        if waiting {
-            return;
-        }
-        tokio::task::yield_now().await;
-    }
-    panic!("request did not wait for the row lock");
 }
 
 #[tokio::test]
@@ -905,6 +891,10 @@ async fn concurrent_refresh_rotation_and_reuse_revokes_the_entire_family() {
         .await
         .unwrap();
     let mut blocker = fixture.pool.acquire().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
     sqlx::query("SELECT pg_advisory_lock(42719, 1)")
         .execute(&mut *blocker)
         .await
@@ -919,21 +909,13 @@ async fn concurrent_refresh_rotation_and_reuse_revokes_the_entire_family() {
         Body::from(rotate_r1),
         &[("content-type", "application/x-www-form-urlencoded")],
     ));
-    for _ in 0..100 {
-        let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=42719 AND objid=1 AND NOT granted)")
-            .fetch_one(&fixture.pool)
-            .await
-            .unwrap();
-        if waiting {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=42719 AND objid=1 AND NOT granted)")
-        .fetch_one(&fixture.pool)
-        .await
-        .unwrap();
-    assert!(waiting, "R1 rotation must block before committing R2");
+    support::wait_blocked_by(
+        &fixture.pool,
+        holder_pid,
+        Some("INSERT INTO mcp_oauth_tokens"),
+        Duration::from_secs(5),
+    )
+    .await;
     let replay_r0 = tokio::spawn(request(
         app,
         Method::POST,
@@ -1724,6 +1706,10 @@ async fn code_exchange_rechecks_expiry_after_a_lock_only_wait() {
         .await
         .unwrap();
     let mut blocker = fixture.pool.begin().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
     sqlx::query("SELECT 1 FROM mcp_oauth_codes WHERE digest=$1 FOR UPDATE")
         .bind(digest.as_slice())
         .execute(&mut *blocker)
@@ -1740,7 +1726,13 @@ async fn code_exchange_rechecks_expiry_after_a_lock_only_wait() {
         )),
         &[("content-type", "application/x-www-form-urlencoded")],
     ));
-    wait_for_database_lock(&fixture.pool).await;
+    support::wait_blocked_by(
+        &fixture.pool,
+        holder_pid,
+        Some("FROM mcp_oauth_codes c"),
+        Duration::from_secs(5),
+    )
+    .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     blocker.commit().await.unwrap();
     let response = exchange_request.await.unwrap();
@@ -1798,6 +1790,10 @@ async fn refresh_rechecks_expiry_after_a_grant_lock_only_wait() {
         .await
         .unwrap();
     let mut blocker = fixture.pool.begin().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
     sqlx::query("SELECT 1 FROM mcp_grants WHERE id=$1 FOR UPDATE")
         .bind(grant_id)
         .execute(&mut *blocker)
@@ -1807,7 +1803,13 @@ async fn refresh_rechecks_expiry_after_a_grant_lock_only_wait() {
     let request_refresh = refresh.clone();
     let refresh_request =
         tokio::spawn(async move { refresh_request(app, &request_client, &request_refresh).await });
-    wait_for_database_lock(&fixture.pool).await;
+    support::wait_blocked_by(
+        &fixture.pool,
+        holder_pid,
+        Some("FROM mcp_oauth_tokens t"),
+        Duration::from_secs(5),
+    )
+    .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     blocker.commit().await.unwrap();
     let response = refresh_request.await.unwrap();
@@ -1864,6 +1866,10 @@ async fn refresh_rotation_then_oauth_revoke_serializes_without_live_descendants(
         .await
         .unwrap();
     let mut blocker = fixture.pool.acquire().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
     sqlx::query("SELECT pg_advisory_lock(42720, 1)")
         .execute(&mut *blocker)
         .await
@@ -1873,16 +1879,13 @@ async fn refresh_rotation_then_oauth_revoke_serializes_without_live_descendants(
     let rotation = tokio::spawn(async move {
         refresh_request(app.clone(), &rotation_client, &rotation_refresh).await
     });
-    for _ in 0..100 {
-        let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=42720 AND objid=1 AND NOT granted)")
-            .fetch_one(&fixture.pool)
-            .await
-            .unwrap();
-        if waiting {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    support::wait_blocked_by(
+        &fixture.pool,
+        holder_pid,
+        Some("INSERT INTO mcp_oauth_tokens"),
+        Duration::from_secs(5),
+    )
+    .await;
     let revoke_app = fixture.app().await;
     let revoke_client = client_id.clone();
     let revoke_refresh = refresh.clone();
@@ -1972,6 +1975,10 @@ async fn oauth_revoke_then_refresh_rotation_serializes_without_live_descendants(
         .await
         .unwrap();
     let mut blocker = fixture.pool.acquire().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
     sqlx::query("SELECT pg_advisory_lock(42721, 1)")
         .execute(&mut *blocker)
         .await
@@ -1988,16 +1995,13 @@ async fn oauth_revoke_then_refresh_rotation_serializes_without_live_descendants(
         )
         .await
     });
-    for _ in 0..100 {
-        let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=42721 AND objid=1 AND NOT granted)")
-            .fetch_one(&fixture.pool)
-            .await
-            .unwrap();
-        if waiting {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    support::wait_blocked_by(
+        &fixture.pool,
+        holder_pid,
+        Some("UPDATE mcp_oauth_tokens"),
+        Duration::from_secs(5),
+    )
+    .await;
     let refresh_client = client_id.clone();
     let refresh_token = refresh.clone();
     let refresh_app = fixture.app().await;
