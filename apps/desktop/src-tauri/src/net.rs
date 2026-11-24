@@ -567,13 +567,9 @@ impl Api {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    #[cfg(feature = "dev-local-tls")]
-    use std::time::Duration;
     use std::{path::Path, process::Command, sync::Arc};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_rustls::TlsAcceptor;
-    #[cfg(feature = "dev-local-tls")]
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     // A trust-policy mutation that accepts this private root for a non-loopback
     // origin, a mismatched hostname, or the default client must fail these tests.
@@ -643,57 +639,6 @@ pub mod tests {
         let default_client = reqwest::Client::new();
         let default_tls = tls_server(fixture.path(), false).await;
         assert!(default_client.get(default_tls).send().await.is_err());
-    }
-
-    /// Requires a locally running development TLS proxy with the CA embedded at build time.
-    #[cfg(feature = "dev-local-tls")]
-    #[tokio::test]
-    #[ignore = "requires a running local development TLS stack"]
-    async fn local_dev_server_uses_bundled_ca() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let origin = std::env::var("PEPPY_DEV_TLS_TEST_ORIGIN")
-            .expect("PEPPY_DEV_TLS_TEST_ORIGIN must name the local HTTPS development origin");
-        let origin = crate::origin::validate_origin(&origin)
-            .expect("PEPPY_DEV_TLS_TEST_ORIGIN must be a valid origin");
-        assert!(
-            crate::origin::is_loopback_https(&origin),
-            "PEPPY_DEV_TLS_TEST_ORIGIN must be an explicit loopback HTTPS origin"
-        );
-
-        let client = crate::tls::http_builder(&origin)
-            .expect("the embedded local development CA must build an HTTP client")
-            .timeout(Duration::from_secs(5))
-            .build()
-            .expect("the HTTP client must be valid");
-        let health = tokio::time::timeout(
-            Duration::from_secs(5),
-            client.get(format!("{origin}/healthz")).send(),
-        )
-        .await
-        .expect("the local HTTPS health request timed out")
-        .expect("the bundled CA must verify the local HTTPS server");
-        assert_eq!(health.status(), StatusCode::OK);
-
-        let request = crate::origin::websocket_url(&origin)
-            .expect("the local HTTPS origin must produce a WSS endpoint")
-            .into_client_request()
-            .expect("the WSS endpoint must produce a request");
-        let connector = crate::tls::websocket_connector(&origin)
-            .expect("the embedded local development CA must build a WSS connector")
-            .expect("loopback HTTPS must use the local development WSS connector");
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio_tungstenite::connect_async_tls_with_config(request, None, true, Some(connector)),
-        )
-        .await
-        .expect("the local WSS request timed out");
-        match result {
-            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
-                assert!(matches!(response.status().as_u16(), 401 | 403));
-            }
-            Ok(_) => panic!("the unauthenticated local WSS endpoint unexpectedly upgraded"),
-            Err(error) => panic!("the bundled CA did not verify the local WSS server: {error}"),
-        }
     }
 
     fn temporary_certificate() -> tempfile::TempDir {

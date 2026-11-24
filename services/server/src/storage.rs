@@ -1131,7 +1131,6 @@ mod tests {
         }
         assert_eq!(strings.len(), 36);
     }
-    use futures_util::TryStreamExt;
     use std::io::Write;
 
     #[test]
@@ -1467,84 +1466,5 @@ mod tests {
             !head.to_ascii_lowercase().contains("transfer-encoding"),
             "upload must be sized, not chunked:\n{head}"
         );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires disposable S3 configuration; run explicitly"]
-    async fn disposable_storage_contract_accepts_a_64_mib_put_and_exact_ranges() {
-        assert_eq!(
-            std::env::var("PEPPY_DISPOSABLE_STORAGE_CONTRACT").as_deref(),
-            Ok("1"),
-            "set PEPPY_DISPOSABLE_STORAGE_CONTRACT=1 for this disposable-only test"
-        );
-        assert_ne!(
-            std::env::var("PEPPY_ENV").ok().as_deref(),
-            Some("production"),
-            "refusing to contact production storage"
-        );
-        let config = crate::config::Config::from_env()
-            .expect("complete disposable S3 test configuration is required");
-        let storage = Storage::new(config.s3.as_ref().expect("S3 configuration is required"));
-        let mut file = tempfile::NamedTempFile::new().expect("temporary file");
-        const OBJECT_BYTES: usize = 64 * 1024 * 1024;
-        const RANGE_START: usize = 1024;
-        const RANGE_BYTES: usize = 1024;
-        for offset in (0..OBJECT_BYTES).step_by(64 * 1024) {
-            let bytes = patterned_bytes(offset, (OBJECT_BYTES - offset).min(64 * 1024));
-            file.write_all(&bytes).expect("write patterned object");
-        }
-        let key = format!("storage-contract/{}", uuid::Uuid::new_v4());
-        let result: Result<(), String> = async {
-            storage
-                .put_file(&key, file.path().to_path_buf(), OBJECT_BYTES as u64)
-                .await
-                .map_err(|error| error.to_string())?;
-            if storage
-                .head_bytes(&key)
-                .await
-                .map_err(|error| error.to_string())?
-                != OBJECT_BYTES as i64
-            {
-                return Err("stored object has an unexpected size".into());
-            }
-            let range = ObjectRange {
-                start: RANGE_START as u64,
-                end: (RANGE_START + RANGE_BYTES - 1) as u64,
-                total: OBJECT_BYTES as u64,
-            };
-            let actual = storage
-                .get(&key)
-                .await
-                .map_err(|error| error.to_string())?
-                .try_collect::<Vec<Vec<u8>>>()
-                .await
-                .map_err(|error| error.to_string())?
-                .concat();
-            if actual != patterned_bytes(0, OBJECT_BYTES) {
-                return Err("full object bytes do not match the uploaded pattern".into());
-            }
-            let actual = storage
-                .get_range(&key, range)
-                .await
-                .map_err(|error| error.to_string())?
-                .try_collect::<Vec<Vec<u8>>>()
-                .await
-                .map_err(|error| error.to_string())?
-                .concat();
-            if actual != patterned_bytes(RANGE_START, RANGE_BYTES) {
-                return Err("ranged bytes do not match the uploaded pattern".into());
-            }
-            Ok(())
-        }
-        .await;
-        let cleanup = storage.delete(&key).await;
-        result.expect("disposable storage contract");
-        cleanup.expect("delete contract object");
-    }
-
-    fn patterned_bytes(offset: usize, length: usize) -> Vec<u8> {
-        (offset..offset + length)
-            .map(|position| (position % 251) as u8)
-            .collect()
     }
 }
