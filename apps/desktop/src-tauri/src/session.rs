@@ -2944,6 +2944,59 @@ mod tests {
     use std::{collections::BTreeMap, sync::atomic::AtomicUsize};
 
     #[test]
+    fn media_page_omits_existing_attachment_retention_state() {
+        use peppy_client_core::{Direction, MmsAcquisitionInput, MmsSource};
+
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = crate::tests::open(&fixture, &fixture.binding, &[]);
+        crate::tests::unlock(&session, &fixture);
+        let source = fixture.dir.path().join("retention-page.png");
+        std::fs::write(&source, sample_png(1, 1)).unwrap();
+        let attachment = session.prepare_attachment(&source).unwrap();
+        let id = attachment.id.parse().unwrap();
+        let acquisition = session
+            .client
+            .begin_mms_acquisition(MmsAcquisitionInput {
+                source: MmsSource {
+                    source_generation: "desktop-native-test".into(),
+                    subscription_id: "sim-1".into(),
+                    provider_message_id: "retention-page".into(),
+                    provider_thread_id: Some("retention-page-thread".into()),
+                },
+                direction: Direction::Incoming,
+                sender_address: Some("+12025550123".into()),
+                recipients: vec![],
+                subject: None,
+                body: "media".into(),
+                imported: false,
+                observed_at_ms: 1,
+                provider_read: None,
+                transaction_id: None,
+            })
+            .unwrap();
+        session
+            .client
+            .set_mms_acquisition_part(&acquisition.acquisition_id, "part-0", id)
+            .unwrap();
+        let conversation = session
+            .client
+            .complete_mms_acquisition(&acquisition.acquisition_id)
+            .unwrap()
+            .conversation_id;
+        session
+            .client
+            .begin_attachment_retention_use(id, peppy_client_core::AttachmentUseKind::PendingSend)
+            .unwrap();
+        assert!(session.client.attachment_retention_state(id).is_ok());
+
+        let page = session.media_page(conversation, None, 10).unwrap();
+        assert_eq!(page.items.len(), 1);
+        // Pins current behaviour of review finding D-26; flip this assertion when the fix is authorized.
+        assert_eq!(page.items[0].attachment.remote_state, None);
+        assert_eq!(page.items[0].attachment.local_available, None);
+    }
+
+    #[test]
     fn stale_cached_epoch_stays_locked_and_the_session_still_opens() {
         let fixture = fixture_at("http://127.0.0.1:9");
         let (root, binding) = (fixture.dir.path(), &fixture.binding);
