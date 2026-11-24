@@ -17,6 +17,9 @@ pub struct GatewaySettings {
     pub mms_sync_enabled: bool,
     pub media_wifi_only: bool,
     pub phone_read_enabled: bool,
+    /// Lets the vault's computers ask this phone to press a mirrored app notification's own
+    /// semantic mark-as-read action.
+    pub notification_mark_read_enabled: bool,
 }
 
 impl Default for GatewaySettings {
@@ -29,6 +32,7 @@ impl Default for GatewaySettings {
             mms_sync_enabled: true,
             media_wifi_only: true,
             phone_read_enabled: false,
+            notification_mark_read_enabled: false,
         }
     }
 }
@@ -40,6 +44,8 @@ pub struct GatewayHostFacts {
     pub sms_available: bool,
     pub notification_is_silent: bool,
     pub phone_read_available: bool,
+    /// Android 9 or later with notification access, so the host can fire a semantic action.
+    pub notification_mark_read_available: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +55,7 @@ pub struct GatewayCapabilities {
     pub mms_sync_supported: bool,
     pub rcs_supported: bool,
     pub phone_read_supported: bool,
+    pub notification_mark_read_supported: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +67,7 @@ pub struct GatewayPolicyDecision {
     pub rcs_supported: bool,
     pub apply_phone_read: bool,
     pub ingest_phone_read: bool,
+    pub apply_notification_mark_read: bool,
 }
 
 impl Client {
@@ -76,6 +84,9 @@ impl Client {
         save(&tx, &settings)?;
         if !settings.phone_read_enabled {
             super::phone_read::retire_all_phone_read_effects(&tx)?;
+        }
+        if !settings.notification_mark_read_enabled || !settings.mirroring_enabled {
+            super::notifications::retire_pending_mark_reads(&tx)?;
         }
         tx.commit()?;
         Ok(())
@@ -94,6 +105,8 @@ impl Client {
             // Neither host has a legitimate general RCS integration.
             rcs_supported: false,
             phone_read_supported: carrier_supported && facts.phone_read_available,
+            notification_mark_read_supported: platform == GatewayPlatform::Android
+                && facts.notification_mark_read_available,
         }
     }
 
@@ -140,6 +153,11 @@ impl Client {
                 && settings.sms_sync_enabled
                 && platform == GatewayPlatform::Android
                 && capabilities.sms_sync_supported,
+            apply_notification_mark_read: settings.notification_mark_read_enabled
+                && settings.mirroring_enabled
+                && capabilities.notification_mirroring_supported
+                && capabilities.notification_mark_read_supported
+                && wifi_permits,
         })
     }
 }
@@ -168,20 +186,20 @@ pub(super) fn seed(conn: &Connection, legacy_enabled_installation: bool) -> Resu
 
 fn load(conn: &Connection) -> Result<GatewaySettings, Error> {
     conn.query_row(
-        "SELECT mirroring_enabled,mirroring_wifi_only,skip_silent,sms_sync_enabled,mms_sync_enabled,media_wifi_only,phone_read_enabled FROM gateway_settings WHERE id=1",
+        "SELECT mirroring_enabled,mirroring_wifi_only,skip_silent,sms_sync_enabled,mms_sync_enabled,media_wifi_only,phone_read_enabled,notification_mark_read_enabled FROM gateway_settings WHERE id=1",
         [],
         |r| Ok(GatewaySettings {
             mirroring_enabled: r.get(0)?, mirroring_wifi_only: r.get(1)?, skip_silent: r.get(2)?,
             sms_sync_enabled: r.get(3)?, mms_sync_enabled: r.get(4)?, media_wifi_only: r.get(5)?,
-            phone_read_enabled: r.get(6)?,
+            phone_read_enabled: r.get(6)?, notification_mark_read_enabled: r.get(7)?,
         }),
     ).map_err(Into::into)
 }
 
 fn save(conn: &Connection, settings: &GatewaySettings) -> Result<(), Error> {
     conn.execute(
-        "UPDATE gateway_settings SET mirroring_enabled=?,mirroring_wifi_only=?,skip_silent=?,sms_sync_enabled=?,mms_sync_enabled=?,media_wifi_only=?,phone_read_enabled=? WHERE id=1",
-        params![settings.mirroring_enabled, settings.mirroring_wifi_only, settings.skip_silent, settings.sms_sync_enabled, settings.mms_sync_enabled, settings.media_wifi_only, settings.phone_read_enabled],
+        "UPDATE gateway_settings SET mirroring_enabled=?,mirroring_wifi_only=?,skip_silent=?,sms_sync_enabled=?,mms_sync_enabled=?,media_wifi_only=?,phone_read_enabled=?,notification_mark_read_enabled=? WHERE id=1",
+        params![settings.mirroring_enabled, settings.mirroring_wifi_only, settings.skip_silent, settings.sms_sync_enabled, settings.mms_sync_enabled, settings.media_wifi_only, settings.phone_read_enabled, settings.notification_mark_read_enabled],
     )?;
     Ok(())
 }

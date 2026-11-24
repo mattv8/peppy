@@ -4004,6 +4004,7 @@ fn capture(key: &str, text: &str) -> NotificationCapture {
         category: None,
         posted_at: 1,
         dismissible: true,
+        mark_read_supported: false,
     }
 }
 
@@ -6248,6 +6249,7 @@ async fn real_client_history_purges_on_the_real_server_and_fresh_snapshot_does_n
         category: None,
         posted_at: 1,
         dismissible: true,
+        mark_read_supported: false,
     };
     // Pre-upgrade: three legacy posts (no server capability recorded yet).
     for text in ["10%", "50%", "90%"] {

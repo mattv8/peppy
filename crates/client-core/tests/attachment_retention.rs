@@ -1037,6 +1037,7 @@ fn superseded_projection_gc_never_completes_its_bound_restore() {
             category: None,
             posted_at: 1,
             dismissible: true,
+            mark_read_supported: false,
         })
         .unwrap();
     let mut server = Server::default();

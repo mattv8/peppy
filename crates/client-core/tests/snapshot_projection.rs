@@ -778,6 +778,7 @@ fn notification(key: &str, package: &str, text: &str) -> NotificationCapture {
         category: None,
         posted_at: 42,
         dismissible: true,
+        mark_read_supported: false,
     }
 }
 

@@ -208,6 +208,7 @@ fn notification_reply_spike_version_43_repairs_and_upgrades() {
         mms_sync_enabled: false,
         media_wifi_only: false,
         phone_read_enabled: true,
+        notification_mark_read_enabled: false,
     };
     client.set_gateway_settings(settings.clone()).unwrap();
     drop(client);
@@ -324,6 +325,7 @@ fn version_45_upgrade_adds_rcs_mapping_schema_without_resetting_preferences() {
         mms_sync_enabled: true,
         media_wifi_only: false,
         phone_read_enabled: true,
+        notification_mark_read_enabled: false,
     };
     client.set_gateway_settings(settings.clone()).unwrap();
     drop(client);
@@ -598,6 +600,7 @@ fn gateway_settings_defaults_persist_and_gate_host_facts() {
             mms_sync_enabled: true,
             media_wifi_only: true,
             phone_read_enabled: false,
+            notification_mark_read_enabled: false,
         })
         .unwrap();
     let decision = client
@@ -879,4 +882,116 @@ fn version_17_upgrade_seeds_legacy_policy_only_once() {
 
     let reopened = open(&config);
     assert!(reopened.gateway_settings().unwrap().mirroring_enabled);
+}
+
+#[test]
+fn notification_mark_read_defaults_off_and_needs_setting_mirroring_and_android_support() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let client = open(&config(&dir, "gateway-mark-read", &vault));
+    assert!(
+        !client
+            .gateway_settings()
+            .unwrap()
+            .notification_mark_read_enabled
+    );
+    let available = GatewayHostFacts {
+        notification_listener_available: true,
+        notification_mark_read_available: true,
+        wifi_connected: true,
+        ..GatewayHostFacts::default()
+    };
+    let decide = |client: &Client, platform, facts| {
+        client
+            .gateway_policy_decision(platform, facts)
+            .unwrap()
+            .apply_notification_mark_read
+    };
+    assert!(!decide(&client, GatewayPlatform::Android, available));
+
+    let enabled = GatewaySettings {
+        mirroring_enabled: true,
+        notification_mark_read_enabled: true,
+        ..GatewaySettings::default()
+    };
+    client.set_gateway_settings(enabled.clone()).unwrap();
+    assert!(decide(&client, GatewayPlatform::Android, available));
+    assert!(!decide(&client, GatewayPlatform::Ios, available));
+    assert!(!decide(
+        &client,
+        GatewayPlatform::Android,
+        GatewayHostFacts {
+            notification_mark_read_available: false,
+            ..available
+        }
+    ));
+    assert!(!decide(
+        &client,
+        GatewayPlatform::Android,
+        GatewayHostFacts {
+            notification_listener_available: false,
+            ..available
+        }
+    ));
+
+    client
+        .set_gateway_settings(GatewaySettings {
+            mirroring_wifi_only: true,
+            ..enabled.clone()
+        })
+        .unwrap();
+    assert!(!decide(
+        &client,
+        GatewayPlatform::Android,
+        GatewayHostFacts {
+            wifi_connected: false,
+            ..available
+        }
+    ));
+    client
+        .set_gateway_settings(GatewaySettings {
+            mirroring_enabled: false,
+            ..enabled
+        })
+        .unwrap();
+    assert!(!decide(&client, GatewayPlatform::Android, available));
+}
+
+#[test]
+fn version_64_upgrade_adds_mark_read_schema_without_resetting_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "gateway-version-64", &vault);
+    let settings = GatewaySettings {
+        mirroring_enabled: true,
+        phone_read_enabled: true,
+        ..GatewaySettings::default()
+    };
+    open(&config)
+        .set_gateway_settings(settings.clone())
+        .unwrap();
+
+    let conn = encrypted_connection(&config);
+    conn.execute_batch(
+        "DROP TABLE notification_mark_reads;
+         ALTER TABLE notifications DROP COLUMN mark_read_supported;
+         ALTER TABLE gateway_settings DROP COLUMN notification_mark_read_enabled;
+         UPDATE schema_meta SET version=64;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let client = open(&config);
+    assert_eq!(client.gateway_settings().unwrap(), settings);
+    drop(client);
+    let conn = encrypted_connection(&config);
+    assert_eq!(schema_version(&conn), 65);
+    assert!(table_exists(&conn, "notification_mark_reads"));
+    assert!(index_exists(&conn, "notification_mark_reads_pending"));
+    assert!(column_exists(&conn, "notifications", "mark_read_supported"));
+    assert!(column_exists(
+        &conn,
+        "gateway_settings",
+        "notification_mark_read_enabled"
+    ));
 }

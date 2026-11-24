@@ -62,6 +62,7 @@ fn capture(key: &str, instance: &str, text: &str) -> NotificationCapture {
         category: None,
         posted_at: now_ms(),
         dismissible: true,
+        mark_read_supported: false,
     }
 }
 
