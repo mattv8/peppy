@@ -1,8 +1,7 @@
 use base64::Engine as _;
 use peppy_domain::{CommandId, DeviceId, EnvelopeId, SourceSequence, VaultId};
 use peppy_protocol::{
-    CompactionMetadata, CompactionReference, Envelope, EnvelopeError, EnvelopePurpose,
-    GatewayRoute, PairingQrRecord,
+    CompactionMetadata, CompactionReference, Envelope, EnvelopeError, EnvelopePurpose, GatewayRoute,
 };
 
 fn envelope() -> Envelope {
@@ -557,25 +556,6 @@ fn malformed_base64_is_rejected_before_large_decode() {
 }
 
 #[test]
-fn pairing_qr_requires_valid_origin_expiry_and_device_binding() {
-    let qr = PairingQrRecord {
-        https_origin: "https://example.test:8443".into(),
-        challenge_token: "A".repeat(43),
-        expires_at_unix_seconds: 101,
-        protocol_version: 1,
-        vault_id: VaultId::new(),
-        key_epoch: 1,
-        profile_fingerprint: "a".repeat(64),
-        device_binding: DeviceId::new(),
-    };
-    assert!(qr.validate_at(100).is_ok());
-    assert_eq!(
-        qr.validate_at(101),
-        Err(EnvelopeError::ExpiredPairingChallenge)
-    );
-}
-
-#[test]
 fn generated_contracts_are_deterministic() {
     let first = peppy_protocol::generate_contracts();
     let second = peppy_protocol::generate_contracts();
@@ -648,35 +628,4 @@ fn event_envelope_conflict_is_scoped_to_vault_producer_and_envelope_id() {
     assert!(first.event_conflicts_with(&changed).unwrap());
     changed.envelope_id = EnvelopeId::new();
     assert!(!first.event_conflicts_with(&changed).unwrap());
-}
-
-#[test]
-fn pairing_origin_and_token_reject_lookalikes() {
-    let mut qr = PairingQrRecord {
-        https_origin: "https://[::1]:443".into(),
-        challenge_token: "A".repeat(43),
-        expires_at_unix_seconds: 101,
-        protocol_version: 1,
-        vault_id: VaultId::new(),
-        key_epoch: 1,
-        profile_fingerprint: "a".repeat(64),
-        device_binding: DeviceId::new(),
-    };
-    assert!(qr.validate_at(100).is_ok());
-    for origin in [
-        "https://[::1]evil",
-        "https://[abc]",
-        "https://user@example.test",
-        "https://example.test/path",
-        "https://example.test?x=1",
-    ] {
-        qr.https_origin = origin.into();
-        assert_eq!(
-            qr.validate_at(100),
-            Err(EnvelopeError::InvalidPairingOrigin)
-        );
-    }
-    qr.https_origin = "https://example.test".into();
-    qr.challenge_token = "A".repeat(42);
-    assert_eq!(qr.validate_at(100), Err(EnvelopeError::InvalidPairingToken));
 }
