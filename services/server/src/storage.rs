@@ -89,6 +89,100 @@ pub struct VersionEntry {
     pub delete_marker: bool,
 }
 
+/// Identifies the cause of a transient storage failure.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageUnavailableReason {
+    PutRequestFailed,
+    PutRejected,
+    PutEncryptionAcknowledgementMissing,
+    HeadRequestFailed,
+    HeadRejected,
+    HeadEncryptionAcknowledgementMissing,
+    GetRequestFailed,
+    GetRejected,
+    GetEncryptionAcknowledgementMissing,
+    RangedGetRequestFailed,
+    RangedGetRejected,
+    RangedGetResponseInvalid,
+    DeleteRequestFailed,
+    DeleteRejected,
+    VersionListingRequestFailed,
+    VersionListingForbidden,
+    VersionListingRejected,
+    VersionListingTooLarge,
+    VersionListingMalformed,
+    VersionDeleteRequestFailed,
+    VersionDeleteForbidden,
+    VersionDeleteRejected,
+    ProbeRequestFailed,
+    ProbeRejected,
+    ProbeReadFailed,
+    EncryptionProbeTimedOut,
+    EncryptionProbeInvalidContentLength,
+    EncryptionProbeFullReadMismatch,
+    EncryptionProbeRangeReadMismatch,
+    EncryptionProbeTooManyBytes,
+    EncryptionProbeTooFewBytes,
+    BucketRequestFailed,
+    BucketProvisioningRejected,
+    PurgeIncomplete,
+    ObjectInvalidContentLength,
+    UnsignedGetFailed,
+}
+
+use StorageUnavailableReason as Reason;
+
+impl StorageUnavailableReason {
+    fn as_str(self) -> &'static str {
+        use StorageUnavailableReason::*;
+        match self {
+            PutRequestFailed => "S3 PUT request failed",
+            PutRejected => "S3 PUT rejected",
+            PutEncryptionAcknowledgementMissing => "S3 PUT encryption acknowledgement missing",
+            HeadRequestFailed => "S3 HEAD request failed",
+            HeadRejected => "S3 HEAD rejected",
+            HeadEncryptionAcknowledgementMissing => "S3 HEAD encryption acknowledgement missing",
+            GetRequestFailed => "S3 GET request failed",
+            GetRejected => "S3 GET rejected",
+            GetEncryptionAcknowledgementMissing => "S3 GET encryption acknowledgement missing",
+            RangedGetRequestFailed => "S3 ranged GET request failed",
+            RangedGetRejected => "S3 ranged GET rejected",
+            RangedGetResponseInvalid => "S3 ranged GET response is invalid",
+            DeleteRequestFailed => "S3 DELETE request failed",
+            DeleteRejected => "S3 DELETE rejected",
+            VersionListingRequestFailed => "S3 version listing request failed",
+            VersionListingForbidden => "S3 version listing forbidden",
+            VersionListingRejected => "S3 version listing rejected",
+            VersionListingTooLarge => "S3 version listing too large",
+            VersionListingMalformed => "S3 version listing malformed",
+            VersionDeleteRequestFailed => "S3 version delete request failed",
+            VersionDeleteForbidden => "S3 version delete forbidden",
+            VersionDeleteRejected => "S3 version delete rejected",
+            ProbeRequestFailed => "S3 probe request failed",
+            ProbeRejected => "S3 probe rejected",
+            ProbeReadFailed => "S3 probe read failed",
+            EncryptionProbeTimedOut => "S3 encryption probe timed out",
+            EncryptionProbeInvalidContentLength => "S3 encryption probe has invalid content length",
+            EncryptionProbeFullReadMismatch => "S3 encryption probe full read mismatch",
+            EncryptionProbeRangeReadMismatch => "S3 encryption probe range read mismatch",
+            EncryptionProbeTooManyBytes => "S3 encryption probe returned too many bytes",
+            EncryptionProbeTooFewBytes => "S3 encryption probe returned too few bytes",
+            BucketRequestFailed => "S3 bucket request failed",
+            BucketProvisioningRejected => "S3 bucket provisioning rejected",
+            PurgeIncomplete => "S3 purge incomplete",
+            ObjectInvalidContentLength => "S3 object has invalid content length",
+            UnsignedGetFailed => "unsigned S3 GET failed",
+        }
+    }
+}
+
+impl std::fmt::Display for StorageUnavailableReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Storage failures callers must distinguish: a missing object is a durable
 /// fact (409/404/410 at the API), anything else is transient (503).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -96,13 +190,13 @@ pub enum StorageError {
     #[error("storage object not found")]
     NotFound,
     #[error("storage unavailable: {0}")]
-    Unavailable(&'static str),
+    Unavailable(StorageUnavailableReason),
     #[error("invalid storage request: {0}")]
     Invalid(&'static str),
 }
 
 impl StorageError {
-    fn from_status(status: StatusCode, operation: &'static str) -> Self {
+    fn from_status(status: StatusCode, operation: StorageUnavailableReason) -> Self {
         if status == StatusCode::NOT_FOUND {
             Self::NotFound
         } else {
@@ -219,13 +313,13 @@ impl Storage {
             .timeout(PUT_TIMEOUT)
             .send()
             .await
-            .map_err(|_| StorageError::Unavailable("S3 PUT request failed"))?;
+            .map_err(|_| StorageError::Unavailable(Reason::PutRequestFailed))?;
         if !response.status().is_success() {
-            return Err(StorageError::Unavailable("S3 PUT rejected"));
+            return Err(StorageError::Unavailable(Reason::PutRejected));
         }
         require_sse_acknowledgement(
             response.headers(),
-            "S3 PUT encryption acknowledgement missing",
+            Reason::PutEncryptionAcknowledgementMissing,
         )?;
         Ok(())
     }
@@ -253,9 +347,9 @@ impl Storage {
             .timeout(PUT_TIMEOUT)
             .send()
             .await
-            .map_err(|_| StorageError::Unavailable("S3 PUT request failed"))?;
+            .map_err(|_| StorageError::Unavailable(Reason::PutRequestFailed))?;
         if !response.status().is_success() {
-            return Err(StorageError::Unavailable("S3 PUT rejected"));
+            return Err(StorageError::Unavailable(Reason::PutRejected));
         }
         if let Some(version) = version {
             *version
@@ -268,7 +362,7 @@ impl Storage {
         }
         require_sse_acknowledgement(
             response.headers(),
-            "S3 PUT encryption acknowledgement missing",
+            Reason::PutEncryptionAcknowledgementMissing,
         )?;
         Ok(())
     }
@@ -293,18 +387,18 @@ impl Storage {
                 .timeout(CONTROL_TIMEOUT)
                 .send()
                 .await
-                .map_err(|_| StorageError::Unavailable("S3 version listing request failed"))?;
+                .map_err(|_| StorageError::Unavailable(Reason::VersionListingRequestFailed))?;
             if response.status() == StatusCode::FORBIDDEN {
-                return Err(StorageError::Unavailable("S3 version listing forbidden"));
+                return Err(StorageError::Unavailable(Reason::VersionListingForbidden));
             }
             if !response.status().is_success() {
-                return Err(StorageError::Unavailable("S3 version listing rejected"));
+                return Err(StorageError::Unavailable(Reason::VersionListingRejected));
             }
             if response
                 .content_length()
                 .is_some_and(|length| length > VERSION_LIST_BODY_LIMIT as u64)
             {
-                return Err(StorageError::Unavailable("S3 version listing too large"));
+                return Err(StorageError::Unavailable(Reason::VersionListingTooLarge));
             }
             let page = parse_version_page(&read_limited_body(response).await?, key)?;
             entries.extend(page.entries);
@@ -313,13 +407,13 @@ impl Storage {
             }
             let next_markers = page
                 .next_markers
-                .ok_or(StorageError::Unavailable("S3 version listing malformed"))?;
+                .ok_or(StorageError::Unavailable(Reason::VersionListingMalformed))?;
             if markers.as_ref() == Some(&next_markers) {
-                return Err(StorageError::Unavailable("S3 version listing malformed"));
+                return Err(StorageError::Unavailable(Reason::VersionListingMalformed));
             }
             markers = Some(next_markers);
         }
-        Err(StorageError::Unavailable("S3 version listing malformed"))
+        Err(StorageError::Unavailable(Reason::VersionListingMalformed))
     }
 
     pub async fn delete_version(
@@ -335,13 +429,13 @@ impl Storage {
             .timeout(CONTROL_TIMEOUT)
             .send()
             .await
-            .map_err(|_| StorageError::Unavailable("S3 version delete request failed"))?;
+            .map_err(|_| StorageError::Unavailable(Reason::VersionDeleteRequestFailed))?;
         if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
             Ok(())
         } else if response.status() == StatusCode::FORBIDDEN {
-            Err(StorageError::Unavailable("S3 version delete forbidden"))
+            Err(StorageError::Unavailable(Reason::VersionDeleteForbidden))
         } else {
-            Err(StorageError::Unavailable("S3 version delete rejected"))
+            Err(StorageError::Unavailable(Reason::VersionDeleteRejected))
         }
     }
 
@@ -366,7 +460,7 @@ impl Storage {
         if self.list_versions(key).await?.is_empty() {
             Ok(())
         } else {
-            Err(StorageError::Unavailable("S3 purge incomplete"))
+            Err(StorageError::Unavailable(Reason::PurgeIncomplete))
         }
     }
 
@@ -377,16 +471,16 @@ impl Storage {
             .timeout(CONTROL_TIMEOUT)
             .send()
             .await
-            .map_err(|_| StorageError::Unavailable("S3 HEAD request failed"))?;
+            .map_err(|_| StorageError::Unavailable(Reason::HeadRequestFailed))?;
         if !response.status().is_success() {
             return Err(StorageError::from_status(
                 response.status(),
-                "S3 HEAD rejected",
+                Reason::HeadRejected,
             ));
         }
         require_sse_acknowledgement(
             response.headers(),
-            "S3 HEAD encryption acknowledgement missing",
+            Reason::HeadEncryptionAcknowledgementMissing,
         )?;
         response
             .headers()
@@ -395,7 +489,7 @@ impl Storage {
             .and_then(|value| value.parse::<i64>().ok())
             .filter(|length| *length >= 0)
             .ok_or(StorageError::Unavailable(
-                "S3 object has invalid content length",
+                Reason::ObjectInvalidContentLength,
             ))
     }
 
@@ -407,11 +501,11 @@ impl Storage {
             .timeout(CONTROL_TIMEOUT)
             .send()
             .await
-            .map_err(|_| StorageError::Unavailable("S3 DELETE request failed"))?;
+            .map_err(|_| StorageError::Unavailable(Reason::DeleteRequestFailed))?;
         if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
             Ok(())
         } else {
-            Err(StorageError::Unavailable("S3 DELETE rejected"))
+            Err(StorageError::Unavailable(Reason::DeleteRejected))
         }
     }
 
@@ -422,16 +516,16 @@ impl Storage {
             .signed_request(Method::GET, &url, &[], SignableBody::empty())?
             .send()
             .await
-            .map_err(|_| StorageError::Unavailable("S3 GET request failed"))?;
+            .map_err(|_| StorageError::Unavailable(Reason::GetRequestFailed))?;
         if !response.status().is_success() {
             return Err(StorageError::from_status(
                 response.status(),
-                "S3 GET rejected",
+                Reason::GetRejected,
             ));
         }
         require_sse_acknowledgement(
             response.headers(),
-            "S3 GET encryption acknowledgement missing",
+            Reason::GetEncryptionAcknowledgementMissing,
         )?;
         let stream = response.bytes_stream().map(|chunk| {
             chunk
@@ -460,11 +554,11 @@ impl Storage {
             )?
             .send()
             .await
-            .map_err(|_| StorageError::Unavailable("S3 ranged GET request failed"))?;
+            .map_err(|_| StorageError::Unavailable(Reason::RangedGetRequestFailed))?;
         if response.status() != StatusCode::PARTIAL_CONTENT {
             return Err(StorageError::from_status(
                 response.status(),
-                "S3 ranged GET rejected",
+                Reason::RangedGetRejected,
             ));
         }
         let expected_length = range
@@ -483,12 +577,10 @@ impl Storage {
             .and_then(|value| value.to_str().ok());
         require_sse_acknowledgement(
             response.headers(),
-            "S3 GET encryption acknowledgement missing",
+            Reason::GetEncryptionAcknowledgementMissing,
         )?;
         if !range_response_is_valid(content_length, content_range, range, expected_length) {
-            return Err(StorageError::Unavailable(
-                "S3 ranged GET response is invalid",
-            ));
+            return Err(StorageError::Unavailable(Reason::RangedGetResponseInvalid));
         }
         let stream = response.bytes_stream().map(|chunk| {
             chunk
@@ -507,9 +599,9 @@ impl Storage {
             .timeout(CONTROL_TIMEOUT)
             .send()
             .await
-            .map_err(|_| StorageError::Unavailable("S3 probe request failed"))?;
+            .map_err(|_| StorageError::Unavailable(Reason::ProbeRequestFailed))?;
         if !response.status().is_success() {
-            return Err(StorageError::Unavailable("S3 probe rejected"));
+            return Err(StorageError::Unavailable(Reason::ProbeRejected));
         }
         Ok(())
     }
@@ -526,7 +618,7 @@ impl Storage {
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(StorageError::Unavailable("S3 encryption probe timed out")),
+            Err(_) => Err(StorageError::Unavailable(Reason::EncryptionProbeTimedOut)),
         };
         self.versioned
             .store(object.version().is_some(), Ordering::Relaxed);
@@ -548,12 +640,12 @@ impl Storage {
         object.put_bytes(payload.clone()).await?;
         if self.head_bytes(key).await? != payload.len() as i64 {
             return Err(StorageError::Unavailable(
-                "S3 encryption probe has invalid content length",
+                Reason::EncryptionProbeInvalidContentLength,
             ));
         }
         if self.read_exact(key, payload.len()).await? != payload {
             return Err(StorageError::Unavailable(
-                "S3 encryption probe full read mismatch",
+                Reason::EncryptionProbeFullReadMismatch,
             ));
         }
         let range = ObjectRange {
@@ -565,7 +657,7 @@ impl Storage {
             != payload[PROBE_RANGE_START..=range.end as usize]
         {
             return Err(StorageError::Unavailable(
-                "S3 encryption probe range read mismatch",
+                Reason::EncryptionProbeRangeReadMismatch,
             ));
         }
         Ok(())
@@ -593,11 +685,13 @@ impl Storage {
             .timeout(CONTROL_TIMEOUT)
             .send()
             .await
-            .map_err(|_| StorageError::Unavailable("S3 bucket request failed"))?;
+            .map_err(|_| StorageError::Unavailable(Reason::BucketRequestFailed))?;
         if response.status().is_success() || response.status() == StatusCode::CONFLICT {
             Ok(())
         } else {
-            Err(StorageError::Unavailable("S3 bucket provisioning rejected"))
+            Err(StorageError::Unavailable(
+                Reason::BucketProvisioningRejected,
+            ))
         }
     }
 
@@ -610,7 +704,7 @@ impl Storage {
             .send()
             .await
             .map(|response| response.status())
-            .map_err(|_| StorageError::Unavailable("unsigned S3 GET failed"))
+            .map_err(|_| StorageError::Unavailable(Reason::UnsignedGetFailed))
     }
 
     fn bucket_url(&self) -> Result<Url, StorageError> {
@@ -744,9 +838,9 @@ async fn read_limited_body(response: reqwest::Response) -> Result<Vec<u8>, Stora
     let mut body = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| StorageError::Unavailable("S3 version listing rejected"))?;
+        let chunk = chunk.map_err(|_| StorageError::Unavailable(Reason::VersionListingRejected))?;
         if body.len().saturating_add(chunk.len()) > VERSION_LIST_BODY_LIMIT {
-            return Err(StorageError::Unavailable("S3 version listing too large"));
+            return Err(StorageError::Unavailable(Reason::VersionListingTooLarge));
         }
         body.extend_from_slice(&chunk);
     }
@@ -754,7 +848,7 @@ async fn read_limited_body(response: reqwest::Response) -> Result<Vec<u8>, Stora
 }
 
 fn parse_version_page(body: &[u8], requested_key: &str) -> Result<VersionPage, StorageError> {
-    let malformed = || StorageError::Unavailable("S3 version listing malformed");
+    let malformed = || StorageError::Unavailable(Reason::VersionListingMalformed);
     let mut reader = Reader::from_reader(body);
     let mut buffer = Vec::new();
     let mut field: Option<Vec<u8>> = None;
@@ -879,7 +973,7 @@ fn parse_version_page(body: &[u8], requested_key: &str) -> Result<VersionPage, S
 
 fn require_sse_acknowledgement(
     headers: &reqwest::header::HeaderMap,
-    missing_message: &'static str,
+    missing_message: StorageUnavailableReason,
 ) -> Result<(), StorageError> {
     if headers
         .get(SSE_HEADER)
@@ -898,17 +992,17 @@ async fn collect_exact(
 ) -> Result<Vec<u8>, StorageError> {
     let mut bytes = Vec::with_capacity(expected_length);
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| StorageError::Unavailable("S3 probe read failed"))?;
+        let chunk = chunk.map_err(|_| StorageError::Unavailable(Reason::ProbeReadFailed))?;
         if bytes.len().saturating_add(chunk.len()) > expected_length {
             return Err(StorageError::Unavailable(
-                "S3 encryption probe returned too many bytes",
+                Reason::EncryptionProbeTooManyBytes,
             ));
         }
         bytes.extend_from_slice(&chunk);
     }
     if bytes.len() != expected_length {
         return Err(StorageError::Unavailable(
-            "S3 encryption probe returned too few bytes",
+            Reason::EncryptionProbeTooFewBytes,
         ));
     }
     Ok(bytes)
@@ -942,13 +1036,108 @@ fn range_response_is_valid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_reasons_preserve_diagnostic_text() {
+        use StorageUnavailableReason::*;
+        let reasons = [
+            PutRequestFailed,
+            PutRejected,
+            PutEncryptionAcknowledgementMissing,
+            HeadRequestFailed,
+            HeadRejected,
+            HeadEncryptionAcknowledgementMissing,
+            GetRequestFailed,
+            GetRejected,
+            GetEncryptionAcknowledgementMissing,
+            RangedGetRequestFailed,
+            RangedGetRejected,
+            RangedGetResponseInvalid,
+            DeleteRequestFailed,
+            DeleteRejected,
+            VersionListingRequestFailed,
+            VersionListingForbidden,
+            VersionListingRejected,
+            VersionListingTooLarge,
+            VersionListingMalformed,
+            VersionDeleteRequestFailed,
+            VersionDeleteForbidden,
+            VersionDeleteRejected,
+            ProbeRequestFailed,
+            ProbeRejected,
+            ProbeReadFailed,
+            EncryptionProbeTimedOut,
+            EncryptionProbeInvalidContentLength,
+            EncryptionProbeFullReadMismatch,
+            EncryptionProbeRangeReadMismatch,
+            EncryptionProbeTooManyBytes,
+            EncryptionProbeTooFewBytes,
+            BucketRequestFailed,
+            BucketProvisioningRejected,
+            PurgeIncomplete,
+            ObjectInvalidContentLength,
+            UnsignedGetFailed,
+        ];
+        let mut strings = std::collections::HashSet::new();
+        for reason in reasons {
+            let expected = match reason {
+                PutRequestFailed => "S3 PUT request failed",
+                PutRejected => "S3 PUT rejected",
+                PutEncryptionAcknowledgementMissing => "S3 PUT encryption acknowledgement missing",
+                HeadRequestFailed => "S3 HEAD request failed",
+                HeadRejected => "S3 HEAD rejected",
+                HeadEncryptionAcknowledgementMissing => {
+                    "S3 HEAD encryption acknowledgement missing"
+                }
+                GetRequestFailed => "S3 GET request failed",
+                GetRejected => "S3 GET rejected",
+                GetEncryptionAcknowledgementMissing => "S3 GET encryption acknowledgement missing",
+                RangedGetRequestFailed => "S3 ranged GET request failed",
+                RangedGetRejected => "S3 ranged GET rejected",
+                RangedGetResponseInvalid => "S3 ranged GET response is invalid",
+                DeleteRequestFailed => "S3 DELETE request failed",
+                DeleteRejected => "S3 DELETE rejected",
+                VersionListingRequestFailed => "S3 version listing request failed",
+                VersionListingForbidden => "S3 version listing forbidden",
+                VersionListingRejected => "S3 version listing rejected",
+                VersionListingTooLarge => "S3 version listing too large",
+                VersionListingMalformed => "S3 version listing malformed",
+                VersionDeleteRequestFailed => "S3 version delete request failed",
+                VersionDeleteForbidden => "S3 version delete forbidden",
+                VersionDeleteRejected => "S3 version delete rejected",
+                ProbeRequestFailed => "S3 probe request failed",
+                ProbeRejected => "S3 probe rejected",
+                ProbeReadFailed => "S3 probe read failed",
+                EncryptionProbeTimedOut => "S3 encryption probe timed out",
+                EncryptionProbeInvalidContentLength => {
+                    "S3 encryption probe has invalid content length"
+                }
+                EncryptionProbeFullReadMismatch => "S3 encryption probe full read mismatch",
+                EncryptionProbeRangeReadMismatch => "S3 encryption probe range read mismatch",
+                EncryptionProbeTooManyBytes => "S3 encryption probe returned too many bytes",
+                EncryptionProbeTooFewBytes => "S3 encryption probe returned too few bytes",
+                BucketRequestFailed => "S3 bucket request failed",
+                BucketProvisioningRejected => "S3 bucket provisioning rejected",
+                PurgeIncomplete => "S3 purge incomplete",
+                ObjectInvalidContentLength => "S3 object has invalid content length",
+                UnsignedGetFailed => "unsigned S3 GET failed",
+            };
+            assert_eq!(reason.as_str(), expected);
+            assert_eq!(
+                StorageError::Unavailable(reason).to_string(),
+                format!("storage unavailable: {expected}")
+            );
+            assert!(strings.insert(expected));
+        }
+        assert_eq!(strings.len(), 36);
+    }
     use futures_util::TryStreamExt;
     use std::io::Write;
 
     #[test]
     fn only_not_found_is_a_durable_absence() {
         assert_eq!(
-            StorageError::from_status(StatusCode::NOT_FOUND, "x"),
+            StorageError::from_status(StatusCode::NOT_FOUND, Reason::HeadRejected),
             StorageError::NotFound
         );
         for status in [
@@ -957,8 +1146,8 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE,
         ] {
             assert_eq!(
-                StorageError::from_status(status, "x"),
-                StorageError::Unavailable("x")
+                StorageError::from_status(status, Reason::HeadRejected),
+                StorageError::Unavailable(Reason::HeadRejected)
             );
         }
     }
@@ -1043,7 +1232,7 @@ mod tests {
         ] {
             assert!(matches!(
                 parse_version_page(page, "private/v/o"),
-                Err(StorageError::Unavailable("S3 version listing malformed"))
+                Err(StorageError::Unavailable(Reason::VersionListingMalformed))
             ));
         }
     }
