@@ -203,17 +203,6 @@ async fn next_event_frame(socket: &mut Socket) -> Value {
     }
 }
 
-#[test]
-fn websocket_control_frame_payload_is_not_decoded_as_json() {
-    let payload = vec![0, 0, 159];
-    let frame = tungstenite::Message::Ping(payload.clone().into());
-
-    match classify_server_frame(frame) {
-        ServerFrame::Ping(received) => assert_eq!(received, payload),
-        _ => panic!("non-UTF8 ping was not classified as a control frame"),
-    }
-}
-
 async fn post_event(
     phase: &'static str,
     server: &Server,

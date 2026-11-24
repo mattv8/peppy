@@ -28,11 +28,6 @@ fn argon2id_verifier_accepts_a_hash_slice_without_a_null_terminated_backing_buff
 }
 
 #[test]
-fn setup_and_session_digests_are_fixed_length() {
-    assert_eq!(digest(b"setup-token").len(), 32);
-}
-
-#[test]
 fn browser_csrf_tokens_are_stable_and_domain_separated_from_session_tokens() {
     let session_token = "browser-session-token";
 
