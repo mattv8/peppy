@@ -14,7 +14,11 @@ type ExistingNotification = (
     i64,
     bool,
     Option<String>,
+    bool,
 );
+
+/// App name, icon, content version, dismissible and mark-read capability of a live notification.
+type LiveNotification = (String, Option<String>, i64, bool, bool);
 
 const MAX_NOTIFICATION_ICON_BYTES: usize = 8_192;
 const MAX_NOTIFICATION_ICON_BASE64_BYTES: usize = MAX_NOTIFICATION_ICON_BYTES.div_ceil(3) * 4;
@@ -130,7 +134,9 @@ impl Client {
         if muted {
             return Ok(NotificationCaptureOutcome::FilteredOut);
         }
-        let existing: Option<ExistingNotification> = tx.query_row("SELECT lifetime,instance,removed,package_name,app_name,title,text,category,posted_at,dismissible,app_icon_png_base64 FROM notifications WHERE source_device_id=? AND notification_key=?", params![ctx.device_id.to_string(), input.notification_key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(10)?))).optional()?;
+        let existing: Option<ExistingNotification> = tx.query_row("SELECT lifetime,instance,removed,package_name,app_name,title,text,category,posted_at,dismissible,app_icon_png_base64,mark_read_supported FROM notifications WHERE source_device_id=? AND notification_key=?", params![ctx.device_id.to_string(), input.notification_key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(10)?,r.get(11)?))).optional()?;
+        // Only an enabled phone advertises the capability; compare and publish this derived value.
+        let mark_read_supported = input.mark_read_supported && mark_read_enabled(&tx)?;
         let retained_post: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM notifications n JOIN outbox o ON o.seq=n.source_sequence WHERE n.source_device_id=? AND n.notification_key=?)", params![source,input.notification_key], |r| r.get(0))?;
         if retained_post
             && existing.as_ref().is_some_and(
@@ -146,6 +152,7 @@ impl Client {
                     _posted_at,
                     dismissible,
                     icon,
+                    stored_mark_read,
                 )| {
                     !removed
                         && package == &input.package_name
@@ -155,6 +162,7 @@ impl Client {
                         && category == &input.category
                         && *dismissible == input.dismissible
                         && icon == &input.app_icon_png_base64
+                        && *stored_mark_read == mark_read_supported
                 },
             )
         {
@@ -188,6 +196,7 @@ impl Client {
             category: input.category,
             posted_at: input.posted_at,
             dismissible: input.dismissible,
+            mark_read_supported,
         };
         let (envelope_id, seq) = enqueue(
             &tx,
@@ -483,6 +492,164 @@ impl Client {
         )?;
         Ok(())
     }
+
+    /// Asks the source phone to mark this content version read through the app's own action, and
+    /// shows it read here. `Ok(false)` when the notification changed, left, or lost the capability.
+    pub fn request_notification_mark_read(
+        &self,
+        target: NotificationTarget,
+        content_sequence: SourceSequence,
+    ) -> Result<bool, Error> {
+        let Ok(sequence) = i64::try_from(content_sequence.0) else {
+            return Ok(false);
+        };
+        if !valid_target(&target) {
+            return Err(Error::InvalidRequest("notification target"));
+        }
+        let mut g = self.lock()?;
+        let (conn, ctx) = g.parts();
+        if !unlocked(&ctx) {
+            return Err(Error::KeysUnavailable);
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !current_version(&tx, &target, sequence, "mark_read_supported=1")? {
+            return Ok(false);
+        }
+        let requested_at_ms = now_ms();
+        enqueue(
+            &tx,
+            &ctx,
+            EnvelopePurpose::Event,
+            None,
+            None,
+            &PrivatePayload::NotificationMarkRead {
+                target: target.clone(),
+                content_sequence,
+                requested_at_ms,
+            },
+        )?;
+        apply_mark_read(
+            &tx,
+            &target,
+            sequence,
+            requested_at_ms,
+            false,
+            ctx.active_epoch.unwrap(),
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Dismisses the notification on its phone only if the banner's content version is still current.
+    pub fn dismiss_notification_if_unchanged(
+        &self,
+        target: NotificationTarget,
+        content_sequence: SourceSequence,
+    ) -> Result<bool, Error> {
+        let Ok(sequence) = i64::try_from(content_sequence.0) else {
+            return Ok(false);
+        };
+        if !valid_target(&target) {
+            return Err(Error::InvalidRequest("notification target"));
+        }
+        let mut g = self.lock()?;
+        let (conn, ctx) = g.parts();
+        if !unlocked(&ctx) {
+            return Err(Error::KeysUnavailable);
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !current_version(&tx, &target, sequence, "dismissible=1")? {
+            return Ok(false);
+        }
+        dismiss_in_tx(&tx, &ctx, &target)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// The source phone's executable requests: live, unexpired, current-epoch, never attempted,
+    /// for an unchanged notification that still reports the capability. Instances are current.
+    pub fn pending_notification_mark_reads(
+        &self,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<NotificationMarkReadRequest>, Error> {
+        let mut store = self.lock()?;
+        if restore_guarded(&store.conn)? {
+            return Ok(Vec::new());
+        }
+        let Some(epoch) = store
+            .active_epoch
+            .filter(|epoch| store.keys.contains_key(epoch))
+        else {
+            return Ok(Vec::new());
+        };
+        let device = store.config.device_id.to_string();
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (earliest, latest) = mark_read_window(now_ms);
+        tx.execute(
+            "UPDATE notification_mark_reads SET attempted=1 WHERE attempted=0 AND (requested_at_ms<? OR requested_at_ms>?)",
+            params![earliest, latest],
+        )?;
+        // A consumed version stays as a tombstone while it can still match the live notification,
+        // so a later request for the same version can never run again.
+        tx.execute(
+            "DELETE FROM notification_mark_reads WHERE attempted=1 AND requested_at_ms<? AND NOT EXISTS(SELECT 1 FROM notifications n WHERE n.source_device_id=notification_mark_reads.source_device_id AND n.notification_key=notification_mark_reads.notification_key AND n.lifetime=notification_mark_reads.lifetime AND n.source_sequence=notification_mark_reads.content_sequence AND n.removed=0)",
+            params![now_ms.saturating_sub(MARK_READ_RETENTION_MS)],
+        )?;
+        let requests = if mark_read_enabled(&tx)? {
+            let mut q = tx.prepare(&format!("SELECT r.id,r.source_device_id,r.notification_key,r.lifetime,n.instance FROM notification_mark_reads r JOIN notifications n ON n.source_device_id=r.source_device_id AND n.notification_key=r.notification_key AND n.lifetime=r.lifetime AND n.source_sequence=r.content_sequence WHERE {MARK_READ_ELIGIBLE_SQL} ORDER BY r.requested_at_ms LIMIT ?5"))?;
+            q.query_map(
+                params![device, epoch, earliest, latest, limit.min(100) as i64],
+                |r| {
+                    Ok(NotificationMarkReadRequest {
+                        id: r.get(0)?,
+                        target: NotificationTarget {
+                            source_device_id: r.get(1)?,
+                            notification_key: r.get(2)?,
+                            lifetime: r.get(3)?,
+                        },
+                        instance: r.get(4)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+        tx.commit()?;
+        Ok(requests)
+    }
+
+    /// Consumes the one-use permit immediately before the OS effect. True only for the call that
+    /// consumed it while the request was still eligible; the host never retries after that.
+    pub fn begin_notification_mark_read(&self, id: &str, now_ms: i64) -> Result<bool, Error> {
+        let mut store = self.lock()?;
+        if restore_guarded(&store.conn)? {
+            return Ok(false);
+        }
+        let Some(epoch) = store
+            .active_epoch
+            .filter(|epoch| store.keys.contains_key(epoch))
+        else {
+            return Ok(false);
+        };
+        let device = store.config.device_id.to_string();
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !mark_read_enabled(&tx)? {
+            return Ok(false);
+        }
+        let (earliest, latest) = mark_read_window(now_ms);
+        let consumed = tx.execute(
+            &format!("UPDATE notification_mark_reads SET attempted=1 WHERE id=?5 AND EXISTS(SELECT 1 FROM notification_mark_reads r JOIN notifications n ON n.source_device_id=r.source_device_id AND n.notification_key=r.notification_key AND n.lifetime=r.lifetime AND n.source_sequence=r.content_sequence WHERE r.id=?5 AND {MARK_READ_ELIGIBLE_SQL})"),
+            params![device, epoch, earliest, latest, id],
+        )?;
+        tx.commit()?;
+        Ok(consumed == 1)
+    }
     pub fn pending_banner_candidates(&self, limit: usize) -> Result<Vec<BannerCandidate>, Error> {
         let mut s = self.lock()?;
         prune_banners(&s.conn)?;
@@ -501,12 +668,13 @@ impl Client {
             String,
             String,
             i64,
+            Option<i64>,
         );
-        let rows: Vec<CandidateRow> = s.conn.prepare(&format!("SELECT id,kind,COALESCE((SELECT target_id FROM conversation_merges WHERE source_id=b.conversation_id),b.conversation_id),source_device_id,notification_key,lifetime,title,body,created_at FROM banner_candidates b WHERE acknowledged=0 AND NOT EXISTS(SELECT 1 FROM conversation_folders f WHERE f.conversation_id=({}) AND f.folder='spam') AND ((kind='message' AND EXISTS(SELECT 1 FROM messages m WHERE m.id=b.id AND m.seen=0)) OR (kind='notification' AND EXISTS(SELECT 1 FROM notifications n WHERE n.source_device_id=b.source_device_id AND n.notification_key=b.notification_key AND n.lifetime=b.lifetime AND n.removed=0 AND NOT n.seen AND NOT EXISTS(SELECT 1 FROM notification_dismissals d WHERE d.source_device_id=n.source_device_id AND d.notification_key=n.notification_key AND d.lifetime=n.lifetime) AND NOT EXISTS(SELECT 1 FROM app_filters f WHERE f.source_device_id=n.source_device_id AND f.package_name=n.package_name AND f.muted=1)))) ORDER BY rowid LIMIT ?", crate::conversation_folders::winner_sql("COALESCE((SELECT target_id FROM conversation_merges WHERE source_id=b.conversation_id),b.conversation_id)")))?.query_map(params![limit.min(1000) as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)))?.collect::<Result<_, _>>()?;
+        let rows: Vec<CandidateRow> = s.conn.prepare(&format!("SELECT id,kind,COALESCE((SELECT target_id FROM conversation_merges WHERE source_id=b.conversation_id),b.conversation_id),source_device_id,notification_key,lifetime,title,body,created_at,content_sequence FROM banner_candidates b WHERE acknowledged=0 AND NOT EXISTS(SELECT 1 FROM conversation_folders f WHERE f.conversation_id=({}) AND f.folder='spam') AND ((kind='message' AND EXISTS(SELECT 1 FROM messages m WHERE m.id=b.id AND m.seen=0)) OR (kind='notification' AND EXISTS(SELECT 1 FROM notifications n WHERE n.source_device_id=b.source_device_id AND n.notification_key=b.notification_key AND n.lifetime=b.lifetime AND n.removed=0 AND NOT n.seen AND NOT EXISTS(SELECT 1 FROM notification_dismissals d WHERE d.source_device_id=n.source_device_id AND d.notification_key=n.notification_key AND d.lifetime=n.lifetime) AND NOT EXISTS(SELECT 1 FROM app_filters f WHERE f.source_device_id=n.source_device_id AND f.package_name=n.package_name AND f.muted=1)))) ORDER BY rowid LIMIT ?", crate::conversation_folders::winner_sql("COALESCE((SELECT target_id FROM conversation_merges WHERE source_id=b.conversation_id),b.conversation_id)")))?.query_map(params![limit.min(1000) as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?)))?.collect::<Result<_, _>>()?;
         let rows = rows
             .into_iter()
             .map(|row| {
-                let (id, kind, _, source_device_id, notification_key, lifetime, _, _, _) = &row;
+                let (id, kind, _, source_device_id, notification_key, lifetime, _, _, _, _) = &row;
                 let message = (kind == "message")
                     .then(|| s.conn.query_row("SELECT payload FROM messages WHERE id=?", [id], |row| row.get::<_, String>(0)).optional())
                     .transpose()?
@@ -514,7 +682,7 @@ impl Client {
                     .and_then(|payload| decode::<MessagePayload>(payload.as_bytes()).ok());
                 let app = (kind == "notification")
                     .then(|| match (source_device_id.as_deref(), notification_key.as_deref(), lifetime.as_deref()) {
-                        (Some(source_device_id), Some(notification_key), Some(lifetime)) => s.conn.query_row("SELECT app_name,app_icon_png_base64 FROM notifications WHERE source_device_id=? AND notification_key=? AND lifetime=?", params![source_device_id, notification_key, lifetime], |row| Ok::<(String, Option<String>), rusqlite::Error>((row.get(0)?, row.get(1)?))).optional(),
+                        (Some(source_device_id), Some(notification_key), Some(lifetime)) => s.conn.query_row("SELECT app_name,app_icon_png_base64,source_sequence,dismissible,mark_read_supported FROM notifications WHERE source_device_id=? AND notification_key=? AND lifetime=?", params![source_device_id, notification_key, lifetime], |row| Ok::<LiveNotification, rusqlite::Error>((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).optional(),
                         _ => Ok(None),
                     })
                     .transpose()?
@@ -545,6 +713,7 @@ impl Client {
                         title,
                         body,
                         created_at,
+                        shown_sequence,
                     ),
                     message,
                     app,
@@ -572,6 +741,19 @@ impl Client {
                     } else {
                         one_time_code::detect_notification(&body, &title).map(|code| code.code)
                     };
+                    // Actions authorize only the version this banner shows; once the live row has
+                    // moved on, the banner keeps its text but offers no phone effect.
+                    let (content_sequence, dismissible, mark_read_supported) = app
+                        .as_ref()
+                        .filter(|(_, _, live, ..)| shown_sequence == Some(*live))
+                        .and_then(|(_, _, live, dismissible, mark_read)| {
+                            Some((
+                                Some(SourceSequence(u64::try_from(*live).ok()?)),
+                                *dismissible,
+                                *mark_read,
+                            ))
+                        })
+                        .unwrap_or((None, false, false));
                     let (source_name, app_icon_png_base64) = if kind == "message" {
                         let source_name = message.and_then(|payload| {
                             let sender = payload.sender_address?;
@@ -591,7 +773,7 @@ impl Client {
                         (source_name, None)
                     } else {
                         match app {
-                            Some((app_name, icon)) => (
+                            Some((app_name, icon, ..)) => (
                                 if app_name.is_empty() {
                                     None
                                 } else {
@@ -613,6 +795,9 @@ impl Client {
                         source_name,
                         app_icon_png_base64,
                         one_time_code,
+                        content_sequence,
+                        dismissible,
+                        mark_read_supported,
                     })
                 },
             )
@@ -648,7 +833,7 @@ fn upsert_notification(
     }
     execute_cached(
         c,
-        "INSERT INTO notifications(source_device_id,notification_key,lifetime,instance,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,seen,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,?) ON CONFLICT(source_device_id,notification_key) DO UPDATE SET seen=CASE WHEN notifications.lifetime=excluded.lifetime THEN notifications.seen ELSE 0 END,lifetime=excluded.lifetime,instance=excluded.instance,package_name=excluded.package_name,app_name=excluded.app_name,app_icon_png_base64=excluded.app_icon_png_base64,title=excluded.title,text=excluded.text,category=excluded.category,posted_at=excluded.posted_at,dismissible=excluded.dismissible,removed=0,source_sequence=excluded.source_sequence WHERE excluded.source_sequence>notifications.source_sequence",
+        "INSERT INTO notifications(source_device_id,notification_key,lifetime,instance,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,seen,removed,source_sequence,mark_read_supported) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?) ON CONFLICT(source_device_id,notification_key) DO UPDATE SET seen=CASE WHEN notifications.lifetime=excluded.lifetime THEN notifications.seen ELSE 0 END,lifetime=excluded.lifetime,instance=excluded.instance,package_name=excluded.package_name,app_name=excluded.app_name,app_icon_png_base64=excluded.app_icon_png_base64,title=excluded.title,text=excluded.text,category=excluded.category,posted_at=excluded.posted_at,dismissible=excluded.dismissible,removed=0,source_sequence=excluded.source_sequence,mark_read_supported=excluded.mark_read_supported WHERE excluded.source_sequence>notifications.source_sequence",
         params![
             n.target.source_device_id,
             n.target.notification_key,
@@ -662,7 +847,8 @@ fn upsert_notification(
             n.category,
             n.posted_at,
             n.dismissible,
-            seq as i64
+            seq as i64,
+            n.mark_read_supported
         ],
     )?;
     // A dismissal received before the post remains presentation state; bind its eventual
@@ -684,7 +870,7 @@ fn upsert_notification(
     )?;
     if !historical && first_post && banner_is_fresh(Some(n.posted_at), now_ms()) {
         let id = json(&n.target)?;
-        c.execute("INSERT OR IGNORE INTO banner_candidates(id,kind,conversation_id,source_device_id,notification_key,lifetime,title,body,created_at) VALUES(?, 'notification',NULL,?,?,?,?,?,?)",params![id,n.target.source_device_id,n.target.notification_key,n.target.lifetime,if n.title.is_empty() { &n.app_name } else { &n.title },n.text,now_ms()])?;
+        c.execute("INSERT OR IGNORE INTO banner_candidates(id,kind,conversation_id,source_device_id,notification_key,lifetime,title,body,created_at,content_sequence) VALUES(?, 'notification',NULL,?,?,?,?,?,?,?)",params![id,n.target.source_device_id,n.target.notification_key,n.target.lifetime,if n.title.is_empty() { &n.app_name } else { &n.title },n.text,now_ms(),seq as i64])?;
     }
     prune_banners(c)?;
     Ok(())
@@ -778,6 +964,92 @@ fn apply_dismiss(
     c.execute("INSERT OR IGNORE INTO notification_dismissals(id,source_device_id,notification_key,lifetime,instance,historical,key_epoch) VALUES(?,?,?,?,?,?,?)",params![json(t)?,t.source_device_id,t.notification_key,t.lifetime,instance.unwrap_or_default(),historical,epoch])?;
     Ok(())
 }
+fn mark_read_enabled(c: &Connection) -> Result<bool, Error> {
+    Ok(c.query_row(
+        "SELECT notification_mark_read_enabled AND mirroring_enabled FROM gateway_settings WHERE id=1",
+        [],
+        |r| r.get(0),
+    )
+    .optional()?
+    .unwrap_or(false))
+}
+
+/// Every device shows the requested content version as read; only the source phone records the
+/// one-use effect. Snapshot- or restore-learned requests are stored historical and never run, and
+/// a request arriving while the setting or mirroring is off is stored already retired.
+fn apply_mark_read(
+    c: &Connection,
+    t: &NotificationTarget,
+    content_sequence: i64,
+    requested_at_ms: i64,
+    historical: bool,
+    epoch: u32,
+) -> Result<(), Error> {
+    execute_cached(
+        c,
+        "UPDATE notifications SET seen=1 WHERE source_device_id=? AND notification_key=? AND lifetime=? AND source_sequence=? AND removed=0",
+        params![
+            t.source_device_id,
+            t.notification_key,
+            t.lifetime,
+            content_sequence
+        ],
+    )?;
+    execute_cached(
+        c,
+        "INSERT OR IGNORE INTO notification_mark_reads(id,source_device_id,notification_key,lifetime,content_sequence,requested_at_ms,historical,key_epoch,attempted) SELECT ?,?,?,?,?,?,?,?,NOT COALESCE((SELECT notification_mark_read_enabled AND mirroring_enabled FROM gateway_settings WHERE id=1),0) WHERE ?=(SELECT v FROM metadata WHERE k='device_id')",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            t.source_device_id,
+            t.notification_key,
+            t.lifetime,
+            content_sequence,
+            requested_at_ms,
+            historical,
+            epoch,
+            t.source_device_id
+        ],
+    )?;
+    prune_banners(c)
+}
+
+/// Retires every unattempted request, so turning the setting or mirroring off never leaves one to
+/// run after it is turned back on.
+pub(super) fn retire_pending_mark_reads(c: &Connection) -> Result<(), Error> {
+    c.execute(
+        "UPDATE notification_mark_reads SET attempted=1 WHERE attempted=0",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Consumed rows for versions that can no longer execute are kept a day, then removed.
+const MARK_READ_RETENTION_MS: i64 = 86_400_000;
+
+/// Inclusive `requested_at_ms` bounds for a request that may still run at `now_ms`.
+fn mark_read_window(now_ms: i64) -> (i64, i64) {
+    (
+        now_ms.saturating_sub(NOTIFICATION_MARK_READ_TTL_MS + sender_blocklist::REQUEST_SKEW_MS),
+        now_ms.saturating_add(sender_blocklist::REQUEST_SKEW_MS),
+    )
+}
+
+/// The notification is live at exactly the content version a banner showed, and `condition` holds.
+fn current_version(
+    c: &Connection,
+    t: &NotificationTarget,
+    content_sequence: i64,
+    condition: &str,
+) -> Result<bool, Error> {
+    Ok(c.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM notifications WHERE source_device_id=? AND notification_key=? AND lifetime=? AND source_sequence=? AND removed=0 AND {condition})"),
+        params![t.source_device_id, t.notification_key, t.lifetime, content_sequence],
+        |r| r.get(0),
+    )?)
+}
+
+const MARK_READ_ELIGIBLE_SQL: &str = "r.attempted=0 AND r.historical=0 AND r.source_device_id=?1 AND r.key_epoch=?2 AND r.requested_at_ms>=?3 AND r.requested_at_ms<=?4 AND n.removed=0 AND n.mark_read_supported=1";
+
 /// Shape and authorship rules for a received `AppFilter` event.
 pub(super) fn valid_filter_event(
     filter: &AppFilter,
@@ -830,6 +1102,27 @@ pub(super) fn apply_notification_payload(
                 return Ok(false);
             }
             apply_dismiss(c, &target, historical, epoch)?;
+            Ok(true)
+        }
+        PrivatePayload::NotificationMarkRead {
+            target,
+            content_sequence,
+            requested_at_ms,
+        } => {
+            if !valid_target(&target)
+                || i64::try_from(content_sequence.0).is_err()
+                || requested_at_ms < 0
+            {
+                return Ok(false);
+            }
+            apply_mark_read(
+                c,
+                &target,
+                content_sequence.0 as i64,
+                requested_at_ms,
+                historical,
+                epoch,
+            )?;
             Ok(true)
         }
         PrivatePayload::AppFilter {
@@ -962,6 +1255,7 @@ mod tests {
             category: None,
             posted_at: now_ms(),
             dismissible: true,
+            mark_read_supported: false,
         };
         upsert_notification(&client.lock().unwrap().conn, &notification, 1, false).unwrap();
         assert_eq!(client.pending_banner_candidates(10).unwrap().len(), 1);
@@ -999,6 +1293,88 @@ mod tests {
         assert!(
             address_index_count(&client) > 0,
             "message batches refresh the contact address index"
+        );
+    }
+
+    #[test]
+    fn historical_mark_read_request_never_executes() {
+        let (client, _directory) = unlocked_client();
+        client
+            .set_gateway_settings(GatewaySettings {
+                mirroring_enabled: true,
+                notification_mark_read_enabled: true,
+                ..GatewaySettings::default()
+            })
+            .unwrap();
+        client
+            .capture_notification(NotificationCapture {
+                notification_key: "k1".into(),
+                instance: "i1".into(),
+                package_name: "com.example.mail".into(),
+                app_name: "Mail".into(),
+                app_icon_png_base64: None,
+                title: "Subject".into(),
+                text: "Body".into(),
+                category: None,
+                posted_at: now_ms(),
+                dismissible: true,
+                mark_read_supported: true,
+            })
+            .unwrap();
+        let (target, sequence): (NotificationTarget, i64) = {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .query_row(
+                    "SELECT source_device_id,notification_key,lifetime,source_sequence FROM notifications",
+                    [],
+                    |r| {
+                        Ok((
+                            NotificationTarget {
+                                source_device_id: r.get(0)?,
+                                notification_key: r.get(1)?,
+                                lifetime: r.get(2)?,
+                            },
+                            r.get(3)?,
+                        ))
+                    },
+                )
+                .unwrap()
+        };
+        let apply = |historical| {
+            let store = client.lock().unwrap();
+            let epoch = store.active_epoch.unwrap();
+            assert!(
+                apply_notification_payload(
+                    &store.conn,
+                    PrivatePayload::NotificationMarkRead {
+                        target: target.clone(),
+                        content_sequence: SourceSequence(sequence as u64),
+                        requested_at_ms: now_ms(),
+                    },
+                    DeviceId::new(),
+                    7,
+                    historical,
+                    epoch,
+                )
+                .unwrap()
+            );
+        };
+        apply(true);
+        assert!(
+            client
+                .pending_notification_mark_reads(now_ms(), 10)
+                .unwrap()
+                .is_empty(),
+            "a snapshot- or restore-learned request never authorizes the effect"
+        );
+        apply(false);
+        assert!(
+            client
+                .pending_notification_mark_reads(now_ms(), 10)
+                .unwrap()
+                .is_empty(),
+            "a later live copy of the same version does not replace the historical row"
         );
     }
 }

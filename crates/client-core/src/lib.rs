@@ -242,7 +242,7 @@ pub use vault_identity::{
 };
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 64;
+const SCHEMA_VERSION: i64 = 65;
 const PENDING_COMMAND_ELIGIBILITY: &str = "a.command_id IS NULL AND l.historical=0 AND l.retired=0 AND l.subscription_id<>'' AND l.key_epoch=? AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id) AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.command_id=l.command_id AND x.target_gateway_id=? AND x.state IN ('requested','confirmed'))";
 #[cfg(test)]
 thread_local! {
@@ -719,6 +719,12 @@ pub enum PrivatePayload {
     NotificationDismiss {
         target: NotificationTarget,
     },
+    /// Asks the source phone to press the app's own mark-as-read action for one content version.
+    NotificationMarkRead {
+        target: NotificationTarget,
+        content_sequence: SourceSequence,
+        requested_at_ms: i64,
+    },
     AppFilter {
         filter: AppFilter,
         logical_revision: u64,
@@ -882,6 +888,10 @@ pub struct NotificationCapture {
     pub category: Option<String>,
     pub posted_at: i64,
     pub dismissible: bool,
+    /// The OS notification has exactly one safe semantic mark-as-read action. Core publishes it
+    /// only while this phone's mark-read setting is on.
+    #[serde(default)]
+    pub mark_read_supported: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NotificationCaptureOutcome {
@@ -981,6 +991,24 @@ pub struct BannerCandidate {
     pub app_icon_png_base64: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub one_time_code: Option<String>,
+    /// Notification candidates only: the live row's content version, which pins any
+    /// mark-read or dismissal the banner requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_sequence: Option<SourceSequence>,
+    #[serde(default)]
+    pub dismissible: bool,
+    #[serde(default)]
+    pub mark_read_supported: bool,
+}
+
+/// A computer-requested mark-read the source phone may attempt once; `instance` is the
+/// notification's current OS instance.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationMarkReadRequest {
+    pub id: String,
+    pub target: NotificationTarget,
+    pub instance: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1014,6 +1042,8 @@ pub struct NotificationWire {
     category: Option<String>,
     posted_at: i64,
     dismissible: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    mark_read_supported: bool,
 }
 
 /// A carrier SMS observed by a gateway. `conversation_id: None` resolves by exact sender address.
@@ -1232,6 +1262,8 @@ pub struct SendCancellationView {
 }
 
 pub const REACTION_REQUEST_TTL_MS: i64 = 600_000;
+/// A computer's mark-read request may run on the phone only within this window of its creation.
+pub const NOTIFICATION_MARK_READ_TTL_MS: i64 = REACTION_REQUEST_TTL_MS;
 const REACTION_REQUEST_SKEW_MS: i64 = sender_blocklist::REQUEST_SKEW_MS;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -7810,6 +7842,41 @@ impl Client {
             .collect())
     }
 
+    /// Freezes unread IDs in the target's effective conversation through that message.
+    pub fn unread_message_batches_through(
+        &self,
+        message_id: MessageId,
+    ) -> Result<Vec<Vec<MessageId>>, Error> {
+        let store = self.lock()?;
+        let target: Option<(String, i64, i64)> = store
+            .conn
+            .query_row(
+                "SELECT effective_conversation_id,sort_at_ms,local_order FROM messages WHERE id=?",
+                [message_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((conversation, sort_at, local_order)) = target else {
+            return Ok(Vec::new());
+        };
+        let mut query = store.conn.prepare(
+            "SELECT id FROM messages WHERE effective_conversation_id=?1 AND seen=0 AND (sort_at_ms<?2 OR (sort_at_ms=?2 AND local_order<=?3)) ORDER BY sort_at_ms,local_order",
+        )?;
+        let ids = query
+            .query_map(params![conversation, sort_at, local_order], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let message_ids = ids
+            .iter()
+            .map(|id| parse(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(message_ids
+            .chunks(READ_STATE_BATCH_SIZE)
+            .map(<[MessageId]>::to_vec)
+            .collect())
+    }
+
     /// Marks requested unread messages seen and queues one encrypted `ReadState` for each change.
     pub fn mark_read_batch(&self, message_ids: &[MessageId]) -> Result<u64, Error> {
         if message_ids.len() > READ_STATE_BATCH_SIZE {
@@ -11180,6 +11247,18 @@ DROP TABLE reaction_sets_staged_v62;
 CREATE INDEX reaction_sets_staged_owner ON reaction_sets_staged(conversation_id, gateway_id);
 ";
 
+/// Version 65: the source phone's one-use ledger of computer-requested mark-read effects, one row
+/// per notification content version.
+const NOTIFICATION_MARK_READ_MIGRATION_65: &str = "
+CREATE TABLE IF NOT EXISTS notification_mark_reads(
+ id TEXT PRIMARY KEY, source_device_id TEXT NOT NULL, notification_key TEXT NOT NULL,
+ lifetime TEXT NOT NULL, content_sequence INTEGER NOT NULL, requested_at_ms INTEGER NOT NULL,
+ historical INTEGER NOT NULL, key_epoch INTEGER NOT NULL, attempted INTEGER NOT NULL DEFAULT 0,
+ UNIQUE(source_device_id, notification_key, lifetime, content_sequence)
+);
+CREATE INDEX IF NOT EXISTS notification_mark_reads_pending ON notification_mark_reads(attempted, historical);
+";
+
 const REACTION_MIGRATION_61: &str = "
 CREATE TABLE IF NOT EXISTS reaction_requests(
  request_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
@@ -11484,6 +11563,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             apply_conversation_merge_migration(&tx)?;
             gateway_settings::seed(&tx, false)?;
+            apply_notification_mark_read_migration(&tx)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
                 params![SCHEMA_VERSION],
@@ -11642,6 +11722,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(VAULT_IDENTITY_MIGRATION)?;
             apply_conversation_merge_migration(&tx)?;
             attachment_retention::initialize(&tx)?;
+            apply_notification_mark_read_migration(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
@@ -11649,6 +11730,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(REACTION_STAGING_MIGRATION_63)?;
             apply_conversation_merge_migration(&tx)?;
+            apply_notification_mark_read_migration(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
@@ -11657,12 +11739,20 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(REACTION_STAGING_MIGRATION_62)?;
             tx.execute_batch(REACTION_STAGING_MIGRATION_63)?;
             apply_conversation_merge_migration(&tx)?;
+            apply_notification_mark_read_migration(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
         Some(63) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             apply_conversation_merge_migration(&tx)?;
+            apply_notification_mark_read_migration(&tx)?;
+            tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
+            tx.commit()?;
+        }
+        Some(64) => {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            apply_notification_mark_read_migration(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
@@ -11792,6 +11882,25 @@ fn apply_conversation_merge_migration(conn: &Connection) -> Result<(), Error> {
              );",
         )?;
     }
+    Ok(())
+}
+
+/// Schema 65: mirrored-notification mark-read capability, its phone setting, and the
+/// source phone's one-use request ledger. Idempotent so every upgrade path can run it.
+fn apply_notification_mark_read_migration(conn: &Connection) -> Result<(), Error> {
+    add_column_if_missing(
+        conn,
+        "notifications",
+        "mark_read_supported INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        conn,
+        "gateway_settings",
+        "notification_mark_read_enabled INTEGER NOT NULL DEFAULT 0",
+    )?;
+    // The content version a notification banner showed, so its actions never authorize a newer one.
+    add_column_if_missing(conn, "banner_candidates", "content_sequence INTEGER")?;
+    conn.execute_batch(NOTIFICATION_MARK_READ_MIGRATION_65)?;
     Ok(())
 }
 
@@ -12942,6 +13051,7 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "notification_posted"
             | "notification_removed"
             | "notification_dismiss"
+            | "notification_mark_read"
             | "app_filter"
             | "conversation_pin"
             | "conversation_folder"
@@ -13863,6 +13973,7 @@ fn apply_record(
             payload @ (PrivatePayload::NotificationPosted { .. }
             | PrivatePayload::NotificationRemoved { .. }
             | PrivatePayload::NotificationDismiss { .. }
+            | PrivatePayload::NotificationMarkRead { .. }
             | PrivatePayload::AppFilter { .. }),
         ) => {
             if !notifications::apply_notification_payload(
@@ -15226,6 +15337,17 @@ fn compaction_group(
         // flag for a lifetime still unremoved after 90 days; history never executes OS effects.
         PrivatePayload::NotificationDismiss { target: t } => {
             (b"notification-dismiss", target(t), true)
+        }
+        // One request per content version, executed at most once, so each is its own terminal
+        // root; the version keeps a later request from superseding one not yet consumed.
+        PrivatePayload::NotificationMarkRead {
+            target: t,
+            content_sequence,
+            ..
+        } => {
+            let mut parts = target(t);
+            parts.push(content_sequence.0.to_string().into_bytes());
+            (b"notification-mark-read", parts, true)
         }
         PrivatePayload::AppFilter { filter, .. } => (
             b"app-filter",
@@ -19511,6 +19633,7 @@ mod tests {
             category: None,
             posted_at: 1,
             dismissible: true,
+            mark_read_supported: false,
         };
         assert!(
             !notifications::apply_notification_payload(
@@ -19621,6 +19744,7 @@ mod tests {
             category: None,
             posted_at: 1,
             dismissible: true,
+            mark_read_supported: false,
         };
         conn.execute(
             "INSERT INTO notifications(source_device_id,notification_key,lifetime,instance,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,seen,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -21900,6 +22024,7 @@ mod tests {
             "message_reactions",
             "contact_book_deleted",
             "contact_book_deleted_member",
+            "notification_mark_read",
             "future_unknown_event",
         ] {
             let mut envelope = Envelope {
@@ -22936,6 +23061,7 @@ mod tests {
                 category: None,
                 posted_at: 1,
                 dismissible: true,
+                mark_read_supported: false,
             })
             .unwrap();
         let mut envelope: Envelope = {
@@ -23191,6 +23317,7 @@ mod tests {
             category: None,
             posted_at: 1,
             dismissible: true,
+            mark_read_supported: false,
         }
     }
 
@@ -24229,6 +24356,15 @@ mod tests {
         assert_eq!(conversations.len(), 1);
         assert_eq!(conversations[0].conversation_id, survivor);
         assert_eq!(client.unread_count(survivor).unwrap(), 2);
+        assert_eq!(
+            client
+                .unread_message_batches_through(second.message_id)
+                .unwrap()
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
+            vec![first.message_id, second.message_id]
+        );
         let page = client.messages_page(survivor, None, 1).unwrap();
         assert!(page.has_more);
         assert_eq!(

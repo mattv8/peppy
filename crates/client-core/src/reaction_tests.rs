@@ -531,6 +531,29 @@ fn reaction_compaction_groups_follow_the_spec() {
 }
 
 #[test]
+fn notification_mark_read_is_a_terminal_root_per_content_version() {
+    let target = NotificationTarget {
+        source_device_id: DeviceId::new().to_string(),
+        notification_key: "key".into(),
+        lifetime: uuid::Uuid::new_v4().to_string(),
+    };
+    let request = |sequence| PrivatePayload::NotificationMarkRead {
+        target: target.clone(),
+        content_sequence: SourceSequence(sequence),
+        requested_at_ms: 1,
+    };
+    let first = compaction_group(&request(4)).unwrap().unwrap();
+    let later = compaction_group(&request(9)).unwrap().unwrap();
+    assert_eq!(first.0, b"notification-mark-read");
+    assert!(first.2, "a request is terminal");
+    assert_ne!(
+        first.1, later.1,
+        "a later version never supersedes an earlier request"
+    );
+    assert!(compaction_identity(&request(4)).is_none());
+}
+
+#[test]
 fn reaction_compose_text_matches_the_shared_fixture() {
     let entries: Vec<serde_json::Value> = serde_json::from_str(include_str!(
         "../../../packages/contracts/fixtures/reaction-text.json"

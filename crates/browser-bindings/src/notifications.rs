@@ -174,6 +174,7 @@ mod tests {
                 posted_at: 100,
                 dismissible,
                 app_icon_png_base64: None,
+                mark_read_supported: false,
             })
             .unwrap();
         core.client()

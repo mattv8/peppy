@@ -106,6 +106,7 @@ fn capture_notification(
                 .unwrap()
                 .as_millis() as i64,
             dismissible: true,
+            mark_read_supported: false,
         })
         .unwrap();
     client

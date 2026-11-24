@@ -692,6 +692,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func beginMmsAcquisitionOutcome(input: NativeMmsAcquisitionInput) throws  -> NativeMmsBeginOutcome
     
+    /**
+     * Consumes the one-use permit right before the OS action; never retry after `true`.
+     */
+    func beginNotificationMarkRead(id: String, nowMs: Int64) throws  -> Bool
+    
     func beginReactionAttempt(requestId: String) throws  -> NativeReactionAttemptDecision
     
     /**
@@ -999,6 +1004,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func pendingMessageHistoryCaptureRequests(providerGeneration: String) throws  -> String
     
     func pendingNotificationDismissals(limit: UInt64) throws  -> [NativeNotificationDismissal]
+    
+    func pendingNotificationMarkReads(nowMs: Int64, limit: UInt64) throws  -> [NativeNotificationMarkRead]
     
     func pendingOutboxJson() throws  -> [String]
     
@@ -1625,6 +1632,20 @@ open func beginMmsAcquisitionOutcome(input: NativeMmsAcquisitionInput)throws  ->
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_mms_acquisition_outcome(
             self.uniffiCloneHandle(),
         FfiConverterTypeNativeMmsAcquisitionInput_lower(input),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Consumes the one-use permit right before the OS action; never retry after `true`.
+     */
+open func beginNotificationMarkRead(id: String, nowMs: Int64)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_notification_mark_read(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
     )
 })
 }
@@ -2777,6 +2798,17 @@ open func pendingNotificationDismissals(limit: UInt64)throws  -> [NativeNotifica
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_notification_dismissals(
             self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(limit),uniffiCallStatus
+    )
+})
+}
+    
+open func pendingNotificationMarkReads(nowMs: Int64, limit: UInt64)throws  -> [NativeNotificationMarkRead]  {
+    return try  FfiConverterSequenceTypeNativeNotificationMarkRead.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_notification_mark_reads(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(nowMs),
         FfiConverterUInt64.lower(limit),uniffiCallStatus
     )
 })
@@ -7071,15 +7103,17 @@ public struct NativeGatewayCapabilities: Equatable, Hashable {
     public var mmsSyncSupported: Bool
     public var rcsSupported: Bool
     public var phoneReadSupported: Bool
+    public var notificationMarkReadSupported: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(notificationMirroringSupported: Bool, smsSyncSupported: Bool, mmsSyncSupported: Bool, rcsSupported: Bool, phoneReadSupported: Bool) {
+    public init(notificationMirroringSupported: Bool, smsSyncSupported: Bool, mmsSyncSupported: Bool, rcsSupported: Bool, phoneReadSupported: Bool, notificationMarkReadSupported: Bool) {
         self.notificationMirroringSupported = notificationMirroringSupported
         self.smsSyncSupported = smsSyncSupported
         self.mmsSyncSupported = mmsSyncSupported
         self.rcsSupported = rcsSupported
         self.phoneReadSupported = phoneReadSupported
+        self.notificationMarkReadSupported = notificationMarkReadSupported
     }
 
     
@@ -7102,7 +7136,8 @@ public struct FfiConverterTypeNativeGatewayCapabilities: FfiConverterRustBuffer 
                 smsSyncSupported: FfiConverterBool.read(from: &buf), 
                 mmsSyncSupported: FfiConverterBool.read(from: &buf), 
                 rcsSupported: FfiConverterBool.read(from: &buf), 
-                phoneReadSupported: FfiConverterBool.read(from: &buf)
+                phoneReadSupported: FfiConverterBool.read(from: &buf), 
+                notificationMarkReadSupported: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -7112,6 +7147,7 @@ public struct FfiConverterTypeNativeGatewayCapabilities: FfiConverterRustBuffer 
         FfiConverterBool.write(value.mmsSyncSupported, into: &buf)
         FfiConverterBool.write(value.rcsSupported, into: &buf)
         FfiConverterBool.write(value.phoneReadSupported, into: &buf)
+        FfiConverterBool.write(value.notificationMarkReadSupported, into: &buf)
     }
 }
 
@@ -7137,15 +7173,17 @@ public struct NativeGatewayHostFacts: Equatable, Hashable {
     public var smsAvailable: Bool
     public var notificationIsSilent: Bool
     public var phoneReadAvailable: Bool
+    public var notificationMarkReadAvailable: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(wifiConnected: Bool, notificationListenerAvailable: Bool, smsAvailable: Bool, notificationIsSilent: Bool, phoneReadAvailable: Bool) {
+    public init(wifiConnected: Bool, notificationListenerAvailable: Bool, smsAvailable: Bool, notificationIsSilent: Bool, phoneReadAvailable: Bool, notificationMarkReadAvailable: Bool) {
         self.wifiConnected = wifiConnected
         self.notificationListenerAvailable = notificationListenerAvailable
         self.smsAvailable = smsAvailable
         self.notificationIsSilent = notificationIsSilent
         self.phoneReadAvailable = phoneReadAvailable
+        self.notificationMarkReadAvailable = notificationMarkReadAvailable
     }
 
     
@@ -7168,7 +7206,8 @@ public struct FfiConverterTypeNativeGatewayHostFacts: FfiConverterRustBuffer {
                 notificationListenerAvailable: FfiConverterBool.read(from: &buf), 
                 smsAvailable: FfiConverterBool.read(from: &buf), 
                 notificationIsSilent: FfiConverterBool.read(from: &buf), 
-                phoneReadAvailable: FfiConverterBool.read(from: &buf)
+                phoneReadAvailable: FfiConverterBool.read(from: &buf), 
+                notificationMarkReadAvailable: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -7178,6 +7217,7 @@ public struct FfiConverterTypeNativeGatewayHostFacts: FfiConverterRustBuffer {
         FfiConverterBool.write(value.smsAvailable, into: &buf)
         FfiConverterBool.write(value.notificationIsSilent, into: &buf)
         FfiConverterBool.write(value.phoneReadAvailable, into: &buf)
+        FfiConverterBool.write(value.notificationMarkReadAvailable, into: &buf)
     }
 }
 
@@ -7266,10 +7306,11 @@ public struct NativeGatewayPolicyDecision: Equatable, Hashable {
     public var rcsSupported: Bool
     public var applyPhoneRead: Bool
     public var ingestPhoneRead: Bool
+    public var applyNotificationMarkRead: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(captureNotification: Bool, captureSms: Bool, captureMms: Bool, transferMedia: Bool, rcsSupported: Bool, applyPhoneRead: Bool, ingestPhoneRead: Bool) {
+    public init(captureNotification: Bool, captureSms: Bool, captureMms: Bool, transferMedia: Bool, rcsSupported: Bool, applyPhoneRead: Bool, ingestPhoneRead: Bool, applyNotificationMarkRead: Bool) {
         self.captureNotification = captureNotification
         self.captureSms = captureSms
         self.captureMms = captureMms
@@ -7277,6 +7318,7 @@ public struct NativeGatewayPolicyDecision: Equatable, Hashable {
         self.rcsSupported = rcsSupported
         self.applyPhoneRead = applyPhoneRead
         self.ingestPhoneRead = ingestPhoneRead
+        self.applyNotificationMarkRead = applyNotificationMarkRead
     }
 
     
@@ -7301,7 +7343,8 @@ public struct FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
                 transferMedia: FfiConverterBool.read(from: &buf), 
                 rcsSupported: FfiConverterBool.read(from: &buf), 
                 applyPhoneRead: FfiConverterBool.read(from: &buf), 
-                ingestPhoneRead: FfiConverterBool.read(from: &buf)
+                ingestPhoneRead: FfiConverterBool.read(from: &buf), 
+                applyNotificationMarkRead: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -7313,6 +7356,7 @@ public struct FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
         FfiConverterBool.write(value.rcsSupported, into: &buf)
         FfiConverterBool.write(value.applyPhoneRead, into: &buf)
         FfiConverterBool.write(value.ingestPhoneRead, into: &buf)
+        FfiConverterBool.write(value.applyNotificationMarkRead, into: &buf)
     }
 }
 
@@ -7344,10 +7388,11 @@ public struct NativeGatewaySettings: Equatable, Hashable {
     public var mmsSyncEnabled: Bool
     public var mediaWifiOnly: Bool
     public var phoneReadEnabled: Bool
+    public var notificationMarkReadEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(mirroringEnabled: Bool, mirroringWifiOnly: Bool, skipSilent: Bool, smsSyncEnabled: Bool, mmsSyncEnabled: Bool, mediaWifiOnly: Bool, phoneReadEnabled: Bool) {
+    public init(mirroringEnabled: Bool, mirroringWifiOnly: Bool, skipSilent: Bool, smsSyncEnabled: Bool, mmsSyncEnabled: Bool, mediaWifiOnly: Bool, phoneReadEnabled: Bool, notificationMarkReadEnabled: Bool) {
         self.mirroringEnabled = mirroringEnabled
         self.mirroringWifiOnly = mirroringWifiOnly
         self.skipSilent = skipSilent
@@ -7355,6 +7400,7 @@ public struct NativeGatewaySettings: Equatable, Hashable {
         self.mmsSyncEnabled = mmsSyncEnabled
         self.mediaWifiOnly = mediaWifiOnly
         self.phoneReadEnabled = phoneReadEnabled
+        self.notificationMarkReadEnabled = notificationMarkReadEnabled
     }
 
     
@@ -7379,7 +7425,8 @@ public struct FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer {
                 smsSyncEnabled: FfiConverterBool.read(from: &buf), 
                 mmsSyncEnabled: FfiConverterBool.read(from: &buf), 
                 mediaWifiOnly: FfiConverterBool.read(from: &buf), 
-                phoneReadEnabled: FfiConverterBool.read(from: &buf)
+                phoneReadEnabled: FfiConverterBool.read(from: &buf), 
+                notificationMarkReadEnabled: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -7391,6 +7438,7 @@ public struct FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer {
         FfiConverterBool.write(value.mmsSyncEnabled, into: &buf)
         FfiConverterBool.write(value.mediaWifiOnly, into: &buf)
         FfiConverterBool.write(value.phoneReadEnabled, into: &buf)
+        FfiConverterBool.write(value.notificationMarkReadEnabled, into: &buf)
     }
 }
 
@@ -9345,10 +9393,11 @@ public struct NativeNotificationCapture: Equatable, Hashable {
     public var postedAt: Int64
     public var dismissible: Bool
     public var appIconPngBase64: String?
+    public var markReadSupported: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(notificationKey: String, instance: String, packageName: String, appName: String, title: String, text: String, category: String?, postedAt: Int64, dismissible: Bool, appIconPngBase64: String?) {
+    public init(notificationKey: String, instance: String, packageName: String, appName: String, title: String, text: String, category: String?, postedAt: Int64, dismissible: Bool, appIconPngBase64: String?, markReadSupported: Bool) {
         self.notificationKey = notificationKey
         self.instance = instance
         self.packageName = packageName
@@ -9359,6 +9408,7 @@ public struct NativeNotificationCapture: Equatable, Hashable {
         self.postedAt = postedAt
         self.dismissible = dismissible
         self.appIconPngBase64 = appIconPngBase64
+        self.markReadSupported = markReadSupported
     }
 
     
@@ -9386,7 +9436,8 @@ public struct FfiConverterTypeNativeNotificationCapture: FfiConverterRustBuffer 
                 category: FfiConverterOptionString.read(from: &buf), 
                 postedAt: FfiConverterInt64.read(from: &buf), 
                 dismissible: FfiConverterBool.read(from: &buf), 
-                appIconPngBase64: FfiConverterOptionString.read(from: &buf)
+                appIconPngBase64: FfiConverterOptionString.read(from: &buf), 
+                markReadSupported: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -9401,6 +9452,7 @@ public struct FfiConverterTypeNativeNotificationCapture: FfiConverterRustBuffer 
         FfiConverterInt64.write(value.postedAt, into: &buf)
         FfiConverterBool.write(value.dismissible, into: &buf)
         FfiConverterOptionString.write(value.appIconPngBase64, into: &buf)
+        FfiConverterBool.write(value.markReadSupported, into: &buf)
     }
 }
 
@@ -9475,6 +9527,64 @@ public func FfiConverterTypeNativeNotificationDismissal_lift(_ buf: RustBuffer) 
 #endif
 public func FfiConverterTypeNativeNotificationDismissal_lower(_ value: NativeNotificationDismissal) -> RustBuffer {
     return FfiConverterTypeNativeNotificationDismissal.lower(value)
+}
+
+
+public struct NativeNotificationMarkRead: Equatable, Hashable {
+    public var id: String
+    public var target: NativeNotificationTarget
+    public var instance: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, target: NativeNotificationTarget, instance: String) {
+        self.id = id
+        self.target = target
+        self.instance = instance
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeNotificationMarkRead: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeNotificationMarkRead: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeNotificationMarkRead {
+        return
+            try NativeNotificationMarkRead(
+                id: FfiConverterString.read(from: &buf), 
+                target: FfiConverterTypeNativeNotificationTarget.read(from: &buf), 
+                instance: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeNotificationMarkRead, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterTypeNativeNotificationTarget.write(value.target, into: &buf)
+        FfiConverterString.write(value.instance, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeNotificationMarkRead_lift(_ buf: RustBuffer) throws -> NativeNotificationMarkRead {
+    return try FfiConverterTypeNativeNotificationMarkRead.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeNotificationMarkRead_lower(_ value: NativeNotificationMarkRead) -> RustBuffer {
+    return FfiConverterTypeNativeNotificationMarkRead.lower(value)
 }
 
 
@@ -19710,6 +19820,31 @@ fileprivate struct FfiConverterSequenceTypeNativeNotificationDismissal: FfiConve
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeNativeNotificationMarkRead: FfiConverterRustBuffer {
+    typealias SwiftType = [NativeNotificationMarkRead]
+
+    public static func write(_ value: [NativeNotificationMarkRead], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNativeNotificationMarkRead.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NativeNotificationMarkRead] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NativeNotificationMarkRead]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNativeNotificationMarkRead.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeNativeNotificationTarget: FfiConverterRustBuffer {
     typealias SwiftType = [NativeNotificationTarget]
 
@@ -21216,6 +21351,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_mms_acquisition_outcome() != 53880) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_notification_mark_read() != 53735) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_reaction_attempt() != 44924) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -21526,6 +21664,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_notification_dismissals() != 22332) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_notification_mark_reads() != 53298) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_outbox_json() != 27899) {

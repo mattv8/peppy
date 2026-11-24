@@ -83,6 +83,7 @@ pub struct NativeGatewaySettings {
     pub mms_sync_enabled: bool,
     pub media_wifi_only: bool,
     pub phone_read_enabled: bool,
+    pub notification_mark_read_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -111,6 +112,7 @@ pub struct NativeGatewayHostFacts {
     pub sms_available: bool,
     pub notification_is_silent: bool,
     pub phone_read_available: bool,
+    pub notification_mark_read_available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -120,6 +122,7 @@ pub struct NativeGatewayCapabilities {
     pub mms_sync_supported: bool,
     pub rcs_supported: bool,
     pub phone_read_supported: bool,
+    pub notification_mark_read_supported: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -131,6 +134,7 @@ pub struct NativeGatewayPolicyDecision {
     pub rcs_supported: bool,
     pub apply_phone_read: bool,
     pub ingest_phone_read: bool,
+    pub apply_notification_mark_read: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -484,6 +488,7 @@ pub struct NativeNotificationCapture {
     pub posted_at: i64,
     pub dismissible: bool,
     pub app_icon_png_base64: Option<String>,
+    pub mark_read_supported: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeNotificationTarget {
@@ -515,6 +520,12 @@ pub struct NativeAppFilter {
 pub struct NativeNotificationSnapshot {
     pub notifications: Vec<NativeMirroredNotification>,
     pub app_filters: Vec<NativeAppFilter>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeNotificationMarkRead {
+    pub id: String,
+    pub target: NativeNotificationTarget,
+    pub instance: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeNotificationDismissal {
@@ -1191,6 +1202,7 @@ fn gateway_settings_view(settings: GatewaySettings) -> NativeGatewaySettings {
         mms_sync_enabled: settings.mms_sync_enabled,
         media_wifi_only: settings.media_wifi_only,
         phone_read_enabled: settings.phone_read_enabled,
+        notification_mark_read_enabled: settings.notification_mark_read_enabled,
     }
 }
 fn gateway_settings(settings: NativeGatewaySettings) -> GatewaySettings {
@@ -1202,6 +1214,7 @@ fn gateway_settings(settings: NativeGatewaySettings) -> GatewaySettings {
         mms_sync_enabled: settings.mms_sync_enabled,
         media_wifi_only: settings.media_wifi_only,
         phone_read_enabled: settings.phone_read_enabled,
+        notification_mark_read_enabled: settings.notification_mark_read_enabled,
     }
 }
 fn gateway_platform(platform: NativeGatewayPlatform) -> GatewayPlatform {
@@ -1217,6 +1230,7 @@ fn gateway_facts(facts: NativeGatewayHostFacts) -> GatewayHostFacts {
         sms_available: facts.sms_available,
         notification_is_silent: facts.notification_is_silent,
         phone_read_available: facts.phone_read_available,
+        notification_mark_read_available: facts.notification_mark_read_available,
     }
 }
 fn provider_row_ref(row: NativeProviderRowRef) -> ProviderRowRef {
@@ -2306,6 +2320,7 @@ impl NativeClient {
             mms_sync_supported: capabilities.mms_sync_supported,
             rcs_supported: capabilities.rcs_supported,
             phone_read_supported: capabilities.phone_read_supported,
+            notification_mark_read_supported: capabilities.notification_mark_read_supported,
         })
     }
 
@@ -2326,6 +2341,7 @@ impl NativeClient {
             rcs_supported: decision.rcs_supported,
             apply_phone_read: decision.apply_phone_read,
             ingest_phone_read: decision.ingest_phone_read,
+            apply_notification_mark_read: decision.apply_notification_mark_read,
         })
     }
 
@@ -3468,6 +3484,7 @@ impl NativeClient {
                 posted_at: input.posted_at,
                 dismissible: input.dismissible,
                 app_icon_png_base64: input.app_icon_png_base64,
+                mark_read_supported: input.mark_read_supported,
             })
         })
         .map(|outcome| match outcome {
@@ -3547,6 +3564,36 @@ impl NativeClient {
     }
     pub fn complete_notification_dismissal(&self, id: String) -> Result<(), MobileBindingsError> {
         with_client(&self.client, |c| c.complete_notification_dismissal(&id))
+    }
+    pub fn pending_notification_mark_reads(
+        &self,
+        now_ms: i64,
+        limit: u64,
+    ) -> Result<Vec<NativeNotificationMarkRead>, MobileBindingsError> {
+        let limit = usize::try_from(limit).map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |c| {
+            c.pending_notification_mark_reads(now_ms, limit)
+        })
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|r| NativeNotificationMarkRead {
+                    id: r.id,
+                    target: notification_target_view(r.target),
+                    instance: r.instance,
+                })
+                .collect()
+        })
+    }
+    /// Consumes the one-use permit right before the OS action; never retry after `true`.
+    pub fn begin_notification_mark_read(
+        &self,
+        id: String,
+        now_ms: i64,
+    ) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, |c| {
+            c.begin_notification_mark_read(&id, now_ms)
+        })
     }
 
     pub fn pending_phone_read_effects(
@@ -6043,6 +6090,7 @@ mod tests {
                 category: None,
                 posted_at,
                 dismissible: true,
+                mark_read_supported: false,
                 app_icon_png_base64: None,
             })
         };

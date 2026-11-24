@@ -36,6 +36,7 @@ fn notification(text: &str) -> NotificationCapture {
         category: None,
         posted_at: 1,
         dismissible: true,
+        mark_read_supported: false,
     }
 }
 

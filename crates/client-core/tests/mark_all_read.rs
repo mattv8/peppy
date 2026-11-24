@@ -14,6 +14,69 @@ fn mark_snapshot(client: &Client) -> Result<u64, Error> {
 }
 
 #[test]
+fn through_missing_message_is_empty() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "reader", &vault), &vault);
+    assert!(
+        client
+            .unread_message_batches_through(MessageId::new())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn through_marks_target_and_earlier_unread_only_in_its_conversation() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "reader", &vault), &vault);
+    let first = client.capture_incoming(incoming("first", "first")).unwrap();
+    let target = client
+        .capture_incoming(incoming("target", "target"))
+        .unwrap();
+    let later = client.capture_incoming(incoming("later", "later")).unwrap();
+    let other = client
+        .capture_incoming(IncomingSms {
+            sender_address: "+15555550101".into(),
+            ..incoming("other", "other")
+        })
+        .unwrap();
+    let batches = client
+        .unread_message_batches_through(target.message_id)
+        .unwrap();
+    let ids: Vec<_> = batches.iter().flatten().copied().collect();
+    assert_eq!(ids, vec![first.message_id, target.message_id]);
+    for batch in batches {
+        client.mark_read_batch(&batch).unwrap();
+    }
+    assert_eq!(client.unread_count(later.conversation_id).unwrap(), 1);
+    assert_eq!(client.unread_count(other.conversation_id).unwrap(), 1);
+}
+
+#[test]
+fn through_splits_batches_at_read_state_batch_size() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "reader", &vault), &vault);
+    let mut target = None;
+    for index in 0..=READ_STATE_BATCH_SIZE {
+        target = Some(
+            client
+                .capture_incoming(incoming("message", &format!("message-{index}")))
+                .unwrap()
+                .message_id,
+        );
+    }
+    let batches = client
+        .unread_message_batches_through(target.unwrap())
+        .unwrap();
+    assert_eq!(batches.len(), 2);
+    assert_eq!(batches[0].len(), READ_STATE_BATCH_SIZE);
+    assert_eq!(batches[1].len(), 1);
+}
+
+#[test]
 fn snapshot_is_frozen_before_later_arrivals_and_batches_are_idempotent() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
