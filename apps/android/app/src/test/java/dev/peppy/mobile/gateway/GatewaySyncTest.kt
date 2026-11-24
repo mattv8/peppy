@@ -3,6 +3,7 @@ package dev.peppy.mobile.gateway
 import dev.peppy.mobile.GatewayAuthException
 import dev.peppy.mobile.GatewaySync
 import dev.peppy.mobile.LoopbackHttpServer
+import dev.peppy.mobile.NotificationMirrorService
 import dev.peppy.mobile.account.isAccountPolicyDenial
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.diagnostics.SyncTraceEvent
@@ -175,6 +176,8 @@ class GatewaySyncTest : GatewayTestBase() {
         sessionCurrent: () -> Boolean = { true },
         effectPermitted: () -> Boolean = { true },
         processPendingSendCancellations: () -> Boolean = { false },
+        publishNotificationDismissalStatus: () -> Unit = {},
+        notificationDismissals: () -> Unit = {},
     ) = GatewaySync(
         client, GatewayHttp(server.origin, TEST_TOKEN), state, deviceId,
         dispatch = dispatch,
@@ -185,6 +188,8 @@ class GatewaySyncTest : GatewayTestBase() {
         sessionCurrent = sessionCurrent,
         effectPermitted = effectPermitted,
         processPendingSendCancellations = processPendingSendCancellations,
+        publishNotificationDismissalStatus = publishNotificationDismissalStatus,
+        notificationDismissals = notificationDismissals,
         nowMs = nowMs,
         elapsedMs = elapsedMs,
     )
@@ -581,6 +586,36 @@ class GatewaySyncTest : GatewayTestBase() {
 
         assertTrue(phases.indexOf("apply") < phases.indexOf("cancellation"))
         assertTrue(phases.indexOf("cancellation") < phases.indexOf("dispatch"))
+    }
+
+    @Test
+    fun dismissalStatusPublishesBeforeDismissalsEvenWithoutAListener() {
+        val client = live()
+        val phases = mutableListOf<String>()
+
+        sync(
+            client,
+            publishNotificationDismissalStatus = { phases += "status" },
+            notificationDismissals = { phases += "dismissals" },
+        ).run()
+
+        assertEquals(listOf("status", "dismissals"), phases)
+    }
+
+    @Test
+    fun dismissalStatusRunsWhenTheNotificationListenerIsNotConnected() {
+        // The production dismissal phase needs a connected listener, which no test has here.
+        val client = live()
+        val phases = mutableListOf<String>()
+
+        val result = sync(
+            client,
+            publishNotificationDismissalStatus = { phases += "status" },
+            notificationDismissals = { phases += "dismissals ${NotificationMirrorService.runPendingDismissals()}" },
+        ).run()
+
+        assertNull(result.failure)
+        assertEquals(listOf("status", "dismissals 0"), phases)
     }
 
     @Test

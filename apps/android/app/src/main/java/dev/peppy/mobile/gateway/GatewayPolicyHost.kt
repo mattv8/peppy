@@ -54,23 +54,24 @@ class GatewayPolicyHost(private val context: Context) {
         val client = NativeGateway.open(appContext) ?: return null
         return try {
             migrateLegacySettings(client, client.gatewaySettings())
-            client.gatewayPolicyDecision(
-                NativeGatewayPlatform.ANDROID,
-                NativeGatewayHostFacts(
-                    onWifi(appContext),
-                    NotificationMirrorAccess.granted(appContext),
-                    smsAvailable,
-                    notificationIsSilent,
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
-                        NotificationMirrorAccess.granted(appContext) &&
-                        hasReadSmsPermission(),
-                    // Android 9 added the semantic mark-as-read action that the phone presses.
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && NotificationMirrorAccess.granted(appContext),
-                ),
-            )
+            client.gatewayPolicyDecision(NativeGatewayPlatform.ANDROID, hostFacts(notificationIsSilent, smsAvailable))
         } catch (_: MobileBindingsException) {
             null
         }
+    }
+
+    /** Transient OS facts for the core's policy; read at call time and never persisted. */
+    fun hostFacts(notificationIsSilent: Boolean = false, smsAvailable: Boolean = hasReceiveSmsPermission()): NativeGatewayHostFacts {
+        val mirrorAccess = NotificationMirrorAccess.granted(appContext)
+        return NativeGatewayHostFacts(
+            onWifi(appContext),
+            mirrorAccess,
+            smsAvailable,
+            notificationIsSilent,
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && mirrorAccess && hasReadSmsPermission(),
+            // Android 9 added the semantic mark-as-read action that the phone presses.
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && mirrorAccess,
+        )
     }
 
     /** SMS's already-durable locked path must not be discarded just because policy lookup failed. */
