@@ -528,6 +528,27 @@ fn reaction_compaction_groups_follow_the_spec() {
             .unwrap()
             .is_none()
     );
+    let status = |blocked: Option<NotificationDismissalBlockReason>| {
+        PrivatePayload::NotificationDismissalStatus {
+            source_device_id: gateway,
+            blocked,
+            observed_at_ms: 1,
+        }
+    };
+    let status_group = group(&status(None));
+    assert_eq!(status_group.0, b"notification-dismissal-status");
+    assert_eq!(
+        status_group.1,
+        group(&status(Some(
+            NotificationDismissalBlockReason::MirroringOff
+        )))
+        .1,
+        "one dismissal-status group per phone, whatever it reports"
+    );
+    assert!(
+        !status_group.2,
+        "a status is superseded by the next one, never terminal"
+    );
 }
 
 #[test]

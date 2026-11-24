@@ -65,6 +65,7 @@ mod message_history_capture;
 mod message_history_protocol;
 mod message_history_requests;
 mod message_origin;
+mod notification_dismissal_status;
 mod notification_preferences;
 pub mod one_time_code;
 mod quick_reply;
@@ -145,6 +146,7 @@ pub const MAX_PREPARED_ATTACHMENT_RETENTION_OPERATIONS: usize =
     attachment_retention::MAX_PREPARED_OPERATIONS;
 pub use gateway_settings::{
     GatewayCapabilities, GatewayHostFacts, GatewayPlatform, GatewayPolicyDecision, GatewaySettings,
+    NotificationDismissalBlockReason,
 };
 pub use local_search::*;
 pub use mcp_commands::{McpCommand, McpQueuedCommand};
@@ -165,6 +167,7 @@ pub use mms_backfill::{
     MmsBackfillRecheck, MmsBackfillRecheckConditions, MmsBackfillRecheckOutcome,
     MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBackfillStatus, MmsLegacyBackfillState,
 };
+pub use notification_dismissal_status::NotificationDismissalBlock;
 pub use one_time_code::{OneTimeCode, OneTimeCodeSource};
 use peppy_crypto::FileKey;
 use peppy_crypto::enrollment::{
@@ -242,7 +245,7 @@ pub use vault_identity::{
 };
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 65;
+const SCHEMA_VERSION: i64 = 66;
 const PENDING_COMMAND_ELIGIBILITY: &str = "a.command_id IS NULL AND l.historical=0 AND l.retired=0 AND l.subscription_id<>'' AND l.key_epoch=? AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id) AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.command_id=l.command_id AND x.target_gateway_id=? AND x.state IN ('requested','confirmed'))";
 #[cfg(test)]
 thread_local! {
@@ -725,6 +728,13 @@ pub enum PrivatePayload {
         content_sequence: SourceSequence,
         requested_at_ms: i64,
     },
+    /// A phone's dismissal availability; `blocked: None` means this phone can dismiss.
+    NotificationDismissalStatus {
+        source_device_id: DeviceId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocked: Option<NotificationDismissalBlockReason>,
+        observed_at_ms: i64,
+    },
     AppFilter {
         filter: AppFilter,
         logical_revision: u64,
@@ -967,6 +977,8 @@ impl Default for NotificationPreferences {
 pub struct NotificationSnapshot {
     pub notifications: Vec<MirroredNotification>,
     pub app_filters: Vec<AppFilter>,
+    /// Phones that cannot dismiss mirrored notifications right now, ordered by device.
+    pub dismissal_blocks: Vec<NotificationDismissalBlock>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -11564,6 +11576,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             apply_conversation_merge_migration(&tx)?;
             gateway_settings::seed(&tx, false)?;
             apply_notification_mark_read_migration(&tx)?;
+            notification_dismissal_status::apply_notification_dismissal_status_migration_66(&tx)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
                 params![SCHEMA_VERSION],
@@ -11723,6 +11736,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             apply_conversation_merge_migration(&tx)?;
             attachment_retention::initialize(&tx)?;
             apply_notification_mark_read_migration(&tx)?;
+            notification_dismissal_status::apply_notification_dismissal_status_migration_66(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
@@ -11731,6 +11745,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(REACTION_STAGING_MIGRATION_63)?;
             apply_conversation_merge_migration(&tx)?;
             apply_notification_mark_read_migration(&tx)?;
+            notification_dismissal_status::apply_notification_dismissal_status_migration_66(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
@@ -11740,6 +11755,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(REACTION_STAGING_MIGRATION_63)?;
             apply_conversation_merge_migration(&tx)?;
             apply_notification_mark_read_migration(&tx)?;
+            notification_dismissal_status::apply_notification_dismissal_status_migration_66(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
@@ -11747,12 +11763,20 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             apply_conversation_merge_migration(&tx)?;
             apply_notification_mark_read_migration(&tx)?;
+            notification_dismissal_status::apply_notification_dismissal_status_migration_66(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
         Some(64) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             apply_notification_mark_read_migration(&tx)?;
+            notification_dismissal_status::apply_notification_dismissal_status_migration_66(&tx)?;
+            tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
+            tx.commit()?;
+        }
+        Some(65) => {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            notification_dismissal_status::apply_notification_dismissal_status_migration_66(&tx)?;
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
@@ -12081,6 +12105,7 @@ fn recover_epoch_page(
         if matches!(
             &payload,
             PrivatePayload::SendCancellationCapability { .. }
+                | PrivatePayload::NotificationDismissalStatus { .. }
                 | PrivatePayload::SendCancellationRequest { .. }
                 | PrivatePayload::SendCancellationResult { .. }
                 | PrivatePayload::ReactionCapability { .. }
@@ -12454,6 +12479,36 @@ fn recover_epoch_page(
                     &producer,
                     to_i64(envelope.producer_sequence.0)?,
                     envelope.compaction.as_ref(),
+                )?;
+            }
+            (
+                "applied",
+                PrivatePayload::NotificationDismissalStatus {
+                    source_device_id,
+                    blocked,
+                    observed_at_ms,
+                },
+            ) => {
+                if envelope.purpose != EnvelopePurpose::Event
+                    || !notification_dismissal_status::valid_status(
+                        source_device_id,
+                        envelope.producer_device_id,
+                        observed_at_ms,
+                    )
+                {
+                    conn.execute(
+                        "UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?",
+                        params![cursor],
+                    )?;
+                    continue;
+                }
+                notification_dismissal_status::apply_status(
+                    conn,
+                    source_device_id,
+                    blocked,
+                    observed_at_ms,
+                    envelope.key_epoch,
+                    envelope.producer_sequence.0,
                 )?;
             }
             ("applied", PrivatePayload::SendCancellationCapability { supported }) => {
@@ -13052,6 +13107,7 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "notification_removed"
             | "notification_dismiss"
             | "notification_mark_read"
+            | "notification_dismissal_status"
             | "app_filter"
             | "conversation_pin"
             | "conversation_folder"
@@ -13208,6 +13264,30 @@ fn apply_record(
                 conn,
                 eligibility.eligibility.conversation_id,
                 eligibility.eligibility.gateway_device_id,
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::NotificationDismissalStatus {
+                source_device_id,
+                blocked,
+                observed_at_ms,
+            },
+        ) => {
+            if !notification_dismissal_status::valid_status(
+                source_device_id,
+                producer,
+                observed_at_ms,
+            ) {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            notification_dismissal_status::apply_status(
+                conn,
+                source_device_id,
+                blocked,
+                observed_at_ms,
+                envelope.key_epoch,
+                envelope.producer_sequence.0,
             )?;
         }
         (EnvelopePurpose::Event, PrivatePayload::SendCancellationCapability { supported }) => {
@@ -15349,6 +15429,14 @@ fn compaction_group(
             parts.push(content_sequence.0.to_string().into_bytes());
             (b"notification-mark-read", parts, true)
         }
+        // Each phone's status supersedes its earlier one. Standing state, not a terminal fact.
+        PrivatePayload::NotificationDismissalStatus {
+            source_device_id, ..
+        } => (
+            b"notification-dismissal-status",
+            vec![source_device_id.to_string().into_bytes()],
+            false,
+        ),
         PrivatePayload::AppFilter { filter, .. } => (
             b"app-filter",
             vec![
@@ -15562,6 +15650,9 @@ pub(crate) fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
             "notification:{}:{}",
             target.source_device_id, target.notification_key
         )),
+        PrivatePayload::NotificationDismissalStatus {
+            source_device_id, ..
+        } => Some(format!("notification-dismissal-status:{source_device_id}")),
         PrivatePayload::AppFilter { filter, .. } => Some(format!(
             "app-filter:{}:{}",
             filter.source_device_id, filter.package_name
@@ -21951,6 +22042,7 @@ mod tests {
             "contact_book_deleted",
             "contact_book_deleted_member",
             "notification_mark_read",
+            "notification_dismissal_status",
             "future_unknown_event",
         ] {
             let mut envelope = Envelope {

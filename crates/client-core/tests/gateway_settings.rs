@@ -985,7 +985,7 @@ fn version_64_upgrade_adds_mark_read_schema_without_resetting_preferences() {
     assert_eq!(client.gateway_settings().unwrap(), settings);
     drop(client);
     let conn = encrypted_connection(&config);
-    assert_eq!(schema_version(&conn), 65);
+    assert_eq!(schema_version(&conn), 66);
     assert!(table_exists(&conn, "notification_mark_reads"));
     assert!(index_exists(&conn, "notification_mark_reads_pending"));
     assert!(column_exists(&conn, "notifications", "mark_read_supported"));
@@ -994,4 +994,34 @@ fn version_64_upgrade_adds_mark_read_schema_without_resetting_preferences() {
         "gateway_settings",
         "notification_mark_read_enabled"
     ));
+}
+
+#[test]
+fn version_65_upgrade_adds_dismissal_status_schema_without_resetting_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "gateway-version-65", &vault);
+    let settings = GatewaySettings {
+        mirroring_enabled: true,
+        phone_read_enabled: true,
+        ..GatewaySettings::default()
+    };
+    open(&config)
+        .set_gateway_settings(settings.clone())
+        .unwrap();
+
+    let conn = encrypted_connection(&config);
+    conn.execute_batch(
+        "DROP TABLE notification_dismissal_statuses;
+         UPDATE schema_meta SET version=65;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let client = open(&config);
+    assert_eq!(client.gateway_settings().unwrap(), settings);
+    drop(client);
+    let conn = encrypted_connection(&config);
+    assert_eq!(schema_version(&conn), 66);
+    assert!(table_exists(&conn, "notification_dismissal_statuses"));
 }
