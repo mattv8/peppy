@@ -237,6 +237,8 @@ async fn copy_vault_rows(source: &PgPool, destination: &PgPool, table: &str, vau
     input.finish().await.unwrap();
 }
 
+mod support;
+
 async fn wait_for_blocked_query(server: &Server, query_prefix: &str) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -599,6 +601,10 @@ async fn blocked_establish_revalidates_revocation_and_owner_role() {
     let demoted = server.create_vault().await;
 
     let mut lock = server.pool.begin().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
     sqlx::query("SELECT key_epoch FROM vaults WHERE vault_id=$1 FOR UPDATE")
         .bind(server.vault)
         .fetch_one(&mut *lock)
@@ -616,9 +622,11 @@ async fn blocked_establish_revalidates_revocation_and_owner_role() {
             .await
             .unwrap()
     });
-    wait_for_blocked_query(
-        &server,
-        "SELECT key_epoch,profile_fingerprint FROM vaults WHERE vault_id",
+    support::wait_blocked_by(
+        &server.admin,
+        holder_pid,
+        Some("SELECT key_epoch,profile_fingerprint FROM vaults WHERE vault_id"),
+        Duration::from_secs(10),
     )
     .await;
     sqlx::query("UPDATE device_credentials SET revoked_at=clock_timestamp() WHERE vault_id=$1 AND device_id=$2")
@@ -636,6 +644,10 @@ async fn blocked_establish_revalidates_revocation_and_owner_role() {
     );
 
     let mut lock = server.pool.begin().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
     sqlx::query("SELECT key_epoch FROM vaults WHERE vault_id=$1 FOR UPDATE")
         .bind(demoted.vault)
         .fetch_one(&mut *lock)
@@ -653,9 +665,11 @@ async fn blocked_establish_revalidates_revocation_and_owner_role() {
             .await
             .unwrap()
     });
-    wait_for_blocked_query(
-        &server,
-        "SELECT key_epoch,profile_fingerprint FROM vaults WHERE vault_id",
+    support::wait_blocked_by(
+        &server.admin,
+        holder_pid,
+        Some("SELECT key_epoch,profile_fingerprint FROM vaults WHERE vault_id"),
+        Duration::from_secs(10),
     )
     .await;
     sqlx::query("UPDATE devices SET role='device' WHERE vault_id=$1 AND device_id=$2")
@@ -685,6 +699,10 @@ async fn blocked_absent_establish_rejects_profile_activated_ahead_of_it() {
     let server = Server::start().await;
     register_next_profile(&server).await;
     let mut lock = server.pool.begin().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
     sqlx::query("SELECT key_epoch FROM vaults WHERE vault_id=$1 FOR UPDATE")
         .bind(server.vault)
         .fetch_one(&mut *lock)
@@ -701,7 +719,13 @@ async fn blocked_absent_establish_rejects_profile_activated_ahead_of_it() {
             .await
             .unwrap()
     });
-    wait_for_blocked_query(&server, "SELECT key_epoch FROM vaults WHERE vault_id").await;
+    support::wait_blocked_by(
+        &server.admin,
+        holder_pid,
+        Some("SELECT key_epoch FROM vaults WHERE vault_id"),
+        Duration::from_secs(10),
+    )
+    .await;
 
     let base_url = server.base_url.clone();
     let token = server.token.clone();

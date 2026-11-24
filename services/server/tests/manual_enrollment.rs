@@ -33,6 +33,8 @@ use uuid::Uuid;
 
 struct HostedAuthorization(Uuid);
 
+mod support;
+
 impl EnrollmentAuthorization for HostedAuthorization {
     fn authorize_enrollment(
         &self,
@@ -655,6 +657,10 @@ async fn manual_challenge_retry_refreshes_expiry_after_a_vault_lock_wait() {
         .unwrap();
 
     let mut vault_lock = pool.begin().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *vault_lock)
+        .await
+        .unwrap();
     sqlx::query("SELECT vault_id FROM vaults WHERE vault_id = $1 FOR UPDATE")
         .bind(vault)
         .fetch_one(&mut *vault_lock)
@@ -663,22 +669,13 @@ async fn manual_challenge_retry_refreshes_expiry_after_a_vault_lock_wait() {
     let retry_app = app.clone();
     let retry_request = request.clone();
     let retry = tokio::spawn(async move { challenge_from(&retry_app, retry_request, None).await });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%FROM vaults WHERE vault_id = $1 FOR UPDATE%')",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            if waiting {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("retry must wait for the held vault lock");
+    support::wait_blocked_by(
+        &pool,
+        holder_pid,
+        Some("FROM vaults WHERE vault_id = $1 FOR UPDATE"),
+        std::time::Duration::from_secs(5),
+    )
+    .await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     vault_lock.commit().await.unwrap();
 
@@ -797,6 +794,10 @@ async fn manual_completion_rechecks_expiry_after_an_admission_lock_wait() {
     };
 
     let mut admission_lock = pool.begin().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *admission_lock)
+        .await
+        .unwrap();
     sqlx::query("SELECT id FROM device_admissions WHERE id = $1 FOR UPDATE")
         .bind(challenge.enrollment_id)
         .fetch_one(&mut *admission_lock)
@@ -814,22 +815,13 @@ async fn manual_completion_rechecks_expiry_after_an_admission_lock_wait() {
         )
         .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%FROM device_admissions a%')",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            if waiting {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("completion must wait for the held admission lock");
+    support::wait_blocked_by(
+        &pool,
+        holder_pid,
+        Some("FROM device_admissions a"),
+        std::time::Duration::from_secs(5),
+    )
+    .await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     admission_lock.commit().await.unwrap();
 

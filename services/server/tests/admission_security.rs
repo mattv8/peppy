@@ -18,42 +18,26 @@ use tower::ServiceExt;
 use url::Url;
 use uuid::Uuid;
 
+mod support;
+
 const ORIGIN: &str = "https://admission-security.test";
 
 struct Fixture {
-    admin: PgPool,
     pool: PgPool,
     pool_url: String,
-    schema: String,
+    schema: support::SchemaFixture,
 }
 
 impl Fixture {
     async fn new() -> Self {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL must identify a disposable PostgreSQL fixture");
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
-            .await
-            .unwrap();
-        let schema = format!("peppy_admission_security_{}", Uuid::new_v4().simple());
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let mut url: Url = database_url.parse().unwrap();
-        url.query_pairs_mut()
-            .append_pair("options", &format!("-csearch_path={schema}"));
-        let pool = PgPoolOptions::new()
-            .max_connections(12)
-            .connect(url.as_str())
-            .await
-            .unwrap();
-        peppy_server::MIGRATOR.run(&pool).await.unwrap();
+        let schema =
+            support::SchemaFixture::new(&database_url, "peppy_admission_security_", 1, 12, false)
+                .await;
         Self {
-            admin,
-            pool,
-            pool_url: url.to_string(),
+            pool: schema.pool().clone(),
+            pool_url: schema.url.to_string(),
             schema,
         }
     }
@@ -89,12 +73,7 @@ impl Fixture {
     }
 
     async fn cleanup(self) {
-        self.pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
-            .execute(&self.admin)
-            .await
-            .unwrap();
-        self.admin.close().await;
+        self.schema.cleanup().await;
     }
 }
 

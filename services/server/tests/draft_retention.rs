@@ -17,33 +17,62 @@ use peppy_server::{
 use reqwest::{Client, Response, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use tokio::{net::TcpListener, task::JoinHandle};
-use url::Url;
 use uuid::Uuid;
 
-async fn pool() -> (PgPool, PgPool, String) {
+mod support;
+
+#[tokio::test]
+async fn schema_fixture_cleans_up_after_panic() {
     let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required");
-    let admin = PgPoolOptions::new()
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let fixture =
+                support::SchemaFixture::new(&database_url, "draft_unwind_", 1, 1, false).await;
+            let mut connection = fixture.pool().acquire().await.unwrap();
+            sqlx::query("SELECT 1")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+            sender.send(fixture.schema.clone()).unwrap();
+            panic!("intentional fixture unwind");
+        });
+    });
+    assert!(worker.join().is_err(), "fixture worker must panic");
+    let schema = receiver.recv().expect("fixture was created before panic");
+    let admin = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
-        .connect(&database_url)
+        .connect(&std::env::var("TEST_DATABASE_URL").unwrap())
         .await
         .unwrap();
-    let schema = format!("draft_retention_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    let mut url: Url = database_url.parse().unwrap();
-    url.query_pairs_mut()
-        .append_pair("options", &format!("-csearch_path={schema}"));
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(url.as_str())
-        .await
-        .unwrap();
-    peppy_server::MIGRATOR.run(&pool).await.unwrap();
-    (admin, pool, schema)
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let (schema_exists, backend_exists): (bool, bool) = sqlx::query_as(
+                "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=$1), EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=$1)",
+            )
+            .bind(&schema)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+            if !schema_exists && !backend_exists {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("schema or tagged backend survived panic: {schema}"));
+}
+
+async fn pool() -> support::SchemaFixture {
+    let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required");
+    support::SchemaFixture::new(&database_url, "draft_retention_", 1, 4, false).await
 }
 
 async fn seed(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
@@ -62,7 +91,8 @@ async fn seed_with_ids(pool: &PgPool, vault: Uuid, device: Uuid) {
 #[tokio::test]
 async fn expiry_closes_branches_nulls_ciphertext_lapses_holds_and_queues_unreferenced_draft_objects()
  {
-    let (admin, pool, schema) = pool().await;
+    let schema = pool().await;
+    let pool = schema.pool().clone();
     let (vault, device, draft) = seed(&pool).await;
     let branch = Uuid::new_v4();
     let revision = Uuid::new_v4();
@@ -88,17 +118,13 @@ async fn expiry_closes_branches_nulls_ciphertext_lapses_holds_and_queues_unrefer
             .await
             .unwrap();
     assert_eq!(terminal, "expired");
-    pool.close().await;
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    admin.close().await;
+    schema.cleanup().await;
 }
 
 #[tokio::test]
 async fn protected_attachment_does_not_starve_a_later_expired_vault() {
-    let (admin, pool, schema) = pool().await;
+    let schema = pool().await;
+    let pool = schema.pool().clone();
     let earlier_vault = Uuid::from_u128(1);
     let later_vault = Uuid::from_u128(2);
     let earlier_device = Uuid::new_v4();
@@ -166,17 +192,13 @@ async fn protected_attachment_does_not_starve_a_later_expired_vault() {
         .unwrap();
     assert_eq!(attachments, (true, false));
 
-    pool.close().await;
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    admin.close().await;
+    schema.cleanup().await;
 }
 
 #[tokio::test]
 async fn live_hold_does_not_starve_later_draft_cleanup_at_quota() {
-    let (admin, pool, schema) = pool().await;
+    let schema = pool().await;
+    let pool = schema.pool().clone();
     let earlier_vault = Uuid::from_u128(3);
     let later_vault = Uuid::from_u128(4);
     let earlier_device = Uuid::new_v4();
@@ -224,17 +246,13 @@ async fn live_hold_does_not_starve_later_draft_cleanup_at_quota() {
         .unwrap();
     assert_eq!(attachments, (true, false));
 
-    pool.close().await;
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    admin.close().await;
+    schema.cleanup().await;
 }
 
 #[tokio::test]
 async fn expiry_bounds_branch_attachment_and_lapsed_hold_work_per_vault() {
-    let (admin, pool, schema) = pool().await;
+    let schema = pool().await;
+    let pool = schema.pool().clone();
     let (vault, device, _) = seed(&pool).await;
     for draft in [Uuid::new_v4(), Uuid::new_v4()] {
         sqlx::query("INSERT INTO draft_incarnations(vault_id,draft_id) VALUES($1,$2)")
@@ -283,12 +301,7 @@ async fn expiry_bounds_branch_attachment_and_lapsed_hold_work_per_vault() {
         .unwrap();
     assert_eq!(work, (2, 1, 1));
 
-    pool.close().await;
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    admin.close().await;
+    schema.cleanup().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,8 +310,7 @@ async fn expiry_bounds_branch_attachment_and_lapsed_hold_work_per_vault() {
 
 struct Harness {
     pool: PgPool,
-    admin: PgPool,
-    schema: String,
+    schema: support::SchemaFixture,
     base_url: String,
     task: JoinHandle<()>,
     owner_token: String,
@@ -331,27 +343,9 @@ impl Harness {
         if !include_storage {
             config.s3 = None;
         }
-        let admin = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&database_url)
-            .await
-            .unwrap();
-        let schema = format!("draft_http_{}", Uuid::new_v4().simple());
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let mut isolated_url: Url = database_url.parse().unwrap();
-        isolated_url
-            .query_pairs_mut()
-            .append_pair("options", &format!("-csearch_path={schema}"));
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect(isolated_url.as_str())
-            .await
-            .unwrap();
-        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        config.database_url = isolated_url.to_string();
+        let schema = support::SchemaFixture::new(&database_url, "draft_http_", 2, 5, false).await;
+        let pool = schema.pool().clone();
+        config.database_url = schema.url.to_string();
         let mut server = ServerBuilder::community(config, pool.clone())
             .storage_cleanup_interval(Duration::from_millis(100))
             .build()
@@ -380,7 +374,6 @@ impl Harness {
         });
         Self {
             pool,
-            admin,
             schema,
             base_url: format!("http://{addr}"),
             task,
@@ -560,12 +553,7 @@ impl Harness {
         }
         self.task.abort();
         let _ = self.task.await;
-        self.pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
-            .execute(&self.admin)
-            .await
-            .unwrap();
-        self.admin.close().await;
+        self.schema.cleanup().await;
     }
 }
 

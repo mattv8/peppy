@@ -32,6 +32,8 @@ use tokio::{net::TcpListener, task::JoinHandle};
 use url::Url;
 use uuid::Uuid;
 
+mod support;
+
 // Under plain `cargo test`, uploads share the process-wide spool directory (src/api/attachments.rs)
 // and several tests assert exact `spool_entries()` counts, so every test takes this lock.
 // nextest runs each test in its own process, where the lock has no effect.
@@ -352,18 +354,12 @@ async fn hold_vault_lock(server: &TestServer) -> (sqlx::Transaction<'static, sql
 }
 
 async fn wait_for_reserve_to_block(server: &TestServer, holder_pid: i32) {
-    wait_until(5, "reserve request blocked on the vault lock", || {
-        let admin = server.admin.clone();
-        async move {
-            sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%SELECT vault_id FROM vaults%')",
-            )
-            .bind(holder_pid)
-            .fetch_one(&admin)
-            .await
-            .unwrap()
-        }
-    })
+    support::wait_blocked_by(
+        &server.admin,
+        holder_pid,
+        Some("SELECT vault_id FROM vaults"),
+        Duration::from_secs(5),
+    )
     .await;
 }
 
@@ -1573,18 +1569,12 @@ async fn public_copy_revalidates_the_exact_bearer_after_its_body_and_vault_lock(
     });
     polled.await.unwrap();
     release.send(()).unwrap();
-    wait_until(5, "public-copy admission blocked on the vault lock", || {
-        let admin = server.admin.clone();
-        async move {
-            sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%SELECT vault_id FROM vaults%')",
-            )
-            .bind(holder_pid)
-            .fetch_one(&admin)
-            .await
-            .unwrap()
-        }
-    })
+    support::wait_blocked_by(
+        &server.admin,
+        holder_pid,
+        Some("SELECT vault_id FROM vaults"),
+        Duration::from_secs(5),
+    )
     .await;
     sqlx::query("UPDATE device_credentials SET revoked_at=clock_timestamp() WHERE vault_id=$1 AND device_id=$2")
         .bind(server.vault)
