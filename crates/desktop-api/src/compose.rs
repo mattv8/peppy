@@ -370,7 +370,7 @@ pub fn send_draft(
     gateways: Option<&[GatewayView]>,
 ) -> Result<SendResultView, ComposeError> {
     let prepared = prepare_draft_send(client, input, gateways)?;
-    queue_prepared_draft_send(client, &prepared, gateways, None)
+    queue_prepared_draft_send(client, &prepared, gateways)
 }
 
 /// Input of the explicit "Send again" command: the original message and the route to copy it to.
@@ -509,12 +509,11 @@ pub(crate) fn send_again_error(error: CoreError) -> ComposeError {
     }
 }
 
-/// Runs the same local composition policy as `send_draft`, then queues the command ID already
-/// accepted by the draft-sync service. Hosts must only call this after that acceptance.
+/// Consumes the durable intent accepted by the draft-sync service without rerunning gateway policy.
+/// Hosts must only call this after that acceptance.
 pub fn send_draft_accepted(
     client: &Client,
     input: &DraftInput,
-    _gateways: Option<&[GatewayView]>,
     command_id: CommandId,
 ) -> Result<SendResultView, ComposeError> {
     let draft_id = DraftId::from_str(&input.id)
@@ -746,7 +745,6 @@ fn queue_prepared_draft_send(
     client: &Client,
     input: &DraftInput,
     gateways: Option<&[GatewayView]>,
-    command_id: Option<CommandId>,
 ) -> Result<SendResultView, ComposeError> {
     let draft_id = DraftId::from_str(&input.id)
         .map_err(|_| ui("invalid-draft", "Save the draft before sending it."))?;
@@ -754,30 +752,24 @@ fn queue_prepared_draft_send(
     let stored = client
         .resolve_compose_draft_for_send(draft_id, revision)
         .map_err(ComposeError::Core)?;
-    let parts = command_id
-        .is_none()
-        .then(|| prepared_draft_send_parts(client, input, gateways))
-        .transpose()?;
+    let parts = prepared_draft_send_parts(client, input, gateways)?;
     let transport = compose_transport(
         &stored.recipients,
         &stored.text,
         !stored.attachment_ids.is_empty(),
     );
-    let group = match (command_id, parts.as_ref().and_then(Option::as_ref)) {
-        (None, None) if stored.recipients.len() > 1 => Some(group_send(input)?),
+    let group = match parts.as_ref() {
+        None if stored.recipients.len() > 1 => Some(group_send(input)?),
         _ => None,
     };
-    let sent = match (command_id, parts.as_ref().and_then(Option::as_ref), group) {
-        (Some(command_id), _, _) => {
-            client.send_compose_draft_accepted_with_parts(draft_id, revision, command_id, None)
-        }
-        (None, Some(parts), _) => client
+    let sent = match (parts.as_ref(), group) {
+        (Some(parts), _) => client
             .send_compose_draft_with_parts(draft_id, revision, parts.clone())
             .map(|_| ()),
-        (None, None, Some(group)) => client
+        (None, Some(group)) => client
             .send_compose_draft_for_group_checked_transport(draft_id, revision, transport, group)
             .map(|_| ()),
-        (None, None, None) => client
+        (None, None) => client
             .send_compose_draft_checked_transport(draft_id, revision, transport)
             .map(|_| ()),
     };
@@ -806,9 +798,7 @@ fn queue_prepared_draft_send(
         status: "queued-local",
         reason: None,
         revision: Some((revision + 1).to_string()),
-        parts: parts
-            .flatten()
-            .map(|parts| (parts.image_groups.len() + usize::from(parts.caption)) as u32),
+        parts: parts.map(|parts| (parts.image_groups.len() + usize::from(parts.caption)) as u32),
         group: None,
         refused_attachment_ids: None,
     })
@@ -1453,12 +1443,7 @@ mod tests {
 
         let mut changed = prepared;
         changed.text = "changed after approval".into();
-        let accepted = match send_draft_accepted(
-            &fixture.client,
-            &changed,
-            Some(&[gateway(GatewayAvailability::Connected)]),
-            command,
-        ) {
+        let accepted = match send_draft_accepted(&fixture.client, &changed, command) {
             Ok(accepted) => accepted,
             Err(_) => panic!("accepted send should queue the sealed command"),
         };
@@ -1517,13 +1502,8 @@ mod tests {
             .unwrap()
             .command_id;
 
-        send_draft_accepted(
-            &fixture.client,
-            &prepared,
-            Some(&[gateway(GatewayAvailability::Connected)]),
-            command,
-        )
-        .unwrap_or_else(|_| panic!("the accepted group send should queue"));
+        send_draft_accepted(&fixture.client, &prepared, command)
+            .unwrap_or_else(|_| panic!("the accepted group send should queue"));
         // A group send writes the roster with the intent's name; a 1:1 send would write none.
         let view = fixture
             .client
@@ -1567,25 +1547,9 @@ mod tests {
             .unwrap()
             .command_id;
 
-        assert!(
-            send_draft_accepted(
-                &fixture.client,
-                &prepared,
-                Some(&[gateway(GatewayAvailability::Connected)]),
-                command,
-            )
-            .is_ok()
-        );
+        assert!(send_draft_accepted(&fixture.client, &prepared, command).is_ok());
 
-        assert!(
-            send_draft_accepted(
-                &fixture.client,
-                &prepared,
-                Some(&[gateway(GatewayAvailability::Connected)]),
-                command,
-            )
-            .is_ok()
-        );
+        assert!(send_draft_accepted(&fixture.client, &prepared, command).is_ok());
     }
 
     #[test]
@@ -1663,11 +1627,11 @@ mod tests {
             )
             .unwrap();
 
-        let first = match send_draft_accepted(&fixture.client, &prepared, None, command) {
+        let first = match send_draft_accepted(&fixture.client, &prepared, command) {
             Ok(result) => result,
             Err(_) => panic!("terminal-first accepted send should report its durable part count"),
         };
-        let repeated = match send_draft_accepted(&fixture.client, &prepared, None, command) {
+        let repeated = match send_draft_accepted(&fixture.client, &prepared, command) {
             Ok(result) => result,
             Err(_) => panic!("repeated accepted send should report its durable part count"),
         };
