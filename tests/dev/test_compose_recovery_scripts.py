@@ -47,6 +47,8 @@ args = sys.argv[1:]
 with open(os.environ["DOCKER_LOG"], "a") as log:
     log.write(json.dumps(args) + "\n")
 if args[0] == "compose":
+    if os.environ.get("FAIL_BACKUP_STEP") == "dump" and "exec" in args:
+        sys.exit(1)
     if "config" in args:
         print(os.environ["COMPOSE_CONFIG"])
     elif "ps" in args and "--status" in args:
@@ -96,6 +98,8 @@ if args[:2] == ["image", "inspect"]:
     print(image_id)
     sys.exit(0)
 if args[0] == "run":
+    if os.environ.get("FAIL_BACKUP_STEP") == "archive":
+        sys.exit(1)
     sys.stdout.buffer.write(b"archive")
     sys.exit(0)
 sys.exit(0)
@@ -161,8 +165,8 @@ def compose_config(api_image: str | None, seaweed_image: str, mcp_overlay: bool 
 def ps_state(mcp_states: dict[str, str]) -> tuple[str, str]:
     services = [
         {"Service": "postgres", "State": "running"},
-        {"Service": "api", "State": "exited"},
-        {"Service": "seaweedfs", "State": "exited"},
+        {"Service": "api", "State": "running"},
+        {"Service": "seaweedfs", "State": "running"},
         *({"Service": name, "State": state} for name, state in mcp_states.items()),
     ]
     running = "\n".join(service["Service"] for service in services if service["State"] == "running")
@@ -393,6 +397,7 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
         images = {"postgres:fixture": POSTGRES_ID, seaweed_image: SEAWEED_ID, api_image or "peppy-api": API_ID, "mcp:fixture": API_ID}
         environment = os.environ | {
             "PATH": f"{tools}:{os.environ['PATH']}",
+            "TMPDIR": str(root),
             "DOCKER_LOG": str(log),
             "COMPOSE_CONFIG": compose_config(api_image, seaweed_image, mcp_overlay),
             "RUNNING_IDS": json.dumps({"postgres": POSTGRES_ID, "seaweedfs": SEAWEED_ID, "api": api_id, "mcp": API_ID}),
@@ -418,6 +423,7 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
         archive = write_restore_archive(root, artifacts, configured, running)
         environment = os.environ | {
             "PATH": f"{tools}:{os.environ['PATH']}",
+            "TMPDIR": str(root),
             "DOCKER_LOG": str(log),
             "COMPOSE_CONFIG": config_json or compose_config(None, "seaweed:fixture"),
             "RUNNING_IDS": "{}",
@@ -451,6 +457,17 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
     @staticmethod
     def recovery_events(log):
         return [json.loads(line) for line in log.read_text().splitlines()]
+
+    def backup_events(self, log):
+        events = []
+        for call in self.recovery_events(log):
+            if "stop" in call or "start" in call:
+                events.append((call[-2], call[-1]))
+            elif "exec" in call and "pg_dump" in call[-1]:
+                events.append(("dump", "postgres"))
+            elif call[0] == "run":
+                events.append(("archive", call[call.index("-v") + 1]))
+        return events
 
     def test_restore_waits_for_authenticated_tcp_database_without_retrying_restore(self):
         root, archive, log, environment = self.restore_fixture(readiness_failures=2)
@@ -519,6 +536,35 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
         self.assertEqual(sidecar.read_text(), expected)
         self.assertEqual(stat.S_IMODE(sidecar.stat().st_mode), 0o600)
         self.assertIn(expected, result.stdout)
+
+    def test_backup_stops_dumps_archives_and_restarts_in_order(self):
+        root, destination, log, environment = self.backup_fixture(None, "seaweed:root")
+        result = self.run_backup(root, destination, environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.backup_events(log), [
+            ("stop", "api"),
+            ("dump", "postgres"),
+            ("stop", "seaweedfs"),
+            ("archive", "peppy_seaweed-data:/source:ro"),
+            ("archive", "peppy_seaweed-home:/source:ro"),
+            ("start", "seaweedfs"),
+            ("start", "api"),
+        ])
+
+    def test_backup_restarts_services_after_dump_or_archive_failure(self):
+        for step in ("dump", "archive"):
+            with self.subTest(step=step):
+                root, destination, log, environment = self.backup_fixture(None, "seaweed:root")
+                result = self.run_backup(root, destination, environment | {"FAIL_BACKUP_STEP": step})
+                self.assertNotEqual(result.returncode, 0)
+                expected = [("stop", "api"), ("dump", "postgres")]
+                if step == "archive":
+                    expected.extend([
+                        ("stop", "seaweedfs"),
+                        ("archive", "peppy_seaweed-data:/source:ro"),
+                    ])
+                expected.extend([("start", "seaweedfs"), ("start", "api")])
+                self.assertEqual(self.backup_events(log), expected)
 
     def test_restore_refuses_pg_restore_when_target_database_never_becomes_ready(self):
         root, archive, log, environment = self.restore_fixture(readiness_failures=100)

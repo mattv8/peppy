@@ -20,7 +20,10 @@ DEV_CONFIG = ROOT / "apps/desktop/src-tauri/tauri.dev.conf.json"
 
 class DesktopHelperTests(unittest.TestCase):
     def run_helper(self, *args, env=None, cwd=ROOT):
-        values = os.environ.copy()
+        values = {
+            name: value for name, value in os.environ.items()
+            if name != "DEBUG" and not name.startswith("PEPPY_DEV_")
+        }
         values.pop("PEPPY_MACOS_SIGNING_IDENTITY", None)
         values.pop("APPLE_SIGNING_IDENTITY", None)
         values.update(env or {})

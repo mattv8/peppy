@@ -170,6 +170,17 @@ class MigrationRepairTests(unittest.TestCase):
         self.assertTrue(repair.is_local_docker_host("unix:///var/run/docker.sock"))
         self.assertTrue(repair.is_local_docker_host("npipe:////./pipe/docker_engine"))
 
+    def test_dev_up_refuses_remote_endpoint_before_any_repair_command_or_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Mock discovery: real docker context inspect is the only command before refusal.
+            with mock.patch.object(repair, "docker_endpoint", return_value="tcp://remote.example:2376"), \
+                 mock.patch.object(repair.subprocess, "run") as run:
+                with self.assertRaisesRegex(repair.RepairError, "non-local Docker endpoint"):
+                    repair.dev_up(root)
+            run.assert_not_called()
+            self.assertEqual(list(root.iterdir()), [])
+
     def test_psql_uses_resolved_container_credentials(self):
         result = type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         with mock.patch.object(repair, "database_credentials", return_value=("actual user", "actual db")):

@@ -24,13 +24,11 @@ def extract_compose_config(compose_file: Path, name: str) -> str:
 @contextmanager
 def extracted_config_file(compose_file: Path, name: str, executable: bool = False):
     """Materialize an inlined config for a subprocess that requires a path."""
-    descriptor, filename = tempfile.mkstemp(prefix=f".peppy-{name}-", dir=ROOT)
-    path = Path(filename)
-    try:
+    with tempfile.TemporaryDirectory(prefix="peppy-compose-config-") as directory:
+        descriptor, filename = tempfile.mkstemp(prefix=f"{name}-", dir=directory)
+        path = Path(filename)
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
             output.write(extract_compose_config(compose_file, name))
         if executable:
             path.chmod(0o755)
         yield path
-    finally:
-        path.unlink(missing_ok=True)
