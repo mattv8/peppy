@@ -1003,7 +1003,8 @@ struct NativeContactsCoordinator {
         switch request["kind"] as? String {
         case "delete":
             if let key = (permit["source"] as? [String: Any])?["source_key"] as? String,
-               try await provider.contact(id: key) == nil {
+               try await provider.contact(id: key) == nil,
+               try await provider.access() == .full {
                 try record(.applied(source: nil), requestId: requestId, report: &report)
                 return
             }
