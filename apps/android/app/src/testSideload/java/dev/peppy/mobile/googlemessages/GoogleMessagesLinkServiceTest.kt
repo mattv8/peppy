@@ -353,11 +353,12 @@ class GoogleMessagesLinkServiceTest {
         )
         val attempt = LinkRuntime.tryBeginPairing()!!
 
-        startService()
+        val controller = startService()
 
         assertTrue(finished.await(1, TimeUnit.SECONDS))
         assertEquals(390_000L, elapsed)
         assertTrue(LinkRuntime.endPairing(attempt))
+        controller.destroy()
     }
 
     @Test
@@ -374,11 +375,12 @@ class GoogleMessagesLinkServiceTest {
             workerFinished = { finished.countDown() },
         )
 
-        startService()
+        val controller = startService()
 
         assertTrue(finished.await(1, TimeUnit.SECONDS))
         assertEquals(listOf(30_000L, 30_000L), delays)
         assertEquals(3, handle.runCalls.get())
+        controller.destroy()
     }
 
     @Test
@@ -697,10 +699,11 @@ class GoogleMessagesLinkServiceTest {
         )
         installEngine(OverflowHandle())
 
-        startService()
+        val controller = startService()
 
         assertTrue(finished.await(1, TimeUnit.SECONDS))
         assertTrue(events.contains("link" to "event_overflow"))
+        controller.destroy()
     }
 
     @Test
@@ -756,10 +759,11 @@ class GoogleMessagesLinkServiceTest {
         }
         LinkRuntimeTestHooks.storeFactory = { EmptyStore }
 
-        startService()
+        val controller = startService()
 
         assertTrue(finished.await(1, TimeUnit.SECONDS))
         assertEquals(0, opens)
+        controller.destroy()
     }
 
     @Test
@@ -776,11 +780,12 @@ class GoogleMessagesLinkServiceTest {
         installEngine(StatusHandle(UNLINKED_STATUS))
         val pairing = LinkRuntime.tryBeginPairing()!!
 
-        startService()
+        val controller = startService()
 
         assertTrue(finished.await(1, TimeUnit.SECONDS))
         assertFalse(synchronized(recordedStates) { "unlinked" in recordedStates })
         assertTrue(LinkRuntime.endPairing(pairing))
+        controller.destroy()
     }
 
     @Test
@@ -799,7 +804,7 @@ class GoogleMessagesLinkServiceTest {
         )
         installEngine(StatusHandle(UNLINKED_STATUS))
 
-        startService()
+        val controller = startService()
 
         assertTrue(statusRead.await(1, TimeUnit.SECONDS))
         val pairing = LinkRuntime.tryBeginPairing()!!
@@ -808,6 +813,7 @@ class GoogleMessagesLinkServiceTest {
         allowSubmission.countDown()
         assertTrue(finished.await(1, TimeUnit.SECONDS))
         assertFalse(synchronized(recordedStates) { "unlinked" in recordedStates })
+        controller.destroy()
     }
 
     @Test
@@ -887,7 +893,7 @@ class GoogleMessagesLinkServiceTest {
     @Test fun `unlink stops the typing host and disables the bridge`() {
         val handle = MutableStatusRunHandle()
         val typing = TypingFixture()
-        startTypingService(handle, typing)
+        val controller = startTypingService(handle, typing)
         goLinkedAndRunning(handle)
         assertTrue(typing.transport.running)
 
@@ -895,6 +901,7 @@ class GoogleMessagesLinkServiceTest {
 
         assertFalse(typing.transport.running)
         assertTrue(typing.core.disables.get() > 0)
+        controller.destroy()
         handle.allowRunReturn.countDown()
     }
 
