@@ -40,7 +40,7 @@ import PeppyBindings
         let f = try RecoveryFixture()
         // A checkpoint write that fails during prepare leaves no checkpoint and makes no remote write.
         f.store.failWrites(to: checkpointKey)
-        await #expect(throws: injectedStoreFailure) { try await f.client.prepareVault(passphrase: validPassphrase) }
+        await #expect(throws: FaultingSecureStore.failure) { try await f.client.prepareVault(passphrase: validPassphrase) }
         #expect(f.store.value(checkpointKey) == nil)
         #expect(f.server.posts.isEmpty)
 
@@ -51,7 +51,7 @@ import PeppyBindings
 
         // The grant arrives but cannot be persisted: it is never spent and the checkpoint stays as prepared.
         f.store.failWrites(to: checkpointKey)
-        await #expect(throws: injectedStoreFailure) { try await f.client.completeVault(passphrase: validPassphrase) }
+        await #expect(throws: FaultingSecureStore.failure) { try await f.client.completeVault(passphrase: validPassphrase) }
         #expect(f.server.grantCount == 1)
         #expect(f.server.completeBodies.isEmpty)
         #expect(f.store.value(checkpointKey) == prepared)
@@ -536,7 +536,12 @@ import PeppyBindings
     @Test func pendingSecretIsStoredBeforeCheckpoint() async throws {
         let f = try RecoveryFixture()
         _ = try await f.client.prepareVault(passphrase: validPassphrase)
-        let writes = f.store.writeAttempts
+        let writes = f.store.writeLog.compactMap { entry -> String? in
+            switch entry {
+            case .add(let account, _, succeeded: true), .upsert(let account, _, succeeded: true): account
+            default: nil
+            }
+        }
         let pending = try #require(writes.firstIndex(of: pendingKey(f.accountID)))
         let checkpoint = try #require(writes.firstIndex(of: checkpointKey))
         #expect(pending < checkpoint)
@@ -546,7 +551,7 @@ import PeppyBindings
     @Test func failedPendingWriteLeavesNoCheckpointAndNoPost() async throws {
         let f = try RecoveryFixture()
         f.store.failWrites(to: pendingKey(f.accountID))
-        await #expect(throws: injectedStoreFailure) { try await f.client.prepareVault(passphrase: validPassphrase) }
+        await #expect(throws: FaultingSecureStore.failure) { try await f.client.prepareVault(passphrase: validPassphrase) }
         #expect(f.store.value(checkpointKey) == nil)
         #expect(f.server.posts.isEmpty)
 
@@ -556,7 +561,7 @@ import PeppyBindings
         let checkpoint = try #require(f.store.value(checkpointKey))
         try f.store.delete(pendingKey(f.accountID))
         f.store.failWrites(to: pendingKey(f.accountID))
-        await #expect(throws: injectedStoreFailure) { try await f.client.completeVault(passphrase: validPassphrase) }
+        await #expect(throws: FaultingSecureStore.failure) { try await f.client.completeVault(passphrase: validPassphrase) }
         #expect(f.server.posts.isEmpty)
         #expect(f.store.value(checkpointKey) == checkpoint)
     }
@@ -693,7 +698,7 @@ import PeppyBindings
         f.store.failWrites(to: nil)
         try await f.client.bindVerifiedEnrollmentSecret(validPassphrase, identity: identity)
         f.store.failDeletes(of: checkpointKey)
-        await #expect(throws: injectedStoreFailure) {
+        await #expect(throws: FaultingSecureStore.failure) {
             try await f.client.acknowledgeEnrollment(identity: identity, passphrase: validPassphrase)
         }
         #expect(f.store.value(checkpointKey) == checkpoint)
@@ -708,7 +713,7 @@ import PeppyBindings
     @Test func orphanedPendingSecretIsRecoverableForItsAccountOnly() async throws {
         let f = try RecoveryFixture()
         f.store.failWrites(to: checkpointKey)
-        await #expect(throws: injectedStoreFailure) { try await f.client.prepareVault(passphrase: validPassphrase) }
+        await #expect(throws: FaultingSecureStore.failure) { try await f.client.prepareVault(passphrase: validPassphrase) }
         #expect(f.store.value(checkpointKey) == nil)
         #expect(f.store.value(pendingKey(f.accountID)) == Data(validPassphrase.utf8))
         f.store.failWrites(to: nil)
@@ -728,7 +733,7 @@ import PeppyBindings
 
         // A storage failure is surfaced, never treated as "no secret".
         f.store.failReads(of: pendingKey(f.accountID))
-        await #expect(throws: injectedStoreFailure) { try await restarted.candidatePendingSecret() }
+        await #expect(throws: FaultingSecureStore.failure) { try await restarted.candidatePendingSecret() }
         f.store.failReads(of: nil)
 
         // Another account never sees A's secret.
@@ -862,7 +867,6 @@ private final class SignOutStore: SecureStore, @unchecked Sendable {
 private let sessionKey = "hosted-account-session:https://peppy.pro"
 private let checkpointKey = "hosted-provisioning:https://peppy.pro"
 private let wrongPassphrase = "wrong phrase with sufficient length here"
-private let injectedStoreFailure = ClientError.secureStorage(status: -25308)
 private let lostResponse = ClientError.network(code: -1005)
 
 private func pendingKey(_ accountID: String) -> String { "vault-secret-pending-v2:https://peppy.pro|hosted-account|\(accountID)" }
@@ -896,44 +900,6 @@ private struct RecoveryFixture: Sendable {
     }
 
     func restartedClient() throws -> HostedAccountClient { try HostedAccountClient(transport: server, secureStore: store) }
-}
-
-/// In-memory secure store that records write attempts and can fail writes to one account.
-private final class FaultingSecureStore: SecureStore, @unchecked Sendable {
-    private let backing = InMemorySecureStore()
-    private let state = Locked((failing: String?.none, failingDelete: String?.none, failingRead: String?.none, writes: [String]()))
-
-    var writeAttempts: [String] { state.value.writes }
-    func failWrites(to account: String?) { state.withValue { $0.failing = account } }
-    func failDeletes(of account: String?) { state.withValue { $0.failingDelete = account } }
-    func failReads(of account: String?) { state.withValue { $0.failingRead = account } }
-    func value(_ account: String) -> Data? { backing.value(account) }
-
-    func read(_ account: String) throws(ClientError) -> Data? {
-        if state.value.failingRead == account { throw injectedStoreFailure }
-        return try backing.read(account)
-    }
-    func addIfAbsent(_ account: String, _ data: Data) throws(ClientError) -> Bool {
-        try recordWrite(account)
-        return try backing.addIfAbsent(account, data)
-    }
-    func upsert(_ account: String, _ data: Data) throws(ClientError) {
-        try recordWrite(account)
-        try backing.upsert(account, data)
-    }
-    func delete(_ account: String) throws(ClientError) {
-        if state.value.failingDelete == account { throw injectedStoreFailure }
-        try backing.delete(account)
-    }
-
-    private func recordWrite(_ account: String) throws(ClientError) {
-        let fails = state.withValue { state -> Bool in
-            guard state.failing != account else { return true }
-            state.writes.append(account)
-            return false
-        }
-        if fails { throw injectedStoreFailure }
-    }
 }
 
 /// Holds one request until the test releases it, and lets the test wait until that request arrived.

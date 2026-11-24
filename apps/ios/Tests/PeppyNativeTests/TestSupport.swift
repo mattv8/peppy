@@ -23,6 +23,75 @@ final class InMemorySecureStore: SecureStore, @unchecked Sendable {
     var snapshot: [String: Data] { lock.withLock { items } }
 }
 
+/// In-memory secure store with injectable faults and an ordered log of mutation attempts.
+final class FaultingSecureStore: SecureStore, @unchecked Sendable {
+    enum Write: Equatable {
+        case add(String, Data, succeeded: Bool), upsert(String, Data, succeeded: Bool), delete(String, succeeded: Bool)
+    }
+
+    static let failure = ClientError.secureStorage(status: -25308)
+    private let lock = NSLock()
+    private var items: [String: Data] = [:]
+    private var reads: Set<String> = []
+    private var writes: Set<String> = []
+    private var deletes: Set<String> = []
+    private var log: [Write] = []
+
+    private var failingRead = false
+    private var failingWrite = false
+    private var failingDelete = false
+    var failRead: Bool {
+        get { lock.withLock { failingRead } }
+        set { lock.withLock { failingRead = newValue } }
+    }
+    var failWrite: Bool {
+        get { lock.withLock { failingWrite } }
+        set { lock.withLock { failingWrite = newValue } }
+    }
+    var failDelete: Bool {
+        get { lock.withLock { failingDelete } }
+        set { lock.withLock { failingDelete = newValue } }
+    }
+    var writeLog: [Write] { lock.withLock { log } }
+    func value(_ account: String) -> Data? { lock.withLock { items[account] } }
+    func failReads(of account: String?) { lock.withLock { reads = account.map { [$0] } ?? [] } }
+    func failWrites(to account: String?) { lock.withLock { writes = account.map { [$0] } ?? [] } }
+    func failDeletes(of account: String?) { lock.withLock { deletes = account.map { [$0] } ?? [] } }
+
+    func read(_ account: String) throws(ClientError) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        if failingRead || reads.contains(account) { throw Self.failure }
+        return items[account]
+    }
+    func addIfAbsent(_ account: String, _ data: Data) throws(ClientError) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let succeeds = !failingWrite && !writes.contains(account)
+        log.append(.add(account, data, succeeded: succeeds))
+        if !succeeds { throw Self.failure }
+        guard items[account] == nil else { return false }
+        items[account] = data
+        return true
+    }
+    func upsert(_ account: String, _ data: Data) throws(ClientError) {
+        lock.lock()
+        defer { lock.unlock() }
+        let succeeds = !failingWrite && !writes.contains(account)
+        log.append(.upsert(account, data, succeeded: succeeds))
+        if !succeeds { throw Self.failure }
+        items[account] = data
+    }
+    func delete(_ account: String) throws(ClientError) {
+        lock.lock()
+        defer { lock.unlock() }
+        let succeeds = !failingDelete && !deletes.contains(account)
+        log.append(.delete(account, succeeded: succeeds))
+        if !succeeds { throw Self.failure }
+        items.removeValue(forKey: account)
+    }
+}
+
 /// A local stand-in for the Peppy server's JSON contract: vault, ingest, replay and snapshot.
 /// It stores envelopes as received and serves them back exactly like the transport log.
 final class FakeServer: HTTPTransport, @unchecked Sendable {
