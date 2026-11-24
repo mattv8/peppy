@@ -3,6 +3,8 @@ import { MCP_COMPLETE_REQUEST_TIMEOUT_MS } from "@peppy/generated/mcp";
 import { BrowserEnrollment, MCP_ENABLE_UNCONFIRMED_MESSAGE, type EnrollmentIdentity, type EnrollmentSession } from "./enrollment.js";
 import { CheckpointError } from "./checkpoint.js";
 import { BrowserCore, CoreRejectedError, type EmscriptenCoreModule } from "./core.js";
+import { coreFake } from "./test-support/core.js";
+import { deferred } from "./test-support/deferred.js";
 
 const origin = "https://peppy.test";
 const vaultId = "00000000-0000-0000-0000-000000000001";
@@ -62,9 +64,7 @@ function json(value: unknown, init?: ResponseInit): Response {
 function pathOf(input: RequestInfo | URL): string { return new URL(String(input)).pathname; }
 
 function deferredResponse(): { promise: Promise<Response>; resolve(response: Response): void } {
-  let resolve!: (response: Response) => void;
-  const promise = new Promise<Response>(next => { resolve = next; });
-  return { promise, resolve };
+  return deferred<Response>();
 }
 
 class LifecycleCore {
@@ -300,10 +300,10 @@ describe("BrowserEnrollment", () => {
   });
 
   it("does not prepare MCP enrollment when owner facade reconstruction fails", async () => {
-    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+    const core = coreFake(async ({ command }) => {
       if (command === "_worker_mcp_owner_begin") throw new Error("credentials-required");
       throw new Error(`unexpected ${command}`);
-    }) };
+    });
     const session = new TestSession();
     session.phase = "ready";
     session.identity = { role: "owner" };

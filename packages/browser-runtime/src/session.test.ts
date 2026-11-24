@@ -4,8 +4,11 @@ import { CheckpointError, type CheckpointInput, IndexedDbCheckpointStore, Runtim
 import { CoreRejectedError, type CoreResult } from "./core.js";
 import { type EmscriptenFilesystem } from "./filesystem.js";
 import { BrowserSession, BrowserSessionError } from "./session.js";
-import { browserHostDependencies, BrowserWorkerHost, dispatchBrowserRpc, type BrowserPort } from "./host.js";
-import type { OwnerLockManager } from "./owner.js";
+import { browserHostDependencies, BrowserWorkerHost, dispatchBrowserRpc } from "./host.js";
+import { FakeLocks } from "./test-support/locks.js";
+import { port as workerPort } from "./test-support/port.js";
+import { MemoryFs } from "./test-support/memory-fs.js";
+import { deferred as createDeferred } from "./test-support/deferred.js";
 
 const encoder = new TextEncoder();
 const id = "123e4567-e89b-12d3-a456-426614174000";
@@ -49,25 +52,6 @@ vi.mock("/core/peppy-browser-core.js", () => ({
 }));
 
 function cipherPathFor(attachmentId: string): string { return `client.db.media/cipher/${attachmentId}.ppss`; }
-
-type Node = { directory: Set<string> } | { bytes: Uint8Array };
-
-class MemoryFs implements EmscriptenFilesystem {
-  private readonly nodes = new Map<string, Node>([["/", { directory: new Set() }]]);
-  public readdir(path: string): string[] { const node = this.node(path); if (!("directory" in node)) throw new Error("not directory"); return [".", "..", ...node.directory]; }
-  public lstat(path: string): { size: number; mode: number } { const node = this.node(path); return "directory" in node ? { size: 0, mode: 2 } : { size: node.bytes.byteLength, mode: 1 }; }
-  public isFile(mode: number): boolean { return mode === 1; }
-  public isDir(mode: number): boolean { return mode === 2; }
-  public isLink(): boolean { return false; }
-  public readFile(path: string): Uint8Array { const node = this.node(path); if ("directory" in node) throw new Error("not file"); return new Uint8Array(node.bytes); }
-  public writeFile(path: string, bytes: Uint8Array): void { if (this.nodes.has(path)) throw new Error("exists"); this.parent(path).add(this.name(path)); this.nodes.set(path, { bytes: new Uint8Array(bytes) }); }
-  public mkdir(path: string): void { if (this.nodes.has(path)) throw new Error("exists"); this.parent(path).add(this.name(path)); this.nodes.set(path, { directory: new Set() }); }
-  public unlink(path: string): void { if (!this.nodes.delete(path)) throw new Error("missing"); this.parent(path).delete(this.name(path)); }
-  public seedDatabase(): void { this.mkdir("/peppy"); this.writeFile("/peppy/client.db", encoder.encode("encrypted database")); this.mkdir("/peppy/client.db.media"); this.mkdir("/peppy/client.db.media/cipher"); }
-  private node(path: string): Node { const node = this.nodes.get(path); if (!node) throw new Error("missing"); return node; }
-  private parent(path: string): Set<string> { const node = this.node(path.slice(0, path.lastIndexOf("/")) || "/"); if (!("directory" in node)) throw new Error("not directory"); return node.directory; }
-  private name(path: string): string { return path.slice(path.lastIndexOf("/") + 1); }
-}
 
 class TrustedCore {
   public envelope = "envelope-1";
@@ -159,8 +143,8 @@ class AttachmentCore extends TrustedCore {
 }
 
 function deferred(): { promise: Promise<void>; release(): void } {
-  let release!: () => void;
-  return { promise: new Promise<void>(resolve => { release = resolve; }), release };
+  const { promise, resolve } = createDeferred<void>();
+  return { promise, release: resolve };
 }
 
 async function unlockedAttachmentSession(state: "ready" | "uploading" | "pending", files: CheckpointInput["files"], attachmentIds = [id]): Promise<{ core: AttachmentCore; fs: MemoryFs; session: BrowserSession; store: IndexedDbCheckpointStore }> {
@@ -175,26 +159,7 @@ async function unlockedAttachmentSession(state: "ready" | "uploading" | "pending
   return { core, fs, session, store };
 }
 
-function locks(): OwnerLockManager {
-  let held = false;
-  return {
-    async request(name, _options, operation) {
-      if (held) return operation(null);
-      held = true;
-      try { return await operation({ name }); } finally { held = false; }
-    },
-  };
-}
-
-function workerPort(): BrowserPort & { messages: unknown[]; emit(message: unknown): void; closed: boolean } {
-  const result = {
-    messages: [] as unknown[], closed: false, onmessage: null as BrowserPort["onmessage"],
-    postMessage(message: unknown) { result.messages.push(message); },
-    close() { result.closed = true; },
-    emit(message: unknown) { result.onmessage?.({ data: message } as MessageEvent); },
-  };
-  return result;
-}
+const locks = () => new FakeLocks("peppy-browser-v1");
 
 function checkpoint(generation: number, envelope = "envelope-1", files: CheckpointInput["files"] = [{ path: "client.db", bytes: encoder.encode("encrypted database") }]): CheckpointInput {
   return { expectedGeneration: generation, files, wrappedCredentials: encoder.encode(envelope) };

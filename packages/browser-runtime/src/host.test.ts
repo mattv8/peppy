@@ -2,21 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserCoreError, CoreRejectedError } from "./core.js";
 import { BrowserEnrollment, type EnrollmentSession } from "./enrollment.js";
 import { browserRememberedUnlock, BrowserWorkerHost, DraftSyncPrompt, dispatchBrowserRpc, sendBrowserDraft, type BrowserPort, type HostSession, type RpcRequest } from "./host.js";
-import type { OwnerLockManager } from "./owner.js";
+import { FakeLocks } from "./test-support/locks.js";
+import { port } from "./test-support/port.js";
+import { deferred as createDeferred } from "./test-support/deferred.js";
 import { TransportError } from "./transport.js";
 import { RememberedUnlock } from "./remembered-unlock.js";
 import { TypingController, type TypingSignal } from "./typing-controller.js";
 
-function locks(): OwnerLockManager {
-  let held = false;
-  return {
-    async request(name, _options, operation) {
-      if (held) return operation(null);
-      held = true;
-      try { return await operation({ name }); } finally { held = false; }
-    },
-  };
-}
+const locks = () => new FakeLocks("peppy-browser-v1");
 
 async function eventually(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -27,8 +20,8 @@ async function eventually(predicate: () => boolean): Promise<void> {
 }
 
 function deferred(): { promise: Promise<void>; release(): void } {
-  let release!: () => void;
-  return { promise: new Promise<void>(resolve => { release = resolve; }), release };
+  const { promise, resolve } = createDeferred<void>();
+  return { promise, release: resolve };
 }
 
 class FakeSession implements HostSession {
@@ -51,16 +44,6 @@ class FakeSession implements HostSession {
   public async unlock(_passphrase: string, _signal?: AbortSignal, _options?: { remember?: boolean }) { this.phase = "ready"; }
   public async enroll(_metadata: unknown, _deviceToken: string, _passphrase: string) { this.phase = "ready"; }
   public shutdown() { this.phase = "closed"; }
-}
-
-function port(): BrowserPort & { messages: unknown[]; emit(message: unknown): void; closed: boolean } {
-  const result = {
-    messages: [] as unknown[], closed: false, onmessage: null as BrowserPort["onmessage"],
-    postMessage(message: unknown) { result.messages.push(message); },
-    close() { result.closed = true; },
-    emit(message: unknown) { result.onmessage?.({ data: message } as MessageEvent); },
-  };
-  return result;
 }
 
 type LedgerCandidate = { id: string; kind: "message" | "notification"; title: string; body: string; createdAt: number; conversationId?: string; notificationTarget?: { sourceDeviceId: string; notificationKey: string; lifetime: string } };

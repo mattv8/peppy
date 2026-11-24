@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { LiveSupervisor, LiveTypingEngine, type LiveSocket } from "./live.js";
 import { OriginTransport } from "./transport.js";
+import { deferred } from "./test-support/deferred.js";
 
 const ticket = "A".repeat(43);
 const handle = "A".repeat(11);
@@ -32,12 +33,6 @@ function authorization(request: RequestInit | undefined): string | null {
 
 async function settled(): Promise<void> {
   for (let index = 0; index < 12; index += 1) await Promise.resolve();
-}
-
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>(accept => { resolve = accept; });
-  return { promise, resolve };
 }
 
 describe("LiveSupervisor", () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { browserHostDependencies, BrowserWorkerHost, type BrowserPort } from "./host.js";
-import type { OwnerLockManager } from "./owner.js";
+import { browserHostDependencies, BrowserWorkerHost } from "./host.js";
+import { FakeLocks } from "./test-support/locks.js";
+import { port } from "./test-support/port.js";
 import { BrowserScheduler } from "./scheduler.js";
 
 const origin = "https://peppy.test";
@@ -29,16 +30,7 @@ vi.mock("./session.js", async importOriginal => {
 
 vi.mock("/core/peppy-browser-core.js", () => ({ default: async () => ({ FS: {} }) }));
 
-function locks(): OwnerLockManager {
-  let held = false;
-  return {
-    async request(name, _options, operation) {
-      if (held) return operation(null);
-      held = true;
-      try { return await operation({ name }); } finally { held = false; }
-    },
-  };
-}
+const locks = () => new FakeLocks("peppy-browser-v1");
 
 async function eventually(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -46,16 +38,6 @@ async function eventually(predicate: () => boolean): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 0));
   }
   throw new Error("condition was not met");
-}
-
-function port(): BrowserPort & { messages: unknown[]; emit(message: unknown): void; closed: boolean } {
-  const result = {
-    messages: [] as unknown[], closed: false, onmessage: null as BrowserPort["onmessage"],
-    postMessage(message: unknown) { result.messages.push(message); },
-    close() { result.closed = true; },
-    emit(message: unknown) { result.onmessage?.({ data: message } as MessageEvent); },
-  };
-  return result;
 }
 
 function json(value: unknown, status = 200): Response {
