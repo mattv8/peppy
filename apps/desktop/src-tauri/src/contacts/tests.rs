@@ -5,13 +5,13 @@ use super::*;
 // Contract tests intentionally bind to the shared pure implementation, not native leftovers.
 use crate::{
     media::tests::sample_png,
-    tests::{Fixture, PHRASE, fixture_at, open},
+    tests::{fixture_at, open, Fixture, PHRASE},
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use peppy_client_core::{ClientConfig, Cursor, DatabaseKey, DeviceId, Envelope, VaultId};
 use peppy_desktop_api::contacts::{
-    Capabilities, List, PhotoInput, capabilities, contact_view, decode_photo_data_url,
-    display_label, edit_state, item_view, list_patches, photo_input, ui_birthday, utc_date,
+    capabilities, contact_view, decode_photo_data_url, display_label, edit_state, item_view,
+    list_patches, photo_input, ui_birthday, utc_date, Capabilities, List, PhotoInput,
 };
 use serde_json::json;
 use std::{
@@ -619,12 +619,10 @@ fn photo_set_is_prepared_by_core_and_held_until_its_upload_is_registered() {
     h.sync_to_desktop();
     assert_eq!(h.edit_state(&id), "applied");
     let contact = h.contact();
-    assert!(
-        contact["photoDataUrl"]
-            .as_str()
-            .unwrap()
-            .starts_with("data:image/jpeg;base64,")
-    );
+    assert!(contact["photoDataUrl"]
+        .as_str()
+        .unwrap()
+        .starts_with("data:image/jpeg;base64,"));
     let encoded =
         contact["photoDataUrl"].as_str().unwrap()["data:image/jpeg;base64,".len()..].to_owned();
     assert!(STANDARD.decode(encoded).unwrap().len() <= AVATAR_MAX_BYTES);
@@ -647,12 +645,10 @@ fn photo_set_is_prepared_by_core_and_held_until_its_upload_is_registered() {
     let search = serde_json::to_value(search_page_view(&h.session, search).unwrap()).unwrap();
     let hit = &search["items"][0];
     assert_eq!(hit["bookLabel"], "Test SIM");
-    assert!(
-        hit["avatarUrl"]
-            .as_str()
-            .unwrap()
-            .starts_with("data:image/jpeg;base64,")
-    );
+    assert!(hit["avatarUrl"]
+        .as_str()
+        .unwrap()
+        .starts_with("data:image/jpeg;base64,"));
     assert!(!hit.to_string().contains(&local.to_string()));
 
     // Remove is a distinct operation and keep sends none.
@@ -837,14 +833,12 @@ fn view_marks_unrepresentable_items_read_only_and_never_exposes_photo_references
 
     // Editing a read-only item is refused; leaving it untouched is fine.
     let old = json!([{"id": "p9", "label": "", "number": "+1", "readOnly": true}]);
-    assert!(
-        list_patches(
-            List::Phones,
-            Some(&json!([{"id": "p9", "number": "+3"}])),
-            Some(&old)
-        )
-        .is_err()
-    );
+    assert!(list_patches(
+        List::Phones,
+        Some(&json!([{"id": "p9", "number": "+3"}])),
+        Some(&old)
+    )
+    .is_err());
     assert!(list_patches(List::Phones, Some(&json!([])), Some(&old)).is_err());
     let (patches, _) = list_patches(List::Phones, Some(&old), Some(&old)).unwrap();
     assert!(patches.is_empty());
@@ -952,11 +946,9 @@ fn birthday_badges_and_remote_restore_round_trip_through_the_owner() {
         )
         .unwrap();
     h.sync_to_desktop();
-    assert!(
-        list_contacts(&h.session, BOOK, None, None, None)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(list_contacts(&h.session, BOOK, None, None, None)
+        .unwrap()
+        .is_empty());
     let restorable = restorable(&h.session, BOOK).unwrap();
     assert_eq!(restorable.len(), 1);
     assert_eq!(restorable[0]["displayName"], "Ada Lovelace");
@@ -1036,16 +1028,12 @@ fn names_resolve_for_display_and_recipient_search_returns_phone_addresses() {
     assert_eq!(found[0]["displayName"], "Ada Lovelace");
     assert_eq!(found[0]["label"], "mobile");
     // JSON keys never match: every stored contact has a "phones" key.
-    assert!(
-        search_recipients(&h.session, "phones", None)
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        search_recipients(&h.session, "  ", None)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(search_recipients(&h.session, "phones", None)
+        .unwrap()
+        .is_empty());
+    assert!(search_recipients(&h.session, "  ", None)
+        .unwrap()
+        .is_empty());
     let text = serde_json::to_string(&json!([found, resolution])).unwrap();
     assert_no_private_data(&text, &h.f);
 

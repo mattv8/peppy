@@ -1051,7 +1051,10 @@ mod tests {
         )
         .unwrap());
         assert_eq!(posts.get(), 0);
-        assert_eq!(session.client.pending_banner_candidates(10).unwrap().len(), 1);
+        assert_eq!(
+            session.client.pending_banner_candidates(10).unwrap().len(),
+            1
+        );
 
         drop(page);
         assert!(!session.catching_up().unwrap());

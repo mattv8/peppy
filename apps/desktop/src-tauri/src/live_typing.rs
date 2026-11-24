@@ -3356,7 +3356,8 @@ mod tests {
     async fn coalesced_devices_only_refresh_keeps_pending_capabilities() {
         use axum::{routing::get, Json, Router};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let fixture = crate::tests::fixture_at(&format!("http://{}", listener.local_addr().unwrap()));
+        let fixture =
+            crate::tests::fixture_at(&format!("http://{}", listener.local_addr().unwrap()));
         let peer = uuid::Uuid::new_v4().to_string();
         let devices = serde_json::json!({"devices": [
             {"device_id": fixture.binding.device_id, "role": "device", "revoked": false},
@@ -3368,21 +3369,30 @@ mod tests {
         }]});
         let calls = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
-            .route("/v1/devices", get(move || {
-                let devices = devices.clone();
-                async move { Json(devices) }
-            }))
-            .route("/v1/capabilities", get(move || {
-                let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
-                let capabilities = capabilities.clone();
-                async move {
-                    if first {
-                        (axum::http::StatusCode::OK, Json(capabilities))
-                    } else {
-                        (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({})))
+            .route(
+                "/v1/devices",
+                get(move || {
+                    let devices = devices.clone();
+                    async move { Json(devices) }
+                }),
+            )
+            .route(
+                "/v1/capabilities",
+                get(move || {
+                    let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                    let capabilities = capabilities.clone();
+                    async move {
+                        if first {
+                            (axum::http::StatusCode::OK, Json(capabilities))
+                        } else {
+                            (
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                Json(serde_json::json!({})),
+                            )
+                        }
                     }
-                }
-            }));
+                }),
+            );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let session = Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]));
         let (sender, _receiver) = mpsc::unbounded_channel();
@@ -3391,7 +3401,11 @@ mod tests {
         assert!(crate::sync::refresh_gateways(&session).await.is_err());
         let pending = session.live_typing.take_refresh().unwrap();
         assert!(pending.superseded);
-        assert!(pending.refresh.gateways.iter().any(|view| view.id == peer && view.supports_sms));
+        assert!(pending
+            .refresh
+            .gateways
+            .iter()
+            .any(|view| view.id == peer && view.supports_sms));
         server.abort();
     }
 

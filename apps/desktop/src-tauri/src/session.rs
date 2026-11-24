@@ -622,9 +622,7 @@ pub(crate) struct ReplayPageInFlight<'a>(&'a Session);
 
 impl Drop for ReplayPageInFlight<'_> {
     fn drop(&mut self) {
-        self.0
-            .replay_page_in_flight
-            .store(false, Ordering::Release);
+        self.0.replay_page_in_flight.store(false, Ordering::Release);
         self.0.notify();
     }
 }
@@ -2986,7 +2984,12 @@ mod tests {
 
         let session = open_session(root, &fixture.store, binding, &[1], crate::tests::noop())
             .expect("a stale cached epoch must leave that epoch locked, not fail the session");
-        assert!(session.client.key_status().unwrap().unlocked_epochs.is_empty());
+        assert!(session
+            .client
+            .key_status()
+            .unwrap()
+            .unlocked_epochs
+            .is_empty());
     }
 
     fn replay_page_error(session: &Session) -> BridgeResult<()> {
@@ -2999,18 +3002,12 @@ mod tests {
     fn replay_page_error_clears_the_catch_up_guard_and_wakes() {
         let fixture = fixture_at("http://127.0.0.1:9");
         let wakes = Arc::new(AtomicUsize::new(0));
-        let session = open_session(
-            fixture.dir.path(),
-            &fixture.store,
-            &fixture.binding,
-            &[],
-            {
-                let wakes = wakes.clone();
-                Arc::new(move || {
-                    wakes.fetch_add(1, Ordering::AcqRel);
-                })
-            },
-        )
+        let session = open_session(fixture.dir.path(), &fixture.store, &fixture.binding, &[], {
+            let wakes = wakes.clone();
+            Arc::new(move || {
+                wakes.fetch_add(1, Ordering::AcqRel);
+            })
+        })
         .unwrap();
 
         assert!(replay_page_error(&session).is_err());

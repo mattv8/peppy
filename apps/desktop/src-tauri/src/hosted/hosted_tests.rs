@@ -2577,8 +2577,7 @@ async fn provision_has_vault_returns_error() {
             "alpha bravo charlie delta echo foxtrot".into(),
         )))
     };
-    let activate_fn =
-        |_cred: Zeroizing<Vec<u8>>, _pass: Zeroizing<String>| async { Ok(()) };
+    let activate_fn = |_cred: Zeroizing<Vec<u8>>, _pass: Zeroizing<String>| async { Ok(()) };
 
     let result = super::provision_core(&store, &hosted, &uri, passphrase_fn, activate_fn).await;
 
@@ -2625,8 +2624,7 @@ async fn provision_read_only_returns_entitlement_error() {
             "alpha bravo charlie delta echo foxtrot".into(),
         )))
     };
-    let activate_fn =
-        |_cred: Zeroizing<Vec<u8>>, _pass: Zeroizing<String>| async { Ok(()) };
+    let activate_fn = |_cred: Zeroizing<Vec<u8>>, _pass: Zeroizing<String>| async { Ok(()) };
 
     let result = super::provision_core(&store, &hosted, &uri, passphrase_fn, activate_fn).await;
 
@@ -2672,8 +2670,7 @@ async fn provision_wrong_resume_passphrase_returns_error() {
     store.set(&checkpoint_key, &checkpoint_bytes).unwrap();
 
     let passphrase_fn = || async move { Ok(Some(Zeroizing::new("wrong passphrase".into()))) };
-    let activate_fn =
-        |_cred: Zeroizing<Vec<u8>>, _pass: Zeroizing<String>| async { Ok(()) };
+    let activate_fn = |_cred: Zeroizing<Vec<u8>>, _pass: Zeroizing<String>| async { Ok(()) };
 
     let result = super::provision_core(&store, &hosted, origin, passphrase_fn, activate_fn).await;
 

@@ -203,9 +203,11 @@ fn oversized_revoked_roster_is_applied_without_overwriting_cache() {
     let mut devices = vec![serde_json::json!({
         "device_id": fixture.binding.device_id, "role": "device", "revoked": false
     })];
-    devices.extend((0..1025).map(|_| serde_json::json!({
-        "device_id": uuid::Uuid::new_v4().to_string(), "role": "gateway", "revoked": true
-    })));
+    devices.extend((0..1025).map(|_| {
+        serde_json::json!({
+            "device_id": uuid::Uuid::new_v4().to_string(), "role": "gateway", "revoked": true
+        })
+    }));
     crate::sync::apply_gateway_refresh(
         &session,
         &serde_json::from_value(serde_json::json!({"devices": devices})).unwrap(),
@@ -246,14 +248,23 @@ async fn gateway_refresh_applies_devices_when_capabilities_fail() {
         {"device_id": owner, "role": "owner", "kind": "android", "revoked": true}
     ]});
     let app = Router::new()
-        .route("/v1/devices", get(move || {
-            let roster = roster.clone();
-            async move { Json(roster) }
-        }))
-        .route("/v1/capabilities", get(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }));
+        .route(
+            "/v1/devices",
+            get(move || {
+                let roster = roster.clone();
+                async move { Json(roster) }
+            }),
+        )
+        .route(
+            "/v1/capabilities",
+            get(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
+        );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let session = std::sync::Arc::new(open(&fixture, &fixture.binding, &[]));
-    session.client.unlock(&fixture.profile, &fixture.header, PHRASE).unwrap();
+    session
+        .client
+        .unlock(&fixture.profile, &fixture.header, PHRASE)
+        .unwrap();
     let owner_dir = tempfile::tempdir().unwrap();
     let owner_client = Client::open(
         ClientConfig {
@@ -262,9 +273,14 @@ async fn gateway_refresh_applies_devices_when_capabilities_fail() {
             device_id: owner.parse().unwrap(),
         },
         DatabaseKey::new(&[3; 32]).unwrap(),
-    ).unwrap();
-    owner_client.unlock(&fixture.profile, &fixture.header, PHRASE).unwrap();
-    owner_client.set_server_compaction_state(true, true).unwrap();
+    )
+    .unwrap();
+    owner_client
+        .unlock(&fixture.profile, &fixture.header, PHRASE)
+        .unwrap();
+    owner_client
+        .set_server_compaction_state(true, true)
+        .unwrap();
     owner_client.capture_contact_book(&serde_json::json!({
         "schema_version": 1,
         "book": {"id": "revoked-book", "owner_device_id": owner, "generation": "1", "state": "active", "region": "US"},
@@ -272,24 +288,36 @@ async fn gateway_refresh_applies_devices_when_capabilities_fail() {
     }).to_string()).unwrap();
     while owner_client.seal_pending_batch(100).unwrap() > 0 {}
     for (index, envelope) in owner_client.pending_outbox().unwrap().iter().enumerate() {
-        session.client.ingest(envelope, Cursor(index as u64 + 1)).unwrap();
+        session
+            .client
+            .ingest(envelope, Cursor(index as u64 + 1))
+            .unwrap();
     }
     session.client.apply_pending(100).unwrap();
     session.set_status(|status| status.gateways = vec![gateway(&owner, true, false)]);
     assert!(crate::sync::refresh_gateways(&session).await.is_err());
     assert!(session.revoked_devices().contains(&owner));
     assert!(session.gateways().0.is_empty());
-    assert_eq!(crate::contacts::list_books(&session).unwrap()[0]["sourceRevoked"], true);
+    assert_eq!(
+        crate::contacts::list_books(&session).unwrap()[0]["sourceRevoked"],
+        true
+    );
     drop(session);
     let reopened = open(&fixture, &fixture.binding, &[]);
-    assert_eq!(crate::contacts::list_books(&reopened).unwrap()[0]["sourceRevoked"], true);
+    assert_eq!(
+        crate::contacts::list_books(&reopened).unwrap()[0]["sourceRevoked"],
+        true
+    );
     server.abort();
 }
 
 #[tokio::test]
 async fn older_gateway_refresh_cannot_overwrite_newer_roster() {
     use axum::{routing::get, Json, Router};
-    use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let fixture = fixture_at(&format!("http://{}", listener.local_addr().unwrap()));
     let peer = uuid::Uuid::new_v4().to_string();
@@ -297,37 +325,45 @@ async fn older_gateway_refresh_cannot_overwrite_newer_roster() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let app = Router::new()
-        .route("/v1/devices", get({
-            let calls = calls.clone();
-            let own = fixture.binding.device_id.clone();
-            let peer = peer.clone();
-            move || {
-                let revoked = calls.fetch_add(1, Ordering::SeqCst) > 0;
-                let own = own.clone();
+        .route(
+            "/v1/devices",
+            get({
+                let calls = calls.clone();
+                let own = fixture.binding.device_id.clone();
                 let peer = peer.clone();
-                async move { Json(serde_json::json!({"devices": [
-                    {"device_id": own, "role":"device", "revoked":false},
-                    {"device_id": peer, "role":"gateway", "revoked":revoked}
-                ]})) }
-            }
-        }))
-        .route("/v1/capabilities", get({
-            let entered = entered.clone();
-            let release = release.clone();
-            let calls = Arc::new(AtomicUsize::new(0));
-            move || {
-                let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                move || {
+                    let revoked = calls.fetch_add(1, Ordering::SeqCst) > 0;
+                    let own = own.clone();
+                    let peer = peer.clone();
+                    async move {
+                        Json(serde_json::json!({"devices": [
+                            {"device_id": own, "role":"device", "revoked":false},
+                            {"device_id": peer, "role":"gateway", "revoked":revoked}
+                        ]}))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/v1/capabilities",
+            get({
                 let entered = entered.clone();
                 let release = release.clone();
-                async move {
-                    if first {
-                        entered.notify_one();
-                        release.notified().await;
+                let calls = Arc::new(AtomicUsize::new(0));
+                move || {
+                    let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        if first {
+                            entered.notify_one();
+                            release.notified().await;
+                        }
+                        Json(serde_json::json!({"capabilities":[]}))
                     }
-                    Json(serde_json::json!({"capabilities":[]}))
                 }
-            }
-        }));
+            }),
+        );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let session = Arc::new(open(&fixture, &fixture.binding, &[]));
     let older = tokio::spawn({
@@ -2377,20 +2413,36 @@ mod real_server {
                 DatabaseKey::new(&[5; 32]).unwrap(),
             )
             .unwrap();
-            client.unlock(&server.profile, &server.header, PHRASE).unwrap();
-            Gateway { client, token, url: server.url.clone(), _dir: dir }
+            client
+                .unlock(&server.profile, &server.header, PHRASE)
+                .unwrap();
+            Gateway {
+                client,
+                token,
+                url: server.url.clone(),
+                _dir: dir,
+            }
         };
         let phone = make_peer(phone_id, phone_token);
         let receiver = make_peer(receiver_id, receiver_token);
         for peer in [&phone, &receiver] {
             let snapshot: Value = reqwest::Client::new()
                 .get(format!("{}/v1/snapshot", server.url))
-                .bearer_auth(&peer.token).send().await.unwrap().error_for_status().unwrap()
-                .json().await.unwrap();
-            peer.client.set_server_compaction_state(
-                snapshot["compaction_supported"].as_bool().unwrap(),
-                snapshot["compaction_active"].as_bool().unwrap(),
-            ).unwrap();
+                .bearer_auth(&peer.token)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            peer.client
+                .set_server_compaction_state(
+                    snapshot["compaction_supported"].as_bool().unwrap(),
+                    snapshot["compaction_active"].as_bool().unwrap(),
+                )
+                .unwrap();
         }
         let book_id = "real-server-contact-book";
         let contacts: Vec<Value> = (0..450)
@@ -2417,11 +2469,17 @@ mod real_server {
         }
         let (_root, state, laptop) = desktop(&server, laptop_id, &laptop_token).await;
         until("all contact rows on laptop", 60, || {
-            crate::contacts::list_books(&laptop).ok().is_some_and(|books| {
-                books.iter().any(|book| book["id"] == book_id && book["contactCount"] == 450)
-            })
-        }).await;
-        let receiver_books: Value = serde_json::from_str(&receiver.client.list_contact_books_json().unwrap()).unwrap();
+            crate::contacts::list_books(&laptop)
+                .ok()
+                .is_some_and(|books| {
+                    books
+                        .iter()
+                        .any(|book| book["id"] == book_id && book["contactCount"] == 450)
+                })
+        })
+        .await;
+        let receiver_books: Value =
+            serde_json::from_str(&receiver.client.list_contact_books_json().unwrap()).unwrap();
         assert_eq!(receiver_books["books"][0]["contact_count"], 450);
 
         let mut ids = Vec::new();
@@ -2431,18 +2489,34 @@ mod real_server {
             assert_eq!(page["total"], 450);
             let rows = page["contacts"].as_array().unwrap();
             assert_eq!(rows.len(), expected);
-            ids.extend(rows.iter().map(|row| row["id"].as_str().unwrap().to_owned()));
+            ids.extend(
+                rows.iter()
+                    .map(|row| row["id"].as_str().unwrap().to_owned()),
+            );
             request = json!({"cursor": page["nextCursor"]});
         }
         assert!(request["cursor"].is_null());
-        assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(), 450);
-        let through = crate::contacts::list_contacts_page(&laptop, book_id, &json!({"through": ids[299]})).unwrap();
+        assert_eq!(
+            ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            450
+        );
+        let through =
+            crate::contacts::list_contacts_page(&laptop, book_id, &json!({"through": ids[299]}))
+                .unwrap();
         assert_eq!(through["throughFound"], true);
         assert_eq!(through["contacts"].as_array().unwrap().len(), 300);
-        let search = laptop.client.search_local(peppy_client_core::LocalSearchRequest {
-            query: "Person 123".into(), kind: Some(peppy_client_core::SearchKind::Contact), cursor: None, limit: None,
-        }).unwrap();
-        let search = serde_json::to_value(crate::contacts::search_page_view(&laptop, search).unwrap()).unwrap();
+        let search = laptop
+            .client
+            .search_local(peppy_client_core::LocalSearchRequest {
+                query: "Person 123".into(),
+                kind: Some(peppy_client_core::SearchKind::Contact),
+                cursor: None,
+                limit: None,
+            })
+            .unwrap();
+        let search =
+            serde_json::to_value(crate::contacts::search_page_view(&laptop, search).unwrap())
+                .unwrap();
         let hit = &search["items"][0];
         assert_eq!(hit["kind"], "contact");
         assert!(!hit["phones"].as_array().unwrap().is_empty());
@@ -2450,21 +2524,46 @@ mod real_server {
             assert_ne!(hit[field].as_str(), Some(book_id));
         }
 
-        reqwest::Client::new().post(format!("{}/v1/devices/{}/revoke", server.url, phone_id.0))
-            .bearer_auth(&server.owner).send().await.unwrap().error_for_status().unwrap();
-        until("revoked phone roster", 60, || laptop.revoked_devices().contains(&phone_id.to_string())).await;
-        until("laptop current", 60, || laptop.sync_current().unwrap_or(false)).await;
+        reqwest::Client::new()
+            .post(format!("{}/v1/devices/{}/revoke", server.url, phone_id.0))
+            .bearer_auth(&server.owner)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        until("revoked phone roster", 60, || {
+            laptop.revoked_devices().contains(&phone_id.to_string())
+        })
+        .await;
+        until("laptop current", 60, || {
+            laptop.sync_current().unwrap_or(false)
+        })
+        .await;
         assert_eq!(
             laptop.client.delete_contact_book(&json!({"book_id": book_id, "revoked_device_ids": [phone_id.to_string()], "sync_current": false}).to_string()),
             Err(peppy_client_core::Error::InvalidRequest("contact book deletion needs an up-to-date sync"))
         );
         let deleted = crate::contacts::delete_book(&laptop, book_id).unwrap();
         assert_eq!(deleted["contacts"], 450);
-        until("laptop delete uploaded", 60, || laptop.client.pending_outbox().unwrap().is_empty()).await;
-        assert!(crate::contacts::list_books(&laptop).unwrap().iter().all(|book| book["id"] != book_id));
-        for _ in 0..10 { receiver.sync().await; }
-        let books: Value = serde_json::from_str(&receiver.client.list_contact_books_json().unwrap()).unwrap();
-        assert!(books["books"].as_array().unwrap().iter().all(|book| book["id"] != book_id));
+        until("laptop delete uploaded", 60, || {
+            laptop.client.pending_outbox().unwrap().is_empty()
+        })
+        .await;
+        assert!(crate::contacts::list_books(&laptop)
+            .unwrap()
+            .iter()
+            .all(|book| book["id"] != book_id));
+        for _ in 0..10 {
+            receiver.sync().await;
+        }
+        let books: Value =
+            serde_json::from_str(&receiver.client.list_contact_books_json().unwrap()).unwrap();
+        assert!(books["books"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|book| book["id"] != book_id));
         while receiver.client.seal_pending_batch(1000).unwrap() > 0 {}
         // The deleter covered every contact held by this receiver; it must not enqueue duplicates.
         assert!(receiver.client.pending_outbox().unwrap().is_empty());
@@ -2472,18 +2571,41 @@ mod real_server {
         let fresh = make_peer(fresh_id, fresh_token);
         let snapshot: Value = reqwest::Client::new()
             .get(format!("{}/v1/snapshot", server.url))
-            .bearer_auth(&fresh.token).send().await.unwrap().error_for_status().unwrap()
-            .json().await.unwrap();
-        fresh.client.set_server_compaction_state(
-            snapshot["compaction_supported"].as_bool().unwrap(),
-            snapshot["compaction_active"].as_bool().unwrap(),
-        ).unwrap();
-        for _ in 0..10 { fresh.sync().await; }
-        let books: Value = serde_json::from_str(&fresh.client.list_contact_books_json().unwrap()).unwrap();
-        assert!(books["books"].as_array().unwrap().iter().all(|book| book["id"] != book_id));
-        let search = fresh.client.search_local(peppy_client_core::LocalSearchRequest {
-            query: "Person".into(), kind: Some(peppy_client_core::SearchKind::Contact), cursor: None, limit: None,
-        }).unwrap();
+            .bearer_auth(&fresh.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        fresh
+            .client
+            .set_server_compaction_state(
+                snapshot["compaction_supported"].as_bool().unwrap(),
+                snapshot["compaction_active"].as_bool().unwrap(),
+            )
+            .unwrap();
+        for _ in 0..10 {
+            fresh.sync().await;
+        }
+        let books: Value =
+            serde_json::from_str(&fresh.client.list_contact_books_json().unwrap()).unwrap();
+        assert!(books["books"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|book| book["id"] != book_id));
+        let search = fresh
+            .client
+            .search_local(peppy_client_core::LocalSearchRequest {
+                query: "Person".into(),
+                kind: Some(peppy_client_core::SearchKind::Contact),
+                cursor: None,
+                limit: None,
+            })
+            .unwrap();
         assert!(search.items.is_empty());
         state.close_session().await;
         server.shutdown().await;
@@ -2501,7 +2623,9 @@ mod real_server {
             DatabaseKey::new(&[5; 32]).unwrap(),
         )
         .unwrap();
-        client.unlock(&server.profile, &server.header, PHRASE).unwrap();
+        client
+            .unlock(&server.profile, &server.header, PHRASE)
+            .unwrap();
         let snapshot: Value = reqwest::Client::new()
             .get(format!("{}/v1/snapshot", server.url))
             .bearer_auth(&token)
@@ -2519,7 +2643,12 @@ mod real_server {
                 snapshot["compaction_active"].as_bool().unwrap(),
             )
             .unwrap();
-        Gateway { client, token, url: server.url.clone(), _dir: dir }
+        Gateway {
+            client,
+            token,
+            url: server.url.clone(),
+            _dir: dir,
+        }
     }
 
     /// Every envelope the server still stores for this vault, read as `token`, with its cursor.
@@ -2577,7 +2706,9 @@ mod real_server {
         let device = device.to_string();
         envelopes
             .iter()
-            .filter(|(_, envelope)| envelope["producer_device_id"].as_str() == Some(device.as_str()))
+            .filter(|(_, envelope)| {
+                envelope["producer_device_id"].as_str() == Some(device.as_str())
+            })
             .filter_map(|(_, envelope)| {
                 let compaction = envelope.get("compaction")?;
                 Some((
@@ -2691,13 +2822,11 @@ mod real_server {
         }
 
         // The phone adds c6. The deleter does not sync again, so it never learns c6.
-        let known: std::collections::HashSet<String> = compaction_records(
-            &stored(&server.url, &deleter_token).await,
-            phone_id,
-        )
-        .into_iter()
-        .map(|(key, _)| key)
-        .collect();
+        let known: std::collections::HashSet<String> =
+            compaction_records(&stored(&server.url, &deleter_token).await, phone_id)
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect();
         let captured: Value =
             serde_json::from_str(&phone.client.capture_contact_book(&capture(1..7)).unwrap())
                 .unwrap();
@@ -2777,9 +2906,13 @@ mod real_server {
         .await;
 
         // Exactly one member, for c6, is uploaded; none for c1..c5. A settle window catches late duplicates.
-        poll_stored(&server.url, &deleter_token, "the receiver's deletion member", 60, |envelopes| {
-            !compaction_records(envelopes, receiver_id).is_empty()
-        })
+        poll_stored(
+            &server.url,
+            &deleter_token,
+            "the receiver's deletion member",
+            60,
+            |envelopes| !compaction_records(envelopes, receiver_id).is_empty(),
+        )
         .await;
         tokio::time::sleep(Duration::from_secs(5)).await;
         let uploaded = compaction_records(&stored(&server.url, &deleter_token).await, receiver_id);
@@ -2798,7 +2931,11 @@ mod real_server {
         }
         let books: Value =
             serde_json::from_str(&fresh.client.list_contact_books_json().unwrap()).unwrap();
-        assert!(books["books"].as_array().unwrap().iter().all(|book| book["id"] != book_id));
+        assert!(books["books"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|book| book["id"] != book_id));
         let search = fresh
             .client
             .search_local(peppy_client_core::LocalSearchRequest {
