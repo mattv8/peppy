@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DesktopSnapshot } from "@peppy/desktop-ui/bridge-contracts";
 import { BrowserBridge } from "./browser-bridge";
 import { normalizeGroupSnapshot, normalizeMessageWindow, parseRcsAttachmentFields, parseSendResult } from "./group-payload";
@@ -12,20 +12,27 @@ class TestPort {
   public postMessage(message: unknown): void { this.sent.push(message); }
 }
 
+const bridges: BrowserBridge[] = [];
+afterEach(() => { bridges.splice(0).forEach(bridge => bridge.dispose()); });
+
 function bridgeWithPort(): { bridge: BrowserBridge; port: TestPort } {
   const port = new TestPort();
-  return { bridge: new BrowserBridge(port as unknown as MessagePort), port };
+  const bridge = new BrowserBridge(port as unknown as MessagePort);
+  bridges.push(bridge);
+  return { bridge, port };
 }
 
 const snapshotWith = (messages: unknown[]): DesktopSnapshot => ({ conversations: [{ id: "conv-1", name: "Ada", preview: "", unread: 0, messages }] } as unknown as DesktopSnapshot);
 
 describe("retryRcsMediaDownload in the browser bridge", () => {
-  it("sends the message and attachment index to the worker", () => {
+  it("sends the message and attachment index to the worker", async () => {
     const { bridge, port } = bridgeWithPort();
-    void bridge.retryRcsMediaDownload("message-rcs-1", 3);
+    const result = bridge.retryRcsMediaDownload("message-rcs-1", 3);
     expect(port.sent).toHaveLength(1);
     expect(port.sent[0]).toMatchObject({ command: "retry_rcs_media_download" });
     expect((port.sent[0] as { args: unknown }).args).toEqual({ messageId: "message-rcs-1", attachmentIndex: 3 });
+    port.onmessage?.({ data: { id: (port.sent[0] as { id: number }).id, ok: true, value: undefined } } as MessageEvent);
+    await result;
   });
 
   it.each([-1, 1.5, Number.NaN])("rejects the attachment index %s without calling the worker", async (index) => {
