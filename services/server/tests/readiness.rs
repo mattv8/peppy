@@ -3,7 +3,7 @@ use std::{net::SocketAddr, time::Duration};
 use peppy_server::{
     config::{Config, S3Config},
     health::storage_contract_check,
-    storage::Storage,
+    storage::{Storage, StorageError, StorageUnavailableReason as Reason},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
@@ -42,8 +42,8 @@ async fn put_bytes_rejects_a_missing_sse_acknowledgement() {
         .unwrap_err();
 
     assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 PUT encryption acknowledgement missing"
+        error,
+        StorageError::Unavailable(Reason::PutEncryptionAcknowledgementMissing)
     );
     server.await.unwrap();
 }
@@ -62,8 +62,8 @@ async fn put_bytes_rejects_a_wrong_sse_acknowledgement() {
         .unwrap_err();
 
     assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 PUT encryption acknowledgement missing"
+        error,
+        StorageError::Unavailable(Reason::PutEncryptionAcknowledgementMissing)
     );
     server.await.unwrap();
 }
@@ -141,8 +141,8 @@ async fn initialization_cleans_up_a_versioned_put_when_its_sse_acknowledgement_i
     let error = initialization_error(Storage::initialize(&config).await);
 
     assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 PUT encryption acknowledgement missing"
+        error,
+        StorageError::Unavailable(Reason::PutEncryptionAcknowledgementMissing)
     );
     server.await.unwrap();
 }
@@ -214,10 +214,7 @@ async fn initialization_rejects_a_nonempty_relist_after_versioned_purge() {
 
     let error = initialization_error(Storage::initialize(&config).await);
 
-    assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 purge incomplete"
-    );
+    assert_eq!(error, StorageError::Unavailable(Reason::PurgeIncomplete));
     server.await.unwrap();
 }
 
@@ -233,8 +230,8 @@ async fn initialization_rejects_forbidden_version_deletes() {
     let error = initialization_error(Storage::initialize(&config).await);
 
     assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 version delete forbidden"
+        error,
+        StorageError::Unavailable(Reason::VersionDeleteForbidden)
     );
     server.await.unwrap();
 }
@@ -251,8 +248,8 @@ async fn initialization_rejects_forbidden_version_listings() {
     let error = initialization_error(Storage::initialize(&config).await);
 
     assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 version listing forbidden"
+        error,
+        StorageError::Unavailable(Reason::VersionListingForbidden)
     );
     server.await.unwrap();
 }
@@ -283,8 +280,8 @@ async fn initialization_rejects_version_delete_failures() {
     let error = initialization_error(Storage::initialize(&config).await);
 
     assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 version delete rejected"
+        error,
+        StorageError::Unavailable(Reason::VersionDeleteRejected)
     );
     server.await.unwrap();
 }
@@ -301,8 +298,8 @@ async fn initialization_rejects_malformed_version_listings() {
     let error = initialization_error(Storage::initialize(&config).await);
 
     assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 version listing malformed"
+        error,
+        StorageError::Unavailable(Reason::VersionListingMalformed)
     );
     server.await.unwrap();
 }
@@ -373,8 +370,8 @@ async fn initialization_rejects_version_listings_larger_than_one_mebibyte() {
     let error = initialization_error(Storage::initialize(&config).await);
 
     assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 version listing too large"
+        error,
+        StorageError::Unavailable(Reason::VersionListingTooLarge)
     );
     server.await.unwrap();
 }
@@ -487,8 +484,8 @@ async fn initialization_rejects_an_incorrect_head_sse_acknowledgement() {
     let error = initialization_error(Storage::initialize(&config).await);
 
     assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 HEAD encryption acknowledgement missing"
+        error,
+        StorageError::Unavailable(Reason::HeadEncryptionAcknowledgementMissing)
     );
     server.await.unwrap();
 }
@@ -500,8 +497,8 @@ async fn initialization_rejects_a_missing_head_sse_acknowledgement() {
     let error = initialization_error(Storage::initialize(&config).await);
 
     assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 HEAD encryption acknowledgement missing"
+        error,
+        StorageError::Unavailable(Reason::HeadEncryptionAcknowledgementMissing)
     );
     server.await.unwrap();
 }
@@ -514,8 +511,8 @@ async fn initialization_rejects_a_missing_full_get_sse_acknowledgement() {
     let error = initialization_error(Storage::initialize(&config).await);
 
     assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 GET encryption acknowledgement missing"
+        error,
+        StorageError::Unavailable(Reason::GetEncryptionAcknowledgementMissing)
     );
     server.await.unwrap();
 }
@@ -528,8 +525,8 @@ async fn initialization_rejects_a_missing_ranged_get_sse_acknowledgement() {
     let error = initialization_error(Storage::initialize(&config).await);
 
     assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 GET encryption acknowledgement missing"
+        error,
+        StorageError::Unavailable(Reason::GetEncryptionAcknowledgementMissing)
     );
     server.await.unwrap();
 }
@@ -541,8 +538,8 @@ async fn initialization_rejects_corrupt_full_probe_data_and_still_deletes_it() {
     let error = initialization_error(Storage::initialize(&config).await);
 
     assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 encryption probe full read mismatch"
+        error,
+        StorageError::Unavailable(Reason::EncryptionProbeFullReadMismatch)
     );
     server.await.unwrap();
 }
@@ -554,8 +551,8 @@ async fn initialization_rejects_corrupt_ranged_probe_data_and_still_deletes_it()
     let error = initialization_error(Storage::initialize(&config).await);
 
     assert_eq!(
-        error.to_string(),
-        "storage unavailable: S3 encryption probe range read mismatch"
+        error,
+        StorageError::Unavailable(Reason::EncryptionProbeRangeReadMismatch)
     );
     server.await.unwrap();
 }
@@ -566,7 +563,7 @@ async fn initialization_fails_when_probe_cleanup_is_rejected() {
 
     let error = initialization_error(Storage::initialize(&config).await);
 
-    assert_eq!(error.to_string(), "storage unavailable: S3 DELETE rejected");
+    assert_eq!(error, StorageError::Unavailable(Reason::DeleteRejected));
     server.await.unwrap();
 }
 
