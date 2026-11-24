@@ -2251,6 +2251,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "image",
+ "peppy-client-core",
  "peppy-crypto",
  "peppy-domain",
  "peppy-protocol",

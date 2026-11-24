@@ -1815,6 +1815,15 @@ fn link_owned_gateway_with_its_send() -> (SendProofGateway, u64, CommandId) {
     (gateway, ownership.ownership_generation, sent)
 }
 
+fn fix_routing_proof_time(gateway: &SendProofGateway) {
+    assert_eq!(
+        sqlcipher(&gateway.config.database_path)
+            .execute("UPDATE rcs_lane_ownership SET proof_time_ms=1000000", [])
+            .unwrap(),
+        1
+    );
+}
+
 fn message_count(gateway: &SendProofGateway) -> usize {
     gateway.client.messages(gateway.conversation).unwrap().len()
 }
@@ -1859,15 +1868,76 @@ fn a_mirrored_row_the_link_delivered_is_left_alone_despite_earlier_captured_rows
 fn a_mirrored_row_seconds_old_waits_for_the_link() {
     let (gateway, _generation) = link_owned_gateway();
 
+    fix_routing_proof_time(&gateway);
+    let now_ms = 2_000_000_000_000;
+    let row = mirrored_row(Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)), now_ms);
     let route = gateway
         .client
-        .route_rcs_provider_row(mirrored_row(
-            Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)),
-            wall_clock_ms(),
-        ))
+        .route_rcs_provider_row_at(row, now_ms)
         .unwrap();
 
     assert_eq!(route, RcsProviderRowRoute::Defer);
+}
+
+#[test]
+fn incoming_grace_upper_boundary_is_exclusive_and_future_rows_are_captured() {
+    let (gateway, _) = link_owned_gateway();
+    fix_routing_proof_time(&gateway);
+    let now_ms = 2_000_000_000_000;
+    for (age, expected) in [
+        (-1, RcsProviderRowRoute::Provider),
+        (0, RcsProviderRowRoute::Defer),
+        (9_999, RcsProviderRowRoute::Defer),
+        (10_000, RcsProviderRowRoute::Provider),
+        (10_001, RcsProviderRowRoute::Provider),
+    ] {
+        let row = mirrored_row(
+            Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)),
+            now_ms - age,
+        );
+        assert_eq!(
+            gateway
+                .client
+                .route_rcs_provider_row_at(row, now_ms)
+                .unwrap(),
+            expected,
+            "age {age}"
+        );
+    }
+}
+
+#[test]
+fn outgoing_echo_grace_upper_boundary_is_exclusive() {
+    let (gateway, _, sent) = link_owned_gateway_with_its_send();
+    fix_routing_proof_time(&gateway);
+    let now_ms = 2_000_000_000_000;
+    sqlcipher(&gateway.config.database_path)
+        .execute(
+            "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms) VALUES(?,'tmp-sent',1,?,?,?)",
+            rusqlite::params![sent.to_string(), vec![0_u8; 32], CLAIM_GOOGLE_ID, now_ms],
+        )
+        .unwrap();
+    for (age, expected) in [
+        (119_999, RcsProviderRowRoute::Defer),
+        (120_000, RcsProviderRowRoute::Provider),
+        (120_001, RcsProviderRowRoute::Provider),
+    ] {
+        let row = RcsProviderRow {
+            provider_type: 2,
+            ..mirrored_row(
+                Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)),
+                now_ms - age,
+            )
+        };
+        assert_eq!(
+            gateway
+                .client
+                .route_rcs_provider_row_at(row, now_ms)
+                .unwrap(),
+            expected,
+            "age {age}"
+        );
+    }
 }
 
 /// The link owning a chat does not prove it delivered every message: a copy it has not
@@ -1888,7 +1958,15 @@ fn a_mirrored_row_the_link_did_not_deliver_is_captured() {
         .client
         .route_rcs_provider_row_result(mirrored_row(None, a_minute_ago))
         .unwrap();
+    let public_route = gateway
+        .client
+        .route_rcs_provider_row(mirrored_row(
+            Some(mirrored_transaction_id(MIRRORED_MESSAGE_ID)),
+            a_minute_ago,
+        ))
+        .unwrap();
 
+    assert_eq!(public_route, RcsProviderRowRoute::Provider);
     assert_eq!(
         (undelivered.route, undelivered.reason),
         (
@@ -2208,7 +2286,8 @@ fn a_status_for_a_text_left_to_the_capture_is_accepted_and_recovery_goes_on() {
 #[test]
 fn the_copy_of_a_text_peppy_just_sent_waits_for_the_link_to_report_it() {
     let (gateway, generation, sent) = link_owned_gateway_with_its_send();
-    let now_ms = wall_clock_ms();
+    fix_routing_proof_time(&gateway);
+    let now_ms = 2_000_000_000_000;
     sqlcipher(&gateway.config.database_path)
         .execute(
             "INSERT INTO rcs_send_ledger(command_id,tmp_id,mapping_revision,proof_digest,google_conversation_id,attempted_at_ms) VALUES(?,'tmp-sent',1,?,?,?)",
@@ -2223,7 +2302,12 @@ fn the_copy_of_a_text_peppy_just_sent_waits_for_the_link_to_report_it() {
         )
     };
     let (sent_box, inbox) = (2, 1);
-    let route = |row| gateway.client.route_rcs_provider_row(row).unwrap();
+    let route = |row| {
+        gateway
+            .client
+            .route_rcs_provider_row_at(row, now_ms)
+            .unwrap()
+    };
 
     let before_echo = [
         route(half_a_minute_old(sent_box)),

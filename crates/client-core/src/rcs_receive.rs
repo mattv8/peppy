@@ -1388,6 +1388,14 @@ impl Client {
         &self,
         row: RcsProviderRow,
     ) -> Result<RcsProviderRowRouteResult, Error> {
+        self.route_rcs_provider_row_result_at(row, crate::notifications::now_ms)
+    }
+
+    pub(crate) fn route_rcs_provider_row_result_at(
+        &self,
+        row: RcsProviderRow,
+        now_ms: impl FnOnce() -> i64,
+    ) -> Result<RcsProviderRowRouteResult, Error> {
         validate_provider_row(&row)?;
         let mut store = self.lock()?;
         let (conn, ctx) = store.parts();
@@ -1541,7 +1549,7 @@ impl Client {
             None => false,
         };
         if !delivered_text {
-            let now_ms = crate::notifications::now_ms();
+            let now_ms = now_ms();
             let age_ms = now_ms.saturating_sub(row.observed_at_ms);
             let outgoing = row.provider_type != PROVIDER_BOX_INBOX;
             let link_may_still_deliver = (0..RCS_LINK_DELIVERY_GRACE_MS).contains(&age_ms)

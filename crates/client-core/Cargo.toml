@@ -107,4 +107,5 @@ phonenumber = { path = "../../vendor/phonenumber", version = "=0.3.10" }
 rusqlite = { version = "=0.32.1", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 [dev-dependencies]
+peppy-client-core = { path = ".", features = ["test-support"] }
 tempfile.workspace = true
