@@ -3181,6 +3181,66 @@
         }
       }
     },
+    "peppy.toggle_android_mark_read_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mark as read from computers"
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mark_read_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lets your computers use an app's own Mark as read button."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mark_read_needs_mirroring": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Available when mirroring is on."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mark_read_needs_access": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused: notification access is needed."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mark_read_needs_android_9": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Needs Android 9 or later."
+          }
+        }
+      }
+    },
+    "peppy.toggle_android_mark_read_consent_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Let computers mark notifications read?"
+          }
+        }
+      }
+    },
     "peppy.toggle_android_contacts_hero_title": {
       "localizations": {
         "en": {
@@ -5377,6 +5437,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Notification access lets Peppy read the content Android makes available, which may include verification codes or bank alerts. Mirroring is off by default. When you enable it, Peppy encrypts copies for your vault and stores them on your configured server for your authorized vault devices. Dismissing a mirrored notification on another device may also clear it on this phone while mirroring is permitted. Turning mirroring off stops new captures and remote phone clearing. Already-synced history stays in your vault."
+          }
+        }
+      }
+    },
+    "peppy.notification_mark_read_disclosure": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When you choose Mark as read on an app notification banner on one of your computers, Peppy asks this phone to press that app's own Mark as read button.\n\nThis works only on notifications Peppy has mirrored, and only on that one notification. It works only if the app gave the notification a Mark as read button. Peppy presses the app's own button. It does not open the app.\n\nMost apps then mark the whole chat or conversation as read and remove their notification. Some apps may also send a read receipt, so the sender can see that you read it.\n\nIf the notification has changed or gone, or has no Mark as read button, nothing happens. Some apps only allow this while the phone is unlocked. If this phone stays locked, the request is dropped after 10 minutes.\n\nThis is off by default. Computers show Mark as read on an app banner only while this setting, notification mirroring and notification access are all on. Turning this off removes the button from new banners. It does not change closing a banner: while mirroring is on, closing a mirrored banner on a computer still clears that notification on this phone."
           }
         }
       }
