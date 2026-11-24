@@ -3,8 +3,9 @@
 mod common;
 
 use common::*;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
+use std::cell::RefCell;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -77,8 +78,10 @@ fn link_live(client: &Client, config: &ClientConfig) {
 struct Fixture {
     _directory: tempfile::TempDir,
     client: Client,
+    sender: Client,
     config: ClientConfig,
     vault: Vault,
+    server: RefCell<Server>,
 }
 
 fn fixture(live: bool) -> Fixture {
@@ -86,6 +89,7 @@ fn fixture(live: bool) -> Fixture {
     let vault = Vault::new();
     let config = config(&directory, "rcs-group-create", &vault);
     let client = unlocked(&config, &vault);
+    let sender = unlocked(&common::config(&directory, "sender", &vault), &vault);
     if live {
         publish_current_gateway(&client, &config);
         link_live(&client, &config);
@@ -93,8 +97,10 @@ fn fixture(live: bool) -> Fixture {
     Fixture {
         _directory: directory,
         client,
+        sender,
         config,
         vault,
+        server: RefCell::new(Server::default()),
     }
 }
 
@@ -106,7 +112,7 @@ fn group_send(
     confirm_duplicate: bool,
 ) -> (ConversationId, CommandId) {
     let draft = fixture
-        .client
+        .sender
         .save_new_compose_draft(ComposeDraftUpdate {
             group_name: None,
             text: "hello".into(),
@@ -119,7 +125,7 @@ fn group_send(
         })
         .unwrap();
     let queued = fixture
-        .client
+        .sender
         .send_compose_draft_for_group(
             draft.draft_id,
             draft.revision,
@@ -130,6 +136,9 @@ fn group_send(
             },
         )
         .unwrap();
+    let mut server = fixture.server.borrow_mut();
+    server.upload(&fixture.sender);
+    server.sync(&fixture.client);
     record_create_request(fixture, queued.command_id, confirm_duplicate);
     (draft.conversation_id, queued.command_id)
 }
@@ -140,15 +149,240 @@ fn retired_group_command_cannot_issue_a_create_permit() {
     let (conversation, command) = group_send(&fixture, &[ALEX, SAM], false);
     let db = sqlcipher(&fixture.config.database_path);
     db.execute(
-        "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,retired,historical) VALUES(?,1,'sub-1','{}',1,0)",
+        "UPDATE command_ledger SET retired=1 WHERE command_id=?",
         [command.to_string()],
-    ).unwrap();
+    )
+    .unwrap();
     assert!(matches!(
         fixture
             .client
             .begin_rcs_group_create(conversation, command, now_ms()),
-        Err(Error::InvalidRequest("group create not permitted"))
+        Err(Error::NotFound)
     ));
+    assert_no_create_permit(&db, command);
+}
+
+fn assert_no_create_permit(db: &Connection, command: CommandId) {
+    let count: i64 = db.query_row(
+        "SELECT (SELECT count(*) FROM rcs_group_create_permits WHERE command_id=?) + (SELECT count(*) FROM rcs_group_create_ledger WHERE command_id=? AND state='begun')",
+        [command.to_string(), command.to_string()],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 0);
+}
+
+fn attempt_evidence(db: &Connection, command: CommandId) -> Option<String> {
+    db.query_row(
+        "SELECT state FROM attempts WHERE command_id=?",
+        [command.to_string()],
+        |row| row.get(0),
+    )
+    .optional()
+    .unwrap()
+}
+
+fn terminal_reason(db: &Connection, command: CommandId) -> Option<String> {
+    db.query_row(
+        "SELECT reason FROM rcs_group_create_terminal WHERE command_id=?",
+        [command.to_string()],
+        |row| row.get(0),
+    )
+    .optional()
+    .unwrap()
+}
+
+// Regression for review exception E2.
+#[test]
+fn restore_guard_prevents_create_without_consuming_evidence() {
+    let fixture = fixture(true);
+    let (conversation, command) = group_send(&fixture, &[ALEX, SAM], false);
+    let db = sqlcipher(&fixture.config.database_path);
+    let outbox = fixture.client.pending_outbox().unwrap();
+    let attempts = attempt_evidence(&db, command);
+    assert_eq!(attempts, None);
+    assert_eq!(terminal_reason(&db, command), None);
+    db.execute("INSERT INTO metadata(k,v) VALUES('restore_guard','1')", [])
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .client
+            .begin_rcs_group_create(conversation, command, now_ms()),
+        Err(Error::InvalidRequest("restore guarded"))
+    ));
+    assert_no_create_permit(&db, command);
+    assert_eq!(terminal_reason(&db, command), None);
+    assert_eq!(attempt_evidence(&db, command), attempts);
+    assert_eq!(fixture.client.pending_outbox().unwrap(), outbox);
+}
+
+// Regression for review exception E2.
+#[test]
+fn existing_attempt_prevents_create_without_consuming_evidence() {
+    let fixture = fixture(true);
+    let (conversation, command) = group_send(&fixture, &[ALEX, SAM], false);
+    let db = sqlcipher(&fixture.config.database_path);
+    db.execute(
+        "INSERT INTO attempts(command_id,state) VALUES(?,'sent')",
+        [command.to_string()],
+    )
+    .unwrap();
+    let outbox = fixture.client.pending_outbox().unwrap();
+    let attempts = attempt_evidence(&db, command);
+    assert_eq!(attempts.as_deref(), Some("sent"));
+    assert_eq!(terminal_reason(&db, command), None);
+    assert!(matches!(
+        fixture
+            .client
+            .begin_rcs_group_create(conversation, command, now_ms()),
+        Err(Error::AlreadyAttempted(SendState::Sent))
+    ));
+    assert_no_create_permit(&db, command);
+    assert_eq!(terminal_reason(&db, command), None);
+    assert_eq!(attempt_evidence(&db, command), attempts);
+    assert_eq!(fixture.client.pending_outbox().unwrap(), outbox);
+}
+
+// Regression for review exception E2.
+#[test]
+fn cancellation_fences_create_after_listing() {
+    for state in ["requested", "confirmed"] {
+        let fixture = fixture(true);
+        let (conversation, command) = group_send(&fixture, &[ALEX, SAM], false);
+        assert!(
+            fixture
+                .client
+                .pending_commands()
+                .unwrap()
+                .iter()
+                .any(|item| item.command_id == command)
+        );
+        let db = sqlcipher(&fixture.config.database_path);
+        db.execute(
+            "INSERT INTO send_cancellations(message_id,command_id,target_gateway_id,state) VALUES(?,?,?,?)",
+            [MessageId::new().to_string(), command.to_string(), fixture.config.device_id.to_string(), state.to_string()],
+        ).unwrap();
+        assert!(matches!(
+            fixture
+                .client
+                .begin_rcs_group_create(conversation, command, now_ms()),
+            Err(Error::InvalidRequest("send cancellation requested"))
+        ));
+        assert_no_create_permit(&db, command);
+    }
+}
+
+// Regression for review exception E2.
+#[test]
+fn historical_and_stale_commands_cannot_create() {
+    for (historical, epoch) in [(true, 1), (false, 0)] {
+        let fixture = fixture(true);
+        let (conversation, command) = group_send(&fixture, &[ALEX, SAM], false);
+        let db = sqlcipher(&fixture.config.database_path);
+        db.execute(
+            "UPDATE command_ledger SET historical=?,key_epoch=? WHERE command_id=?",
+            rusqlite::params![historical, epoch, command.to_string()],
+        )
+        .unwrap();
+        assert!(
+            fixture
+                .client
+                .begin_rcs_group_create(conversation, command, now_ms())
+                .is_err()
+        );
+        assert_no_create_permit(&db, command);
+    }
+}
+
+// Regression for review exception E2.
+#[test]
+fn changed_roster_refuses_create() {
+    let fixture = fixture(true);
+    let (conversation, command) = group_send(&fixture, &[ALEX, SAM], false);
+    let db = sqlcipher(&fixture.config.database_path);
+    db.execute("UPDATE conversation_group_members SET canonical_address=? WHERE conversation_id=? AND canonical_address=?",
+        [LEE.to_string(), conversation.to_string(), SAM.to_string()]).unwrap();
+    assert_eq!(
+        fixture
+            .client
+            .begin_rcs_group_create(conversation, command, now_ms())
+            .unwrap(),
+        GroupCreateBegin::Refused(SendRefusalReason::MembersChanged)
+    );
+    assert_no_create_permit(&db, command);
+    assert_eq!(
+        terminal_reason(&db, command).as_deref(),
+        Some("members_changed")
+    );
+    db.execute("UPDATE conversation_group_members SET canonical_address=? WHERE conversation_id=? AND canonical_address=?",
+        [SAM.to_string(), conversation.to_string(), LEE.to_string()]).unwrap();
+    assert_eq!(
+        fixture
+            .client
+            .begin_rcs_group_create(conversation, command, now_ms())
+            .unwrap(),
+        GroupCreateBegin::Refused(SendRefusalReason::MembersChanged)
+    );
+    assert_no_create_permit(&db, command);
+    assert_eq!(
+        terminal_reason(&db, command).as_deref(),
+        Some("members_changed")
+    );
+}
+
+// Regression for review exception E2.
+#[test]
+fn changed_member_revision_refuses_create() {
+    let fixture = fixture(true);
+    let (conversation, command) = group_send(&fixture, &[ALEX, SAM], false);
+    let db = sqlcipher(&fixture.config.database_path);
+    let revision: u64 = db
+        .query_row(
+            "SELECT member_revision FROM conversation_group_meta WHERE conversation_id=?",
+            [conversation.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    db.execute(
+        "UPDATE metadata SET v=? WHERE k=?",
+        [
+            json!({"group_create":{"name":"Weekend"},"expected_member_revision":999}).to_string(),
+            format!("rcs_group_send_v1/{command}"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        fixture
+            .client
+            .begin_rcs_group_create(conversation, command, now_ms())
+            .unwrap(),
+        GroupCreateBegin::Refused(SendRefusalReason::MembersChanged)
+    );
+    assert_no_create_permit(&db, command);
+    assert_eq!(
+        terminal_reason(&db, command).as_deref(),
+        Some("members_changed")
+    );
+    db.execute(
+        "UPDATE metadata SET v=? WHERE k=?",
+        [
+            json!({"group_create":{"name":"Weekend"},"expected_member_revision":revision})
+                .to_string(),
+            format!("rcs_group_send_v1/{command}"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        fixture
+            .client
+            .begin_rcs_group_create(conversation, command, now_ms())
+            .unwrap(),
+        GroupCreateBegin::Refused(SendRefusalReason::MembersChanged)
+    );
+    assert_no_create_permit(&db, command);
+    assert_eq!(
+        terminal_reason(&db, command).as_deref(),
+        Some("members_changed")
+    );
 }
 
 fn record_create_request(fixture: &Fixture, command: CommandId, confirm_duplicate: bool) {
@@ -158,7 +392,7 @@ fn record_create_request(fixture: &Fixture, command: CommandId, confirm_duplicat
     }
     sqlcipher(&fixture.config.database_path)
         .execute(
-            "INSERT INTO metadata(k,v) VALUES(?,?)",
+            "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
             [
                 format!("rcs_group_send_v1/{command}"),
                 json!({"group_create": request}).to_string(),
@@ -709,7 +943,7 @@ fn a_failed_result_commit_stays_awaiting_settlement_until_it_is_settled_explicit
     // Settled state survives a reopen, and the unfinished command stays terminal.
     let previous = live.client;
     drop(previous);
-    live.client = open(&config);
+    live.client = unlocked(&config, &live.vault);
     assert_eq!(
         live.client.group_create_state(conversation).unwrap(),
         GroupCreateState::Unknown

@@ -940,7 +940,10 @@ pub(crate) fn prepare_quick_reply_group_send(
 }
 
 /// Other members of a send, canonical and sorted, with the vault's own addresses removed.
-fn group_send_members(conn: &Connection, recipients: &[String]) -> Result<BTreeSet<String>, Error> {
+pub(crate) fn group_send_members(
+    conn: &Connection,
+    recipients: &[String],
+) -> Result<BTreeSet<String>, Error> {
     let region = conversation_match::identity_region(conn)?;
     let own = own_addresses(conn)?;
     let members = recipients

@@ -409,25 +409,62 @@ pub(crate) fn admit(
 /// Issues the single-use create permit for a send whose gate says a create is needed.
 pub(crate) fn begin(
     conn: &Connection,
+    ctx: &Ctx<'_>,
+    active_epoch: Option<u32>,
     command_id: CommandId,
     conversation_id: ConversationId,
     now_ms: i64,
 ) -> Result<GroupCreateBegin, Error> {
-    match gate(conn, command_id, conversation_id)? {
-        Gate::Needed(request) => {
-            let retired: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM command_ledger WHERE command_id=? AND retired=1)",
-                [command_id.to_string()],
-                |row| row.get(0),
-            )?;
-            if retired {
-                return Err(Error::InvalidRequest("group create not permitted"));
-            }
-            conn.execute(
-                "INSERT INTO rcs_group_create_permits(command_id) VALUES(?)",
-                [command_id.to_string()],
-            )?;
-            conn.execute(
+    if crate::cancellation_fenced(conn, command_id, &ctx.device_id)? {
+        return Err(Error::InvalidRequest("send cancellation requested"));
+    }
+    let gate = gate(conn, command_id, conversation_id)?;
+    match &gate {
+        Gate::Refused(reason) => {
+            terminalize(conn, &command_id.to_string(), *reason)?;
+            return Ok(GroupCreateBegin::Refused(*reason));
+        }
+        Gate::Waiting => {
+            return Err(Error::InvalidRequest("group create not permitted"));
+        }
+        _ => {}
+    }
+    let fields = rcs_group::send_fields(conn, command_id)?;
+    if fields.group_create.is_none() {
+        return Err(Error::InvalidRequest("group create not permitted"));
+    }
+    let ledger = crate::ledger_command(conn, command_id)?;
+    if let Some(state) = crate::attempt_state(conn, command_id)? {
+        return Err(Error::AlreadyAttempted(state));
+    }
+    crate::require_received_command_eligible(conn, active_epoch, ledger.epoch, ledger.historical)?;
+    if ledger.message.record.conversation_id != conversation_id {
+        return Err(Error::InvalidRequest("group create not permitted"));
+    }
+    let roster = rcs_group::roster(conn, conversation_id)?;
+    let command_members = rcs_group::group_send_members(conn, &ledger.message.recipients)?;
+    if command_members.len() < 2 {
+        return Err(Error::InvalidRequest("group create not permitted"));
+    }
+    let changed = match fields.expected_member_revision {
+        Some(revision) => {
+            crate::group_metadata::member_revision(conn, conversation_id)? != Some(revision)
+        }
+        None => command_members != roster,
+    };
+    if changed {
+        let reason = SendRefusalReason::MembersChanged;
+        terminalize(conn, &command_id.to_string(), reason)?;
+        return Ok(GroupCreateBegin::Refused(reason));
+    }
+    let Gate::Needed(request) = gate else {
+        return Err(Error::InvalidRequest("group create not permitted"));
+    };
+    conn.execute(
+        "INSERT INTO rcs_group_create_permits(command_id) VALUES(?)",
+        [command_id.to_string()],
+    )?;
+    conn.execute(
                 "INSERT INTO rcs_group_create_ledger(conversation_id,command_id,state,attempted_at_ms,reconciled_at_ms,outcome_code,google_conversation_id,owner_token) VALUES(?,?,'begun',?,NULL,NULL,NULL,?) ON CONFLICT(conversation_id) DO UPDATE SET command_id=excluded.command_id,state='begun',attempted_at_ms=excluded.attempted_at_ms,reconciled_at_ms=NULL,outcome_code=NULL,google_conversation_id=NULL,owner_token=excluded.owner_token",
                 params![
                     conversation_id.to_string(),
@@ -436,22 +473,11 @@ pub(crate) fn begin(
                     owner_token()
                 ],
             )?;
-            Ok(GroupCreateBegin::Permit(GroupCreatePermit {
-                command_id,
-                numbers: rcs_group::roster(conn, conversation_id)?
-                    .into_iter()
-                    .collect(),
-                name: request.name,
-            }))
-        }
-        Gate::Refused(reason) => {
-            terminalize(conn, &command_id.to_string(), reason)?;
-            Ok(GroupCreateBegin::Refused(reason))
-        }
-        Gate::NotHandled | Gate::Waiting => {
-            Err(Error::InvalidRequest("group create not permitted"))
-        }
-    }
+    Ok(GroupCreateBegin::Permit(GroupCreatePermit {
+        command_id,
+        numbers: roster.into_iter().collect(),
+        name: request.name,
+    }))
 }
 
 /// Records Google's answer for a begun permit. Anything other than a recognised answer is unknown,
