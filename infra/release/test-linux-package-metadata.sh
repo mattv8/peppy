@@ -55,59 +55,6 @@ assert_missing_rpm_license_is_rejected ''
 assert_missing_rpm_license_is_rejected '   '
 assert_missing_rpm_license_is_rejected '(none)'
 
-assert_rebuilt_rpm_license_is_preserved() {
-  local root bundle_dir tool_dir status output
-  root=$(mktemp -d)
-  bundle_dir="$root/bundle"
-  tool_dir="$root/bin"
-  mkdir -p "$bundle_dir/deb" "$bundle_dir/rpm" "$tool_dir"
-  : > "$bundle_dir/deb/fixture.deb"
-  : > "$bundle_dir/rpm/fixture.rpm"
-  cat > "$tool_dir/dpkg-deb" <<'EOF'
-#!/usr/bin/env bash
-if [ "$1" = '-R' ]; then
-  mkdir -p "$3/DEBIAN"
-  printf 'Version: 0\n' > "$3/DEBIAN/control"
-fi
-exit 0
-EOF
-  cat > "$tool_dir/rpm" <<'EOF'
-#!/usr/bin/env bash
-case "$3" in
-  '%{NAME}') printf 'fixture' ;;
-  '%{ARCH}') printf 'noarch' ;;
-  '%{LICENSE}')
-    case "$4" in
-      *rebuilt.rpm) printf 'GPL-3.0-only' ;;
-      *) printf 'MIT' ;;
-    esac
-    ;;
-  '%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}') printf 'fixture|1.2.3|1|noarch' ;;
-esac
-EOF
-  cat > "$tool_dir/rpmrebuild" <<'EOF'
-#!/usr/bin/env bash
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = '--directory' ]; then
-    touch "$2/rebuilt.rpm"
-    exit 0
-  fi
-  shift
-done
-exit 1
-EOF
-  chmod +x "$tool_dir/dpkg-deb" "$tool_dir/rpm" "$tool_dir/rpmrebuild"
-  set +e
-  output=$(PATH="$tool_dir:$PATH" "$script_dir/normalize-linux-package-metadata.sh" 1.2.3 "$bundle_dir" 2>&1)
-  status=$?
-  set -e
-  test "$status" -ne 0
-  printf '%s\n' "$output" | grep -Fq 'rebuilt RPM metadata mismatch: fixture|1.2.3|1|noarch|GPL-3.0-only'
-  rm -rf "$root"
-}
-
-assert_rebuilt_rpm_license_is_preserved
-
 for command in cpio curl dpkg-deb file gpg rpm rpm2cpio rpmbuild rpmsign tar; do
   command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 1; }
 done

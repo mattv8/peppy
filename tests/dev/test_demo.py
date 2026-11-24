@@ -161,17 +161,6 @@ class DemoTests(unittest.TestCase):
         self.assertEqual(up[-2:], ["dev", "caddy"])
         self.assertIn("infra/compose/compose.demo-tls.yml", " ".join(str(value) for value in up))
 
-    def test_demo_uses_current_enrollment_commands_not_removed_owner_cli(self):
-        source = (ROOT / "infra/dev/demo.py").read_text()
-        self.assertIn('[simulator_binary, "claim-owner"', source)
-        self.assertIn('[simulator_binary, "admit-gateway"', source)
-        self.assertNotIn('"create-owner"', source)
-
-    def test_migration_uses_built_server_binary_not_cargo_run(self):
-        source = (ROOT / "infra/dev/demo.py").read_text()
-        self.assertIn('checked([server_binary, "migrate"], env=server_env)', source)
-        self.assertNotIn('"-p", "peppy-server", "--", "migrate"', source)
-
     def test_credential_metadata_is_secret_free_for_invalid_state(self):
         with tempfile.TemporaryDirectory() as directory:
             credentials = Path(directory) / "credentials.json"

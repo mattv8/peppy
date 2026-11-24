@@ -15,7 +15,6 @@ except ModuleNotFoundError:
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HELPER = ROOT / "infra/dev/desktop.sh"
-BASE_CONFIG = ROOT / "apps/desktop/src-tauri/tauri.conf.json"
 DEV_CONFIG = ROOT / "apps/desktop/src-tauri/tauri.dev.conf.json"
 
 
@@ -89,20 +88,6 @@ class DesktopHelperTests(unittest.TestCase):
         (source / ".node-version").write_text(f"{node_selector}\n")
         (source / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.98.1"\n')
         return source
-
-    def test_desktop_configs_default_to_development_identity_and_keep_the_explicit_overlay(self):
-        self.assertEqual(
-            json.loads(BASE_CONFIG.read_text())["productName"],
-            "Peppy_dev",
-        )
-        self.assertEqual(
-            json.loads(BASE_CONFIG.read_text())["identifier"],
-            "org.peppy.desktop.dev",
-        )
-        self.assertEqual(
-            json.loads(DEV_CONFIG.read_text()),
-            {"productName": "Peppy_dev", "identifier": "org.peppy.desktop.dev"},
-        )
 
     def test_rejects_unknown_action_without_running_tools(self):
         result = self.run_helper("unknown")

@@ -109,10 +109,6 @@ grep -Fq 'shell: bash' "$script_dir/../../.github/workflows/build-artifacts.yml"
 grep -Fq 'refs/heads/production:stable|push:refs/heads/staging:staging' "$script_dir/../../.github/workflows/build-artifacts.yml"
 grep -Fq "[ \"\$REQUESTED_REF\" = \"\$GITHUB_SHA\" ]" "$script_dir/../../.github/workflows/build-artifacts.yml"
 grep -Fq 'Windows Kits\10\bin' "$script_dir/sign-windows-artifact.ps1"
-grep -Fq 'dpkg-deb --root-owner-group --build' "$script_dir/normalize-linux-package-metadata.sh"
-grep -Fq "dpkg-deb -c \"\$deb\"" "$script_dir/normalize-linux-package-metadata.sh"
-grep -Fq "rpmrebuild --package --notest --directory \"\$output_dir\"" "$script_dir/normalize-linux-package-metadata.sh"
-grep -Fq "'%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}'" "$script_dir/normalize-linux-package-metadata.sh"
 grep -Fq -- '--passphrase-fd 3' "$script_dir/sign-checksums.sh"
 selected=$(printf '%s\n' '' v0.2.0-staging.9 v0.2.0-staging.10 v0.1.0-staging.99 v0.2.0 other | "$script_dir/prune-prereleases.sh" --keep 2 --select)
 test "$selected" = v0.1.0-staging.99

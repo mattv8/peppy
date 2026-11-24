@@ -12,16 +12,6 @@ import Foundation
 
         let target = try #require(RelayWakeRegistrationTarget.custom(backgroundUpdatesEnabled: true, optedIn: true, persistedOrigin: savedA, environment: "production"))
         #expect(target.origin.serialized == savedA)
-    }
-
-    @Test func persistedCustomSelectionDoesNotUseTypedOriginAndHostedSelectionRemainsAutomatic() throws {
-        let savedA = "https://relay-a.example.test"
-        let typedB = "https://relay-b.example.test"
-
-        let custom = try #require(RelayWakeRegistrationTarget.custom(backgroundUpdatesEnabled: true, optedIn: true, persistedOrigin: savedA, environment: "production"))
-        #expect(custom.origin.serialized == savedA)
-        #expect(custom.origin.serialized != typedB)
-
         let hosted = try #require(RelayWakeRegistrationTarget.hosted(configuration: HostedWakeConfiguration(relayOrigin: "https://hosted-relay.example.test", environment: "production")))
         #expect(hosted.origin.serialized == "https://hosted-relay.example.test")
         #expect(hosted.environment == "production")

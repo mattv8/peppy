@@ -7,6 +7,20 @@ import Testing
 @Suite struct SessionTests {
     let passphrase = "io synthetic vault passphrase"
 
+    @Test func closedClientRejectsNativeRcsSendFactory() throws {
+        let config = NativeOpenConfig(
+            databasePath: temporaryDirectory().appendingPathComponent("closed.db").path,
+            vaultId: UUID().uuidString,
+            deviceId: UUID().uuidString,
+            databaseKey: Data(repeating: 7, count: 32)
+        )
+        let client = try openNativeClient(config: config)
+        try client.dispose()
+        #expect(throws: MobileBindingsError.Closed) {
+            _ = try gatewayPrepareNativeRcsSend(client: client, commandId: UUID().uuidString, nowMs: 1_000)
+        }
+    }
+
     func session(_ server: FakeServer, store: any SecureStore, deviceId: String, directory: URL) -> NativeSession {
         NativeSession(
             secureStore: store,

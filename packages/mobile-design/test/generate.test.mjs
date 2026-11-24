@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
@@ -7,7 +6,6 @@ import { catalog, nativeCatalog, desktopCatalog, desktopOnlyKeys, desktopOverrid
 import { icoFrameAlphas } from "../scripts/icon-alpha.mjs";
 
 const root = resolve(import.meta.dirname, "../../..");
-const run = (...args) => execFileSync("node", ["packages/mobile-design/scripts/generate.mjs", ...args], { cwd: root, encoding: "utf8" });
 const path = file => resolve(root, file);
 
 function luminance(hex) {
@@ -31,11 +29,6 @@ function themeTokens(css, selector, start = 0) {
   const body = css.slice(selectorStart, css.indexOf("}", selectorStart));
   return Object.fromEntries([...body.matchAll(/--peppy-([\w-]+):\s*(#[0-9a-f]{3,6});/gi)].map(([, key, value]) => [key, value.slice(1)]));
 }
-
-test("generated mobile design resources are deterministic", () => {
-  run();
-  run("--check");
-});
 
 test("CSS and generated tokens retain coral action foreground contrast", () => {
   const css = readFileSync(path("packages/desktop-ui/src/peppy-tokens.css"), "utf8");

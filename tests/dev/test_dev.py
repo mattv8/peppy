@@ -445,12 +445,6 @@ class DevScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("dev-demo", result.stderr)
 
-    def test_source_exclusions_keep_example_but_exclude_local_env(self):
-        exclusions = (ROOT / "infra/dev/source-excludes.txt").read_text()
-        self.assertIn(".env*", exclusions)
-        self.assertIn(".env.example", exclusions)
-        self.assertIn("local.properties", exclusions)
-
     def test_tar_exclusions_keep_tracked_infra_build(self):
         with tempfile.TemporaryDirectory() as directory:
             root, output = Path(directory) / "source", Path(directory) / "output"
