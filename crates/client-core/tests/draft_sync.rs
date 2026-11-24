@@ -1,5 +1,7 @@
 use crate::common::*;
-use peppy_crypto::{KeyPurpose, derive_purpose_key, derive_root_key, encrypt};
+use peppy_crypto::{
+    KeyPurpose, derive_draft_purpose_key, derive_purpose_key, derive_root_key, encrypt,
+};
 
 fn draft_aad(vault_id: VaultId, draft_id: DraftId, revision_id: uuid::Uuid) -> Vec<u8> {
     [
@@ -13,7 +15,8 @@ fn draft_aad(vault_id: VaultId, draft_id: DraftId, revision_id: uuid::Uuid) -> V
 
 fn sealed_head(vault: &Vault, draft_id: DraftId, record: DraftRecordV1) -> RemoteDraftChange {
     let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
-    let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Draft).unwrap();
+    let event = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    let key = derive_draft_purpose_key(&event, &vault.profile).unwrap();
     let plaintext = serde_json::to_vec(&record).unwrap();
     let sealed = encrypt(
         &key,
@@ -37,6 +40,34 @@ fn sealed_head(vault: &Vault, draft_id: DraftId, record: DraftRecordV1) -> Remot
             .collect(),
         expires_at_ms: 1_000,
     }
+}
+
+#[test]
+fn synthetic_head_imports_into_a_draft() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "receiver", &vault), &vault);
+    let draft_id = DraftId::new();
+    let head = sealed_head(
+        &vault,
+        draft_id,
+        DraftRecordV1 {
+            version: 1,
+            draft_id,
+            revision_id: uuid::Uuid::new_v4(),
+            text: "synthetic".into(),
+            recipients: vec![ADDRESS.into()],
+            route: None,
+            attachments: vec![],
+            authored_at_ms: 0,
+            group_name: None,
+        },
+    );
+    client.apply_draft_changes(vec![head], "1").unwrap();
+    assert_eq!(client.draft_sync_cursor().unwrap(), "1");
+    let draft = client.compose_draft(draft_id).unwrap().unwrap();
+    assert_eq!(draft.text, "synthetic");
+    assert_eq!(draft.recipients, vec![ADDRESS.to_string()]);
 }
 
 fn descriptor(config: &ClientConfig, attachment_id: AttachmentId) -> DraftRecordAttachmentV1 {

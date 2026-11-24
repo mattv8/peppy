@@ -485,9 +485,10 @@ fn text_only_group_and_attachment_only_mms_complete() {
     let mut group = input("group", Direction::Incoming);
     group.recipients = vec!["+15555550101".into(), "+15555550102".into()];
     let group = client.begin_mms_acquisition(group).unwrap();
-    client
+    let group_completed = client
         .complete_mms_acquisition(&group.acquisition_id)
         .unwrap();
+    assert!(!group_completed.duplicate);
     let mut media_only = input("media", Direction::Incoming);
     media_only.body.clear();
     let media_only = client.begin_mms_acquisition(media_only).unwrap();
@@ -495,9 +496,42 @@ fn text_only_group_and_attachment_only_mms_complete() {
     client
         .set_mms_acquisition_part(&media_only.acquisition_id, "1", part)
         .unwrap();
-    client
+    let media_completed = client
         .complete_mms_acquisition(&media_only.acquisition_id)
         .unwrap();
+    assert!(!media_completed.duplicate);
+    assert!(client.mms_acquisitions(10).unwrap().is_empty());
+    let messages = client.messages(group_completed.conversation_id).unwrap();
+    assert_eq!(
+        group_completed.conversation_id,
+        media_completed.conversation_id
+    );
+    assert_eq!(messages.len(), 2);
+    let group_message = messages
+        .iter()
+        .find(|message| message.payload.record.message_id == group_completed.message_id)
+        .unwrap();
+    assert_eq!(group_message.payload.body, "hello");
+    assert_eq!(
+        group_message.payload.record.message_id,
+        group_completed.message_id
+    );
+    let media_message = messages
+        .iter()
+        .find(|message| message.payload.record.message_id == media_completed.message_id)
+        .unwrap();
+    assert_eq!(media_message.payload.body, "");
+    assert_eq!(
+        media_message.payload.record.message_id,
+        media_completed.message_id
+    );
+    assert_eq!(
+        client
+            .mms_acquisition_parts(&media_only.acquisition_id)
+            .unwrap()[0]
+            .attachment_id,
+        part
+    );
 }
 
 #[test]

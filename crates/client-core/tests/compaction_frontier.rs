@@ -135,6 +135,41 @@ fn oversized_legacy_frontier_folds_into_authenticated_checkpoints() {
 }
 
 #[test]
+fn frontier_fold_boundaries_cover_exactly_the_selected_records() {
+    for count in [1, 128, 129, 256, 257] {
+        let dir = TempDir::new().unwrap();
+        let vault = Vault::new();
+        let phone = legacy_unlocked(&config(&dir, "phone", &vault), &vault);
+        let mut server = Server::default();
+        for step in 0..count {
+            phone
+                .capture_notification(notification(&format!("{step}")))
+                .unwrap();
+        }
+        assert_eq!(server.upload(&phone), count);
+        connect(&phone);
+        phone.remove_notification("progress", "i").unwrap();
+        let uploaded = server.upload(&phone);
+        let expected_checkpoints = count.saturating_sub(128).div_ceil(127);
+        assert_eq!(uploaded, 1 + expected_checkpoints, "frontier {count}");
+
+        let mut frontier: Vec<Identity> = server.log[..count].iter().map(id).collect();
+        for (index, record) in server.log[count..].iter().enumerate() {
+            let covered = frontier.len().min(128);
+            assert_eq!(
+                refs(record),
+                frontier[..covered],
+                "frontier {count}, record {index}"
+            );
+            assert_eq!(record.compaction.as_ref().unwrap().checkpoint, index > 0);
+            frontier.drain(..covered);
+            frontier.push(id(record));
+        }
+        assert_eq!(frontier, vec![id(server.log.last().unwrap())]);
+    }
+}
+
+#[test]
 fn out_of_order_app_filters_are_all_superseded_by_the_next_write() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
