@@ -15,12 +15,6 @@ fn ts() -> i64 {
         .as_secs() as i64
 }
 
-fn wait_until_after(timestamp: i64) {
-    while ts() <= timestamp {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-}
-
 fn call(result: Result<String, Error>) -> Value {
     serde_json::from_str(&result.unwrap()).unwrap()
 }
@@ -572,11 +566,18 @@ fn expired_requests_are_recorded_and_published() {
     );
     p.deliver(true);
     let mut r = request(&p.owner_cfg, "r1", "update", "1", given_patch("Augusta"));
-    let expires_at = ts() + 2;
-    r["expires_at"] = json!(expires_at);
+    r.as_object_mut().unwrap().remove("expires_at");
     call(p.peer.request_contact_edit(&r.to_string()));
     p.deliver(false);
-    wait_until_after(expires_at);
+    let conn = super::contact_book_deletion::sqlcipher(&p.owner_cfg.database_path);
+    assert_eq!(
+        conn.execute(
+            "UPDATE contact_edit_ledger SET expires_at=0 WHERE request_id=?",
+            ["r1"],
+        )
+        .unwrap(),
+        1
+    );
     assert_eq!(permit(&p.owner, "r1")["status"], "expired");
     assert_eq!(permit(&p.owner, "r1")["status"], "expired");
     p.deliver(true);
