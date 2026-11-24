@@ -29,21 +29,28 @@ COMPOSE_FILE=docker-compose.yml just backup /secure/backups
 Backup directories are private (`0700`) and every archive artifact is private
 (`0600`) and owned by the invoking operator.
 
-Allow in-flight API requests to drain before the command. The script uses PostgreSQL `pg_dump`, stops SeaweedFS before copying its volume and filer metadata, and writes a versioned checksum manifest. It does not delete or prune data. On exit, it restarts only API and SeaweedFS services that ran when backup began; it leaves initially stopped services stopped.
+Allow in-flight API requests to drain before the command. The script uses PostgreSQL `pg_dump`, stops SeaweedFS (and MCP, with the MCP overlay) before copying their volumes and filer metadata, and writes a versioned checksum manifest. It does not delete or prune data. On exit, it restarts only the API, SeaweedFS, and (with the MCP overlay) MCP services that ran when backup began; it leaves initially stopped services stopped.
 
 ## Restore
 
 Restore only to a distinct Compose project with no existing target volumes:
 
 ```sh
-just restore /secure/backups/peppy-peppy-... restore-drill
+PEPPY_RESTORE_MANIFEST_SHA256=<trusted-64-character-digest> just restore /secure/backups/peppy-peppy-... restore-drill
 ```
+
+Pass the `PEPPY_BACKUP_MANIFEST_SHA256` value that `just backup` printed as
+`PEPPY_RESTORE_MANIFEST_SHA256`, taken from trusted storage kept separately
+from the backup. Backup also writes it to a mode-0600
+`<backup-directory>.manifest.sha256` file beside the backup; move that value to
+the trusted store. Restore refuses to start without a 64-character lowercase
+digest.
 
 Use the identical `COMPOSE_FILE` setting that produced the backup when
 restoring an overlay deployment:
 
 ```sh
-COMPOSE_FILE=docker-compose.yml just restore /secure/backups/peppy-peppy-... restore-drill
+PEPPY_RESTORE_MANIFEST_SHA256=<trusted-64-character-digest> COMPOSE_FILE=docker-compose.yml just restore /secure/backups/peppy-peppy-... restore-drill
 ```
 
 The restore verifies the manifest and checksums, verifies image/layout compatibility, and refuses existing target volumes. It starts PostgreSQL only to load the dump. It leaves migrations, the API, and carrier processing stopped, and it performs no automatic post-restore execution. Do not use `docker compose down -v` as a recovery shortcut.

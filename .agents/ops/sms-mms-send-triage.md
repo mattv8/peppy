@@ -161,7 +161,7 @@ awk -v bucket_min=5 'BEGIN { bucket = bucket_min * 60000 }
 /^event=/ { delete k; for (i = 1; i <= NF; i++) { split($i, a, "="); k[a[1]] = a[2] }
   t = k["timestamp_ms"] + 0; if (t == 0) next; if (t > last) last = t; b = int(t / bucket); seen[b] = 1
   if ($1 == "event=16") { if (k["23"] == "-1") http_fail[b]++; else http_ok[b]++ }
-  if ($1 == "event=22") { if (k["29"] == "7") sock_up[b]++; else sock_retry[b]++ }
+  if ($1 == "event=22") { if (k["29"] == "7") sock_up[b]++; else if (k["29"] == "8") sock_retry[b]++ }
   if ($1 == "event=15" && k["20"] == "17") { dispatch[b]++; if (k["7"] + 0 > cpu[b]) cpu[b] = k["7"] + 0; if (k["6"] + 0 > wall[b]) wall[b] = k["6"] + 0 } }
 END { for (b in seen) printf "%6.0f min before export: http_ok=%d http_fail=%d socket_connected=%d socket_reconnecting=%d dispatch=%d dispatch_max_cpu_ms=%d dispatch_max_wall_ms=%d\n", (last - b * bucket) / 60000, http_ok[b], http_fail[b], sock_up[b], sock_retry[b], dispatch[b], cpu[b], wall[b] }' <export> | sort -n
 ```

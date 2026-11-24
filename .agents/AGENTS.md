@@ -203,7 +203,8 @@ This reference records non-obvious Peppy domain constraints.
   approval reads it silently. iOS uses the shared Keychain store
   (`AfterFirstUnlockThisDeviceOnly`, not synchronized); Android uses the
   Keystore-wrapped store excluded from backup and device transfer.
-  Stored binding secrets are not yet removed on revocation or vault teardown.
+  Stored binding secrets are not yet removed on revocation, and only iOS
+  removes its binding after a confirmed vault deletion.
   Preserve an in-progress secret in transient private state across same-page
   retries; do not put it in logs, process arguments, Tauri IPC, Android saved
   state, or browser local/session storage. Recover protected prepared material
@@ -259,12 +260,14 @@ This reference records non-obvious Peppy domain constraints.
   [instance routes](../services/server/src/api.rs), and
   [gateway work filtering](../services/server/src/api/sync.rs).
 - Community setup policy is server-advertised: absent or empty
-  `PEPPY_SETUP_TOKEN` permits open first claim, while a nonempty token requires
-  at least 32 UTF-8 bytes and protects first claim. UI must visibly distinguish
-  these modes and request a code only when the server requires one. No token is
-  generated or logged as a fallback. Configure the same token on every replica.
-  Existing unclaimed installations upgraded without the setting become open;
-  operators who require protection must configure it before upgrade.
+  `PEPPY_SETUP_TOKEN` permits open first claim for 60 minutes after each server
+  process start (then `setup_window_closed` until a restart), while a nonempty
+  token requires at least 32 UTF-8 bytes and protects first claim with no time
+  limit. UI must visibly distinguish these modes and request a code only when
+  the server requires one. No token is generated or logged as a fallback.
+  Configure the same token on every replica. Existing unclaimed installations
+  upgraded without the setting become open; operators who require protection
+  must configure it before upgrade.
 - Community admin password and generated vault secret are separate secrets with
   separate checks. `validate_password` in
   [instance policy](../services/server/src/instance.rs) accepts 12–1024 UTF-8
@@ -385,7 +388,10 @@ This reference records non-obvious Peppy domain constraints.
   [main screen](../apps/android/app/src/main/java/dev/peppy/mobile/MainActivity.kt)
   and [MMS settings](../apps/android/app/src/main/java/dev/peppy/mobile/mms/MmsSettings.kt).
 - Outbox rejection policy: a 4xx on `POST /v1/events` that carries a server
-  `code` is a permanent decision (`rejectOutbox`, re-pair required). A 4xx
+  `code` is a permanent decision (`rejectOutbox`, re-pair required), except a
+  coded `operation_not_permitted` 403 (an account policy pause that keeps
+  envelopes pending), 401 (an auth failure), a 409 `idempotency_conflict`
+  (producer-conflict recovery), and 408 or 429 (transient). A 4xx
   with no code is a `SoftRejection`: retried one head envelope per pass with
   bounded fuses, never acked, and it blocks only the contact-photo phases.
   Every Peppy server 403 is an `ApiError` with a JSON `code`; a bodiless 403
