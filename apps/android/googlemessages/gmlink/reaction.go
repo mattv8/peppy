@@ -133,7 +133,7 @@ func (link *Link) CommitPreparedReaction(requestJSON string) (string, error) {
 		effect = client.SendReaction
 	}
 	ctx, cancel := context.WithCancel(operationCtx)
-	ctx = context.WithValue(ctx, sendAdmissionContextKey{}, sendAdmission(func() bool { return link.admitPreparedReaction(ticket) }))
+	ctx = context.WithValue(ctx, sendAdmissionContextKey{}, sendAdmission(func() bool { return link.reactionAdmissionCurrent(ticket) }))
 	response, err := effect(ctx, payload)
 	cancel()
 	if errors.Is(err, errSendAdmissionRevoked) {
@@ -150,16 +150,6 @@ func (link *Link) reactionTicketCurrent(ticket *preparedReactionTicket) bool {
 	defer link.mu.Unlock()
 	return link.nowForTicketLocked().Before(ticket.expiresAt) && !link.closed && link.generation == ticket.generation && link.runGeneration == ticket.generation &&
 		link.streamEpoch == ticket.streamEpoch && link.indexRevision == ticket.revision && link.hasSendVerificationLocked()
-}
-
-func (link *Link) admitPreparedReaction(ticket *preparedReactionTicket) bool {
-	link.mu.Lock()
-	hook := link.beforeSendAdmission
-	link.mu.Unlock()
-	if hook != nil {
-		hook()
-	}
-	return link.reactionAdmissionCurrent(ticket)
 }
 
 func (link *Link) reactionAdmissionCurrent(ticket *preparedReactionTicket) bool {

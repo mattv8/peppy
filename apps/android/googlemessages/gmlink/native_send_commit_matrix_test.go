@@ -2,6 +2,7 @@ package gmlink
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -51,9 +52,11 @@ func TestNativeSendCommitRevocationAdmissionFences(t *testing.T) {
 		unblock := func() { releaseOnce.Do(func() { close(release) }) }
 		defer unblock()
 		link.mu.Lock()
-		link.beforeSendAdmission = func() {
+		send := link.client.SendMessage
+		link.sendMessage = func(ctx context.Context, request *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error) {
 			close(reached)
 			<-release
+			return send(ctx, request)
 		}
 		link.mu.Unlock()
 		done := make(chan string, 1)

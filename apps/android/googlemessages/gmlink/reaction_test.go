@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -75,6 +76,7 @@ func TestPreparedReactionRejectsInvalidationDuringLookupAndAdmission(t *testing.
 	t.Run("lookup", func(t *testing.T) {
 		link, phone, cleanup, _, _ := preparedRcsFixtureWithPhone(t)
 		defer cleanup()
+		defer phone.openGate()
 		request := reactionRequestJSON(link.OwnerGeneration())
 		if result, err := link.PrepareReaction(request); err != nil || decodeSendCode(t, result) != "prepared" {
 			t.Fatalf("prepare = %q, %v", result, err)
@@ -104,24 +106,25 @@ func TestPreparedReactionRejectsInvalidationDuringLookupAndAdmission(t *testing.
 	})
 
 	t.Run("admission", func(t *testing.T) {
-		link, _, cleanup, _, _ := preparedRcsFixtureWithPhone(t)
+		link, phone, cleanup, _, _ := preparedRcsFixtureWithPhone(t)
 		defer cleanup()
+		phone.configure(func(knobs *fixtureKnobs) {
+			knobs.failAction = gmproto.ActionType_SEND_REACTION
+			knobs.failStatus = 500
+		})
 		request := reactionRequestJSON(link.OwnerGeneration())
 		if result, err := link.PrepareReaction(request); err != nil || decodeSendCode(t, result) != "prepared" {
 			t.Fatalf("prepare = %q, %v", result, err)
 		}
 		reached, release := make(chan struct{}), make(chan struct{})
-		link.mu.Lock()
-		link.beforeSendAdmission = func() { close(reached); <-release }
-		link.mu.Unlock()
-		calls := 0
-		link.sendReaction = func(ctx context.Context, _ *gmproto.SendReactionRequest) (*gmproto.SendReactionResponse, error) {
-			admission := ctx.Value(sendAdmissionContextKey{}).(sendAdmission)
-			if !admission() {
-				return nil, errSendAdmissionRevoked
-			}
-			calls++
-			return &gmproto.SendReactionResponse{Success: true}, nil
+		var releaseOnce sync.Once
+		unblock := func() { releaseOnce.Do(func() { close(release) }) }
+		defer unblock()
+		send := link.client.SendReaction
+		link.sendReaction = func(ctx context.Context, request *gmproto.SendReactionRequest) (*gmproto.SendReactionResponse, error) {
+			close(reached)
+			<-release
+			return send(ctx, request)
 		}
 		done := make(chan string, 1)
 		go func() {
@@ -136,9 +139,12 @@ func TestPreparedReactionRejectsInvalidationDuringLookupAndAdmission(t *testing.
 		link.mu.Lock()
 		link.invalidateEvidenceLocked()
 		link.mu.Unlock()
-		close(release)
-		if result := <-done; result != "rejected" || calls != 0 {
-			t.Fatalf("admission invalidation = %q, calls=%d", result, calls)
+		unblock()
+		if result := recvWithin(t, done, 5*time.Second); result != "rejected" {
+			t.Fatalf("admission invalidation = %q", result)
+		}
+		if calls := phone.countAction(gmproto.ActionType_SEND_REACTION.String()); calls != 0 {
+			t.Fatalf("revoked reaction count = %d", calls)
 		}
 	})
 }

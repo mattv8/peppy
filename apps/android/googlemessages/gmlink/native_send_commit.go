@@ -120,12 +120,6 @@ func (link *Link) nativeFlightCurrentLocked(ticket *nativeRcsTicket, flight *nat
 
 func (link *Link) admitNativeSend(ctx context.Context, ticket *nativeRcsTicket, flight *nativeRcsInFlight) bool {
 	link.mu.Lock()
-	hook := link.beforeSendAdmission
-	link.mu.Unlock()
-	if hook != nil {
-		hook()
-	}
-	link.mu.Lock()
 	defer link.mu.Unlock()
 	if ticket.group && groupMemberDigest(link.conversationRecords[ticket.targetObservation.GoogleConversationID]) != ticket.request.ExpectedMemberDigest {
 		flight.membersChanged = true

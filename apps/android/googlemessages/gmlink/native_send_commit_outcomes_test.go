@@ -118,7 +118,12 @@ func TestNativeSendCommitAdmissionFenceRejectsLiveDrift(t *testing.T) {
 			link.mu.Lock()
 			ticket := link.nativeTicket
 			frozen := ticket.targetObservationJSON
-			link.beforeSendAdmission = func() { close(reached); <-release }
+			send := link.client.SendMessage
+			link.sendMessage = func(ctx context.Context, request *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error) {
+				close(reached)
+				<-release
+				return send(ctx, request)
+			}
 			link.mu.Unlock()
 			done := make(chan string, 1)
 			go func() {
