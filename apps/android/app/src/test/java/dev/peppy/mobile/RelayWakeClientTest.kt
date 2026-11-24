@@ -48,31 +48,6 @@ class RelayWakeClientTest {
         assertEquals(1, WorkManager.getInstance(context).getWorkInfosForUniqueWork("peppy-relay-wake-reconcile").get().size)
     }
 
-    @Test fun challengeConfirmationPublishesOnlyRouteAndWakeCredential() {
-        val transport = object : RelayWakeTransport {
-            override fun post(path: String, body: String) = when (path) {
-                "/v1/registrations" -> HttpResult(201, "{\"registration_id\":\"00000000-0000-4000-8000-000000000001\"}")
-                else -> HttpResult(201, "{\"route_id\":\"00000000-0000-4000-8000-000000000002\",\"manage_credential\":\"${"a".repeat(64)}\",\"wake_credential\":\"${"b".repeat(64)}\"}")
-            }
-        }
-        var stored: RelayRoute? = null
-        val store = object : RelayRouteStore {
-            override fun route() = stored
-            override fun save(route: RelayRoute) { stored = route }
-            override fun clear() { stored = null }
-            var pending: String? = null
-            override fun pendingRegistration() = pending
-            override fun savePendingRegistration(id: String) { pending = id }
-            override fun clearPendingRegistration() { pending = null }
-        }
-        var published: Pair<String, String>? = null
-        val client = RelayWakeClient(transport, store, RelayRoutePublisher { route, wake -> published = route to wake })
-        assertEquals("00000000-0000-4000-8000-000000000001", client.register("provider-token"))
-        assertTrue(client.confirm("f".repeat(64)))
-        assertEquals("00000000-0000-4000-8000-000000000002" to "${"b".repeat(64)}", published)
-        assertEquals("${"a".repeat(64)}", stored!!.manageCredential)
-    }
-
     @Test fun failedCleanupKeepsPendingRegistrationWorkerRetryable() {
         assertTrue(relayWakeWorkerShouldRetry(RelayWakeReconcile.PENDING, cleanupRetry = true))
         assertFalse(relayWakeWorkerShouldRetry(RelayWakeReconcile.PENDING, cleanupRetry = false))
@@ -183,26 +158,6 @@ class RelayWakeClientTest {
             relayWakeStateStoreFactory = previousFactory
             preferences.edit().clear().commit()
         }
-    }
-
-    @Test fun malformedChallengeIsRejectedBeforeTransport() {
-        var requests = 0
-        val client = RelayWakeClient(object : RelayWakeTransport {
-            override fun post(path: String, body: String): HttpResult {
-                requests++
-                return HttpResult(500, null)
-            }
-        }, object : RelayRouteStore {
-            override fun route() = null
-            override fun save(route: RelayRoute) = Unit
-            override fun clear() = Unit
-            override fun pendingRegistration() = "00000000-0000-4000-8000-000000000001"
-            override fun savePendingRegistration(id: String) = Unit
-            override fun clearPendingRegistration() = Unit
-        }, RelayRoutePublisher { _, _ -> })
-
-        assertFalse(client.confirm("not-a-challenge"))
-        assertEquals(0, requests)
     }
 }
 

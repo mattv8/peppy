@@ -176,21 +176,6 @@ private fun withinObservationCap(value: String) = value.toByteArray(Charsets.UTF
 
 private fun ULong.toSignedLong(): Long? = takeIf { it in 1uL..Long.MAX_VALUE.toULong() }?.toLong()
 
-private fun json(value: String): String = buildString(value.length + 2) {
-    append('"')
-    value.forEach { character -> when (character) {
-        '\\' -> append("\\\\")
-        '"' -> append("\\\"")
-        '\b' -> append("\\b")
-        '\u000C' -> append("\\f")
-        '\n' -> append("\\n")
-        '\r' -> append("\\r")
-        '\t' -> append("\\t")
-        else -> if (character < ' ') append("\\u%04x".format(character.code)) else append(character)
-    } }
-    append('"')
-}
-
 private class NativeResponse(private val fields: Map<String, String>) {
     operator fun get(name: String): String? = fields[name]
     fun string(name: String): String? = fields[name]

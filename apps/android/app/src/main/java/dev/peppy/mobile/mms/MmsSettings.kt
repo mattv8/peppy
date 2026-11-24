@@ -255,7 +255,6 @@ internal fun MmsSettings(
     databaseOpen: Boolean,
     onChanged: () -> Unit,
     detailsOnly: Boolean = false,
-    onOpenGoogleMessagesLink: () -> Unit = {},
 ) {
     val preferences = remember { MmsPreferences(context) }
     var enabled by remember(refresh) { mutableStateOf(preferences.enabled) }
@@ -411,7 +410,6 @@ internal fun MmsSettings(
                 enabled = canRequestProviderRescan(enabled, receiveGranted, databaseOpen, restrictedAccess),
                 pending = rescanPending,
                 feedback = rescanFeedback,
-                onOpenGoogleMessagesLink = onOpenGoogleMessagesLink,
                 startRescan = {
                     rescanPending = true
                     scope.launch {
@@ -521,7 +519,6 @@ internal fun RestrictedMessageAccessControls(
     enabled: Boolean,
     pending: Boolean,
     feedback: String?,
-    onOpenGoogleMessagesLink: () -> Unit,
     startRescan: () -> Unit,
 ) {
     if (showAccessStatus && access != RestrictedMessageAccess.NOT_ALLOWED) {
@@ -534,7 +531,7 @@ internal fun RestrictedMessageAccessControls(
             modifier = Modifier.testTag("mms-restricted-message-rescan"),
         ) { Text(stringResource(R.string.peppy_mms_restricted_rescan)) }
     } else if (showAccessStatus && access == RestrictedMessageAccess.NOT_ALLOWED) {
-        RestrictedNotAllowedAccessControls(context, refresh, onOpenGoogleMessagesLink)
+        RestrictedNotAllowedAccessControls(context, refresh)
     }
     feedback?.let {
         Text(

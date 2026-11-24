@@ -21,6 +21,7 @@ import dev.peppy.mobile.SmsCaptureSummary
 import dev.peppy.mobile.SmsCompletion
 import dev.peppy.mobile.SmsLiveGapPlan
 import dev.peppy.mobile.SmsReconciliationPlan
+import dev.peppy.mobile.mergeSmsCaptureSummaries
 import dev.peppy.mobile.diagnostics.SyncDiagnosticStage
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.diagnostics.SyncTraceEvent
@@ -413,19 +414,4 @@ private fun SmsAcquisitionState.toNativeState(): NativeSmsAcquisitionState = whe
     SmsAcquisitionState.PAUSED -> NativeSmsAcquisitionState.PAUSED
 }
 
-private operator fun SmsCaptureSummary.plus(other: SmsCaptureSummary) = SmsCaptureSummary(
-    captured + other.captured,
-    pending + other.pending,
-    unavailable + other.unavailable,
-    paused + other.paused,
-    more || other.more,
-    providerError || other.providerError,
-    other.pendingRecheckCursor ?: pendingRecheckCursor,
-    historyExhausted || other.historyExhausted,
-    coreError || other.coreError,
-    processed + other.processed,
-    rowsQueried + other.rowsQueried,
-    advanced || other.advanced,
-    budgetExhausted || other.budgetExhausted,
-    scanObservations + other.scanObservations,
-)
+private operator fun SmsCaptureSummary.plus(other: SmsCaptureSummary) = mergeSmsCaptureSummaries(this, other)

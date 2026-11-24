@@ -73,7 +73,6 @@ internal sealed interface PlaySubscriptionState {
     data object RestoreWorking : PlaySubscriptionState
     data object Pending : PlaySubscriptionState
     data object Verifying : PlaySubscriptionState
-    data object RestoreNone : PlaySubscriptionState
     data object LinkRetry : PlaySubscriptionState
     data object NotEntitling : PlaySubscriptionState
     data object BoundToOtherAccount : PlaySubscriptionState

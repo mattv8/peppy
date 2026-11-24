@@ -363,8 +363,6 @@ internal class RcsReceiveCoordinator(
         }
     }.getOrNull()
 
-    private fun sentAtMs(record: String) = runCatching { JSONObject(record).optLong("sent_at_ms") }.getOrDefault(0L)
-
     private fun parsePage(json: String): Page? = runCatching {
         val value = JSONObject(json)
         val records = value.optJSONArray("records") ?: JSONArray()

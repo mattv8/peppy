@@ -20,7 +20,7 @@ internal class RcsMediaSendCoordinator(
                 runNative(lease, attachment)
                 return@submit
             }
-            val plaintext = try { core.decrypt(attachment.attachmentId, files.rootForTest().absolutePath) } catch (_: Throwable) {
+            val plaintext = try { core.decrypt(attachment.attachmentId, files.rootDirectory().absolutePath) } catch (_: Throwable) {
                 publish(lease, attachment, "failed"); return@submit
             }
             try {

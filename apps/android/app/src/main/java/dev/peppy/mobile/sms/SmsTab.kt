@@ -322,7 +322,6 @@ internal fun SmsTab(
                 databaseOpen,
                 onChanged,
                 detailsOnly = true,
-                onOpenGoogleMessagesLink = { linkDetailsOpen = true },
             )
             if (restrictedSetupAvailable(context)) AdvancedFeaturesSection(context, refresh, onChanged)
             resultHint?.let { Text(it, Modifier.testTag("sms-action-error")) }
@@ -396,7 +395,7 @@ internal fun SmsTab(
             ) { Text(stringResource(R.string.peppy_toggle_android_sms_review_access)) }
             if (actualCapture) resultHint?.let { Text(it, Modifier.testTag("sms-action-error")) }
          }
-         MmsSettings(context, refresh, databaseOpen, onChanged, onOpenGoogleMessagesLink = { linkDetailsOpen = true })
+         MmsSettings(context, refresh, databaseOpen, onChanged)
          PhoneReadSettings(context, refresh, onChanged)
          Section("battery-section", stringResource(R.string.peppy_toggle_android_background_sync), showDivider = false) {
              BatteryOptimizationRow(context)

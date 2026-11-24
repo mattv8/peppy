@@ -151,7 +151,6 @@ internal fun PlaySubscriptionPanel(
                 stringResource(R.string.peppy_hosted_purchase_verifying),
                 Modifier.testTag("play-subscription-status").semantics { liveRegion = LiveRegionMode.Polite },
             )
-            PlaySubscriptionState.RestoreNone -> Status(R.string.peppy_play_restore_none)
             PlaySubscriptionState.LinkRetry -> {
                 Status(R.string.peppy_play_link_retry_body)
                 OutlinedButton(onClick = coordinator::retry, modifier = Modifier.testTag("play-link-retry")) { Text(stringResource(R.string.peppy_try_again)) }

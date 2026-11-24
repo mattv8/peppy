@@ -30,8 +30,6 @@ import dev.peppy.mobile.security.SecretBox
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.SecureRandom
-import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -59,11 +57,7 @@ internal fun relaySupportsCandidates(transport: RelayWakeTransport): Boolean? {
 fun interface RelayRoutePublisher { @Throws(IOException::class) fun publish(routeId: String, wakeCredential: String) }
 interface RelayRouteStore {
     fun route(): RelayRoute?
-    fun save(route: RelayRoute)
     fun clear()
-    fun pendingRegistration(): String?
-    fun savePendingRegistration(id: String)
-    fun clearPendingRegistration()
 }
 
 /** Keystore-wrapped route credentials. Provider tokens and manage credentials never leave this store. */
@@ -77,68 +71,19 @@ class RelayCredentialStore(private val preferences: SharedPreferences, private v
         }
     }
 
-    override fun save(route: RelayRoute) {
-        val body = JSONObject().put("route_id", route.routeId).put("manage_credential", route.manageCredential)
-            .put("wake_credential", route.wakeCredential).toString().toByteArray(Charsets.UTF_8)
-        preferences.edit().putString(KEY, secrets.seal(PURPOSE, body)).apply()
-    }
-
     override fun clear() { preferences.edit().remove(KEY).apply() }
-    override fun pendingRegistration(): String? = preferences.getString(PENDING_KEY, null)?.let { secrets.open(PENDING_PURPOSE, it) }
-        ?.toString(Charsets.UTF_8)?.takeIf { UUID_RE.matches(it) }
-    override fun savePendingRegistration(id: String) { preferences.edit().putString(PENDING_KEY, secrets.seal(PENDING_PURPOSE, id.toByteArray())).apply() }
-    override fun clearPendingRegistration() { preferences.edit().remove(PENDING_KEY).apply() }
     private companion object {
         const val KEY = "relay-route-v1"; const val PURPOSE = "relay-route-v1"
-        const val PENDING_KEY = "relay-pending-v1"; const val PENDING_PURPOSE = "relay-pending-v1" // gitleaks:allow -- preference key and encryption-purpose labels, not credentials
-        val UUID_RE = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", RegexOption.IGNORE_CASE)
     }
 }
 
 class RelayWakeClient(
-    private val transport: RelayWakeTransport,
-    private val credentials: RelayRouteStore,
-    private val publisher: RelayRoutePublisher,
-    private val provider: String = "fcm",
-    private val supportsCandidates: Boolean = false,
-) {
-    /** Starts the push challenge. The caller must pass its provider token; it is never persisted here. */
-    fun register(deviceToken: String): String? {
-        if (!validToken(deviceToken)) return null
-        val response = transport.post("/v1/registrations", JSONObject().put("provider", provider).put("device_token", deviceToken).toString())
-        if (response.code != 201) return null
-        return try { JSONObject(requireNotNull(response.body)).getString("registration_id").takeIf { UUID_RE.matches(it) }?.also { credentials.savePendingRegistration(it) } } catch (_: Exception) { null }
-    }
-
-    /** Called only after the provider delivered the opaque challenge. */
-    fun confirm(challenge: String, installationPublicIdentity: String? = null): Boolean {
-        val registrationId = credentials.pendingRegistration() ?: return false
-        if (!UUID_RE.matches(registrationId) || !SECRET_RE.matches(challenge)) return false
-        val candidate = if (supportsCandidates) RelayRoute(UUID.randomUUID().toString(), randomSecret(), randomSecret()) else null
-        val body = JSONObject().put("challenge", challenge).also {
-            if (candidate != null) it.put("route_id", candidate.routeId).put("manage_credential", candidate.manageCredential).put("wake_credential", candidate.wakeCredential)
-            if (installationPublicIdentity != null) it.put("installation_public_identity", installationPublicIdentity)
-        }
-        val response = transport.post("/v1/registrations/$registrationId/confirm", body.toString())
-        if (response.code != 201) return false
-        val route = try {
-            val value = JSONObject(requireNotNull(response.body))
-            RelayRoute(value.getString("route_id"), value.getString("manage_credential"), value.getString("wake_credential"))
-        } catch (_: Exception) { return false }
-        if (candidate != null && (route.routeId != candidate.routeId || route.manageCredential != candidate.manageCredential || route.wakeCredential != candidate.wakeCredential)) return false
-        credentials.save(route)
-        try { publisher.publish(route.routeId, route.wakeCredential) } catch (_: IOException) { return false }
-        credentials.clearPendingRegistration()
-        return true
-    }
-
-    private fun validToken(token: String) = token.isNotBlank() && token.toByteArray(Charsets.UTF_8).size <= 4096
-    private companion object {
-        val UUID_RE = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", RegexOption.IGNORE_CASE)
-        val SECRET_RE = Regex("[0-9a-f]{64}", RegexOption.IGNORE_CASE)
-        fun randomSecret(): String = ByteArray(32).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it) }
-    }
-}
+    transport: RelayWakeTransport,
+    credentials: RelayRouteStore,
+    publisher: RelayRoutePublisher,
+    provider: String = "fcm",
+    supportsCandidates: Boolean = false,
+)
 
 /** Fixed-origin, redirect-refusing relay transport; relay endpoints are unauthenticated by design. */
 class AndroidRelayWakeTransport(origin: String) : RelayWakeTransport {

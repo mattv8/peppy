@@ -709,11 +709,7 @@ private class MemoryMutatingPreferences(
 private class FakeRouteStore(private var saved: RelayRoute?) : RelayRouteStore {
     var cleared = false
     override fun route() = saved
-    override fun save(route: RelayRoute) { saved = route }
     override fun clear() { cleared = true; saved = null }
-    override fun pendingRegistration() = null
-    override fun savePendingRegistration(id: String) = Unit
-    override fun clearPendingRegistration() = Unit
 }
 
 private class RelayWakeMemoryStore : RelayWakeCoordinatorStore {
