@@ -11,7 +11,6 @@ import (
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
-	"sync"
 	"time"
 )
 
@@ -530,14 +529,8 @@ func TestOldPairCleanupKeepsNewPairOwnership(t *testing.T) {
 	})
 	link, host := openSafetyLink(t, nil)
 	setSafetyState(link, stateSignedOut, nil)
-	reached, release := make(chan struct{}), make(chan struct{})
-	var cleanupOnce sync.Once
-	link.pairCleanupReady = func(uint64) {
-		cleanupOnce.Do(func() {
-			close(reached)
-			<-release
-		})
-	}
+	reached, release := host.holdNextEvent("pair_ok")
+	t.Cleanup(func() { closeRound2Signal(release) })
 
 	oldResult := make(chan error, 1)
 	go func() { oldResult <- link.Pair(canaryCookieJSON(t)) }()
@@ -550,22 +543,36 @@ func TestOldPairCleanupKeepsNewPairOwnership(t *testing.T) {
 
 	// Sign the link out while the old pair still holds its cleanup.
 	link.queueEvent(&events.AccountChange{})
-	awaitSafety(t, "the sign-out to land", func() bool { return host.countEvent("link", "signed_out") == 1 })
+	awaitSafety(t, "the sign-out to land", func() bool {
+		link.mu.Lock()
+		defer link.mu.Unlock()
+		return link.state == stateSignedOut
+	})
 
 	// The new pair must not complete on its own: it stays pairing until the test closes the link.
 	fixture.configure(func(knobs *fixtureKnobs) { knobs.gaiaFinish = false })
 	newResult := make(chan error, 1)
 	go func() { newResult <- link.Pair(canaryCookieJSON(t)) }()
-	awaitEmoji(t, host)
+	awaitSafety(t, "the new pair to start", func() bool {
+		link.mu.Lock()
+		defer link.mu.Unlock()
+		return link.state == statePairing
+	})
 	newOwner := currentPairOwner(link)
 	link.mu.Lock()
 	newOperation := link.pairOwner
 	link.mu.Unlock()
 
-	close(release)
+	select {
+	case err := <-oldResult:
+		t.Fatalf("old Pair returned before the held pair_ok callback was released: %v", err)
+	default:
+	}
+	closeRound2Signal(release)
 	if err := awaitPairResult(t, link, oldResult, "old Pair"); err != nil {
 		t.Fatalf("old Pair error = %v, want nil: its commit had succeeded", err)
 	}
+	awaitEmoji(t, host)
 	expectStatus(t, link, `"state":"pairing"`)
 
 	// The new pair's own client rotates cookies; they must still persist.

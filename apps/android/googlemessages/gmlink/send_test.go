@@ -299,10 +299,15 @@ func TestPreparedRcsAdmissionRejectsRevocationBeforeHTTPWrite(t *testing.T) {
 	defer cleanup()
 	ticket := prepareTicket(t, link, token, tmpID)
 	reached, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
 	link.mu.Lock()
-	link.beforeSendAdmission = func() {
+	send := link.client.SendMessage
+	link.sendMessage = func(ctx context.Context, request *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error) {
 		close(reached)
 		<-release
+		return send(ctx, request)
 	}
 	link.mu.Unlock()
 	result := make(chan string, 1)
@@ -315,8 +320,8 @@ func TestPreparedRcsAdmissionRejectsRevocationBeforeHTTPWrite(t *testing.T) {
 	link.mu.Lock()
 	link.invalidateEvidenceLocked()
 	link.mu.Unlock()
-	close(release)
-	if got := <-result; got != "rejected" {
+	unblock()
+	if got := recvWithin(t, result, 5*time.Second); got != "rejected" {
 		t.Fatalf("revoked admission = %s", got)
 	}
 	fixture.mu.Lock()
@@ -413,8 +418,16 @@ func TestPreparedRcsAdmissionRejectsStopAndOwnerRetirement(t *testing.T) {
 			link, fixture, cleanup, token, tmpID := preparedRcsFixtureWithPhone(t)
 			ticket := prepareTicket(t, link, token, tmpID)
 			reached, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
 			link.mu.Lock()
-			link.beforeSendAdmission = func() { close(reached); <-release }
+			send := link.client.SendMessage
+			link.sendMessage = func(ctx context.Context, request *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error) {
+				close(reached)
+				<-release
+				return send(ctx, request)
+			}
 			link.mu.Unlock()
 			result := make(chan string, 1)
 			go func() { result <- decodeSendCode(t, link.CommitPreparedRcs(ticket, commitPermit(tmpID, token))) }()
@@ -424,8 +437,8 @@ func TestPreparedRcsAdmissionRejectsStopAndOwnerRetirement(t *testing.T) {
 				t.Fatal("transport admission was not reached")
 			}
 			test.revoke(link)
-			close(release)
-			if got := <-result; got != "rejected" {
+			unblock()
+			if got := recvWithin(t, result, 5*time.Second); got != "rejected" {
 				t.Fatalf("revoked admission = %s", got)
 			}
 			if got := fixture.countAction(gmproto.ActionType_SEND_MESSAGE.String()); got != 0 {

@@ -81,9 +81,7 @@ type Link struct {
 	outputClosed          bool
 	outputActive          int
 	closeReady            bool
-	outputStart           func(hostOutput)
 	completionOutputReady func()
-	pairCleanupReady      func(uint64)
 
 	changes                      chan any
 	conversationEvents           []conversationEvent
@@ -112,7 +110,6 @@ type Link struct {
 	preparedTicket               *preparedRcsTicket
 	preparedReactionTicket       *preparedReactionTicket
 	sendAdmissionInFlight        bool
-	beforeSendAdmission          func()
 	ticketNow                    func() time.Time
 	sendMessage                  func(context.Context, *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error)
 	sendReaction                 func(context.Context, *gmproto.SendReactionRequest) (*gmproto.SendReactionResponse, error)
@@ -340,9 +337,6 @@ func (link *Link) pair(auth *libgm.AuthData, relink bool, storedSource string) (
 			if link.restorePairFor(owner, previous, previousEvidence, code) {
 				link.emitFor(owner, "link", code, 0)
 			}
-		}
-		if link.pairCleanupReady != nil {
-			link.pairCleanupReady(owner)
 		}
 		link.mu.Lock()
 		// Clear only this pair's own handles: a newer pair may already own them.
@@ -1973,9 +1967,6 @@ func (link *Link) deliverUnmanagedOutput(output hostOutput) {
 }
 
 func (link *Link) deliverOutput(output hostOutput) {
-	if link.outputStart != nil {
-		link.outputStart(output)
-	}
 	if link.outputAdmitted(output) {
 		link.callHost(output)
 	}

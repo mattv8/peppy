@@ -909,31 +909,40 @@ func TestFetchRcsGapUsesPerPageDeadline(t *testing.T) {
 	}
 }
 
-func TestRcsOutputDropsRevokedStreamInsidePlatformDispatch(t *testing.T) {
-	host := &ownedRecordHost{}
-	link := receiveWiringLink(host)
-	output := hostOutput{
-		rcsRecord:         `{"code":"ok"}`,
-		generation:        7,
-		revision:          11,
-		streamEpoch:       3,
-		requireGeneration: true,
-		requireRevision:   true,
-		requireStream:     true,
-		done:              make(chan struct{}),
-	}
-	link.outputActive = 1
-	link.outputStart = func(hostOutput) {
-		link.mu.Lock()
-		link.invalidateEvidenceLocked()
-		link.ownerVerification = nil
-		link.mu.Unlock()
-	}
-
-	link.deliverOutput(output)
-
-	if len(host.rcsRecords) != 0 {
-		t.Fatalf("records = %v", host.rcsRecords)
+func TestRcsOutputDispatchRequiresCurrentStream(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		revoke  bool
+		records int
+	}{
+		{name: "current", records: 1},
+		{name: "revoked", revoke: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host := &ownedRecordHost{}
+			link := receiveWiringLink(host)
+			output := hostOutput{
+				rcsRecord:         `{"code":"ok"}`,
+				generation:        7,
+				revision:          11,
+				streamEpoch:       3,
+				requireGeneration: true,
+				requireRevision:   true,
+				requireStream:     true,
+				done:              make(chan struct{}),
+			}
+			link.outputActive = 1
+			if test.revoke {
+				link.mu.Lock()
+				link.invalidateEvidenceLocked()
+				link.ownerVerification = nil
+				link.mu.Unlock()
+			}
+			link.deliverOutput(output)
+			if len(host.rcsRecords) != test.records {
+				t.Fatalf("records = %v, want %d", host.rcsRecords, test.records)
+			}
+		})
 	}
 }
 
