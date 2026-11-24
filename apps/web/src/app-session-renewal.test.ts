@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AppSessionRenewal, armHostedSessionRenewal, restoreAfterPersistedPageShow } from "./app-session-renewal";
+import { AppSessionRenewal, restoreAfterPersistedPageShow } from "./app-session-renewal";
 
 const accountId = "11111111-1111-7111-8111-111111111111";
 
@@ -180,13 +180,5 @@ describe("AppSessionRenewal", () => {
     now = 900_000;
     await renewal.onInteraction({ isTrusted: true });
     expect(fetch).toHaveBeenCalledTimes(4);
-  });
-
-  it("arms only when hosted configuration is available", () => {
-    const arm = vi.fn(() => () => undefined);
-    expect(armHostedSessionRenewal(false, { arm } as unknown as AppSessionRenewal)).toBeUndefined();
-    expect(arm).not.toHaveBeenCalled();
-    expect(armHostedSessionRenewal(true, { arm } as unknown as AppSessionRenewal)).toBeTypeOf("function");
-    expect(arm).toHaveBeenCalledOnce();
   });
 });

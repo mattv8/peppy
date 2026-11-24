@@ -1,7 +1,9 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { NotificationFilterBar } from "./NotificationFilterBar";
+
+afterEach(cleanup);
 
 describe("NotificationFilterBar", () => {
   it("keeps arrangement names and invokes the enabled dismiss action", () => {

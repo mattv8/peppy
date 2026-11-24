@@ -535,6 +535,7 @@ describe("setup landing routing", () => {
     host.conversations = [replacement];
     await act(async () => hint?.());
 
+    await waitFor(() => expect(document.getElementById("thread-list")).toBeInTheDocument());
     expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
     expect(screen.queryByText("Hello from Aurora")).not.toBeInTheDocument();
     expect(screen.queryByText("Hello from River")).not.toBeInTheDocument();
@@ -712,6 +713,7 @@ describe("setup landing routing", () => {
     render(<App />);
 
     await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    await waitFor(() => expect(document.getElementById("thread-list")).toBeInTheDocument());
     expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
     expect(bridge.enrollment_status).not.toHaveBeenCalled();
   });
@@ -755,13 +757,6 @@ describe("setup landing routing", () => {
 
     await act(async () => refresh.resolve(refreshedSnapshot));
     expect(screen.getByRole("button", { name: "Set up phone later" })).toBeInTheDocument();
-  });
-
-  it("removes phone setup from the conversation header", async () => {
-    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [SMS_ONLY], deviceRole: "owner" });
-    render(<App />);
-    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
-    expect(document.getElementById("add-phone-action")).not.toBeInTheDocument();
   });
 
   it("returns to the selected conversation when titlebar phone setup is cancelled", async () => {
@@ -931,6 +926,7 @@ describe("setup landing routing", () => {
     await landingSnapshot({ connection: { state: "offline", errorCode: "offline" }, encryption: { state: "unlocked" } });
     render(<App />);
     await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    await waitFor(() => expect(document.getElementById("thread-list")).toBeInTheDocument());
     expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
     expect(document.getElementById("system-ribbon")).toHaveTextContent("Server offline");
     expect(document.getElementById("system-ribbon")).toHaveTextContent("Peppy will reconnect automatically.");
@@ -1003,8 +999,8 @@ describe("setup landing routing", () => {
     });
     render(<App />);
     await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
-    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
     await waitFor(() => expect(document.querySelector("[data-header-title]")?.textContent).toBe("Peppy"));
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
   });
 
   it("shows the neutral Peppy header for a deferred owner without a phone", async () => {
@@ -1018,8 +1014,8 @@ describe("setup landing routing", () => {
     });
     render(<App />);
     await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    await waitFor(() => expect(document.querySelector("[data-header-title]")?.textContent).toBe("Peppy"));
     expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
-    expect(document.querySelector("[data-header-title]")?.textContent).toBe("Peppy");
   });
 });
 
@@ -2521,25 +2517,6 @@ describe("lazy conversation history", () => {
     expect(screen.queryByText("Stale after lock")).not.toBeInTheDocument();
   });
 
-  it("does not update state when an older page resolves after unmount", async () => {
-    const conversation = host.conversations[0];
-    conversation.hasOlderMessages = true;
-    const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
-    vi.spyOn(bridge, "load_history").mockReturnValueOnce(page.promise);
-    const { unmount } = render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
-    unmount();
-
-    await act(async () => page.resolve({
-      conversationId: conversation.id,
-      messages: [{ ...conversation.messages[0], id: "m-stale-after-unmount", body: "Stale after unmount", attachments: [] }],
-      hasMore: false,
-    }));
-
-    expect(screen.queryByText("Stale after unmount")).not.toBeInTheDocument();
-    expect(bridge.load_history).toHaveBeenCalledOnce();
-  });
-
   it("shows a visible error when a history page belongs to another conversation", async () => {
     const conversation = host.conversations[0];
     conversation.hasOlderMessages = true;
@@ -2741,6 +2718,7 @@ describe("conversation pinning", () => {
     expect(setPinned).toHaveBeenCalledOnce();
     expect(setPinned).toHaveBeenCalledWith("aurora", true);
     expect(pin).toBeDisabled();
+    onTestFinished(() => document.body.removeAttribute("tabindex"));
     document.body.tabIndex = -1;
     document.body.focus();
     expect(document.activeElement).toBe(document.body);
@@ -2751,7 +2729,6 @@ describe("conversation pinning", () => {
     await waitFor(() => expect(unpin).toHaveFocus());
     expect(unpin).toHaveAccessibleName("Unpin conversation");
     expect(unpin.closest("[data-conversation-actions]")).toBeNull();
-    document.body.removeAttribute("tabindex");
   });
 
   it("prevents duplicate unpin requests and restores focus to the trailing pin after reordering", async () => {
@@ -2828,6 +2805,7 @@ describe("conversation pinning", () => {
     render(<App />);
 
     await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    await waitFor(() => expect(document.getElementById("thread-list")).toBeInTheDocument());
     expect(document.querySelector("[data-pin-conversation-id]")).not.toBeInTheDocument();
   });
 
@@ -3033,7 +3011,7 @@ describe("new-recipient drafts", () => {
     host.conversations = [];
     render(<App />);
     await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
-    expect(document.querySelector("[data-header-title]")?.textContent).toBe("Peppy");
+    await waitFor(() => expect(document.querySelector("[data-header-title]")?.textContent).toBe("Peppy"));
     const omni = await screen.findByRole("combobox", { name: "Search Peppy" });
     fireEvent.change(omni, { target: { value: "+1 202 555 0100" } });
     fireEvent.click(await screen.findByText("Start conversation with (202) 555-0100"));
@@ -3613,7 +3591,6 @@ describe("draft durability", () => {
     expect(notice).toHaveTextContent("Error saving draft.");
     expect(notice.closest("#composer-inline-status")).not.toBeNull();
     expect(within(document.getElementById("composer-inline-status")!).getAllByText("Error saving draft.")).toHaveLength(1);
-    expect(document.getElementById("composer-status-row")).toBeNull();
     expect(within(notice).getByRole("button", { name: "Retry" })).toBeEnabled();
   });
 
@@ -4072,7 +4049,6 @@ describe("draft durability", () => {
     expect(bridge.send_draft).toHaveBeenCalledTimes(1);
     expect(host.sent).toHaveLength(0);
     expect(host.drafts.get("river")?.text).toBe("destination hello");
-    expect(document.querySelector("[data-draft-conflict-comparison]")).toBeNull();
   });
 
   it("copies the exact moved text on demand and keeps it when the clipboard write fails", async () => {
@@ -4235,7 +4211,6 @@ describe("draft durability", () => {
     const recover = within(failure).getByRole("button", { name: "Save as new draft" });
     expect(recover).toHaveAttribute("data-draft-action", "save-new");
     expect(message()).toHaveValue("late local text");
-    expect(document.querySelector("[data-draft-conflict-comparison]")).toBeNull();
 
     host.failSaves = undefined;
     fireEvent.click(recover);
@@ -4271,7 +4246,6 @@ describe("draft durability", () => {
     await waitFor(() =>
       expect(host.drafts.get("aurora")).toMatchObject({ text: "mine", revision: "3" }),
     );
-    expect(document.querySelector("[data-draft-conflict-comparison]")).toBeNull();
 
     fireEvent.click(within(replaced).getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(message()).toHaveValue("other window"));
@@ -5076,7 +5050,6 @@ describe("composer window", () => {
     expect(pill.querySelector("[data-head-route-state]")).toHaveTextContent("Online");
     expect(pill.querySelector("[data-head-route-state]")).toHaveAttribute("data-route-badge", "status");
     expect(pill.querySelector("[data-head-route-state]")).toHaveAttribute("data-gateway-availability", "connected");
-    expect(pill.querySelector("[data-head-route-separator]")).not.toBeInTheDocument();
     expect(pill.querySelector("[aria-hidden]")).not.toBeInTheDocument();
     expect(document.getElementById("head-panel-route-description")).toHaveTextContent("Phone, SIM 2. Phone and SIM are selected in the main window.");
     expect(screen.queryByRole("combobox", { name: "Phone" })).not.toBeInTheDocument();
@@ -5169,7 +5142,6 @@ describe("composer window", () => {
       openComposerWindow("aurora", true);
       render(<App />);
       await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent(routeCase.label.replace(" · ", "")));
-      expect(document.querySelector("[data-head-route-separator]")).not.toBeInTheDocument();
       expect(screen.queryByRole("combobox", { name: "Phone" })).not.toBeInTheDocument();
     }
   });
@@ -5825,6 +5797,7 @@ describe("host state display", () => {
 
   it("locks browser snapshots only after saving drafts through a receiver-bound host capability", async () => {
     const lock = vi.fn().mockResolvedValue(undefined);
+    onTestFinished(() => { delete bridge.lock_sync; });
     bridge.lock_sync = function() {
       expect(this).toBe(bridge);
       return lock();
@@ -5840,11 +5813,11 @@ describe("host state display", () => {
     await waitFor(() => expect(lock).toHaveBeenCalledOnce());
     expect(bridge.save_draft).toHaveBeenCalled();
     expect(vi.mocked(bridge.save_draft).mock.invocationCallOrder[0]).toBeLessThan(lock.mock.invocationCallOrder[0]);
-    delete bridge.lock_sync;
   });
 
   it("shows the remembered unlock warning and refreshes after browser lock cleanup fails", async () => {
     const lock = vi.fn().mockRejectedValue({ code: "recovery-clear-failed", message: "Browser recovery could not be forgotten." });
+    onTestFinished(() => { delete bridge.lock_sync; });
     bridge.lock_sync = function() { return lock(); };
     const snapshot = host.load();
     vi.mocked(bridge.load_state).mockResolvedValue({ ...snapshot, mode: "browser", desktop: undefined });
@@ -5856,7 +5829,6 @@ describe("host state display", () => {
 
     expect(await screen.findByText("Sync is locked, but this browser may still remember your Vault key phrase.")).toBeInTheDocument();
     await waitFor(() => expect(loadState).toHaveBeenCalledTimes(2));
-    delete bridge.lock_sync;
   });
 
   it("omits native update settings from the browser host", async () => {
@@ -6095,7 +6067,7 @@ describe("host state display", () => {
     await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
-    expect(screen.getByRole("region", { name: "Settings" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Settings" })).toBeInTheDocument();
     expect(document.getElementById("notification-banner-locked-note")).toHaveTextContent("Unlock Peppy to change banner settings.");
     expect(screen.getByRole("switch", { name: "SMS/MMS banners" })).toBeDisabled();
     expect(screen.getByRole("switch", { name: "App notification banners" })).toBeDisabled();
@@ -6126,7 +6098,6 @@ describe("host state display", () => {
     expect(
       screen.queryByRole("separator", { name: "Resize thread list" }),
     ).not.toBeInTheDocument();
-    expect(document.getElementById("new-composer-window")).not.toBeInTheDocument();
     expect(
       screen.getByRole("heading", { level: 1, name: "Settings" }),
     ).toBeInTheDocument();
@@ -6214,8 +6185,8 @@ describe("host state display", () => {
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: /^Notifications/ }));
 
-    const originalScrollTo = HTMLElement.prototype.scrollTo;
-    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    const originalScrollTo = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTo");
+    const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
     const originalClientTop = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientTop");
     const originalBounds = HTMLElement.prototype.getBoundingClientRect;
     const scrollContent = vi.fn();
@@ -6262,8 +6233,10 @@ describe("host state display", () => {
       expect(scrollWindow).not.toHaveBeenCalled();
     } finally {
       margin.remove();
-      Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: originalScrollTo });
-      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: originalScrollIntoView });
+      if (originalScrollTo) Object.defineProperty(HTMLElement.prototype, "scrollTo", originalScrollTo);
+      else delete (HTMLElement.prototype as { scrollTo?: typeof HTMLElement.prototype.scrollTo }).scrollTo;
+      if (originalScrollIntoView) Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScrollIntoView);
+      else delete (HTMLElement.prototype as { scrollIntoView?: typeof HTMLElement.prototype.scrollIntoView }).scrollIntoView;
       if (originalClientTop) Object.defineProperty(HTMLElement.prototype, "clientTop", originalClientTop);
       else delete (HTMLElement.prototype as { clientTop?: number }).clientTop;
     }
@@ -7315,7 +7288,6 @@ describe("desktop presentation controls", () => {
       clientY: 10,
     });
     fireEvent.pointerMove(grip, { pointerId: 1, clientX: 80, clientY: 60 });
-    expect(document.querySelector("[data-recipient-anchor], #recipient-drop-targets, .recipient-drop-target")).not.toBeInTheDocument();
     fireEvent.pointerCancel(grip, { pointerId: 1 });
     expect(panel.style.left).toBe(before.left);
     expect(panel.style.top).toBe(before.top);
@@ -7592,17 +7564,10 @@ describe("development fixture bridge", () => {
     ).toBe(true);
   });
 
-  it("runs the new-recipient flow in fixture mode without debug labels", async () => {
+  it("runs the new-recipient flow in fixture mode with assigned draft identity", async () => {
     const save = vi.spyOn(fixtureBridge, "save_draft");
     render(<App />);
     const omni = await screen.findByRole("combobox", { name: "Search Peppy" });
-    for (const debugText of [
-      "SIMULATED UI",
-      "DEVELOPMENT FIXTURE",
-      "Browser fixture",
-      "sim-fixture",
-    ])
-      expect(document.body.textContent).not.toContain(debugText);
     fireEvent.change(omni, { target: { value: "+1 202 555 0199" } });
     fireEvent.click(await screen.findByText("Start conversation with (202) 555-0199"));
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));

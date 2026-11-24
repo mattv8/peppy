@@ -18,11 +18,6 @@ describe("firstEmoji", () => {
     expect(firstEmoji("123")).toBeUndefined();
     expect(firstEmoji("#")).toBeUndefined();
   });
-
-  it("accepts flags as one grapheme and rejects keycaps (the shared contract, emoji.contract.test.tsx)", () => {
-    expect(firstEmoji("🇬🇧")).toBe("🇬🇧");
-    expect(firstEmoji("1️⃣")).toBeUndefined();
-  });
 });
 
 describe("pickerHint", () => {

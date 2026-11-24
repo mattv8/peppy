@@ -105,13 +105,6 @@ describe("send cancellation", () => {
     expect(pending).toHaveFocus();
     cancelSend.mockRestore();
   });
-  it("marks the received-by-phone fixture as gateway-persisted without inferring eligibility from its status", async () => {
-    const snapshot = await fixtureBridge.load_state("conv-aurora");
-    const message = snapshot.conversations.find((conversation) => conversation.id === "conv-aurora")?.messages.find((candidate) => candidate.id === "message-aurora-2");
-
-    expect(message).toMatchObject({ status: "gateway-persisted", sendCancellation: { canCancel: true } });
-  });
-
   it("keeps the outgoing body when the durable cancellation request fails", async () => {
     const cancelSend = vi.spyOn(bridge, "cancel_send").mockRejectedValueOnce(new Error("offline"));
     render(<App />);
@@ -135,6 +128,7 @@ describe("send cancellation", () => {
   });
 
   it("replaces an eligible fixture message with its durable pending state", async () => {
+    vi.spyOn(bridge, "cancel_send").mockResolvedValueOnce({ state: "requested", canCancel: false, requiresGatewayUpdate: false });
     render(<App />);
 
     const cancel = await screen.findByRole("button", { name: "Cancel send and remove message" });

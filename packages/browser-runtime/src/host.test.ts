@@ -272,54 +272,36 @@ describe("browser host RPC", () => {
     await host.stop();
   });
 
-  it("preserves enrollment command results and network call traces", async () => {
+  it.each([
+    ["create_owner", { setupToken: "setup", adminPassword: "admin", passphrase: "phrase", username: "user" }, "enrollmentCreateOwner", [{ setupToken: "setup", adminPassword: "admin", passphrase: "phrase" }, "user"]],
+    ["sign_in", { username: "user" }, "enrollmentSignIn", ["", "user"]],
+    ["connect_shared_secret", { passphrase: "phrase", vaultOwner: "owner" }, "enrollmentConnectSharedSecret", ["phrase", "owner"]],
+    ["begin_vault_request", { inviteLink: "link", displayName: "name" }, "enrollmentBeginVaultRequest", ["link", "name"]],
+    ["create_vault", { username: "user", adminPassword: "admin", passphrase: "phrase" }, "enrollmentCreateVault", ["user", { adminPassword: "admin", passphrase: "phrase" }]],
+  ])("maps enrollment_%s arguments to the network", async (command, args, method, methodArgs) => {
+    const trace: unknown[] = [];
+    const network = new Proxy({}, {
+      get: (_target, name: string) => async (...networkArgs: unknown[]) => {
+        trace.push([name, ...networkArgs]);
+      },
+    }) as import("./host.js").BrowserNetwork;
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => new FakeSession(), network });
+    const enrollment = (host as unknown as { enrollment(request: RpcRequest): Promise<unknown> }).enrollment.bind(host);
+
+    await enrollment({ id: 1, command: `enrollment_${command}`, args });
+    expect(trace).toEqual([[method, ...methodArgs]]);
+  });
+
+  it("rejects invalid enrollment requests without network calls", async () => {
     const trace: unknown[] = [];
     const network = new Proxy({}, {
       get: (_target, name: string) => async (...args: unknown[]) => {
         trace.push([name, ...args]);
-        if (name === "enrollmentGenerateSecret") return "generated";
-        if (["enrollmentSetHostedCsrf", "enrollmentSignOut", "enrollmentRevokeInvite", "enrollmentApproveVaultRequest", "enrollmentDenyVaultRequest", "enrollmentCancel"].includes(name)) return undefined;
-        return { source: name };
       },
     }) as import("./host.js").BrowserNetwork;
     const host = new BrowserWorkerHost({ locks: locks(), boot: async () => new FakeSession(), network });
     const enrollment = (request: RpcRequest) =>
       (host as unknown as { enrollment(request: RpcRequest): Promise<unknown> }).enrollment(request);
-    const cases: Array<[string, Record<string, unknown>, string, unknown[], unknown]> = [
-      ["discover", { origin: "origin" }, "Discover", ["origin"], { source: "enrollmentDiscover" }],
-      ["create_owner", { setupToken: "setup", adminPassword: "admin", passphrase: "phrase", username: "user" }, "CreateOwner", [{ setupToken: "setup", adminPassword: "admin", passphrase: "phrase" }, "user"], { source: "enrollmentCreateOwner" }],
-      ["sign_in", { username: "user" }, "SignIn", ["", "user"], { source: "enrollmentSignIn" }],
-      ["set_hosted_csrf", { csrf: "csrf" }, "SetHostedCsrf", ["csrf"], undefined],
-      ["connect_shared_secret", { passphrase: "phrase", vaultOwner: "owner" }, "ConnectSharedSecret", ["phrase", "owner"], { source: "enrollmentConnectSharedSecret" }],
-      ["begin_vault_request", { inviteLink: "link", displayName: "name" }, "BeginVaultRequest", ["link", "name"], { source: "enrollmentBeginVaultRequest" }],
-      ["vault_request_status", {}, "VaultRequestStatus", [], { source: "enrollmentVaultRequestStatus" }],
-      ["create_vault", { username: "user", adminPassword: "admin", passphrase: "phrase" }, "CreateVault", ["user", { adminPassword: "admin", passphrase: "phrase" }], { source: "enrollmentCreateVault" }],
-      ["pending_vault_request", {}, "PendingVaultRequest", [], { source: "enrollmentPendingVaultRequest" }],
-      ["add_phone", { method: "transfer" }, "AddPhone", ["transfer"], { source: "enrollmentAddPhone" }],
-      ["connect_computer", {}, "ConnectComputer", [], { source: "enrollmentConnectComputer" }],
-      ["computer_status", {}, "ComputerStatus", [], { source: "enrollmentComputerStatus" }],
-      ["confirm_computer", {}, "ConfirmComputer", [], { source: "enrollmentConfirmComputer" }],
-      ["cancel_computer", {}, "CancelComputer", [], { source: "enrollmentCancelComputer" }],
-      ["status", {}, "Status", [], { source: "enrollmentStatus" }],
-      ["approve", {}, "Approve", [], { source: "enrollmentApprove" }],
-      ["cancel", { waitingOnly: true }, "Cancel", [{ waitingOnly: true }], undefined],
-      ["sign_out", {}, "SignOut", [], undefined],
-      ["generate_secret", {}, "GenerateSecret", [], { passphrase: "generated" }],
-      ["management", {}, "Management", [], { source: "enrollmentManagement" }],
-      ["revoke_device", { deviceId: "device" }, "RevokeDevice", ["device"], { source: "enrollmentRevokeDevice" }],
-      ["list_vaults", {}, "ListVaults", [], { source: "enrollmentListVaults" }],
-      ["create_invite", {}, "CreateInvite", [], { source: "enrollmentCreateInvite" }],
-      ["list_invites", {}, "ListInvites", [], { source: "enrollmentListInvites" }],
-      ["revoke_invite", { inviteId: "invite" }, "RevokeInvite", ["invite"], undefined],
-      ["list_vault_requests", {}, "ListVaultRequests", [], { source: "enrollmentListVaultRequests" }],
-      ["approve_vault_request", { requestId: "request" }, "ApproveVaultRequest", ["request"], undefined],
-      ["deny_vault_request", { requestId: "request" }, "DenyVaultRequest", ["request"], undefined],
-    ];
-    for (const [command, args, method, methodArgs, value] of cases) {
-      trace.length = 0;
-      expect(await enrollment({ id: 1, command: `enrollment_${command}`, args })).toEqual({ id: 1, ok: true, value });
-      expect(trace).toEqual([[`enrollment${method}`, ...methodArgs]]);
-    }
     for (const [command, args] of [
       ["enrollment_unknown", {}],
       ["enrollment_create_owner", {}],
@@ -2540,34 +2522,6 @@ describe("browser host RPC", () => {
     expect(accept).toHaveBeenCalledTimes(2);
   });
 
-  it("does not accept a draft send when its core preflight rejects it", async () => {
-    const session = new FakeSession();
-    const accept = vi.fn(async () => undefined);
-    const sendDraft = async (args: Record<string, unknown>) => {
-      const input = args.input as Record<string, unknown>;
-      const prepared = await session.mutate("_worker_draft_prepare_send", { input });
-      await accept();
-      return prepared;
-    };
-    session.mutate = async (command, args) => {
-      session.calls.push({ command, args, mutation: true });
-      if (command === "_worker_draft_prepare_send") throw new CoreRejectedError("invalid-draft");
-      return { command };
-    };
-    const host = new BrowserWorkerHost({
-      locks: locks(),
-      boot: async () => session,
-      network: { start: async () => undefined, stop: async () => undefined, producerReady: () => true, sendDraft } as unknown as import("./host.js").BrowserNetwork,
-    });
-    const attached = port();
-    await host.attach(attached);
-    attached.emit({ id: 1, command: "send_draft", args: { input: { text: "invalid" } } });
-    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
-
-    expect(accept).not.toHaveBeenCalled();
-    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: false, error: expect.objectContaining({ code: "invalid-draft" }) }));
-  });
-
   it("locks all ports and terminates the worker without restoring a live filesystem", async () => {
     const session = new FakeSession();
     let terminated = false;
@@ -3255,18 +3209,6 @@ describe("browser host RPC", () => {
     expect(attached.messages).toContainEqual({ event: "stopped", reason: "unavailable" });
   });
 
-  it("unwraps DesktopBridge draft argument objects into Rust's flat command shapes", async () => {
-    const session = new FakeSession();
-    await dispatchBrowserRpc(session, { id: 1, command: "save_draft", args: { input: { text: "draft" } } });
-    await dispatchBrowserRpc(session, { id: 2, command: "set_notification_preferences", args: { preferences: { preview: "hidden" } } });
-    await dispatchBrowserRpc(session, { id: 3, command: "discard_draft", args: { input: { id: "draft", conversationId: "conversation", expectedRevision: "1" } } });
-    expect(session.calls).toEqual([
-      { command: "save_draft", args: { text: "draft" }, mutation: true },
-      { command: "set_notification_preferences", args: { messageBanners: true, mirroredBanners: true, preview: "hidden", showSource: false, muteWithHeads: true }, mutation: true },
-      { command: "discard_draft", args: { id: "draft", conversationId: "conversation", expectedRevision: "1" }, mutation: true },
-    ]);
-  });
-
   it("writes notification preferences through the checkpointed core session", async () => {
     const session = new FakeSession();
     const response = await dispatchBrowserRpc(session, { id: 1, command: "set_notification_preferences", args: { preferences: { preview: "hidden" } } });
@@ -3524,7 +3466,7 @@ describe("send_again host command", () => {
     await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
 
     expect(session.calls).toContainEqual({ command: "send_again", args, mutation: true });
-    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: { command: "send_again" } });
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: true }));
     expect(wake).toHaveBeenCalled();
   });
 

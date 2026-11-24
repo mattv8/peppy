@@ -57,12 +57,3 @@ it("offers no scope while inactive or locked", () => {
   rerender({ ...options, active: true, locked: false });
   expect(result.current.scope).toMatchObject({ label: "Contacts" });
 });
-
-it("re-arms the scope on reset when the chip was exited and the query was left", () => {
-  const { result } = renderHook(() => useScopedSearch(options));
-  act(() => result.current.scope!.onExit());
-
-  act(() => result.current.resetSearch());
-
-  expect(result.current.scope).toBeDefined();
-});

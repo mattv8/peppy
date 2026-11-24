@@ -334,7 +334,7 @@ describe("MediaTile preview hydration", () => {
   });
 
   it("bounds repeated busy answers to the attempt budget, then offers an explicit retry that resets it", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     try {
       vi.stubGlobal("IntersectionObserver", Observer);
       const hydrateMediaPreview = vi.fn<HydratePreview>().mockRejectedValue({ code: "media-busy" });

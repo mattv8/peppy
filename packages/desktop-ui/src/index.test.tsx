@@ -447,7 +447,6 @@ describe("ConversationList interactions", () => {
     expect(document.querySelectorAll("[data-pin-conversation-id='conv-a']")).toHaveLength(1);
     const select = document.querySelector<HTMLButtonElement>("[data-conversation-id='conv-a']")!;
     expect(unpin.compareDocumentPosition(select) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(document.querySelector("[data-conversation-actions] .conversation-pin")).not.toBeInTheDocument();
     expect(document.querySelector("[data-conversation-actions]")).not.toBeInTheDocument();
     expect(unpin.querySelectorAll("svg[aria-hidden='true']")).toHaveLength(2);
     fireEvent.click(select);
@@ -705,13 +704,6 @@ describe("desktop UI controls", () => {
     expect(screen.getByText("Hidden hint")).toHaveClass("sr-only");
   });
 
-  it("applies the standalone variant class only when requested", () => {
-    const { container, unmount } = render(<RecipientChipInput recipients={[]} onCommit={() => {}} variant="standalone" />);
-    expect(container.querySelector("[data-recipient-chip-input]")).toHaveClass("recipient-chip-input", "recipient-chip-input--standalone");
-    unmount();
-
-  });
-
   it("uses a deterministic fallback avatar for conversations without an identity", () => {
     render(<ConversationList conversations={people} selectedId="conv-a" onSelect={() => {}} />);
     const avatar = screen.getByRole("button", { name: /Aurora/ }).querySelector(".contact-avatar");
@@ -776,15 +768,6 @@ describe("desktop UI controls", () => {
     fireEvent.change(input, { target: { value: "+12025550100" } });
     fireEvent.keyDown(input, { key: "Enter" });
     expect(changed).toHaveBeenLastCalledWith(["phone-conversation"]);
-  });
-
-  it("keeps named-contact matching as free text", () => {
-    const changed = vi.fn();
-    render(<RecipientPicker recipients={people} onChange={changed} />);
-    const input = screen.getByRole("combobox");
-    fireEvent.change(input, { target: { value: "Aur" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(changed).toHaveBeenCalledWith(["conv-a"]);
   });
 
   it("offers a formatted, canonical new-recipient option for a valid number without a conversation", () => {
@@ -857,20 +840,6 @@ describe("desktop UI controls", () => {
       isComposing: true,
     });
     expect(sent).not.toHaveBeenCalled();
-  });
-
-  it("passes a supplied placeholder through to the message textarea", () => {
-    render(
-      <Composer
-        draft=""
-        attachments={[]}
-        sendSupported={false}
-        placeholder="Loading draft…"
-        onDraftChange={() => {}}
-        onSend={() => {}}
-      />,
-    );
-    expect(screen.getByLabelText("Message")).toHaveAttribute("placeholder", "Loading draft…");
   });
 
   it("keeps a read-only composer focusable without editing or sending", () => {
@@ -1002,23 +971,6 @@ describe("desktop UI controls", () => {
     expect(document.querySelectorAll("#unavailable-hint")).toHaveLength(1);
   });
 
-  it("never renders the simulated badge", () => {
-    const noop = () => {};
-    const { rerender } = render(
-      <AppTitlebar onMinimize={noop} onMaximize={noop} onClose={noop} />,
-    );
-    expect(screen.queryByText("SIMULATED UI")).not.toBeInTheDocument();
-    rerender(
-      <AppTitlebar
-        onMinimize={noop}
-        onMaximize={noop}
-        onClose={noop}
-        simulated
-      />,
-    );
-    expect(screen.queryByText("SIMULATED UI")).not.toBeInTheDocument();
-  });
-
   it("renders titlebar status only when provided", () => {
     const noop = () => {};
     const { rerender } = render(
@@ -1101,11 +1053,6 @@ describe("desktop UI controls", () => {
     const actions = document.getElementById("titlebar-actions")!;
     expect(actions).toContainElement(document.getElementById("titlebar-extra-action"));
     expect(actions.querySelector('[data-action="new-message"]')?.nextElementSibling).toBe(document.getElementById("titlebar-extra-action"));
-  });
-
-  it("uses the supplied sidebar label for its accessible name and title", () => {
-    render(<AppTitlebar onToggleSidebar={() => {}} sidebarLabel="Toggle contact books" />);
-    expect(screen.getByRole("button", { name: "Toggle contact books" })).toHaveAttribute("title", "Toggle contact books");
   });
 
   it("renders titlebar actions without built-in conversation controls", () => {

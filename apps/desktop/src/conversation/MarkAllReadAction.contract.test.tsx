@@ -39,14 +39,14 @@ describe("MarkAllReadAction contract", () => {
     expect(refresh).toHaveBeenCalledTimes(2);
   });
 
-  it("uses refresh-only recovery for an invalid acknowledgement without rendering its count", async () => {
-    const markAllRead = vi.fn().mockResolvedValue("1.5");
+  it.each(["1.5", "01"])("uses refresh-only recovery for invalid acknowledgement %s without rendering its count", async (acknowledgement) => {
+    const markAllRead = vi.fn().mockResolvedValue(acknowledgement);
     const refresh = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(undefined);
     render(<MarkAllReadAction unreadCount={1} enabled markAllRead={markAllRead} refresh={refresh} onFocusFallback={vi.fn()} />);
 
     confirm();
     await screen.findByRole("alert");
-    expect(screen.queryByText(/1\.5/)).not.toBeInTheDocument();
+    expect(screen.queryByText(acknowledgement)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry refresh" }));
 
     await waitFor(() => expect(screen.getByRole("status")).toBeEmptyDOMElement());

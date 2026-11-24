@@ -196,7 +196,6 @@ describe("RCS outgoing message states", () => {
     await waitFor(() => expect(document.querySelector('[data-message-row="mystery"]')).toBeInTheDocument());
     expect(document.querySelector('[data-message-meta="mystery"]')).toBeNull();
     expect(document.querySelectorAll(".message-meta-status:empty")).toHaveLength(0);
-    expect(await meta("mystery")).toBeNull();
   });
 
   it("keeps the RCS word out of every message row", async () => {

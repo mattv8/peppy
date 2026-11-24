@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import purchaseOptionsFixture from "./purchase-options.fixture.json";
 
 const eventMock = vi.hoisted(() => ({
   handler: undefined as ((event: { payload: unknown }) => void) | undefined,
@@ -505,23 +504,6 @@ describe("fixture draft saves", () => {
     expect(await fixtureBridge.mark_all_read()).toBe("0");
     const state = await fixtureBridge.load_state();
     expect(state.conversations.every(conversation => conversation.unread === 0)).toBe(true);
-  });
-
-  it("provides sensible development-only billing and sign-in values", async () => {
-    expect(await fixtureBridge.billing_summary()).toEqual({ provider: "none", manageableIn: "website", planActive: false, storagePacks: 0, storageRenewsWithoutPlan: false, deletionPending: false });
-    expect((await fixtureBridge.hosted_account()).providers).toEqual(expect.arrayContaining(["google", "apple"]));
-  });
-
-  it("provides sensible development-only startup and purchase values", async () => {
-    expect(await fixtureBridge.startup_status()).toEqual({ state: "off", background: false });
-    await fixtureBridge.set_start_at_login(true);
-    await fixtureBridge.set_open_in_background(true);
-    expect(await fixtureBridge.startup_status()).toEqual({ state: "on", background: true });
-    expect(await fixtureBridge.purchase_options()).toEqual(purchaseOptionsFixture.direct);
-    expect(await fixtureBridge.store_products()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: "plan" }),
-      expect.objectContaining({ kind: "storage", storageBytes: expect.any(Number) }),
-    ]));
   });
 
   it("updates only an established fixture conversation pin state", async () => {

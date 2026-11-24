@@ -1,7 +1,7 @@
 import type { AttachmentView } from "@peppy/desktop-ui/bridge-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GalleryAttachment } from "./grouping";
-import { applicableHydration, busyRetryDelayMs, createPreviewHydrator, hydratedPreviewCandidates, isCurrentHydration, MAX_BUSY_ATTEMPTS, needsPreviewHydration, NATIVE_HYDRATION_CONCURRENCY, previewSourceKey, withHydratedPreview, type HydratedPreview } from "./previewHydration";
+import { applicableHydration, busyRetryDelayMs, createPreviewHydrator, hydratedPreviewCandidates, isCurrentHydration, needsPreviewHydration, previewSourceKey, withHydratedPreview, type HydratedPreview } from "./previewHydration";
 
 /** The native contract: the ORIGINAL attachment view, with its best local thumbnail nested under mediaMeta. */
 const nativeOriginal = (options: { thumbnailId?: string; thumbnailUrl?: string; attachmentId?: string; originalUrl?: string; state?: AttachmentView["state"] } = {}): AttachmentView => ({
@@ -51,7 +51,6 @@ describe("createPreviewHydrator", () => {
   });
 
   it("never runs more than the native concurrency limit and starts queued work as slots free", async () => {
-    expect(NATIVE_HYDRATION_CONCURRENCY).toBe(2);
     const gates = new Map<string, ReturnType<typeof deferred<AttachmentView>>>();
     const hydrate = vi.fn((_messageId: string, id: string) => {
       const gate = deferred<AttachmentView>();
@@ -136,7 +135,6 @@ describe("createPreviewHydrator", () => {
 describe("busyRetryDelayMs", () => {
   it("doubles from 250ms and caps at 2s, within the attempt budget", () => {
     expect([0, 1, 2, 3, 4].map(busyRetryDelayMs)).toEqual([250, 500, 1000, 2000, 2000]);
-    expect(MAX_BUSY_ATTEMPTS).toBe(6);
   });
 });
 

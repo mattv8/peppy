@@ -1,7 +1,9 @@
 import "@testing-library/jest-dom/vitest";
-import { render } from "@testing-library/react";
-import { expect, it } from "vitest";
+import { cleanup, render } from "@testing-library/react";
+import { afterEach, expect, it } from "vitest";
 import { TypingRow } from "./TypingIndicator";
+
+afterEach(cleanup);
 
 it("renders a direct typing bubble without a sender avatar", () => {
   const { container } = render(<TypingRow scope="direct" label="Typing" typers={[]} showSenderAvatars={false} conversationToneSeed="aurora" toneOverrides={{}} />);

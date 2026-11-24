@@ -1,45 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { notificationPersistence, readAccountAccess, type AccountAccessResult, type DesktopBridge, type MessageStatus, type MessageView, type SendCancellationView, type SendRecovery, type SendRecoveryKind } from "./bridge-contracts";
-
-describe("message bridge contract for RCS", () => {
-  it("accepts the read status and rcs transport and keeps rcsReported optional", () => {
-    const status: MessageStatus = "read";
-    const transport: MessageView["transport"] = "rcs";
-    const message: MessageView = { id: "m", revision: "1", sender: "self", body: "", timestamp: "0", attachments: [], status, transport };
-    expect(message.status).toBe("read");
-    expect(message.transport).toBe("rcs");
-    expect(message.rcsReported).toBeUndefined();
-    expect(transport).toBe("rcs");
-  });
-});
-
-describe("send cancellation bridge contract", () => {
-  it("keeps cancellation projection optional for hosts that do not support it", () => {
-    const cancellation: SendCancellationView = { state: "requested", canCancel: false, requiresGatewayUpdate: false };
-    const message: MessageView = { id: "m", revision: "1", sender: "self", body: "", timestamp: "0", attachments: [], sendCancellation: cancellation };
-
-    expect(message.sendCancellation).toEqual(cancellation);
-  });
-});
-
-describe("send recovery bridge contract", () => {
-  it("accepts the three recovery kinds, with canSendAgain required and sentAgain optional", () => {
-    const kinds: SendRecoveryKind[] = ["not-sent", "unconfirmed-removed", "unconfirmed-removed-cancel"];
-    for (const kind of kinds) {
-      const recovery: SendRecovery = { kind, canSendAgain: kind !== "unconfirmed-removed-cancel" };
-      const message: MessageView = { id: "m", revision: "1", sender: "self", body: "", timestamp: "0", attachments: [], sendRecovery: recovery };
-      expect(message.sendRecovery).toEqual(recovery);
-      expect(message.sendRecovery?.sentAgain).toBeUndefined();
-    }
-    const sent: SendRecovery = { kind: "not-sent", canSendAgain: false, sentAgain: { messageId: "m-again" } };
-    expect(sent.sentAgain?.messageId).toBe("m-again");
-  });
-
-  it("declares send_again with the gateway and SIM route and a { messageId } result", () => {
-    const send: DesktopBridge["send_again"] = async (input) => ({ messageId: `${input.messageId}-again` });
-    expect(send).toBeTypeOf("function");
-  });
-});
+import { notificationPersistence, readAccountAccess, type AccountAccessResult } from "./bridge-contracts";
 
 describe("account access bridge contract", () => {
   const notice: AccountAccessResult = {

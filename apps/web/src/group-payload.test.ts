@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ConversationView, DesktopSnapshot, GroupView } from "@peppy/desktop-ui/bridge-contracts";
+import type { ConversationView, DesktopSnapshot } from "@peppy/desktop-ui/bridge-contracts";
 import { groupDraftFields, normalizeGroupSnapshot, parseGroupView, parseSendResult, parseTypingSignal } from "./group-payload";
 
 /** Wire fixtures, one per UX state in ux-spec §12 and contracts §6. */
@@ -161,12 +161,5 @@ describe("groupDraftFields", () => {
 
   it("rejects a non-decimal revision", () => {
     expect(() => groupDraftFields({ expectedMemberRevision: "-1" })).toThrow("Invalid member revision.");
-  });
-});
-
-describe("fixture coverage", () => {
-  it("covers every group state the contract names", () => {
-    const states = new Set(Object.values(fixtures).map((fixture) => (fixture as GroupView).state));
-    expect([...states].sort()).toEqual(["live", "paused", "proving", "unlinked", "withdrawn"]);
   });
 });

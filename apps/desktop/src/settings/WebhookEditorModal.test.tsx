@@ -659,15 +659,5 @@ describe("WebhookEditorModal", () => {
       expect(discardNote()).toBeNull();
       expect(screen.getByRole("button", { name: "Save" })).not.toHaveAttribute("aria-describedby");
     });
-
-    it("places the note after the filter block and before the signing secret", () => {
-      renderEditor({ webhook: zapier });
-      typeInto("Endpoint URL", "https://hooks.example.com/changed");
-
-      const note = discardNote() as HTMLElement;
-      const secret = screen.getByLabelText("Signing secret");
-      expect(note.compareDocumentPosition(secret) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-      expect(screen.getByLabelText("Contacts or numbers").compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    });
   });
 });

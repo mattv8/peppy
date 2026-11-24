@@ -6,6 +6,7 @@ import type { MessageStatus } from "../bridge/bridge";
 import { RcsMessageMeta } from "./RcsMessageMeta";
 
 describe("RcsMessageMeta", () => {
+  afterEach(cleanup);
   it("does not infer delivery from submitted and renders the reported RCS outcomes", () => {
     const { rerender, container } = render(<RcsMessageMeta messageId="submitted" status="submitted" statusLabel="Submitted" />);
     expect(container).toBeEmptyDOMElement();

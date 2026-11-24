@@ -3,7 +3,10 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, expect, it, vi } from "vitest";
 import { NotificationMuteNotice } from "./NotificationMuteNotice";
 
-afterEach(cleanup);
+afterEach(() => {
+  vi.useRealTimers();
+  cleanup();
+});
 
 const notice = { kind: "success" as const, filter: { sourceDeviceId: "phone", packageName: "chat", appName: "Chat", muted: true }, label: "Chat" };
 
@@ -34,5 +37,4 @@ it("pauses its success timeout while hovered", () => {
   fireEvent.mouseLeave(toast);
   act(() => vi.advanceTimersByTime(10_000));
   expect(onDismiss).toHaveBeenCalledOnce();
-  vi.useRealTimers();
 });

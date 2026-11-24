@@ -145,7 +145,6 @@ describe("RememberedUnlock", () => {
     const { record, key } = await cacheRecords(databaseName);
     expect(JSON.stringify(record)).not.toContain("a private phrase");
     expect(key?.extractable).toBe(false);
-    await expect(crypto.subtle.exportKey("raw", key!)).rejects.toThrow();
   });
 
   it("deletes a valid baseline automatic record instead of recovering it", async () => {

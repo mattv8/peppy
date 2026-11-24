@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DesktopBridge } from "@peppy/desktop-ui/bridge-contracts";
 import { useTypingSender } from "./useTypingSender";
@@ -33,6 +33,7 @@ describe("useTypingSender", () => {
   });
 
   afterEach(() => {
+    cleanup();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });

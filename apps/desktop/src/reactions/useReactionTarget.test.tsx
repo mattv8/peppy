@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { REACTION_CLOSE_DELAY_MS, REACTION_OPEN_DELAY_MS, useReactionTarget } from "./useReactionTarget";
 
@@ -24,6 +24,7 @@ describe("useReactionTarget hover", () => {
   });
 
   afterEach(() => {
+    cleanup();
     previous?.remove();
     previous = undefined;
     vi.useRealTimers();

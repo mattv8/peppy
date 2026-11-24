@@ -1,7 +1,9 @@
 import "@testing-library/jest-dom/vitest";
-import { renderHook } from "@testing-library/react";
-import { expect, it, vi } from "vitest";
+import { cleanup, renderHook } from "@testing-library/react";
+import { afterEach, expect, it, vi } from "vitest";
 import { useNotificationSearch } from "./useNotificationSearch";
+
+afterEach(cleanup);
 
 const notification = {
   target: { sourceDeviceId: "phone-1", notificationKey: "notice-1", lifetime: "7" },

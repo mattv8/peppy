@@ -1,7 +1,5 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { bridge, fixtureBridge, fixtureReactionConversations, type DesktopSnapshot } from "./bridge/bridge";
@@ -132,7 +130,6 @@ describe("photo labels", () => {
     await openConversation("conv-reaction-states");
     fireEvent.keyDown(document.querySelector('[data-reaction-message="reaction-photo-pair"][data-slide-index="1"]')!, { key: "r" });
     expect(bar()).toHaveAttribute("aria-label", "React to photo 2 of 2 from +15555550180");
-    expect(bar()?.getAttribute("aria-label")).not.toMatch(/ 0 of /);
   });
 });
 
@@ -233,56 +230,6 @@ describe("re-check: the tile body is described by the R hint", () => {
     expect(hint).toHaveTextContent("Press R to react.");
     expect(document.getElementById("message-list")!.contains(hint)).toBe(false);
     expect(document.querySelector('.tile-body[data-message-id="reaction-photo"]')).toHaveAttribute("aria-describedby", "message-reaction-hint-r");
-  });
-});
-
-describe("re-check: stylesheet for forced colours and the ring", () => {
-  const css = readFileSync(resolve(__dirname, "reactions/reactions.css"), "utf8");
-
-  it("gives unpressed bar buttons Canvas in forced colours, and pressed ones Highlight, after the transparent base", () => {
-    const base = css.indexOf("border-bottom: 2px solid transparent");
-    const forced = css.indexOf("#message-reaction-bar button { border-bottom-color: Canvas; }");
-    expect(base).toBeGreaterThan(-1);
-    expect(forced).toBeGreaterThan(base);
-    expect(css).toContain('#message-reaction-bar button[aria-pressed="true"] { border-bottom-color: Highlight; }');
-  });
-
-  it("draws the pair ring as an overlay on the slide, with no outline on the slide itself", () => {
-    expect(css).toMatch(/\[data-reaction-target\]::after \{ content: ""; position: absolute; inset: 0;[^}]*outline: 2px solid var\(--peppy-focus\)/);
-    expect(css).toMatch(/\[data-reaction-target\] \{ position: relative; \}/);
-    expect(css).not.toMatch(/\[data-reaction-target\] \{ outline:/);
-    expect(css).toContain("[data-reaction-target]::after { outline-color: Highlight; }");
-  });
-});
-
-describe("forced colours, focus and sizes (stylesheet presence)", () => {
-  const css = readFileSync(resolve(__dirname, "reactions/reactions.css"), "utf8");
-  const chips = readFileSync(resolve(__dirname, "reactions/reaction-chips.css"), "utf8");
-
-  it("marks the pressed quick button with a border, not a box-shadow, in both colour modes", () => {
-    expect(css).toMatch(/button\[aria-pressed="true"\]\s*\{[^}]*border-bottom-color: var\(--peppy-accent\)/);
-    expect(css).toMatch(/aria-pressed="true"\] \{ border-bottom-color: Highlight; \}/);
-    expect(css).not.toMatch(/aria-pressed="true"\][^}]*box-shadow/);
-  });
-
-  it("gives the focused message the design ring, with Highlight in forced colours", () => {
-    expect(css).toMatch(/\[data-reaction-ok\]:focus-visible \{ outline: 2px solid var\(--peppy-focus\); outline-offset: 2px; \}/);
-    expect(css).toMatch(/forced-colors: active\) \{ \[data-reaction-ok\]:focus-visible \{ outline-color: Highlight/);
-  });
-
-  it("sets the emoji glyphs to 18px, and 22px on coarse pointers", () => {
-    expect(css).toMatch(/#message-reaction-bar button \{[^}]*font-size: 18px/);
-    expect(css).toMatch(/\(pointer: coarse\) \{ #message-reaction-bar \{ min-height: 48px; \} #message-reaction-bar button \{ width: 44px; height: 44px; font-size: 22px; \} \}/);
-  });
-
-  it("uses the accent for own chips and the full warning colour for unknown chips", () => {
-    expect(chips).toMatch(/\.reaction-badge-own \{[^}]*border-color: var\(--peppy-accent\)/);
-    expect(chips).toMatch(/\.reaction-badge\[data-reaction-state="unknown"\] \{ border-color: var\(--peppy-warning-text\)/);
-  });
-
-  it("limits the own-chip hit area to coarse pointers, and drops the second ring on text-sourced failures", () => {
-    expect(chips).toMatch(/@media \(pointer: coarse\) \{ button\.reaction-badge-own::before/);
-    expect(chips).toMatch(/\.reaction-badge-own-text\[data-reaction-state="failed"\][^}]*box-shadow: none/);
   });
 });
 

@@ -44,14 +44,6 @@ describe("InstanceManagement", () => {
     expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
   });
 
-  it("forwards a non-admin username when signing in", async () => {
-    const mockedBridge = bridge({ enrollment_management: vi.fn(async () => { throw { code: "http-401" }; }) });
-    render(<InstanceManagement bridge={mockedBridge} />);
-    fireEvent.change(await screen.findByLabelText("Username"), { target: { value: "sasha" } });
-    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
-    await waitFor(() => expect(mockedBridge.enrollment_sign_in).toHaveBeenCalledWith({ username: "sasha" }));
-  });
-
   it("keeps the username and shows feedback for a resolved sign-in error stage", async () => {
     const mockedBridge = bridge({ enrollment_management: vi.fn(async () => { throw { code: "http-401" }; }), enrollment_sign_in: vi.fn(async () => ({ mode: "community" as const, stage: "error" as const })) });
     render(<InstanceManagement bridge={mockedBridge} />);

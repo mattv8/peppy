@@ -1,7 +1,9 @@
 import "@testing-library/jest-dom/vitest";
-import { render } from "@testing-library/react";
-import { expect, it } from "vitest";
+import { cleanup, render } from "@testing-library/react";
+import { afterEach, expect, it } from "vitest";
 import { RcsBadge } from "./RcsBadge";
+
+afterEach(cleanup);
 
 it("exposes the current route through visible and accessible badge text", () => {
   const { container } = render(<RcsBadge />);
