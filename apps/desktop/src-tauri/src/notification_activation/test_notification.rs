@@ -320,6 +320,8 @@ fn submit(
         body: presentation.body.into(),
         icon: Some(crate::notification_icon::Icon::Message),
         copy: None,
+        mark_read: None,
+        dismiss: None,
         popup_actions: Some(PopupActions {
             reveal: presentation.reveal,
             reply: !presentation.reveal,

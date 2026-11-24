@@ -166,6 +166,7 @@ impl Backend {
             match windows_codec::parse_action(argument.as_deref()) {
                 Some(ActivationAction::Copy) => activate.copy(),
                 Some(ActivationAction::Reveal) => activate.reveal(),
+                Some(ActivationAction::MarkRead) => activate.mark_read(),
                 Some(ActivationAction::Reply) => {
                     // Missing, malformed, and non-string input values fail closed.
                     if let Some(body) = args.as_ref().and_then(windows_codec::reply_body) {
@@ -183,10 +184,11 @@ impl Backend {
             ToastDismissedEventArgs,
         >::new(move |_, args| {
             if let Some(args) = args.as_ref() {
+                // Only the user closing the toast may clear the phone; Peppy hiding it retires
+                // the banner, and a timeout keeps it in Action Center.
                 match args.Reason()? {
-                    ToastDismissalReason::TimedOut => dismiss.dismissed(true),
-                    ToastDismissalReason::UserCanceled
-                    | ToastDismissalReason::ApplicationHidden => dismiss.dismissed(false),
+                    ToastDismissalReason::UserCanceled => dismiss.dismiss(),
+                    ToastDismissalReason::ApplicationHidden => dismiss.retire(),
                     _ => {}
                 }
             }
@@ -238,12 +240,14 @@ const SHOW_ICON: &[u8] = include_bytes!("../../icons/notification-actions/show.p
 const SEND_ICON: &[u8] = include_bytes!("../../icons/notification-actions/send.png");
 const COPY_ICON: &[u8] = include_bytes!("../../icons/notification-actions/copy.png");
 const DISMISS_ICON: &[u8] = include_bytes!("../../icons/notification-actions/dismiss.png");
+const MARK_READ_ICON: &[u8] = include_bytes!("../../icons/notification-actions/mark-read.png");
 
 struct ActionIconLeases {
     show: Lease,
     send: Lease,
     copy: Lease,
     dismiss: Lease,
+    mark_read: Lease,
 }
 
 impl From<&ActionIconLeases> for super::windows_xml::ActionIconUris<'_> {
@@ -258,12 +262,13 @@ impl From<&ActionIconLeases> for super::windows_xml::ActionIconUris<'_> {
             send: uri(&leases.send).unwrap_or_default(),
             copy: uri(&leases.copy).unwrap_or_default(),
             dismiss: uri(&leases.dismiss).unwrap_or_default(),
+            mark_read: uri(&leases.mark_read).unwrap_or_default(),
         }
     }
 }
 
 fn action_icons(app: &AppHandle, actions: ActionAvailability) -> Option<ActionIconLeases> {
-    if !actions.copy && !actions.reveal && !actions.reply {
+    if !actions.copy && !actions.reveal && !actions.reply && !actions.mark_read {
         return None;
     }
     Some(ActionIconLeases {
@@ -271,6 +276,7 @@ fn action_icons(app: &AppHandle, actions: ActionAvailability) -> Option<ActionIc
         send: notification_icon::materialize_bytes(app, SEND_ICON)?,
         copy: notification_icon::materialize_bytes(app, COPY_ICON)?,
         dismiss: notification_icon::materialize_bytes(app, DISMISS_ICON)?,
+        mark_read: notification_icon::materialize_bytes(app, MARK_READ_ICON)?,
     })
 }
 

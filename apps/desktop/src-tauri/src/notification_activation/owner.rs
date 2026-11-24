@@ -21,14 +21,17 @@ const ACCEPTANCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 #[cfg(any(target_os = "macos", test))]
 pub(super) const PLATFORM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 // Terminal events occupy the low bits; the sequence sits above them. RETIRE may be OR-ed
-// onto CLICK or COPY after delivery so cleanup retries never redeliver the same event.
+// onto a delivered event so cleanup retries never redeliver the same event.
 const CLICK: u64 = 1;
 const RETIRE: u64 = 2;
 const COPY: u64 = 4;
 const REVEAL: u64 = 8;
 const REPLY: u64 = 16;
-const EVENT_MASK: u64 = 0b1_1111;
-const SEQUENCE_SHIFT: u32 = 5;
+const MARK_READ: u64 = 32;
+/// The user closed the banner, as opposed to Peppy or the OS retiring it.
+const DISMISS: u64 = 64;
+const EVENT_MASK: u64 = 0b111_1111;
+const SEQUENCE_SHIFT: u32 = 7;
 
 pub struct Post {
     pub activation: Option<NotificationActivation>,
@@ -39,6 +42,10 @@ pub struct Post {
     pub icon: Option<crate::notification_icon::Icon>,
     /// Copy target for the popup's Copy action. The OS carries only the post id.
     pub copy: Option<OneTimeCodeTarget>,
+    /// Mark as read target; the OS carries only the action id.
+    pub mark_read: Option<MarkReadTarget>,
+    /// Phone dismissal to request when the user closes the banner.
+    pub dismiss: Option<DismissTarget>,
     /// Optional native-only action capability. The callback owns any host reservation.
     pub popup_actions: Option<PopupActions>,
 }
@@ -70,6 +77,13 @@ impl Signal {
     pub fn copy(&self) {
         self.set(COPY);
     }
+    pub fn mark_read(&self) {
+        self.set(MARK_READ);
+    }
+    /// A user dismissal. Without a dismiss target it only retires the banner.
+    pub fn dismiss(&self) {
+        self.set(DISMISS);
+    }
     pub fn reveal(&self) {
         self.set_popup(REVEAL, PopupAction::Reveal);
     }
@@ -78,12 +92,6 @@ impl Signal {
             return;
         }
         self.set_popup(REPLY, PopupAction::Reply(body));
-    }
-    #[cfg(any(target_os = "windows", test))]
-    pub fn dismissed(&self, timed_out: bool) {
-        if !timed_out {
-            self.retire();
-        }
     }
     fn set(&self, event: u64) {
         // Exactly one terminal event per post; popup timeout is not terminal.
@@ -196,17 +204,22 @@ struct Entry<T> {
     cancel: CancellationToken,
     signal: Signal,
     copy: Option<OneTimeCodeTarget>,
+    mark_read: Option<MarkReadTarget>,
+    dismiss: Option<DismissTarget>,
     popup_actions: Option<PopupActions>,
     handle: T,
 }
 
 type DeliveredPopupAction = (Arc<dyn Fn(PopupAction) + Send + Sync>, PopupAction);
+/// The entry's popup capability rides along with a delivered event: dropping the last copy
+/// cancels a quick-reply post's token, which would otherwise reject the event in `activate`.
 type DeliveredNotification = (
     u64,
     NotificationActivation,
     CancellationToken,
-    Option<OneTimeCodeTarget>,
+    Option<PopupEffect>,
     Option<DeliveredPopupAction>,
+    Option<PopupActions>,
 );
 
 trait Backend {
@@ -346,6 +359,8 @@ impl<B: Backend> Registry<B> {
             post.icon.as_ref(),
             ActionAvailability {
                 copy: post.copy.is_some(),
+                mark_read: post.mark_read.is_some(),
+                report_dismiss: post.dismiss.is_some(),
                 reveal: post
                     .popup_actions
                     .as_ref()
@@ -364,6 +379,8 @@ impl<B: Backend> Registry<B> {
             cancel: post.cancel,
             signal,
             copy: post.copy,
+            mark_read: post.mark_read,
+            dismiss: post.dismiss,
             popup_actions: post.popup_actions,
             handle,
         });
@@ -405,7 +422,7 @@ impl<B: Backend> Registry<B> {
     }
 
     /// Returns each delivered terminal event in sequence order. `None` is a click
-    /// (navigation); `Some(target)` is a Copy action that must never navigate.
+    /// (navigation); `Some(effect)` is a Copy, Mark as read or dismissal that never navigates.
     fn reconcile(&mut self) -> Vec<DeliveredNotification> {
         let mut delivered = Vec::new();
         let mut index = 0;
@@ -418,8 +435,7 @@ impl<B: Backend> Registry<B> {
             let event = entry.signal.event.load(Ordering::Acquire);
             if event != 0 || entry.cancel.is_cancelled() {
                 if !entry.cancel.is_cancelled() {
-                    if let Some((copy, popup_action)) = delivery(event, &entry.copy, &entry.signal)
-                    {
+                    if let Some((effect, popup_action)) = delivery(event, entry) {
                         let is_reveal = matches!(popup_action, Some(PopupAction::Reveal));
                         if is_reveal {
                             entry.revealing = true;
@@ -429,16 +445,17 @@ impl<B: Backend> Registry<B> {
                                 event >> SEQUENCE_SHIFT,
                                 activation.clone(),
                                 entry.cancel.clone(),
-                                copy,
+                                effect,
                                 popup_action.and_then(|action| {
                                     entry
                                         .popup_actions
                                         .as_ref()
                                         .map(|actions| (actions.handler.clone(), action))
                                 }),
+                                entry.popup_actions.clone(),
                             ));
                         }
-                        // Cleanup failure must not suppress a genuine click or copy or replay
+                        // Cleanup failure must not suppress a genuine event or replay
                         // it on the next wake. Keep its registration until removal succeeds.
                         entry.signal.event.store(event | RETIRE, Ordering::Release);
                         if is_reveal {
@@ -456,24 +473,31 @@ impl<B: Backend> Registry<B> {
                 index += 1;
             }
         }
-        delivered.sort_by_key(|(sequence, _, _, _, _)| *sequence);
+        delivered.sort_by_key(|(sequence, ..)| *sequence);
         delivered
     }
 }
 
 /// Maps a stored terminal event to its delivery. A retired event carries RETIRE in the
-/// mask, so it matches neither arm and is never delivered as a click or a copy.
-fn delivery(
-    event: u64,
-    copy: &Option<OneTimeCodeTarget>,
-    signal: &Signal,
-) -> Option<(Option<OneTimeCodeTarget>, Option<PopupAction>)> {
+/// mask, so it matches no arm and is never delivered. Targets come from the entry, never the
+/// OS callback; an event whose entry has no target is a plain retirement.
+fn delivery<T>(event: u64, entry: &Entry<T>) -> Option<(Option<PopupEffect>, Option<PopupAction>)> {
     match event & EVENT_MASK {
         CLICK => Some((None, Some(PopupAction::Open))),
-        COPY => copy
+        COPY => entry
+            .copy
             .clone()
-            .map(|target| (Some(target), Some(PopupAction::Copy))),
-        REVEAL | REPLY => signal
+            .map(|target| (Some(PopupEffect::Copy(target)), Some(PopupAction::Copy))),
+        MARK_READ => entry
+            .mark_read
+            .clone()
+            .map(|target| (Some(PopupEffect::MarkRead(target)), None)),
+        DISMISS => entry
+            .dismiss
+            .clone()
+            .map(|target| (Some(PopupEffect::Dismiss(target)), None)),
+        REVEAL | REPLY => entry
+            .signal
             .popup_action
             .lock()
             .unwrap()
@@ -496,13 +520,15 @@ fn serve<B: Backend>(
     mut registry: Registry<B>,
     receiver: mpsc::Receiver<Command>,
     stop: Arc<AtomicBool>,
-    mut activate: impl FnMut(u64, NotificationActivation, CancellationToken, Option<OneTimeCodeTarget>),
+    mut activate: impl FnMut(u64, NotificationActivation, CancellationToken, Option<PopupEffect>),
 ) {
     while let Ok(command) = receiver.recv() {
         if stop.load(Ordering::Acquire) {
             break;
         }
-        for (sequence, activation, cancel, copy, popup_action) in registry.reconcile() {
+        for (sequence, activation, cancel, effect, popup_action, _capability) in
+            registry.reconcile()
+        {
             let activates_existing_flow = popup_action
                 .as_ref()
                 .is_none_or(|(_, action)| matches!(action, PopupAction::Open | PopupAction::Copy));
@@ -512,7 +538,7 @@ fn serve<B: Backend>(
                     .spawn(move || handler(action));
             }
             if activates_existing_flow {
-                activate(sequence, activation, cancel, copy);
+                activate(sequence, activation, cancel, effect);
             }
         }
         let (result, reply) = match command {
@@ -553,8 +579,8 @@ impl Owner {
                     registry,
                     receiver,
                     stop,
-                    |sequence, activation, cancel, copy| {
-                        super::activate(&app, activation, &cancel, sequence, copy)
+                    |sequence, activation, cancel, effect| {
+                        super::activate(&app, activation, &cancel, sequence, effect)
                     },
                 );
             })
@@ -791,6 +817,8 @@ mod tests {
             sound: false,
             icon: Some(crate::notification_icon::Icon::Message),
             copy: None,
+            mark_read: None,
+            dismiss: None,
             popup_actions: None,
         }
     }
@@ -849,6 +877,8 @@ mod tests {
                 sound: false,
                 icon: Some(crate::notification_icon::Icon::Message),
                 copy: None,
+                mark_read: None,
+                dismiss: None,
                 popup_actions: Some(PopupActions {
                     reveal: presentation.reveal,
                     reply: !presentation.reveal,
@@ -886,7 +916,7 @@ mod tests {
             .signal
             .reply("ignored test reply".into());
         registry.entries[1].signal.reveal();
-        for (_, _, _, _, action) in registry.reconcile() {
+        for (_, _, _, _, action, _) in registry.reconcile() {
             let (handler, action) = action.unwrap();
             handler(action);
         }
@@ -920,6 +950,8 @@ mod tests {
                     sound: false,
                     icon: Some(crate::notification_icon::Icon::Message),
                     copy: None,
+                    mark_read: None,
+                    dismiss: None,
                     popup_actions: Some(PopupActions {
                         reveal: false,
                         reply: true,
@@ -932,7 +964,7 @@ mod tests {
             )
             .unwrap();
         registry.entries[0].signal.reply("ignored again".into());
-        for (_, _, _, _, action) in registry.reconcile() {
+        for (_, _, _, _, action, _) in registry.reconcile() {
             let (handler, action) = action.unwrap();
             handler(action);
         }
@@ -1291,6 +1323,8 @@ mod tests {
             sound: true,
             icon: Some(crate::notification_icon::Icon::Message),
             copy: None,
+            mark_read: None,
+            dismiss: None,
             popup_actions: None,
         }
     }
@@ -1626,6 +1660,8 @@ mod tests {
                         body,
                         icon,
                         copy: None,
+                        mark_read: None,
+                        dismiss: None,
                         popup_actions: None,
                     })
                     .and_then(Acceptance::wait)
@@ -1938,6 +1974,8 @@ mod tests {
                     body,
                     icon,
                     copy: None,
+                    mark_read: None,
+                    dismiss: None,
                     popup_actions: None,
                 })?;
                 observing.recv_timeout(PLATFORM_TIMEOUT).unwrap();
@@ -2028,8 +2066,8 @@ mod tests {
             owner.post(post(id)).unwrap();
         }
         let history = owner.backend.callbacks["0"].clone();
-        history.dismissed(true);
-        owner.backend.callbacks["1"].dismissed(false);
+        // A timed-out toast reports nothing; a user dismissal without a target only retires.
+        owner.backend.callbacks["1"].dismiss();
         owner.backend.callbacks["2"].retire();
         assert!(owner.reconcile().is_empty());
         assert_eq!(owner.entries.len(), 1);
@@ -2104,7 +2142,7 @@ mod tests {
         assert_eq!(
             clicks
                 .iter()
-                .map(|(_, value, _, _, _)| value.request_id.as_str())
+                .map(|(_, value, ..)| value.request_id.as_str())
                 .collect::<Vec<_>>(),
             ["1", "0"]
         );
@@ -2134,7 +2172,7 @@ mod tests {
         let delivered = owner.reconcile();
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].1.request_id, "0");
-        assert_eq!(delivered[0].3, Some(copy_target("0")));
+        assert_eq!(delivered[0].3, Some(PopupEffect::Copy(copy_target("0"))));
         assert_eq!(
             owner.entries.len(),
             1,
@@ -2152,7 +2190,7 @@ mod tests {
         signal.click();
         let delivered = owner.reconcile();
         assert_eq!(delivered.len(), 1);
-        assert_eq!(delivered[0].3, Some(copy_target("0")));
+        assert_eq!(delivered[0].3, Some(PopupEffect::Copy(copy_target("0"))));
         assert!(owner.reconcile().is_empty());
         assert!(owner.entries.is_empty());
     }
@@ -2205,11 +2243,160 @@ mod tests {
         assert_eq!(
             delivered
                 .iter()
-                .map(|(_, value, _, copy, _)| (value.request_id.as_str(), copy.is_some()))
+                .map(|(_, value, _, copy, ..)| (value.request_id.as_str(), copy.is_some()))
                 .collect::<Vec<_>>(),
             [("1", false), ("0", true)]
         );
         assert_eq!(delivered[0].0, 1);
         assert_eq!(delivered[1].0, 2);
+    }
+
+    fn notification_target(id: usize) -> NotificationTarget {
+        NotificationTarget {
+            source_device_id: "phone".into(),
+            notification_key: format!("key-{id}"),
+            lifetime: "life".into(),
+        }
+    }
+
+    fn effect_post(id: usize) -> Post {
+        Post {
+            mark_read: Some(MarkReadTarget::Notification {
+                target: notification_target(id),
+                content_sequence: SourceSequence(3),
+            }),
+            dismiss: Some(DismissTarget {
+                target: notification_target(id),
+                content_sequence: SourceSequence(3),
+            }),
+            ..post(id)
+        }
+    }
+
+    #[test]
+    fn notification_mark_read_and_dismiss_are_delivered_once_with_their_targets() {
+        let mut owner = registry();
+        owner.post(effect_post(0)).unwrap();
+        owner.post(effect_post(1)).unwrap();
+        assert!(owner.backend.popup_actions[0].mark_read);
+        assert!(owner.backend.popup_actions[0].report_dismiss);
+        owner.backend.callbacks["0"].mark_read();
+        owner.backend.callbacks["1"].dismiss();
+        let delivered = owner.reconcile();
+        assert_eq!(delivered.len(), 2);
+        assert!(matches!(
+            &delivered[0].3,
+            Some(PopupEffect::MarkRead(MarkReadTarget::Notification { target, .. }))
+                if target == &notification_target(0)
+        ));
+        assert_eq!(
+            delivered[1].3,
+            Some(PopupEffect::Dismiss(DismissTarget {
+                target: notification_target(1),
+                content_sequence: SourceSequence(3),
+            }))
+        );
+        assert!(delivered.iter().all(|delivery| delivery.4.is_none()));
+        assert!(owner.reconcile().is_empty());
+        assert!(owner.entries.is_empty());
+    }
+
+    #[test]
+    fn notification_first_terminal_event_wins_across_dismiss_mark_read_and_click() {
+        let mut owner = registry();
+        owner.post(effect_post(0)).unwrap();
+        let signal = owner.backend.callbacks["0"].clone();
+        signal.dismiss();
+        signal.mark_read();
+        signal.click();
+        let delivered = owner.reconcile();
+        assert_eq!(delivered.len(), 1);
+        assert!(matches!(delivered[0].3, Some(PopupEffect::Dismiss(_))));
+        assert!(owner.reconcile().is_empty());
+    }
+
+    #[test]
+    fn notification_dismiss_or_mark_read_without_a_target_only_retires() {
+        let mut owner = registry();
+        owner.post(post(0)).unwrap();
+        owner.post(post(1)).unwrap();
+        assert!(!owner.backend.popup_actions[0].report_dismiss);
+        owner.backend.callbacks["0"].dismiss();
+        owner.backend.callbacks["1"].mark_read();
+        assert!(owner.reconcile().is_empty());
+        assert!(owner.entries.is_empty());
+    }
+
+    #[test]
+    fn notification_cancelled_session_ignores_late_mark_read_and_dismiss() {
+        let mut owner = registry();
+        let first = effect_post(0);
+        let cancel = first.cancel.clone();
+        owner.post(first).unwrap();
+        owner.post(effect_post(1)).unwrap();
+        cancel.cancel();
+        owner.backend.callbacks["0"].mark_read();
+        let delivered = owner.reconcile();
+        assert!(delivered.is_empty());
+        owner.backend.callbacks["1"].dismiss();
+        assert_eq!(owner.reconcile().len(), 1);
+    }
+
+    #[test]
+    fn notification_effects_keep_sequence_order_in_the_seven_bit_event_field() {
+        let mut owner = registry();
+        owner.post(copy_post(0)).unwrap();
+        owner.post(effect_post(1)).unwrap();
+        owner.post(post(2)).unwrap();
+        owner.backend.callbacks["2"].click();
+        owner.backend.callbacks["1"].mark_read();
+        owner.backend.callbacks["0"].copy();
+        let delivered = owner.reconcile();
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|(sequence, value, ..)| (*sequence, value.request_id.as_str()))
+                .collect::<Vec<_>>(),
+            [(1, "2"), (2, "1"), (3, "0")]
+        );
+    }
+
+    /// Mirrors a quick-reply capability: dropping its last holder cancels the post's parent token.
+    struct CancelOnDrop(CancellationToken);
+    impl Drop for CancelOnDrop {
+        fn drop(&mut self) {
+            self.0.cancel();
+        }
+    }
+
+    #[test]
+    fn notification_mark_read_on_a_reply_banner_survives_entry_cleanup_until_activation() {
+        let mut owner = registry();
+        let authority = CancellationToken::new();
+        let guard = Arc::new(CancelOnDrop(authority.clone()));
+        let handler: Arc<dyn Fn(PopupAction) + Send + Sync> = Arc::new(move |_| {
+            let _ = &guard;
+        });
+        let mut reply = effect_post(0);
+        reply.cancel = authority.child_token();
+        reply.popup_actions = Some(PopupActions {
+            reveal: false,
+            reply: true,
+            handler,
+        });
+        owner.post(reply).unwrap();
+        owner.backend.callbacks["0"].mark_read();
+
+        let delivered = owner.reconcile();
+        assert!(owner.entries.is_empty(), "the banner itself is retired");
+        assert_eq!(delivered.len(), 1);
+        assert!(matches!(delivered[0].3, Some(PopupEffect::MarkRead(_))));
+        assert!(delivered[0].4.is_none(), "the reply handler is not invoked");
+        assert!(
+            !delivered[0].2.is_cancelled(),
+            "activation still admits the event"
+        );
+        drop(delivered);
+        assert!(authority.is_cancelled());
     }
 }

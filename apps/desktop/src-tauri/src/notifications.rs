@@ -1,5 +1,6 @@
 //! Per-desktop banner delivery. Preferences are vault state owned by core; the legacy
 //! per-installation file seeds at most one vault before it is retired.
+use crate::notification_activation::{BannerPresentation, DismissTarget, MarkReadTarget};
 use crate::{
     credentials::Binding,
     error::{BridgeError, BridgeResult},
@@ -522,6 +523,41 @@ fn copy_target(candidate: &BannerCandidate) -> Option<OneTimeCodeTarget> {
     }
 }
 
+/// A banner's Mark as read and close-to-dismiss effects. Mirrored effects need the content
+/// version core reported for this banner; a stale banner (no version) offers neither.
+fn banner_effects(candidate: &BannerCandidate) -> (Option<MarkReadTarget>, Option<DismissTarget>) {
+    match candidate.kind.as_str() {
+        "message" => (
+            candidate
+                .id
+                .parse()
+                .ok()
+                .map(|message_id| MarkReadTarget::Message { message_id }),
+            None,
+        ),
+        "notification" => {
+            let (Some(target), Some(content_sequence)) =
+                (&candidate.notification_target, candidate.content_sequence)
+            else {
+                return (None, None);
+            };
+            (
+                candidate
+                    .mark_read_supported
+                    .then(|| MarkReadTarget::Notification {
+                        target: target.clone(),
+                        content_sequence,
+                    }),
+                candidate.dismissible.then(|| DismissTarget {
+                    target: target.clone(),
+                    content_sequence,
+                }),
+            )
+        }
+        _ => (None, None),
+    }
+}
+
 fn source_or_generic_title(kind: &str, source_name: Option<&str>) -> String {
     if let Some(source_name) = source_name.filter(|name| !name.trim().is_empty()) {
         return source_name.to_owned();
@@ -573,18 +609,9 @@ pub fn drain_banner_candidates(
                     crate::heads_runtime::has_head(app, id)
                 })
         },
-        |candidate, destination, title, body, icon, copy| {
+        |candidate, banner| {
             crate::notification_activation::quick_reply::post_candidate(
-                app,
-                session,
-                candidate,
-                crate::notification_activation::quick_reply::BannerPresentation {
-                    destination,
-                    title,
-                    body,
-                    icon,
-                    copy,
-                },
+                app, session, candidate, banner,
             )
         },
     )
@@ -604,12 +631,31 @@ pub(crate) fn drain_with_delivery(
         Option<OneTimeCodeTarget>,
     ) -> Result<(), crate::notification_activation::PostError>,
 ) -> BridgeResult<bool> {
+    drain_with_candidate_delivery(session, settings, app_locked, suppress, |_, banner| {
+        post(
+            banner.destination,
+            banner.title,
+            banner.body,
+            banner.icon,
+            banner.copy,
+        )
+    })
+}
+
+/// Drains like [`drain_with_delivery`], but hands each test the complete presentation.
+#[cfg(test)]
+pub(crate) fn drain_with_presentations(
+    session: &Session,
+    settings: &NotificationSettings,
+    app_locked: impl Fn() -> bool,
+    mut post: impl FnMut(BannerPresentation) -> Result<(), crate::notification_activation::PostError>,
+) -> BridgeResult<bool> {
     drain_with_candidate_delivery(
         session,
         settings,
         app_locked,
-        suppress,
-        |_, destination, title, body, icon, copy| post(destination, title, body, icon, copy),
+        |_, _| false,
+        |_, banner| post(banner),
     )
 }
 
@@ -620,11 +666,7 @@ fn drain_with_candidate_delivery(
     suppress: impl Fn(&BannerCandidate, &NotificationPreferences) -> bool,
     mut post: impl FnMut(
         Option<&BannerCandidate>,
-        peppy_desktop_api::NotificationActivationDestination,
-        String,
-        String,
-        Option<crate::notification_icon::Icon>,
-        Option<OneTimeCodeTarget>,
+        BannerPresentation,
     ) -> Result<(), crate::notification_activation::PostError>,
 ) -> BridgeResult<bool> {
     let _drain = settings
@@ -715,14 +757,22 @@ fn drain_with_candidate_delivery(
                 let copy = (matches!(preferences.preview, Preview::Full) && !locked)
                     .then(|| copy_target(&candidate))
                     .flatten();
-                match post(
-                    Some(&candidate),
-                    crate::notification_activation::destination(&candidate),
+                // Mark as read and phone dismissal work at every preview tier, never while locked.
+                let (mark_read, dismiss) = if locked {
+                    (None, None)
+                } else {
+                    banner_effects(&candidate)
+                };
+                let banner = BannerPresentation {
+                    destination: crate::notification_activation::destination(&candidate),
                     title,
                     body,
-                    crate::notification_icon::for_candidate(&preferences, &candidate, locked),
+                    icon: crate::notification_icon::for_candidate(&preferences, &candidate, locked),
                     copy,
-                ) {
+                    mark_read,
+                    dismiss,
+                };
+                match post(Some(&candidate), banner) {
                     Ok(()) | Err(crate::notification_activation::PostError::NotAllowed) => {
                         acknowledge.push(candidate.id);
                     }
@@ -783,11 +833,11 @@ fn drain_with_candidate_delivery(
                 let (title, body) = summary_text();
                 match post(
                     None,
-                    peppy_desktop_api::NotificationActivationDestination::Main,
-                    title,
-                    body,
-                    None,
-                    None,
+                    BannerPresentation::plain(
+                        peppy_desktop_api::NotificationActivationDestination::Main,
+                        title,
+                        body,
+                    ),
                 ) {
                     Ok(()) | Err(crate::notification_activation::PostError::NotAllowed) => {}
                     Err(crate::notification_activation::PostError::AwaitingAuthorization) => {
@@ -881,8 +931,24 @@ mod tests {
         NotificationSettings,
         peppy_client_core::Client,
     ) {
+        mirrored_candidates_with(posted_at, text, false, true)
+    }
+
+    /// Mirrored candidates from a phone whose mark-read setting follows `mark_read`.
+    fn mirrored_candidates_with(
+        posted_at: &[i64],
+        text: &str,
+        mark_read: bool,
+        dismissible: bool,
+    ) -> (
+        crate::tests::Fixture,
+        Session,
+        NotificationSettings,
+        peppy_client_core::Client,
+    ) {
         use peppy_client_core::{
-            Client, ClientConfig, Cursor, DatabaseKey, DeviceId, NotificationCapture,
+            Client, ClientConfig, Cursor, DatabaseKey, DeviceId, GatewaySettings,
+            NotificationCapture,
         };
 
         let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
@@ -908,6 +974,13 @@ mod tests {
             .unlock(&fixture.profile, &fixture.header, crate::tests::PHRASE)
             .unwrap();
         phone.set_server_compaction_state(true, true).unwrap();
+        phone
+            .set_gateway_settings(GatewaySettings {
+                mirroring_enabled: true,
+                notification_mark_read_enabled: mark_read,
+                ..GatewaySettings::default()
+            })
+            .unwrap();
         for (id, posted_at) in posted_at.iter().enumerate() {
             phone
                 .capture_notification(NotificationCapture {
@@ -920,7 +993,8 @@ mod tests {
                     text: text.into(),
                     category: None,
                     posted_at: *posted_at,
-                    dismissible: true,
+                    dismissible,
+                    mark_read_supported: true,
                 })
                 .unwrap();
         }
@@ -1056,6 +1130,7 @@ mod tests {
                             category: None,
                             posted_at: now + id,
                             dismissible: true,
+                            mark_read_supported: false,
                         })
                         .unwrap();
                 }
@@ -1183,6 +1258,123 @@ mod tests {
         copies.into_inner()
     }
 
+    type PhoneEffects = (Option<MarkReadTarget>, Option<DismissTarget>);
+
+    fn drained_effects(
+        session: &Session,
+        settings: &NotificationSettings,
+        app_locked: bool,
+    ) -> Vec<PhoneEffects> {
+        let effects = RefCell::new(Vec::new());
+        drain_with_presentations(
+            session,
+            settings,
+            || app_locked,
+            |banner| {
+                effects
+                    .borrow_mut()
+                    .push((banner.mark_read, banner.dismiss));
+                Ok(())
+            },
+        )
+        .unwrap();
+        effects.into_inner()
+    }
+
+    fn now_ms() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    }
+
+    #[test]
+    fn mirrored_banners_offer_mark_read_and_dismissal_only_when_the_phone_allows() {
+        for (mark_read, dismissible) in [(true, true), (false, true), (true, false), (false, false)]
+        {
+            let (_fixture, session, settings, _phone) =
+                mirrored_candidates_with(&[now_ms()], "New message", mark_read, dismissible);
+            let effects = drained_effects(&session, &settings, false);
+            assert_eq!(effects.len(), 1);
+            let (offered_mark_read, offered_dismiss) = &effects[0];
+            assert_eq!(
+                offered_mark_read.is_some(),
+                mark_read,
+                "{mark_read} {dismissible}"
+            );
+            assert_eq!(
+                offered_dismiss.is_some(),
+                dismissible,
+                "{mark_read} {dismissible}"
+            );
+            if let Some(MarkReadTarget::Notification { target, .. }) = offered_mark_read {
+                assert_eq!(target.notification_key, "notification-0");
+            }
+            if let Some(dismiss) = offered_dismiss {
+                assert_eq!(dismiss.target.notification_key, "notification-0");
+            }
+        }
+    }
+
+    #[test]
+    fn locked_banners_carry_no_phone_effects() {
+        let (_fixture, session, settings, _phone) =
+            mirrored_candidates_with(&[now_ms()], "New message", true, true);
+        assert_eq!(drained_effects(&session, &settings, true), [(None, None)]);
+    }
+
+    #[test]
+    fn summary_banners_carry_no_phone_effects() {
+        let now = now_ms();
+        let (_fixture, session, settings, _phone) = mirrored_candidates_with(
+            &[now; BANNER_BURST_SUMMARY_THRESHOLD + 1],
+            "New message",
+            true,
+            true,
+        );
+        assert_eq!(drained_effects(&session, &settings, false), [(None, None)]);
+    }
+
+    #[test]
+    fn message_banners_offer_mark_read_at_every_preview_tier() {
+        use peppy_client_core::{Cursor, IncomingSms};
+
+        let (_fixture, session, settings, phone) = mirrored_candidates_with(&[], "", false, true);
+        let captured = phone
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550199".into(),
+                body: "Are you there?".into(),
+                provider_message_id: Some("banner-mark-read".into()),
+                imported: false,
+            })
+            .unwrap();
+        for (index, envelope) in phone.pending_outbox().unwrap().iter().enumerate() {
+            session
+                .client
+                .ingest(envelope, Cursor(index as u64 + 1))
+                .unwrap();
+        }
+        session.client.apply_pending(100).unwrap();
+        session
+            .client
+            .set_notification_preferences(NotificationPreferences {
+                preview: Preview::Hidden,
+                ..NotificationPreferences::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            drained_effects(&session, &settings, false),
+            [(
+                Some(MarkReadTarget::Message {
+                    message_id: captured.message_id
+                }),
+                None
+            )]
+        );
+    }
+
     fn candidate(
         kind: &str,
         notification_target: Option<peppy_client_core::NotificationTarget>,
@@ -1199,6 +1391,9 @@ mod tests {
             source_name: None,
             app_icon_png_base64: None,
             one_time_code: one_time_code.map(str::to_owned),
+            content_sequence: None,
+            dismissible: false,
+            mark_read_supported: false,
         }
     }
 
@@ -1742,6 +1937,9 @@ mod tests {
             source_name: Some("private source".into()),
             app_icon_png_base64: None,
             one_time_code: None,
+            content_sequence: None,
+            dismissible: false,
+            mark_read_supported: false,
         };
         let rendered = banner_text(
             &NotificationPreferences {
@@ -1780,6 +1978,9 @@ mod tests {
             source_name: Some("Calendar".into()),
             app_icon_png_base64: None,
             one_time_code: None,
+            content_sequence: None,
+            dismissible: false,
+            mark_read_supported: false,
         };
         assert_eq!(
             banner_text(
@@ -1812,6 +2013,9 @@ mod tests {
             source_name: None,
             app_icon_png_base64: None,
             one_time_code: None,
+            content_sequence: None,
+            dismissible: false,
+            mark_read_supported: false,
         };
         let mirrored = BannerCandidate {
             id: "mirror".into(),
@@ -1824,6 +2028,9 @@ mod tests {
             source_name: None,
             app_icon_png_base64: None,
             one_time_code: None,
+            content_sequence: None,
+            dismissible: false,
+            mark_read_supported: false,
         };
         let notifications = NotificationContext {
             view: Some(NotificationView::Notifications),
@@ -1852,6 +2059,9 @@ mod tests {
             source_name: None,
             app_icon_png_base64: None,
             one_time_code: None,
+            content_sequence: None,
+            dismissible: false,
+            mark_read_supported: false,
         };
         let headed = |id: &str| id == "conversation-a";
         let enabled = NotificationPreferences::default();

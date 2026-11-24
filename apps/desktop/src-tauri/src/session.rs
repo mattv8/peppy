@@ -1641,6 +1641,17 @@ impl Session {
         self.mark_seen_scoped(ids, None)
     }
 
+    /// Marks `message_id` and every earlier unread message in its conversation read.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    pub fn mark_read_through(&self, message_id: MessageId) -> BridgeResult<u64> {
+        let batches = self
+            .client
+            .unread_message_batches_through(message_id)
+            .map_err(core_error)?;
+        self.apply_read_batches(batches, |batch| self.client.mark_read_batch(batch))
+            .map_err(core_error)
+    }
+
     pub fn mark_all_read(&self) -> BridgeResult<String> {
         let batches = self.client.unread_message_batches().map_err(core_error)?;
         self.apply_read_batches(batches, |batch| self.client.mark_read_batch(batch))
@@ -3522,6 +3533,61 @@ mod tests {
             .to_string();
 
         session.mark_seen_scoped(&[id], Some(conversation)).unwrap();
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn mark_read_through_marks_earlier_unread_and_notifies_once() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let count = Arc::new(AtomicUsize::new(0));
+        let notifier_count = count.clone();
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(move || {
+                notifier_count.fetch_add(1, Ordering::Relaxed);
+            }),
+        )
+        .unwrap();
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        let captured: Vec<_> = ["earlier", "banner", "later"]
+            .into_iter()
+            .map(|body| {
+                session
+                    .client
+                    .capture_incoming(IncomingSms {
+                        conversation_id: None,
+                        sender_address: "+15555550100".into(),
+                        body: body.into(),
+                        provider_message_id: Some(format!("mark-through-{body}")),
+                        imported: false,
+                    })
+                    .unwrap()
+            })
+            .collect();
+        count.store(0, Ordering::Relaxed);
+
+        assert_eq!(
+            session.mark_read_through(captured[1].message_id).unwrap(),
+            2
+        );
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            session
+                .client
+                .unread_count(captured[2].conversation_id)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            session.mark_read_through(captured[1].message_id).unwrap(),
+            0
+        );
         assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 
