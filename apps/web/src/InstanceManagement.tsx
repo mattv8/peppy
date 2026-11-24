@@ -202,7 +202,7 @@ export function InstanceManagement({ bridge, accountUrl }: { bridge: ManagementB
               <th scope="col"><span className="visually-hidden">Actions</span></th>
             </tr>
           </thead>
-          <tbody>
+          <tbody id="instance-management-device-list">
             {management.devices.map((device) => (
               <tr id={`instance-management-device-${device.device_id}`} key={device.device_id}>
                 <th scope="row">{device.name}<span className="instance-management-kind">{device.kind}</span></th>

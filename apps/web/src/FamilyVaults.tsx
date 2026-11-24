@@ -298,14 +298,14 @@ export function FamilyVaults({ bridge }: { bridge: FamilyVaultsBridge }) {
         ) : requests.map((request) => (
           <article id={`family-vaults-request-${request.requestId}`} key={request.requestId} data-request-id={request.requestId} data-request-state={request.state}>
             <h4>{request.displayName}</h4>
-            <dl className="family-vaults-request-meta">
+            <dl id={`family-vaults-request-meta-${request.requestId}`} className="family-vaults-request-meta">
               <div><dt>{peppyCopy.family_vaults_request_client}</dt><dd>{request.client}</dd></div>
               <div><dt>{peppyCopy.family_vaults_request_age}</dt><dd>{age(request.createdAt)}</dd></div>
               <div><dt>{peppyCopy.family_vaults_request_state}</dt><dd>{requestState(request.state)}</dd></div>
               <div><dt>{peppyCopy.family_vaults_request_expires}</dt><dd>{peppyCopy.family_vaults_invite_expires_in} {duration(request.expiresInSeconds)}</dd></div>
             </dl>
             {request.state === "pending" && (
-              <div className="enrollment-actions">
+              <div id={`family-vaults-request-actions-${request.requestId}`} className="enrollment-actions">
                 <button id={`family-vaults-approve-${request.requestId}`} className="primary-button" type="button" onClick={() => void actOnRequest(request.requestId, "approve")}>{peppyCopy.family_vaults_approve_request}</button>
                 <button id={`family-vaults-deny-${request.requestId}`} className="secondary-button" type="button" onClick={() => setConfirmDeny(request.requestId)}>{peppyCopy.family_vaults_deny_request}</button>
                 {confirmDeny === request.requestId && (
