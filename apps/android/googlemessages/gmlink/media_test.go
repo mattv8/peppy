@@ -61,7 +61,9 @@ func TestUploadRcsMediaUsesBoundedTransferContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := &Link{runCtx: context.Background()}
+	calls := 0
 	link.uploadMedia = func(ctx context.Context, _ []byte, _, _ string) (*gmproto.MediaContent, error) {
+		calls++
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			t.Fatal("upload context has no deadline")
@@ -72,8 +74,10 @@ func TestUploadRcsMediaUsesBoundedTransferContext(t *testing.T) {
 		}
 		return &gmproto.MediaContent{MediaID: "id", DecryptionKey: bytes.Repeat([]byte{1}, 32), MimeType: "image/jpeg", Size: 5, MediaName: "source.jpg"}, nil
 	}
-	if result := link.UploadRcsMedia(`{"path":"` + path + `","mime":"image/jpeg","name":"source.jpg","size":5}`); result == `{"code":"unknown"}` {
-		t.Fatalf("result=%s", result)
+	result := link.UploadRcsMedia(`{"path":"` + path + `","mime":"image/jpeg","name":"source.jpg","size":5}`)
+	var decoded rcsMediaResult
+	if err := json.Unmarshal([]byte(result), &decoded); err != nil || calls != 1 || decoded.Code != "ok" || decoded.MediaRef == "" {
+		t.Fatalf("result=%s calls=%d err=%v", result, calls, err)
 	}
 }
 

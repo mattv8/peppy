@@ -114,22 +114,14 @@ func (link *Link) BootstrapRcsObservation(requestJSON string) string {
 		identifier := participant.GetID()
 		observation.Participants = append(observation.Participants, nativeRcsParticipant{Identity: identifier.GetNumber(), GoogleParticipantID: identifier.GetParticipantID(), IdentifierType: int32(identifier.GetType()), IsVisible: participant.GetIsVisible(), IsMe: participant.GetIsMe()})
 	}
-	encoded, _, valid := encodeNativeObservation("ok", observation)
+	_, inner, valid := encodeNativeObservation("ok", observation)
 	if !valid {
 		return bootstrapRcsJSON(nativeRcsBootstrapResult{Code: "rejected"})
 	}
-	return bootstrapRcsJSON(nativeRcsBootstrapResult{Code: "ok", Observation: observationFromNativeJSON(encoded)})
+	return bootstrapRcsJSON(nativeRcsBootstrapResult{Code: "ok", Observation: inner})
 }
 
 func bootstrapRcsJSON(result nativeRcsBootstrapResult) string {
 	encoded, _ := json.Marshal(result)
 	return string(encoded)
-}
-
-func observationFromNativeJSON(encoded string) string {
-	var result nativeRcsObservationResult
-	if json.Unmarshal([]byte(encoded), &result) != nil {
-		return ""
-	}
-	return result.Observation
 }

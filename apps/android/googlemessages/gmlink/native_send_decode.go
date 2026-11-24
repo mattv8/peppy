@@ -124,7 +124,7 @@ func validMemberDigest(value string) bool {
 
 func decodePrepareCarrierBinding(raw json.RawMessage) (nativeRcsPrepareCarrierBinding, bool) {
 	v, ok := nativeObject(raw, "carrier_route_id", "android_subscription_id", "own_number_raw", "own_number_source", "route_observed_at_ms")
-	b := nativeRcsPrepareCarrierBinding{nativeString(v["carrier_route_id"]), nativeInt32(v["android_subscription_id"]), nativeString(v["own_number_raw"]), nativeString(v["own_number_source"]), nativeInt64(v["route_observed_at_ms"])}
+	b := nativeRcsPrepareCarrierBinding{CarrierRouteID: nativeString(v["carrier_route_id"]), AndroidSubscriptionID: nativeInt32(v["android_subscription_id"]), OwnNumberRaw: nativeString(v["own_number_raw"]), OwnNumberSource: nativeString(v["own_number_source"]), RouteObservedAtMS: nativeInt64(v["route_observed_at_ms"])}
 	return b, ok && nativeKinds(v, []string{"carrier_route_id", "own_number_raw", "own_number_source"}, nil, nil, []string{"android_subscription_id", "route_observed_at_ms"}) && nativeInt32Valid(v["android_subscription_id"]) && validOwnNumberSource(b.OwnNumberSource)
 }
 
@@ -134,7 +134,7 @@ func decodeTarget(raw json.RawMessage) (nativeRcsTargetSnapshot, bool) {
 	binding, bindingOK := decodeCarrierBinding(v["carrier_binding"])
 	outgoing, outgoingOK := decodeOutgoing(v["outgoing"])
 	evidence, evidenceOK := decodeEvidence(v["evidence"])
-	t := nativeRcsTargetSnapshot{nativeUint32(v["proof_version"]), nativeString(v["peppy_conversation_id"]), nativeString(v["google_conversation_id"]), nativeString(v["conversation_type"]), nativeString(v["status"]), nativeString(v["send_mode"]), nativeBool(v["read_only"]), nativeBool(v["default_outgoing"]), participants, nativeString(v["class"]), nativeString(v["canonical_recipient"]), nativeString(v["canonical_own_identity"]), nativeString(v["identity_region"]), nativeUint32(v["canonicalizer_revision"]), nativeString(v["selected_sim_id"]), binding, outgoing, evidence}
+	t := nativeRcsTargetSnapshot{ProofVersion: nativeUint32(v["proof_version"]), PeppyConversationID: nativeString(v["peppy_conversation_id"]), GoogleConversationID: nativeString(v["google_conversation_id"]), ConversationType: nativeString(v["conversation_type"]), Status: nativeString(v["status"]), SendMode: nativeString(v["send_mode"]), ReadOnly: nativeBool(v["read_only"]), DefaultOutgoing: nativeBool(v["default_outgoing"]), Participants: participants, Class: nativeString(v["class"]), CanonicalRecipient: nativeString(v["canonical_recipient"]), CanonicalOwnIdentity: nativeString(v["canonical_own_identity"]), IdentityRegion: nativeString(v["identity_region"]), CanonicalizerRevision: nativeUint32(v["canonicalizer_revision"]), SelectedSIMID: nativeString(v["selected_sim_id"]), CarrierBinding: binding, Outgoing: outgoing, Evidence: evidence}
 	return t, ok && participantsOK && bindingOK && outgoingOK && evidenceOK && nativeKinds(v, []string{"peppy_conversation_id", "google_conversation_id", "conversation_type", "status", "send_mode", "class", "canonical_recipient", "canonical_own_identity", "identity_region", "selected_sim_id"}, []string{"read_only", "default_outgoing"}, []string{"proof_version", "canonicalizer_revision"}, nil) && nativeUint32Valid(v["proof_version"]) && nativeUint32Valid(v["canonicalizer_revision"]) && validEnum(t.ConversationType, "Rcs", "Other") && validEnum(t.SendMode, "Automatic", "Other") && validEnum(t.Class, "OneToOne", "SelfChat", "Group")
 }
 
@@ -143,7 +143,7 @@ func decodeParticipants(raw json.RawMessage) ([]nativeRcsParticipant, bool) {
 	participants := make([]nativeRcsParticipant, len(items))
 	for i, item := range items {
 		v, valid := nativeObject(item, "identity", "google_participant_id", "identifier_type", "is_visible", "is_me")
-		participants[i] = nativeRcsParticipant{nativeString(v["identity"]), nativeString(v["google_participant_id"]), nativeInt32(v["identifier_type"]), nativeBool(v["is_visible"]), nativeBool(v["is_me"])}
+		participants[i] = nativeRcsParticipant{Identity: nativeString(v["identity"]), GoogleParticipantID: nativeString(v["google_participant_id"]), IdentifierType: nativeInt32(v["identifier_type"]), IsVisible: nativeBool(v["is_visible"]), IsMe: nativeBool(v["is_me"])}
 		ok = ok && valid && nativeKinds(v, []string{"identity", "google_participant_id"}, []string{"is_visible", "is_me"}, nil, []string{"identifier_type"}) && nativeInt32Valid(v["identifier_type"])
 	}
 	return participants, ok
@@ -151,32 +151,32 @@ func decodeParticipants(raw json.RawMessage) ([]nativeRcsParticipant, bool) {
 
 func decodeCarrierBinding(raw json.RawMessage) (nativeRcsCarrierBinding, bool) {
 	v, ok := nativeObject(raw, "carrier_route_id", "android_subscription_id", "is_current_default_sms", "own_number_raw", "own_number_source", "route_observed_at_ms", "route_context_revision", "same_handset_evidence_id")
-	b := nativeRcsCarrierBinding{nativeString(v["carrier_route_id"]), nativeInt32(v["android_subscription_id"]), nativeBool(v["is_current_default_sms"]), nativeString(v["own_number_raw"]), nativeString(v["own_number_source"]), nativeInt64(v["route_observed_at_ms"]), nativeUint64(v["route_context_revision"]), nativeString(v["same_handset_evidence_id"])}
+	b := nativeRcsCarrierBinding{CarrierRouteID: nativeString(v["carrier_route_id"]), AndroidSubscriptionID: nativeInt32(v["android_subscription_id"]), IsCurrentDefaultSMS: nativeBool(v["is_current_default_sms"]), OwnNumberRaw: nativeString(v["own_number_raw"]), OwnNumberSource: nativeString(v["own_number_source"]), RouteObservedAtMS: nativeInt64(v["route_observed_at_ms"]), RouteContextRevision: nativeUint64(v["route_context_revision"]), SameHandsetEvidenceID: nativeString(v["same_handset_evidence_id"])}
 	return b, ok && nativeKinds(v, []string{"carrier_route_id", "own_number_raw", "own_number_source", "same_handset_evidence_id"}, []string{"is_current_default_sms"}, []string{"route_context_revision"}, []string{"android_subscription_id", "route_observed_at_ms"}) && nativeInt32Valid(v["android_subscription_id"]) && validOwnNumberSource(b.OwnNumberSource)
 }
 
 func decodeOutgoing(raw json.RawMessage) (nativeRcsOutgoing, bool) {
 	v, ok := nativeObject(raw, "outgoing_id", "sim_participant_id", "own_identity_raw", "sim_payload", "rcs_chats_enabled")
 	payload, payloadOK := decodeSIMPayload(v["sim_payload"])
-	return nativeRcsOutgoing{nativeString(v["outgoing_id"]), nativeString(v["sim_participant_id"]), nativeString(v["own_identity_raw"]), payload, nativeBool(v["rcs_chats_enabled"])}, ok && payloadOK && nativeKinds(v, []string{"outgoing_id", "sim_participant_id", "own_identity_raw"}, []string{"rcs_chats_enabled"}, nil, nil)
+	return nativeRcsOutgoing{OutgoingID: nativeString(v["outgoing_id"]), SIMParticipantID: nativeString(v["sim_participant_id"]), OwnIdentityRaw: nativeString(v["own_identity_raw"]), SIMPayload: payload, RcsChatsEnabled: nativeBool(v["rcs_chats_enabled"])}, ok && payloadOK && nativeKinds(v, []string{"outgoing_id", "sim_participant_id", "own_identity_raw"}, []string{"rcs_chats_enabled"}, nil, nil)
 }
 
 func decodeSIMPayload(raw json.RawMessage) (nativeRcsSIMPayload, bool) {
 	v, ok := nativeObject(raw, "two", "sim_number")
-	return nativeRcsSIMPayload{nativeInt32(v["two"]), nativeInt32(v["sim_number"])}, ok && nativeKinds(v, nil, nil, nil, []string{"two", "sim_number"}) && nativeInt32Valid(v["two"]) && nativeInt32Valid(v["sim_number"])
+	return nativeRcsSIMPayload{Two: nativeInt32(v["two"]), SIMNumber: nativeInt32(v["sim_number"])}, ok && nativeKinds(v, nil, nil, nil, []string{"two", "sim_number"}) && nativeInt32Valid(v["two"]) && nativeInt32Valid(v["sim_number"])
 }
 
 func decodeEvidence(raw json.RawMessage) (nativeRcsEvidence, bool) {
 	v, ok := nativeObject(raw, "lifetime", "lookup_id", "lookup_complete", "google_candidate_count", "settings_revision", "settings_provenance", "settings_observed_at_ms", "settings_stream_epoch", "settings_currentness", "current_settings_sims", "settings_validated_at_ms", "conversation_observed_at_ms")
 	lifetime, lifetimeOK := decodeLifetime(v["lifetime"])
 	sims, simsOK := decodeOutgoings(v["current_settings_sims"])
-	e := nativeRcsEvidence{lifetime, nativeString(v["lookup_id"]), nativeBool(v["lookup_complete"]), nativeUint32(v["google_candidate_count"]), nativeUint64(v["settings_revision"]), nativeString(v["settings_provenance"]), nativeInt64(v["settings_observed_at_ms"]), nativeUint64(v["settings_stream_epoch"]), nativeString(v["settings_currentness"]), sims, nativeInt64(v["settings_validated_at_ms"]), nativeInt64(v["conversation_observed_at_ms"])}
+	e := nativeRcsEvidence{Lifetime: lifetime, LookupID: nativeString(v["lookup_id"]), LookupComplete: nativeBool(v["lookup_complete"]), GoogleCandidateCount: nativeUint32(v["google_candidate_count"]), SettingsRevision: nativeUint64(v["settings_revision"]), SettingsProvenance: nativeString(v["settings_provenance"]), SettingsObservedAtMS: nativeInt64(v["settings_observed_at_ms"]), SettingsStreamEpoch: nativeUint64(v["settings_stream_epoch"]), SettingsCurrentness: nativeString(v["settings_currentness"]), CurrentSettingsSIMs: sims, SettingsValidatedAtMS: nativeInt64(v["settings_validated_at_ms"]), ConversationObservedAtMS: nativeInt64(v["conversation_observed_at_ms"])}
 	return e, ok && lifetimeOK && simsOK && nativeKinds(v, []string{"lookup_id", "settings_provenance", "settings_currentness"}, []string{"lookup_complete"}, []string{"google_candidate_count", "settings_revision", "settings_stream_epoch"}, []string{"settings_observed_at_ms", "settings_validated_at_ms", "conversation_observed_at_ms"}) && nativeUint32Valid(v["google_candidate_count"]) && validEnum(e.SettingsProvenance, "CurrentEvent", "OldEvent", "Unknown") && validEnum(e.SettingsCurrentness, "ContinuousVerifiedFeed", "Unproven")
 }
 
 func decodeLifetime(raw json.RawMessage) (nativeRcsLifetime, bool) {
 	v, ok := nativeObject(raw, "runtime_id", "run_generation", "link_generation", "session_generation", "context_revision")
-	return nativeRcsLifetime{nativeString(v["runtime_id"]), nativeUint64(v["run_generation"]), nativeUint64(v["link_generation"]), nativeUint64(v["session_generation"]), nativeUint64(v["context_revision"])}, ok && nativeKinds(v, []string{"runtime_id"}, nil, []string{"run_generation", "link_generation", "session_generation", "context_revision"}, nil)
+	return nativeRcsLifetime{RuntimeID: nativeString(v["runtime_id"]), RunGeneration: nativeUint64(v["run_generation"]), LinkGeneration: nativeUint64(v["link_generation"]), SessionGeneration: nativeUint64(v["session_generation"]), ContextRevision: nativeUint64(v["context_revision"])}, ok && nativeKinds(v, []string{"runtime_id"}, nil, []string{"run_generation", "link_generation", "session_generation", "context_revision"}, nil)
 }
 
 func decodeOutgoings(raw json.RawMessage) ([]nativeRcsOutgoing, bool) {
@@ -427,9 +427,6 @@ func nativeInteger(s string, signed bool) bool {
 	return true
 }
 func validNativeTmpID(value string) bool { return len(value) >= 1 && len(value) <= 256 }
-func validNativeBody(value string) bool {
-	return len(value) >= 1 && len(value) <= 4096 && utf8.ValidString(value)
-}
 func validOwnNumberSource(value string) bool {
 	return validEnum(value, "SubscriptionManagerPhoneNumber", "TelephonyLine1Number")
 }
