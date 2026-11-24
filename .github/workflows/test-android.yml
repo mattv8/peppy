@@ -98,9 +98,9 @@ jobs:
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
           infra/compose/verify-android-native.sh
-      - name: Run Google Messages sideload unit tests
+      - name: Run Google Messages link-mode sideload test
         working-directory: apps/android
-        run: ../../.github/scripts/run-with-jvm-watchdog.sh 300 1080 -- ./gradlew --console=plain --dependency-verification=strict :app:testSideloadUnitTest -PpeppyGoogleMessagesLink=true
+        run: ../../.github/scripts/run-with-jvm-watchdog.sh 300 1080 -- ./gradlew --console=plain --dependency-verification=strict :app:testSideloadUnitTest -PpeppyGoogleMessagesLink=true --tests dev.peppy.mobile.about.AssetThirdPartyNoticesSideloadTest
       - name: Verify native RCS cross-language contract
         env:
           PEPPY_RCS_GO_OBSERVATION_PATH: ${{ runner.temp }}/rcs-go-observations.json

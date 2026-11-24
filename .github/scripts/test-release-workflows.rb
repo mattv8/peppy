@@ -307,12 +307,13 @@ android_consumers = %w[android-debug-unit-tests android-sideload-unit-tests andr
 preparation_steps = android_preparation.fetch('steps')
 aar_index = preparation_steps.index { |step| step['name'] == 'Build Google Messages AAR and licenses' }
 native_index = preparation_steps.index { |step| step['name'] == 'Verify and build Android native libraries' }
-linked_tests_index = preparation_steps.index { |step| step['name'] == 'Run Google Messages sideload unit tests' }
+linked_tests_index = preparation_steps.index { |step| step['name'] == 'Run Google Messages link-mode sideload test' }
 assert.call(aar_index && linked_tests_index && aar_index < linked_tests_index, 'linked sideload tests must run after building the Google Messages AAR')
 assert.call(native_index && linked_tests_index && native_index < linked_tests_index, 'linked sideload tests must run after building Android native libraries')
 linked_tests_command = preparation_steps.fetch(linked_tests_index).fetch('run')
 assert.call(linked_tests_command.include?(':app:testSideloadUnitTest -PpeppyGoogleMessagesLink=true'), 'linked sideload tests must enable Google Messages')
 assert.call(linked_tests_command.include?('--dependency-verification=strict') && linked_tests_command.include?('../../.github/scripts/run-with-jvm-watchdog.sh 300 1080 -- ./gradlew'), 'linked sideload tests must use strict dependency verification and the JVM watchdog')
+assert.call(linked_tests_command.scan('--tests').length == 1 && linked_tests_command.match?(/--tests dev\.peppy\.mobile\.about\.AssetThirdPartyNoticesSideloadTest(\s|\z)/), 'linked sideload tests must run only the link-mode notices test: the real Go engine cannot load on a host JVM, and the full suite runs unlinked in android-sideload-unit-tests')
 assert.call(android_consumers.all? { |job| job.fetch('needs') == 'android-native-preparation' }, 'every Android consumer must require native preparation')
 assert.call(android_consumers.all? { |job| job.fetch('steps').any? { |step| step.dig('with', 'name') == 'android-native-${{ github.sha }}' } }, 'every Android consumer must download the SHA-bound native artifact')
 android_packaging = android_ci_jobs.fetch('android-lint-and-assembly').fetch('steps').find { |step| step['name'] == 'Lint and assemble Android artifacts' }
