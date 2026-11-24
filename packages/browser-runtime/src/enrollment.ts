@@ -573,9 +573,19 @@ export class BrowserEnrollment {
 
   public management(): Promise<InstanceManagement> { return this.managementRequest("/v1/instance/management", "GET"); }
 
-  public revokeDevice(deviceId: string): Promise<InstanceManagement> {
-    if (!isDeviceId(deviceId)) return Promise.reject({ code: "invalid-request" });
-    return this.managementRequest(`/v1/instance/devices/${encodeURIComponent(deviceId)}/revoke`, "POST");
+  public async revokeDevice(deviceId: string): Promise<InstanceManagement> {
+    if (!isDeviceId(deviceId)) throw { code: "invalid-request" };
+    try {
+      await this.request(`/v1/instance/devices/${encodeURIComponent(deviceId)}/revoke`, "POST");
+    } catch (error) {
+      if (error instanceof HttpStatusError && (error.status === 401 || error.status === 403)) throw { code: `http-${error.status}` };
+      throw error;
+    }
+    try {
+      return await this.management();
+    } catch {
+      throw { code: "revoke-refresh-failed" };
+    }
   }
 
   public async beginVaultRequest(inviteLink: string, displayName: string): Promise<EnrollmentView> {

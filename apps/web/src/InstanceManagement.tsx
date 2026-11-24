@@ -97,8 +97,13 @@ export function InstanceManagement({ bridge, accountUrl }: { bridge: ManagementB
     try {
       setManagement(await bridge.enrollment_revoke_device(pendingRevoke.device_id));
       setPendingRevoke(undefined);
-    } catch {
-      setError("Peppy could not revoke this device. No device access was changed.");
+    } catch (nextError) {
+      if (typeof nextError === "object" && nextError !== null && "code" in nextError && nextError.code === "revoke-refresh-failed") {
+        setPendingRevoke(undefined);
+        setError("The device was revoked, but Peppy could not refresh the device list.");
+      } else {
+        setError("Peppy could not revoke this device. No device access was changed.");
+      }
     }
   };
 
