@@ -1978,12 +1978,15 @@ impl Client {
         now_ms: i64,
     ) -> Result<GroupCreateBegin, Error> {
         let mut guard = self.lock()?;
+        ensure_recovery_complete(&guard)?;
+        let active = guard.active_epoch;
         let (conn, ctx) = guard.parts();
         // Create pass boundary: a retained settlement left by a failed commit is retried here.
         // Settlement only; Google is never called, and a truly active create is not touched.
         rcs_group_create::settle_retained_best_effort(conn);
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let begin = rcs_group_create::begin(&tx, command_id, conversation_id, now_ms)?;
+        let begin =
+            rcs_group_create::begin(&tx, &ctx, active, command_id, conversation_id, now_ms)?;
         group_metadata::sync_all_link_states(&tx, &ctx, now_ms)?;
         tx.commit()?;
         Ok(begin)
