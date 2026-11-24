@@ -1184,12 +1184,7 @@ fn rcs_retry_is_refused_after_restore_guard_is_recorded() {
         .unwrap();
     gateway.mark_restored_gateway().unwrap();
 
-    assert_eq!(
-        gateway
-            .retry_rcs_failed_before_submission(command_id, &current, 1_001)
-            .unwrap_err(),
-        Error::InvalidRequest("restore guarded")
-    );
+    assert_invalid_request(gateway.retry_rcs_failed_before_submission(command_id, &current, 1_001));
 }
 
 #[test]

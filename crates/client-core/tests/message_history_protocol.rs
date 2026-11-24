@@ -33,6 +33,31 @@ fn source_advertisement_is_fail_closed_and_projects_only_protocol_fields() {
     assert_eq!(published["published"], true);
     assert!(published.get("query").is_none());
     assert!(published.get("raw_provider_id").is_none());
+    let outbox = decrypted_outbox(&client, &vault);
+    assert_eq!(outbox.len(), 1);
+    let published_source = outbox[0]["source"].as_object().unwrap();
+    let mut fields: Vec<_> = published_source.keys().map(String::as_str).collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        [
+            "capabilities",
+            "exhausted",
+            "generation",
+            "key_epoch",
+            "permission",
+            "policy",
+            "producer",
+            "revision",
+            "schema_version"
+        ]
+    );
+    assert!(
+        !outbox[0]
+            .to_string()
+            .contains("must never leave local search")
+    );
+    assert!(!outbox[0].to_string().contains("\"raw_provider_id\""));
 
     // A genuinely new advertisement needs the outbox, which is fenced without compaction.
     client.set_server_compaction_state(false, false).unwrap();

@@ -985,7 +985,7 @@ fn version_64_upgrade_adds_mark_read_schema_without_resetting_preferences() {
     assert_eq!(client.gateway_settings().unwrap(), settings);
     drop(client);
     let conn = encrypted_connection(&config);
-    assert_eq!(schema_version(&conn), 66);
+    assert_eq!(schema_version(&conn), current_schema_version());
     assert!(table_exists(&conn, "notification_mark_reads"));
     assert!(index_exists(&conn, "notification_mark_reads_pending"));
     assert!(column_exists(&conn, "notifications", "mark_read_supported"));
@@ -1022,6 +1022,6 @@ fn version_65_upgrade_adds_dismissal_status_schema_without_resetting_preferences
     assert_eq!(client.gateway_settings().unwrap(), settings);
     drop(client);
     let conn = encrypted_connection(&config);
-    assert_eq!(schema_version(&conn), 66);
+    assert_eq!(schema_version(&conn), current_schema_version());
     assert!(table_exists(&conn, "notification_dismissal_statuses"));
 }

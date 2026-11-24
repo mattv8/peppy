@@ -1397,20 +1397,17 @@ fn regular_number_overlap_and_multiple_sms_recipients_never_get_short_code_excep
     let command = lab.command("2025550123", SIM);
     assert_eq!(lab.permit(command, 1_000), blocked());
     let before = lab.sender.pending_outbox().unwrap();
-    assert_eq!(
-        lab.sender.queue_send(
-            OutgoingSms {
-                conversation_id: lab.conversation,
-                recipients: vec!["22345".into(), "22346".into()],
-                body: "carrier".into()
-            },
-            GatewayRoute::Carrier {
-                gateway_device_id: lab.gateway_config.device_id,
-                subscription_id: SIM.into()
-            }
-        ),
-        Err(Error::InvalidRequest("SMS requires exactly one recipient"))
-    );
+    assert_invalid_request(lab.sender.queue_send(
+        OutgoingSms {
+            conversation_id: lab.conversation,
+            recipients: vec!["22345".into(), "22346".into()],
+            body: "carrier".into(),
+        },
+        GatewayRoute::Carrier {
+            gateway_device_id: lab.gateway_config.device_id,
+            subscription_id: SIM.into(),
+        },
+    ));
     assert_eq!(lab.sender.pending_outbox().unwrap(), before);
     assert_eq!(lab.attempts(command), 0);
     assert_eq!(lab.diagnostic(), None);

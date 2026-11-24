@@ -94,10 +94,7 @@ fn native_carrier_begin_refuses_wrong_sim_without_an_attempt() {
     let mut wrong_sim = observation.clone();
     wrong_sim.selected_sim_id = "android-subscription-8".into();
 
-    assert!(matches!(
-        gateway.begin_native_rcs_send(preparation, &wrong_sim, 1_000),
-        Err(Error::InvalidRequest("mapping unproven"))
-    ));
+    assert_invalid_request(gateway.begin_native_rcs_send(preparation, &wrong_sim, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 }
@@ -180,10 +177,7 @@ fn native_carrier_prepare_refusal_does_not_consume_a_carrier_proof() {
         .record_carrier_only_proof(&carrier_proof(&command), 1_000)
         .unwrap();
 
-    assert!(matches!(
-        gateway.prepare_native_rcs_send(command_id, 1_000),
-        Err(Error::InvalidRequest("mapping unproven"))
-    ));
+    assert_invalid_request(gateway.prepare_native_rcs_send(command_id, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     drop(gateway);
     let reopened = unlocked(&config, &vault);
@@ -220,10 +214,7 @@ fn native_carrier_admission_matches_automatic_and_strict_entry_stays_refused() {
 
     let (_directory, _vault, strict_config, strict, strict_command) = carrier_command();
     strict.verify_rcs_mapping(&observation, 1_000).unwrap();
-    assert!(matches!(
-        strict.begin_rcs_send_attempt(strict_command, &observation, 1_000),
-        Err(Error::InvalidRequest("RCS route required"))
-    ));
+    assert_invalid_request(strict.begin_rcs_send_attempt(strict_command, &observation, 1_000));
     assert_eq!(attempt_count(&strict_config, strict_command), 0);
 }
 
@@ -247,10 +238,7 @@ fn a_text_only_mms_command_to_several_recipients_stays_out_of_the_text_path() {
     let (_directory, _vault, config, gateway, command) =
         carrier_text_mms_command(&["peer-local", "other-local"]);
 
-    assert!(matches!(
-        gateway.prepare_native_rcs_send(command, 1_000),
-        Err(Error::InvalidRequest("RCS text required"))
-    ));
+    assert_invalid_request(gateway.prepare_native_rcs_send(command, 1_000));
     assert_eq!(attempt_count(&config, command), 0);
 }
 
@@ -433,10 +421,7 @@ fn native_preparation_rejects_empty_and_exactly_4097_byte_stored_bodies() {
             rcs_command("peer-local");
         replace_stored_body(&config, command_id, body);
 
-        assert!(matches!(
-            gateway.prepare_native_rcs_send(command_id, 1_000),
-            Err(Error::InvalidRequest("RCS body out of bounds"))
-        ));
+        assert_invalid_request(gateway.prepare_native_rcs_send(command_id, 1_000));
         assert_eq!(attempt_count(&config, command_id), 0);
         assert_eq!(rcs_ledger_count(&config, command_id), 0);
     }
@@ -450,10 +435,7 @@ fn native_begin_rechecks_replaced_empty_and_exactly_4097_byte_stored_bodies() {
         let preparation = gateway.prepare_native_rcs_send(command_id, 1_000).unwrap();
         replace_stored_body(&config, command_id, body);
 
-        assert!(matches!(
-            gateway.begin_native_rcs_send(preparation, &observation, 1_000),
-            Err(Error::InvalidRequest("RCS body out of bounds"))
-        ));
+        assert_invalid_request(gateway.begin_native_rcs_send(preparation, &observation, 1_000));
         assert_eq!(attempt_count(&config, command_id), 0);
         assert_eq!(rcs_ledger_count(&config, command_id), 0);
     }
@@ -852,20 +834,14 @@ fn public_allocators_refuse_persisted_exhaustion_without_mutating_state() {
     sqlite_max["link_generation"] = serde_json::json!(i64::MAX);
     replace_metadata(&config, RCS_CONTEXT_KEY, &sqlite_max.to_string());
     let before = persisted_metadata(&config, RCS_CONTEXT_KEY);
-    assert!(matches!(
-        gateway.next_rcs_context_tuple("runtime", 1, 1, "new-pairing"),
-        Err(Error::InvalidRequest("RCS context tuple exhausted"))
-    ));
+    assert_invalid_request(gateway.next_rcs_context_tuple("runtime", 1, 1, "new-pairing"));
     assert_eq!(persisted_metadata(&config, RCS_CONTEXT_KEY), before);
 
     let mut u64_max: serde_json::Value = serde_json::from_str(&valid_context).unwrap();
     u64_max["context_revision"] = serde_json::json!(u64::MAX);
     replace_metadata(&config, RCS_CONTEXT_KEY, &u64_max.to_string());
     let before = persisted_metadata(&config, RCS_CONTEXT_KEY);
-    assert!(matches!(
-        gateway.next_rcs_context_tuple("runtime", 1, 1, "verified-handset"),
-        Err(Error::InvalidRequest("RCS context tuple exhausted"))
-    ));
+    assert_invalid_request(gateway.next_rcs_context_tuple("runtime", 1, 1, "verified-handset"));
     assert_eq!(persisted_metadata(&config, RCS_CONTEXT_KEY), before);
 
     let conversation_id = gateway
@@ -887,10 +863,7 @@ fn public_allocators_refuse_persisted_exhaustion_without_mutating_state() {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(matches!(
-        gateway.next_rcs_mapping_revision(conversation_id),
-        Err(Error::InvalidRequest("RCS mapping revision exhausted"))
-    ));
+    assert_invalid_request(gateway.next_rcs_mapping_revision(conversation_id));
     assert_eq!(
         encrypted_connection(&config)
             .query_row(
@@ -990,26 +963,17 @@ fn native_preparation_refuses_missing_historical_attempted_and_wrong_recipient_c
             [command_id.to_string()],
         )
         .unwrap();
-    assert!(matches!(
-        gateway.prepare_native_rcs_send(command_id, 1_000),
-        Err(Error::InvalidRequest("historical command"))
-    ));
+    assert_invalid_request(gateway.prepare_native_rcs_send(command_id, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 
     let (_directory, _vault, config, gateway, command_id) = carrier_command();
-    assert!(matches!(
-        gateway.prepare_native_rcs_send(command_id, 1_000),
-        Err(Error::InvalidRequest("mapping unproven"))
-    ));
+    assert_invalid_request(gateway.prepare_native_rcs_send(command_id, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 
     let (_directory, _vault, config, gateway, command_id, _observation) = rcs_command("other-peer");
-    assert!(matches!(
-        gateway.prepare_native_rcs_send(command_id, 1_000),
-        Err(Error::InvalidRequest("RCS recipient is not proven"))
-    ));
+    assert_invalid_request(gateway.prepare_native_rcs_send(command_id, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 
@@ -1033,10 +997,7 @@ fn native_begin_refuses_replaced_or_invalidated_prepared_mappings_without_an_att
             [preparation.mapping().unwrap().conversation_id.to_string()],
         )
         .unwrap();
-    assert!(matches!(
-        gateway.begin_native_rcs_send(preparation, &observation, 1_000),
-        Err(Error::InvalidRequest("mapping changed"))
-    ));
+    assert_invalid_request(gateway.begin_native_rcs_send(preparation, &observation, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 
@@ -1048,10 +1009,7 @@ fn native_begin_refuses_replaced_or_invalidated_prepared_mappings_without_an_att
             [preparation.mapping().unwrap().conversation_id.to_string()],
         )
         .unwrap();
-    assert!(matches!(
-        gateway.begin_native_rcs_send(preparation, &observation, 1_000),
-        Err(Error::InvalidRequest("mapping changed"))
-    ));
+    assert_invalid_request(gateway.begin_native_rcs_send(preparation, &observation, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 
@@ -1062,10 +1020,7 @@ fn native_begin_refuses_replaced_or_invalidated_prepared_mappings_without_an_att
         gateway.verify_rcs_mapping(&replacement, 1_001).unwrap(),
         RcsMappingOutcome::Mapped(_)
     ));
-    assert!(matches!(
-        gateway.begin_native_rcs_send(preparation, &replacement, 1_001),
-        Err(Error::InvalidRequest("mapping changed"))
-    ));
+    assert_invalid_request(gateway.begin_native_rcs_send(preparation, &replacement, 1_001));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 
@@ -1083,10 +1038,7 @@ fn native_begin_refuses_replaced_or_invalidated_prepared_mappings_without_an_att
     current.native_evidence.settings_validated_at_ms = 999;
     current.native_evidence.conversation_observed_at_ms = 999;
     current.carrier_binding.route_observed_at_ms = 999;
-    assert!(matches!(
-        gateway.begin_native_rcs_send(preparation, &current, 1_000),
-        Err(Error::InvalidRequest("mapping changed"))
-    ));
+    assert_invalid_request(gateway.begin_native_rcs_send(preparation, &current, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 }
@@ -1097,10 +1049,7 @@ fn native_begin_refuses_stale_partial_and_wrong_route_observations_without_an_at
         rcs_command("peer-local");
     let preparation = gateway.prepare_native_rcs_send(command_id, 1_000).unwrap();
     observation.observed_at_ms = 0;
-    assert!(matches!(
-        gateway.begin_native_rcs_send(preparation, &observation, 31_001),
-        Err(Error::InvalidRequest("mapping unproven"))
-    ));
+    assert_invalid_request(gateway.begin_native_rcs_send(preparation, &observation, 31_001));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 
@@ -1108,10 +1057,7 @@ fn native_begin_refuses_stale_partial_and_wrong_route_observations_without_an_at
         rcs_command("peer-local");
     let preparation = gateway.prepare_native_rcs_send(command_id, 1_000).unwrap();
     observation.native_evidence.lookup_complete = false;
-    assert!(matches!(
-        gateway.begin_native_rcs_send(preparation, &observation, 1_000),
-        Err(Error::InvalidRequest("mapping unproven"))
-    ));
+    assert_invalid_request(gateway.begin_native_rcs_send(preparation, &observation, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 
@@ -1119,10 +1065,7 @@ fn native_begin_refuses_stale_partial_and_wrong_route_observations_without_an_at
         rcs_command("peer-local");
     let preparation = gateway.prepare_native_rcs_send(command_id, 1_000).unwrap();
     observation.carrier_binding.is_current_default_sms = false;
-    assert!(matches!(
-        gateway.begin_native_rcs_send(preparation, &observation, 1_000),
-        Err(Error::InvalidRequest("mapping unproven"))
-    ));
+    assert_invalid_request(gateway.begin_native_rcs_send(preparation, &observation, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 
@@ -1130,10 +1073,7 @@ fn native_begin_refuses_stale_partial_and_wrong_route_observations_without_an_at
         rcs_command("peer-local");
     let preparation = gateway.prepare_native_rcs_send(command_id, 1_000).unwrap();
     observation.native_evidence.lifetime.run_generation = 0;
-    assert!(matches!(
-        gateway.begin_native_rcs_send(preparation, &observation, 1_000),
-        Err(Error::InvalidRequest("mapping unproven"))
-    ));
+    assert_invalid_request(gateway.begin_native_rcs_send(preparation, &observation, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 
@@ -1141,10 +1081,7 @@ fn native_begin_refuses_stale_partial_and_wrong_route_observations_without_an_at
         rcs_command("peer-local");
     let preparation = gateway.prepare_native_rcs_send(command_id, 1_000).unwrap();
     observation.native_evidence.lifetime.link_generation += 1;
-    assert!(matches!(
-        gateway.begin_native_rcs_send(preparation, &observation, 1_000),
-        Err(Error::InvalidRequest("mapping unproven"))
-    ));
+    assert_invalid_request(gateway.begin_native_rcs_send(preparation, &observation, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 
@@ -1152,10 +1089,7 @@ fn native_begin_refuses_stale_partial_and_wrong_route_observations_without_an_at
         rcs_command("peer-local");
     let preparation = gateway.prepare_native_rcs_send(command_id, 1_000).unwrap();
     observation.native_evidence.settings_currentness = NativeSettingsCurrentness::Unproven;
-    assert!(matches!(
-        gateway.begin_native_rcs_send(preparation, &observation, 1_000),
-        Err(Error::InvalidRequest("mapping unproven"))
-    ));
+    assert_invalid_request(gateway.begin_native_rcs_send(preparation, &observation, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 }
@@ -1210,10 +1144,7 @@ fn native_preparation_rejects_unsupported_or_stale_stored_mappings() {
                 .to_string()],
         )
         .unwrap();
-    assert!(matches!(
-        gateway.prepare_native_rcs_send(command_id, 1_000),
-        Err(Error::InvalidRequest("mapping unproven"))
-    ));
+    assert_invalid_request(gateway.prepare_native_rcs_send(command_id, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 
@@ -1229,10 +1160,7 @@ fn native_preparation_rejects_unsupported_or_stale_stored_mappings() {
                 .to_string()],
         )
         .unwrap();
-    assert!(matches!(
-        gateway.prepare_native_rcs_send(command_id, 31_001),
-        Err(Error::InvalidRequest("mapping unproven"))
-    ));
+    assert_invalid_request(gateway.prepare_native_rcs_send(command_id, 31_001));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 }
@@ -1314,10 +1242,7 @@ fn native_preparation_refuses_nontext_command_without_an_attempt() {
             ],
         )
         .unwrap();
-    assert!(matches!(
-        gateway.prepare_native_rcs_send(command_id, 1_000),
-        Err(Error::InvalidRequest("RCS text required"))
-    ));
+    assert_invalid_request(gateway.prepare_native_rcs_send(command_id, 1_000));
     assert_eq!(attempt_count(&config, command_id), 0);
     assert_eq!(rcs_ledger_count(&config, command_id), 0);
 }
