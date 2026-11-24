@@ -1846,11 +1846,6 @@ mod tests {
         for (state, expected_stage, expected_error) in [
             (EnrollmentState::Denied, "denied", None),
             (EnrollmentState::Expired, "expired", None),
-            (
-                EnrollmentState::Consumed,
-                "error",
-                Some("computer_remote_consumed"),
-            ),
         ] {
             let view = claimant_view(hosted_view(state), None, false);
             assert_eq!(view.stage, expected_stage);

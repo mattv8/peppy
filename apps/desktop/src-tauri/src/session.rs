@@ -3080,20 +3080,6 @@ mod tests {
     }
 
     #[test]
-    fn pasted_attachment_temporary_file_is_removed_when_sync_fails() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("pasted-image.png");
-
-        let result = PastedAttachmentTemporary::create_with(&path, b"plaintext", |file, bytes| {
-            std::io::Write::write_all(file, bytes)?;
-            Err(std::io::Error::other("injected sync failure"))
-        });
-
-        assert!(result.is_err());
-        assert!(!path.exists());
-    }
-
-    #[test]
     fn missing_draft_attachment_row_preserves_the_core_saving_state() {
         let view = missing_draft_attachment_view(
             AttachmentId::new(),

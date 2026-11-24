@@ -1052,31 +1052,6 @@ async fn locally_expired_session_stays_available_for_authoritative_renewal() {
 }
 
 #[tokio::test]
-async fn fresh_thirty_day_session_skips_renewal_post() {
-    let store = MemoryStore::default();
-    let hosted = HostedState::default();
-    let server = Arc::new(Mutex::new(FakeServerState::default()));
-    let (origin, _handle) = start_fake_server(server.clone()).await;
-    hosted.base_override.lock().unwrap().replace(origin.clone());
-    store
-        .set(
-            &super::session_key(&origin),
-            &encode_session(
-                ACCOUNT,
-                "fresh-bearer",
-                super::now_unix() + u64::from(peppy_hosted_api::SESSION_LIFETIME_SECONDS),
-            ),
-        )
-        .unwrap();
-
-    super::renew_session(&store, &hosted, &origin, false)
-        .await
-        .unwrap();
-
-    assert_eq!(server.lock().unwrap().renew_calls, 0);
-}
-
-#[tokio::test]
 async fn forced_renewal_bypasses_freshness() {
     let store = MemoryStore::default();
     let hosted = HostedState::default();

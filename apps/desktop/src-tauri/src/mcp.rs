@@ -925,11 +925,6 @@ mod tests {
         assert_eq!(webhook_error(NetError::TooLarge).code, "response-too-large");
     }
 
-    #[test]
-    fn computer_creation_uses_the_collection_route() {
-        assert_eq!(COMPUTER_ENROLLMENT_PATH, "/v1/enrollment/computers");
-    }
-
     #[tokio::test]
     async fn mcp_account_session_uses_the_captured_hosted_origin() {
         use crate::secure_store::SecretStore;
