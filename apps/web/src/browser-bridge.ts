@@ -3,7 +3,7 @@ import type {
   ContactEditRequestInput, ContactEditStatus, ContactScanStatus, ContactSyncStatus, ContactView,
   DesktopBridge, DesktopSnapshot, DeviceRosterView, Draft, DraftInput, HistoryPage,
   HistorySearchAttemptInput, HistorySearchSnapshot, LocalSearchPage, LocalSearchRequest, MaximizeButtonRegion, MediaCursor, MediaOpen, MediaPage, MessageWindow,
-  MessageWindowRequest, NotificationCheck, NotificationPreferences, NotificationTarget, OneTimeCodeTarget, PublicCopy,
+  MessageWindowRequest, NotificationCheck, NotificationDismissResult, NotificationPreferences, NotificationTarget, OneTimeCodeTarget, PublicCopy,
   ContactNameCandidates, RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput, SendResultView, StartHistorySearchInput,
   BillingSummaryView, HostedSignInProvider, PurchaseOptions, StartupStatus, StoreProduct,
   AccountAccessResult, AttachmentRetentionStateDto, AttachmentRetentionStatusResult, ConversationFolder, NotificationPersistence, NotificationPersistenceSettings, PastedImage, ReactionSubmitView,
@@ -581,8 +581,7 @@ export class BrowserBridge implements DesktopBridge {
     return this.call("dismiss_reaction_request", { requestId: input.requestId });
   }
   public set_conversation_tone(seed: string, paletteIndex: number | null): Promise<void> { return this.call("set_conversation_tone", { seed, paletteIndex }); }
-  public dismiss_notification(target: NotificationTarget): Promise<void> { return this.call("dismiss_notification", { target }); }
-  public dismiss_all_notifications(): Promise<void> { return this.call("dismiss_all_notifications"); }
+  public dismiss_notifications(targets: NotificationTarget[]): Promise<NotificationDismissResult[]> { return this.call("dismiss_notifications", { targets }); }
   public set_app_muted(sourceDeviceId: string, packageName: string, appName: string, muted: boolean): Promise<void> { return this.call("set_app_muted", { sourceDeviceId, packageName, appName, muted }); }
   public mark_notifications_seen(targets: NotificationTarget[]): Promise<void> { return this.call("mark_notifications_seen", { targets }); }
   public set_notification_preferences(preferences: NotificationPreferences): Promise<void> { return this.call("set_notification_preferences", { preferences }); }

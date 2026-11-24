@@ -108,7 +108,11 @@ import {
   type Draft,
 } from "./bridge/bridge";
 import { useMaximizeButtonRegion } from "./shell/useMaximizeButtonRegion";
-import { dismissibleNotifications, notificationAppName, notificationMuteKey, notificationSourceName, NotificationsView, notificationTuple, visibleNotifications } from "./notifications/Notifications";
+import { dismissibleNotifications, notificationAppName, notificationMuteKey, notificationSourceName, NotificationsView, notificationTuple, phoneNameOf, shownDismissalBlocks, visibleNotifications, type NotificationAnnouncement } from "./notifications/Notifications";
+import { useNotificationDismissals } from "./notifications/useNotificationDismissals";
+import { newestDismissTargets } from "./notifications/dismissalOverlay";
+import { blockedDismissAnnouncement } from "./notifications/notificationDismissCopy";
+import { notificationKey } from "./notifications/notificationSections";
 import type { NotificationActionNotice as NotificationActionNoticeState } from "./notifications/NotificationActionNotice";
 import { useNotificationSearch } from "./notifications/useNotificationSearch";
 import { useScopedSearch } from "./search/useScopedSearch";
@@ -258,6 +262,8 @@ export type PendingSend = {
   baselineSelfIds: ReadonlySet<string>;
 };
 
+/** A stable empty list, so effects keyed on the snapshot's notifications do not re-run while no snapshot is loaded. */
+const EMPTY_NOTIFICATIONS: MirroredNotification[] = [];
 const PENDING_SEND_ECHO_WINDOW_MS = 5 * 60_000;
 
 /**
@@ -2611,12 +2617,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   const settingsOpen = !revoked && activeView === "settings";
   const notificationsOpen = !revoked && activeView === "notifications";
   const notificationsLocked = snapshot?.encryption.state !== "unlocked";
-  const dismissibleNotificationsCount = dismissibleNotifications(snapshot?.notifications ?? [], snapshot?.appFilters ?? [], notificationsLocked).length;
   const contactsOpen = !revoked && activeView === "contacts";
   const [settingsSectionRequested, setSettingsSectionRequested] = useState<"notifications" | "notification-apps" | "devices" | "updates">();
   const [notificationAppFilter, setNotificationAppFilter] = useState<string | null>(null);
   const notificationSearchRequestId = useRef(0);
-  const dismissingNotificationsRef = useRef(false);
   const [actionNotice, setActionNotice] = useState<ActionNotice>();
   const [refreshNotice, setRefreshNotice] = useState("");
   const [composerFeedback, setComposerFeedback] = useState<ComposerFeedback>();
@@ -2636,6 +2640,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   const noticeActionBusyRef = useRef(false);
   const [noticeActionBusy, setNoticeActionBusy] = useState(false);
   const [notificationActionNotice, setNotificationActionNotice] = useState<NotificationActionNoticeState | undefined>();
+  const [notificationAnnouncement, setNotificationAnnouncement] = useState<NotificationAnnouncement>({ seq: 0, text: "" });
+  const announceNotification = useCallback((text: string) => setNotificationAnnouncement(current => ({ seq: current.seq + 1, text })), []);
   const [notificationMuteNotice, setNotificationMuteNotice] = useState<NotificationMuteNoticeState>();
   const [notificationMutePending, setNotificationMutePending] = useState(false);
   const notificationMutePendingRef = useRef(false);
@@ -2685,7 +2691,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   const notificationDrain = useRef<ReturnType<typeof createNotificationActivationDrain> | undefined>(undefined);
   const notificationNavigation = useRef<{ requestId: string; sessionGeneration: string; generation: number; epoch: number } | undefined>(undefined);
   const notificationHandler = useRef<(request: NotificationActivation, context: ActivationContext) => Promise<void>>(async () => {});
-  const [dismissingNotifications, setDismissingNotifications] = useState(false);
   const [addingPhone, setAddingPhone] = useState(false);
   const [addDeviceFromSettings, setAddDeviceFromSettings] = useState(false);
   const [initialEnrollmentActive, setInitialEnrollmentActive] = useState(false);
@@ -5536,6 +5541,26 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     if (contactNavigation.current) contactNavigation.current(open);
     else open();
   };
+  const notificationDismissals = useNotificationDismissals({
+    bridge,
+    notifications: snapshot?.notifications ?? EMPTY_NOTIFICATIONS,
+    refresh: () => refresh(),
+    writesPaused: isWritesPaused(snapshot),
+    announce: announceNotification,
+    onBulkFailure: notice => setNotificationActionNotice(notice && { kind: "error", ...notice }),
+    label: row => ({ title: notificationDisplayTitle(row.title), appName: notificationAppName(row.appName, row.packageName) }),
+    singleAnnouncement: row => {
+      const sources = snapshot?.gateways ?? [];
+      const id = row.target.sourceDeviceId;
+      if (!shownDismissalBlocks(snapshot?.notificationDismissalBlocks ?? [], sources).some(block => block.sourceDeviceId === id)) return undefined;
+      return blockedDismissAnnouncement(notificationDisplayTitle(row.title), notificationAppName(row.appName, row.packageName), phoneNameOf(id, sources, [id]));
+    },
+  });
+  const hiddenNotificationKeys = notificationDismissals.hiddenKeys;
+  const notificationSearchRows = useMemo(
+    () => (snapshot?.notifications ?? []).filter(notification => !hiddenNotificationKeys.has(notificationKey(notification.target))),
+    [snapshot?.notifications, hiddenNotificationKeys],
+  );
   const {
     notificationQuery,
     setNotificationQuery,
@@ -5545,7 +5570,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   } = useNotificationSearch({
     active: notificationsOpen,
     locked: notificationsLocked || Boolean(appLock?.locked),
-    notifications: snapshot?.notifications ?? [],
+    notifications: notificationSearchRows,
     filters: snapshot?.appFilters ?? [],
     sources: snapshot?.gateways ?? [],
     displayTitle: notificationDisplayTitle,
@@ -5556,6 +5581,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       navigateNotificationSearch(undefined);
     },
   });
+  // Dismiss all: up to 100 visible, dismissible, not-hidden rows, newest first. Same set the toolbar counts.
+  const dismissibleNotificationRows = dismissibleNotifications(snapshot?.notifications ?? [], snapshot?.appFilters ?? [], notificationsLocked, hiddenNotificationKeys);
+  const dismissibleNotificationsCount = dismissibleNotificationRows.length;
+  const dismissAllNotifications = () => {
+    if (!notificationDismissals.dismiss(newestDismissTargets(dismissibleNotificationRows), { single: false })) return;
+    setNotificationAppFilter(null);
+    setNotificationQuery("");
+  };
   const { query: contactQuery, setQuery: setContactQuery, scope: contactSearchScope, resetSearch: resetContactSearch } = useScopedSearch({
     active: contactsOpen,
     locked: !snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked),
@@ -6381,7 +6414,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
         details: <StatusDetails />,
       };
   const mutedNotificationKeys = new Set((snapshot?.appFilters ?? []).filter((filter) => filter.muted).map((filter) => notificationMuteKey(filter.sourceDeviceId, filter.packageName)));
-  const notificationUnread = snapshot?.notifications.filter((notification) => !notification.seen && !notification.dismissalPending && !mutedNotificationKeys.has(notificationMuteKey(notification.target.sourceDeviceId, notification.packageName))).length ?? 0;
+  const notificationUnread = snapshot?.notifications.filter((notification) => !notification.seen && !notification.dismissalPending && !hiddenNotificationKeys.has(notificationKey(notification.target)) && !mutedNotificationKeys.has(notificationMuteKey(notification.target.sourceDeviceId, notification.packageName))).length ?? 0;
   const contactsPending = snapshot?.contactsPendingCount ?? snapshot?.contactBooks?.reduce((count, book) => count + book.pendingEditCount, 0) ?? 0;
   const searchDisabled = !snapshot || snapshot.encryption.state !== "unlocked" || Boolean(appLock?.locked);
   const searchSessionKey = renderedSearchSessionKey;
@@ -6467,22 +6500,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       </main>
     );
   }
-
-  const dismissAllNotifications = () => {
-    if (dismissingNotificationsRef.current) return;
-    setNotificationAppFilter(null);
-    setNotificationQuery("");
-    dismissingNotificationsRef.current = true;
-    setDismissingNotifications(true);
-    setNotificationActionNotice(undefined);
-    void bridge.dismiss_all_notifications()
-      .then(() => refresh())
-      .catch(error => setNotificationActionNotice({ kind: "error", message: `Could not dismiss notifications. ${errorText(error)}` }))
-      .finally(() => {
-        dismissingNotificationsRef.current = false;
-        setDismissingNotifications(false);
-      });
-  };
 
   return (
     <ToneOverridesProvider overrides={toneOverrides}>
@@ -6888,10 +6905,21 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
               sources={snapshot?.gateways ?? []}
               locked={notificationsLocked}
               writesPaused={isWritesPaused(snapshot)}
-              dismissAll={{ label: dismissibleNotificationsCount > 100 ? "Dismiss up to 100" : "Dismiss all", disabled: !dismissibleNotificationsCount || dismissingNotifications, onDismissAll: dismissAllNotifications }}
+              hiddenKeys={hiddenNotificationKeys}
+              failures={notificationDismissals.failures}
+              onRetryDismiss={key => { setNotificationActionNotice(undefined); notificationDismissals.retry(key); }}
+              dismissalBlocks={snapshot?.notificationDismissalBlocks ?? []}
+              announcement={notificationAnnouncement}
+              onAnnounce={announceNotification}
+              dismissAll={{
+                label: dismissibleNotificationsCount > 100 ? "Dismiss up to 100" : "Dismiss all",
+                disabled: !dismissibleNotificationsCount || isWritesPaused(snapshot),
+                disabledReason: isWritesPaused(snapshot) ? UPDATE_PAUSED_DESCRIPTION : undefined,
+                onDismissAll: dismissAllNotifications,
+              }}
               onDismiss={target => {
                 setNotificationActionNotice(undefined);
-                void bridge.dismiss_notification(target).then(() => refresh()).catch(error => setNotificationActionNotice({ kind: "error", message: `Could not dismiss notification. ${errorText(error)}` }));
+                notificationDismissals.dismiss([target], { single: true });
               }}
               onMute={filter => {
                 if (notificationsLocked || appLock?.locked || notificationMutePendingRef.current) return;
@@ -6912,27 +6940,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
               }}
               onSettings={() => { setSettingsSectionRequested("notifications"); setActiveView("settings"); }}
               onManageApps={() => { setSettingsSectionRequested("notification-apps"); setActiveView("settings"); }}
-              onDismissMany={async targets => {
-                if (dismissingNotificationsRef.current) return;
-                const pinnedTargets = targets.slice(0, 100);
-                let dismissed = 0;
-                let failure: unknown;
-                dismissingNotificationsRef.current = true;
-                setDismissingNotifications(true);
+              onDismissMany={targets => {
                 setNotificationActionNotice(undefined);
-                try {
-                  for (const target of pinnedTargets) {
-                    await bridge.dismiss_notification(target);
-                    dismissed += 1;
-                  }
-                } catch (error) {
-                  failure = error;
-                } finally {
-                  await refresh().catch(() => undefined);
-                  dismissingNotificationsRef.current = false;
-                  setDismissingNotifications(false);
-                }
-                if (failure) setNotificationActionNotice({ kind: "error", message: `Dismissed ${dismissed} of ${pinnedTargets.length}. ${errorText(failure)}` });
+                notificationDismissals.dismiss(targets, { single: false });
               }}
               query={notificationQuery}
               onClearQuery={() => setNotificationQuery("")}

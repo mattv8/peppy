@@ -7765,19 +7765,20 @@ describe("notification bulk dismissal", () => {
     expect(screen.getByRole("button", { name: "Dismiss all" })).toBeDisabled();
   });
 
-  it("labels more than one hundred eligible notifications and suppresses same-turn duplicate dismissal", async () => {
+  it("labels more than one hundred eligible notifications and sends at most one hundred in one call", async () => {
     host.notifications = Array.from({ length: 101 }, (_, index) => notification(index));
-    const request = deferred<void>();
-    const dismissAll = vi.spyOn(bridge, "dismiss_all_notifications").mockReturnValue(request.promise);
+    const request = deferred<{ target: DesktopSnapshot["notifications"][number]["target"]; outcome: "recorded" }[]>();
+    const dismiss = vi.spyOn(bridge, "dismiss_notifications").mockReturnValue(request.promise);
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
     const bulk = screen.getByRole("button", { name: "Dismiss up to 100" });
     fireEvent.click(bulk);
-    fireEvent.click(bulk);
-    expect(dismissAll).toHaveBeenCalledTimes(1);
-    expect(bulk).toBeDisabled();
-    request.resolve();
-    await waitFor(() => expect(bulk).toBeEnabled());
+    expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(dismiss.mock.calls[0][0]).toHaveLength(100);
+    expect(screen.getAllByRole("article")).toHaveLength(1);
+    request.resolve(dismiss.mock.calls[0][0].map(target => ({ target, outcome: "recorded" as const })));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Dismiss all" })).toBeEnabled());
+    expect(dismiss).toHaveBeenCalledTimes(1);
   });
 
   it("labels exactly one hundred eligible notifications as dismiss all", async () => {
@@ -7789,8 +7790,8 @@ describe("notification bulk dismissal", () => {
   });
 
   it("calls, refreshes, and positions the eligible bulk action in the toolbar", async () => {
-    host.notifications = [notification(1)];
-    const dismissAll = vi.spyOn(bridge, "dismiss_all_notifications").mockResolvedValue();
+    host.notifications = [notification(1), notification(2)];
+    const dismiss = vi.spyOn(bridge, "dismiss_notifications").mockImplementation(async targets => targets.map(target => ({ target, outcome: "recorded" as const })));
     const load = vi.mocked(bridge.load_state);
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
@@ -7798,33 +7799,35 @@ describe("notification bulk dismissal", () => {
     expect(bulk.closest("#notifications-toolbar")).not.toBeNull();
     const initialLoads = load.mock.calls.length;
     fireEvent.click(bulk);
-    await waitFor(() => expect(dismissAll).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(dismiss).toHaveBeenCalledTimes(1));
+    expect(dismiss.mock.calls[0][0]).toHaveLength(2);
     await waitFor(() => expect(load.mock.calls.length).toBeGreaterThan(initialLoads));
   });
 
-  it("shows bulk dismissal failures", async () => {
-    host.notifications = [notification(1)];
-    vi.spyOn(bridge, "dismiss_all_notifications").mockRejectedValue(new Error("offline"));
+  it("returns the rows and shows a bulk dismissal failure with Try again", async () => {
+    host.notifications = [notification(1), notification(2)];
+    vi.spyOn(bridge, "dismiss_notifications").mockRejectedValue(new Error("offline"));
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
     fireEvent.click(screen.getByRole("button", { name: "Dismiss all" }));
-    expect(await screen.findByText("Could not dismiss notifications. offline")).toBeVisible();
+    expect(await screen.findByText("Couldn't dismiss 2 notifications. Peppy couldn't save this.")).toBeVisible();
+    expect(screen.getAllByRole("article")).toHaveLength(2);
+    expect(document.getElementById("notifications-action-notice-action")).toHaveTextContent("Try again");
   });
 
   it("clears a bulk dismissal error before a successful retry", async () => {
-    host.notifications = [notification(1)];
-    const dismissAll = vi.spyOn(bridge, "dismiss_all_notifications")
+    host.notifications = [notification(1), notification(2)];
+    const dismiss = vi.spyOn(bridge, "dismiss_notifications")
       .mockRejectedValueOnce(new Error("offline"))
-      .mockResolvedValueOnce();
+      .mockImplementationOnce(async targets => targets.map(target => ({ target, outcome: "recorded" as const })));
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
-    const bulk = screen.getByRole("button", { name: "Dismiss all" });
-    fireEvent.click(bulk);
-    expect(await screen.findByText("Could not dismiss notifications. offline")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss all" }));
+    expect(await screen.findByText("Couldn't dismiss 2 notifications. Peppy couldn't save this.")).toBeVisible();
 
-    fireEvent.click(bulk);
-    await waitFor(() => expect(dismissAll).toHaveBeenCalledTimes(2));
-    expect(screen.queryByText("Could not dismiss notifications. offline")).not.toBeInTheDocument();
+    fireEvent.click(document.getElementById("notifications-action-notice-action")!);
+    await waitFor(() => expect(dismiss).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("Couldn't dismiss 2 notifications. Peppy couldn't save this.")).not.toBeInTheDocument();
   });
 });
 

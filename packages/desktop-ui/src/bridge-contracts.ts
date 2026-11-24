@@ -119,7 +119,7 @@ export type PastedImage = { bytes: ArrayBuffer; name: string; mediaType: string 
 export type PreparedPastedAttachments = { views: AttachmentView[]; failures: string[] };
 /** Exact durable cursors only; `targetHighWater` is a transient authenticated replay cut, not a percentage denominator. */
 export type SyncProgress = { phase: "updating" | "receiving" | "applying" | "waitingForKeys" | "repairing" | "blocked" | "current"; receivedThrough: string; processedThrough: string; targetHighWater?: string; snapshotReceived?: string; snapshotExpected?: string; snapshotRemaining?: string; snapshotTotal?: string; updateCompleted?: string; updateTotal?: string };
-export type DesktopSnapshot = { writesPaused?: boolean; version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; requestedRedirect?: { from: string; to: string }; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; sessionScopeId?: string; head: { enabled: boolean; capability: "available" | "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus; contactNameConflicts?: string[]; toneOverrides?: Record<string, number>; syncProgress?: SyncProgress; rcsStatus?: RcsStatusSnapshot };
+export type DesktopSnapshot = { writesPaused?: boolean; version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; requestedRedirect?: { from: string; to: string }; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; sessionScopeId?: string; head: { enabled: boolean; capability: "available" | "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; notificationDismissalBlocks?: NotificationDismissalBlock[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus; contactNameConflicts?: string[]; toneOverrides?: Record<string, number>; syncProgress?: SyncProgress; rcsStatus?: RcsStatusSnapshot };
 /** gatewayId/simId are optional on saves (omitted = keep the stored route) and required on sends. */
 export type DraftInput = Pick<Draft, "id" | "conversationId" | "text" | "recipientIds" | "attachmentIds" | "groupName"> & { expectedRevision: string; gatewayId?: string; simId?: string };
 export type DiscardDraftInput = Pick<Draft, "id" | "conversationId"> & { expectedRevision: string };
@@ -128,6 +128,10 @@ export type SendDraftInput = DraftInput & { gatewayId: string; simId: string; ex
 /** A separate, server-readable re-encoded copy created only after native confirmation. */
 export type PublicCopy = { url: string; expiresInSeconds: number };
 export type NotificationTarget = { sourceDeviceId: string; notificationKey: string; lifetime: string };
+export type NotificationDismissOutcome = "recorded" | "alreadyRecorded" | "notDismissible" | "gone" | "muted";
+export type NotificationDismissResult = { target: NotificationTarget; outcome: NotificationDismissOutcome };
+export type NotificationDismissalBlockReason = "mirroringOff" | "notificationAccessOff" | "waitingForWifi" | "other";
+export type NotificationDismissalBlock = { sourceDeviceId: string; reason: NotificationDismissalBlockReason; observedAtMs: number };
 export type OneTimeCodeTarget = { kind: "message"; messageId: string } | { kind: "notification"; target: NotificationTarget };
 export type MirroredNotification = { target: NotificationTarget; packageName: string; appName: string; appIconPngBase64?: string; title: string; text: string; category?: string; postedAt: number; dismissible: boolean; seen: boolean; dismissalPending: boolean; oneTimeCode?: string };
 export type AppFilter = { sourceDeviceId: string; packageName: string; appName: string; muted: boolean };
@@ -295,8 +299,8 @@ export interface DesktopBridge {
   set_conversation_folder(conversationId: string, folder: ConversationFolder): Promise<void>;
   request_sender_unblock(conversationId: string): Promise<void>;
   set_conversation_tone(seed: string, paletteIndex: number | null): Promise<void>;
-  dismiss_notification(target: NotificationTarget): Promise<void>;
-  dismiss_all_notifications(): Promise<void>;
+  /** Records dismissals for up to 100 targets in one core transaction; results follow input order. */
+  dismiss_notifications(targets: NotificationTarget[]): Promise<NotificationDismissResult[]>;
   set_app_muted(sourceDeviceId: string, packageName: string, appName: string, muted: boolean): Promise<void>;
   mark_notifications_seen(targets: NotificationTarget[]): Promise<void>;
   set_notification_preferences(preferences: NotificationPreferences): Promise<void>;

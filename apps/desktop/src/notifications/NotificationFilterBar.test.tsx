@@ -33,6 +33,20 @@ describe("NotificationFilterBar", () => {
     expect(container.querySelector("#notifications-dismiss-all")).toBeNull();
   });
 
+  it("places the waiting slot between the chips and the arrangement toggle", () => {
+    const { container } = render(<NotificationFilterBar chips={[{ packageName: "a", name: "A", count: 1 }, { packageName: "b", name: "B", count: 1 }]} appFilter={null} onAppFilter={vi.fn()} arrangement="time" onArrangement={vi.fn()} waiting={<span id="waiting-slot">Waiting</span>} />);
+    const slot = container.querySelector("#waiting-slot")!;
+    expect(container.querySelector("#notifications-filter-bar")!.compareDocumentPosition(slot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(slot.compareDocumentPosition(container.querySelector(".notification-arrangement")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("uses the disabled reason as the dismiss title while paused", () => {
+    render(<NotificationFilterBar chips={[]} appFilter={null} onAppFilter={vi.fn()} arrangement="time" onArrangement={vi.fn()} dismissAll={{ label: "Dismiss paused", disabled: true, disabledReason: "Paused while Peppy updates your messages.", onDismissAll: vi.fn() }} />);
+    const dismiss = screen.getByRole("button", { name: "Dismiss paused" });
+    expect(dismiss).toHaveAttribute("title", "Paused while Peppy updates your messages.");
+    expect(dismiss).toHaveAttribute("aria-describedby", "update-paused-description");
+  });
+
   it("wraps the visible Time, App and dismiss text in toolbar labels", () => {
     const { container } = render(<NotificationFilterBar chips={[]} appFilter={null} onAppFilter={vi.fn()} arrangement="time" onArrangement={vi.fn()} dismissAll={{ label: "Dismiss up to 100", disabled: false, onDismissAll: vi.fn() }} />);
     const labels = [...container.querySelectorAll(".notification-toolbar-label")].map(label => label.textContent);

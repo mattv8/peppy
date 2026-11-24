@@ -1,16 +1,23 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { BellOff, Clock, UPDATE_PAUSED_DESCRIPTION, formatDateTime, formatElapsedShort, isoDateTime, X } from "@peppy/desktop-ui";
+import { BellOff, Clock, Lock, TriangleAlert, UPDATE_PAUSED_DESCRIPTION, formatDateTime, formatElapsedShort, isoDateTime, X } from "@peppy/desktop-ui";
 import type { AppFilter, MirroredNotification, NotificationTarget } from "../bridge/bridge";
 import type { OneTimeCodeTarget } from "@peppy/desktop-ui/bridge-contracts";
 import { OneTimeCodeButton } from "../one-time-code/OneTimeCodeButton";
 import { notificationMuteKey, notificationTuple } from "./notificationIdentity";
 import { highlightSegments, notificationSearchTerms } from "./notificationSearch";
+import { localFailureText, refusedRowStatus, TRY_AGAIN_LABEL, tryAgainLabel, waitingRowStatus } from "./notificationDismissCopy";
 
 export type NotificationLabels = {
   appName(notification: MirroredNotification): string;
   sourceName(notification: MirroredNotification): string;
   title(notification: MirroredNotification): string;
 };
+
+/** Status shown under a row's text. Omitted for an ordinary dismissible row. */
+export type NotificationRowStatus =
+  | { kind: "waiting"; phoneName: string }
+  | { kind: "refused" }
+  | { kind: "failed"; message: string; onRetry?: () => void };
 
 export type NotificationRowProps = {
   writesPaused?: boolean;
@@ -25,7 +32,33 @@ export type NotificationRowProps = {
   onCopy(target: OneTimeCodeTarget, code: string): Promise<void>;
   onAction(keys: string[]): void;
   hideAppName?: boolean;
+  status?: NotificationRowStatus;
+  /** A locked row offers Mute only, with no Dismiss button. */
+  locked?: boolean;
 };
+
+type DismissState = "idle" | "pending" | "refused" | "failed";
+
+function dismissStateOf(status: NotificationRowStatus | undefined): DismissState {
+  return status?.kind === "waiting" ? "pending" : status?.kind ?? "idle";
+}
+
+function rowReasonOf(state: DismissState): string | undefined {
+  if (state === "pending") return "waiting";
+  if (state === "refused") return "refused";
+  if (state === "failed") return "local-failure";
+  return undefined;
+}
+
+function RowStatusLine({ status, title, appName, writesPaused }: { status: NotificationRowStatus; title: string; appName: string; writesPaused: boolean }) {
+  if (status.kind === "waiting") return <span className="notif-row-status" data-row-status="waiting"><Clock size={14} aria-hidden />{waitingRowStatus(status.phoneName)}</span>;
+  if (status.kind === "refused") return <span className="notif-row-status" data-row-status="refused"><Lock size={14} aria-hidden />{refusedRowStatus(appName)}</span>;
+  return <span className="notif-row-status" data-row-status="failed">
+    <TriangleAlert size={14} aria-hidden />
+    <span role="alert">{localFailureText(status.message)}</span>
+    {status.onRetry && <button type="button" className="secondary-button notif-row-retry" aria-label={tryAgainLabel(title, appName)} disabled={writesPaused} title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined} aria-describedby={writesPaused ? "update-paused-description" : undefined} onClick={status.onRetry}>{TRY_AGAIN_LABEL}</button>}
+  </span>;
+}
 
 export function NotificationAppIcon({ appName, base64 }: { appName: string; base64?: string }) {
   const [failed, setFailed] = useState(false);
@@ -66,32 +99,26 @@ function NotificationRowText({ id, text, query }: { id: string; text: string; qu
 }
 
 export function NotificationRow({
-  notification, labels, filter, unread, showPhone, query, onDismiss, onMute, onCopy, onAction, hideAppName, writesPaused = false,
+  notification, labels, filter, unread, showPhone, query, onDismiss, onMute, onCopy, onAction, hideAppName, writesPaused = false, status, locked = false,
 }: NotificationRowProps) {
-  const pending = notification.dismissalPending;
   const key = notificationTuple(notification.target.sourceDeviceId, notification.target.notificationKey, notification.target.lifetime);
   const appName = labels.appName(notification);
   const phoneName = labels.sourceName(notification);
   const title = labels.title(notification);
+  const dismissState = dismissStateOf(status);
+  const showDismiss = !locked && (dismissState === "idle" || dismissState === "failed");
   const muteLabel = `Mute ${appName}${showPhone ? ` on ${phoneName}` : ""}`;
   const dismissLabel = `Dismiss ${title || appName || "notification"} from ${appName} on ${phoneName}`;
   const titleId = `notif-title-${key}`;
   const metaId = `notif-meta-${key}`;
-  const dismissRequested = useRef(false);
-  const dismissButton = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    const active = document.activeElement;
-    if (!pending || !dismissRequested.current || (active !== document.body && active !== dismissButton.current)) return;
-    document.getElementById(`notif-${key}`)?.focus({ preventScroll: true });
-    dismissRequested.current = false;
-  }, [key, pending]);
 
   return <article
     id={`notif-${key}`}
     tabIndex={-1}
     data-device-id={notification.target.sourceDeviceId}
     data-notification-key={notification.target.notificationKey}
-    data-dismiss-state={pending ? "pending" : "idle"}
+    data-dismiss-state={dismissState}
+    data-row-reason={rowReasonOf(dismissState)}
     data-read-state={unread ? "unread" : "read"}
     data-notification-target={JSON.stringify(notification.target)}
     className="notif-row"
@@ -116,7 +143,7 @@ export function NotificationRow({
         contextName={appName}
         onCopy={onCopy}
       />}
-      {pending && <span className="notif-pending" title="Dismissal pending — will apply on your phone's next sync."><Clock size={14} aria-hidden />Waiting for phone</span>}
+      {status && <RowStatusLine status={status} title={title} appName={appName} writesPaused={writesPaused} />}
     </div>
     <div className="notif-row-side">
       <time className="notif-row-time" dateTime={isoDateTime(notification.postedAt)} title={formatDateTime(notification.postedAt) ?? "Unknown time"}>
@@ -126,9 +153,9 @@ export function NotificationRow({
         <button className="notif-inline-action" title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : muteLabel} aria-label={muteLabel} disabled={writesPaused} aria-describedby={writesPaused ? "update-paused-description" : undefined} onClick={() => { onAction([key]); onMute(filter); }}>
           <BellOff size={14} aria-hidden />
         </button>
-        <button ref={dismissButton} className="notif-dismiss-btn" disabled={pending || !notification.dismissible} title={pending ? "Dismissal pending — will apply on your phone's next sync." : "Dismiss"} aria-label={dismissLabel} onClick={() => { dismissRequested.current = true; onAction([key]); onDismiss(notification.target); }}>
+        {showDismiss && <button className="notif-dismiss-btn" disabled={writesPaused || !notification.dismissible} title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : "Dismiss"} aria-label={dismissLabel} aria-describedby={writesPaused ? "update-paused-description" : undefined} onClick={() => { onAction([key]); onDismiss(notification.target); }}>
           <X size={14} aria-hidden />
-        </button>
+        </button>}
       </div>
     </div>
   </article>;
