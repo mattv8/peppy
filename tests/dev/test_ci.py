@@ -36,6 +36,8 @@ class CiTestRunnerTests(unittest.TestCase):
         self._write_stub(
             "tool",
             "#!/bin/bash\nprintf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$COMMAND_LOG\"\n"
+            "if [[ \"$(basename \"$0\")\" == docker && $* == *' port postgres 5432' ]]; then echo 127.0.0.1:5432; fi\n"
+            "if [[ \"$(basename \"$0\")\" == docker && $* == *' port seaweedfs 8333' ]]; then echo 127.0.0.1:8333; fi\n"
             "if [[ \"$(basename \"$0\")\" == cargo && \"$*\" == *'--out-dir'* ]]; then\n"
             "  out=${*: -1}; language=\"$*\";\n"
             "  if [[ $language == *'--language kotlin'* ]]; then cp -R apps/android/app/src/main/java/uniffi \"$out\"; else cp apps/ios/Generated/peppy_mobile_bindingsFFI.h apps/ios/Generated/peppy_mobile_bindings.swift apps/ios/Generated/peppy_mobile_bindingsFFI.modulemap \"$out\"; fi\n"
