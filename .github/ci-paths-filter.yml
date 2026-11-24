@@ -70,6 +70,7 @@ web:
 
 android:
   - 'apps/android/**'
+  - 'packages/contracts/**'
   - 'packages/mobile-design/**'
   - 'infra/compose/verify-android-native.sh'
   - 'infra/dev/android.sh'

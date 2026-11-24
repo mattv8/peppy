@@ -157,6 +157,14 @@ main() {
     cargo clippy --workspace --all-targets --locked -- -D warnings
     cargo test --workspace --lib --exclude peppy-push-relay --locked
     cargo run --locked -p peppy-protocol --bin generate-contracts -- --check
+    cargo run --locked -p peppy-desktop-api --bin generate-search-contracts -- --check
+    cargo run --locked -p peppy-desktop-api --bin generate-attachment-retention-contracts -- --check
+    cargo run --locked -p peppy-desktop-api --bin generate-account-access-contracts -- --check
+    cargo run --locked -p peppy-desktop-api --bin generate-rcs-status-contracts -- --check
+    cargo run --locked -p peppy-desktop-api --bin generate-launch-progress-contracts -- --check
+    cargo run --locked -p peppy-desktop-api --bin generate-notification-activation-contracts -- --check
+    cargo run --locked -p peppy-hosted-api --bin generate-mcp-contracts -- --check
+    cargo run --locked -p peppy-hosted-api --bin export-web-schema -- --check
     cargo deny check licenses bans sources
     cargo deny check advisories
     python3 infra/audit/check-vendored.py
