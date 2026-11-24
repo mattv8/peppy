@@ -23,8 +23,30 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   }),
 }));
 
-import { fixtureBridge, missingHostBridge, normalizeComputerClaimant, resetFixtureDiagnosticsForTests, tauriBridge } from "./bridge";
+import { DIAGNOSTICS_METHOD_NAMES, MISSING_HOST_METHOD_NAMES, fixtureBridge, missingHostBridge, normalizeComputerClaimant, resetFixtureDiagnosticsForTests, tauriBridge } from "./bridge";
 import { hasDiagnosticsBridge } from "../settings/useDiagnostics";
+
+describe("missing native host bridge", () => {
+  it("preserves fixture method order and excludes diagnostics", () => {
+    const expected = Object.keys(fixtureBridge).filter(key => !DIAGNOSTICS_METHOD_NAMES.has(key));
+    expect(MISSING_HOST_METHOD_NAMES).toEqual(expected);
+    expect(Object.keys(missingHostBridge)).toEqual(expected);
+  });
+
+  it("provides no-op subscriptions and rejects other methods", async () => {
+    for (const key of ["subscribe", "subscribe_maximize_button_hover", "subscribe_drafts", "subscribe_typing", "subscribe_lifecycle", "subscribe_lifecycle_finished"] as const) {
+      const unsubscribe = (missingHostBridge[key] as () => () => void)();
+      expect(typeof unsubscribe).toBe("function");
+      expect(unsubscribe()).toBeUndefined();
+    }
+    for (const key of ["load_state", "save_draft"] as const) {
+      await expect((missingHostBridge[key] as () => Promise<unknown>)()).rejects.toEqual({
+        code: "missing-native-host",
+        message: `Native host is required for ${key}.`,
+      });
+    }
+  });
+});
 
 describe("native computer claimant normalization", () => {
   const nativeView = (stage: string, errorCode?: string) => ({ stage, invitationId: "id", qrPayload: null, awaitingOwner: false, state: "consumed" as const, expiresInSeconds: 0, verificationCode: null, errorCode });
