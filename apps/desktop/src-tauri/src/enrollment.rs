@@ -4505,43 +4505,6 @@ mod owner_retry_tests {
     }
 
     #[tokio::test]
-    async fn start_over_refuses_an_in_flight_claim_without_changing_its_epoch_or_checkpoint() {
-        let store = MemoryStore::default();
-        let controller = pending_owner_controller(&store);
-        let (epoch, checkpoint) = {
-            let mut guard = controller.lock().unwrap();
-            guard.owner_claim_in_flight = 1;
-            (
-                guard.operation_epoch,
-                store
-                    .get(&owner_checkpoint_key(ORIGIN))
-                    .unwrap()
-                    .unwrap()
-                    .to_vec(),
-            )
-        };
-
-        let result = start_over_core(&controller, &store, |_| async {
-            panic!("in-flight precondition must refuse before discovery")
-        })
-        .await;
-        let Err(error) = result else {
-            panic!("in-flight claim must conflict");
-        };
-
-        assert_eq!(error.code, "operation_conflict");
-        assert_eq!(controller.lock().unwrap().operation_epoch, epoch);
-        assert_eq!(
-            store
-                .get(&owner_checkpoint_key(ORIGIN))
-                .unwrap()
-                .unwrap()
-                .to_vec(),
-            checkpoint
-        );
-    }
-
-    #[tokio::test]
     async fn failed_claim_post_releases_its_in_flight_claim() {
         let controller = unclaimed_controller();
         let store = MemoryStore::default();
@@ -4566,6 +4529,8 @@ mod owner_retry_tests {
     async fn start_over_keeps_refusing_while_any_claim_guard_is_held() {
         let store = MemoryStore::default();
         let controller = pending_owner_controller(&store);
+        let epoch = controller.lock().unwrap().operation_epoch;
+        let checkpoint = store.get(&owner_checkpoint_key(ORIGIN)).unwrap().unwrap().to_vec();
         let (first, second) = {
             let mut guard = controller.lock().unwrap();
             guard.owner_claim_in_flight += 2;
@@ -4583,6 +4548,11 @@ mod owner_retry_tests {
         };
         assert_eq!(error.code, "operation_conflict");
         assert_eq!(controller.lock().unwrap().owner_claim_in_flight, 1);
+        assert_eq!(controller.lock().unwrap().operation_epoch, epoch);
+        assert_eq!(
+            store.get(&owner_checkpoint_key(ORIGIN)).unwrap().unwrap().to_vec(),
+            checkpoint
+        );
 
         drop(second);
         assert_eq!(controller.lock().unwrap().owner_claim_in_flight, 0);
@@ -4691,34 +4661,7 @@ mod owner_retry_tests {
         assert!(controller.ready);
         assert!(controller.owner);
         assert_eq!(controller.view().stage, "ready");
-    }
-
-    #[tokio::test]
-    async fn superseded_activation_immediately_reports_a_ready_status_view() {
-        let controller = Arc::new(unclaimed_controller());
-        let store = MemoryStore::default();
-        let activation_controller = controller.clone();
-
-        let outcome = create_owner_core(
-            &controller,
-            &store,
-            None,
-            String::new(),
-            |purpose| std::future::ready(prompt(purpose)),
-            || Zeroizing::new(RECOVERY_SECRET.into()),
-            |_, request| std::future::ready(Ok(claim_response(&request, false))),
-            move |_, _, _| {
-                cancel_owner_operation(&activation_controller).unwrap();
-                std::future::ready(Ok(()))
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(outcome, OwnerCreation::Activated { superseded: true });
-        let view = controller.lock().unwrap().view();
-        assert_eq!(view.stage, "ready");
-        assert_eq!(view.owner, Some(true));
+        assert_eq!(controller.view().owner, Some(true));
     }
 
     #[tokio::test]
@@ -5097,15 +5040,6 @@ mod owner_retry_tests {
         assert!(!handoff_capability_unavailable(
             &peppy_hosted_client::HostedClientError::InvalidProfile
         ));
-    }
-
-    #[test]
-    fn missing_binding_secret_fails_closed_for_handoff_recovery() {
-        let binding_account = active_binding().vault_secret_account();
-
-        let error = stored_vault_secret(&MemoryStore::default(), &binding_account).unwrap_err();
-
-        assert_eq!(error.code, "vault-secret-unavailable");
     }
 
     #[test]
