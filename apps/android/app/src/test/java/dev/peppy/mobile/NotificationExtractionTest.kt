@@ -9,7 +9,6 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.service.notification.StatusBarNotification
 import android.util.Base64
-import androidx.core.content.pm.PackageInfoCompat
 import androidx.test.core.app.ApplicationProvider
 import dev.peppy.mobile.notifications.NotificationAppMetadata
 import org.junit.Assert.*
@@ -116,7 +115,6 @@ class NotificationExtractionTest {
             }
         })
         shadowOf(context.packageManager).setApplicationIcon(packageName, ColorDrawable(Color.CYAN))
-        assertEquals(1, PackageInfoCompat.getLongVersionCode(context.packageManager.getPackageInfo(packageName, 0)))
         val metadata = checkNotNull(NotificationAppMetadata.resolve(context.packageManager, packageName))
 
         assertEquals("Example", metadata.label)

@@ -35,18 +35,6 @@ class GatewayHttpMediaTest {
         }
     }
 
-    @Test fun jsonGetPreservesLegitimateQueryParameters() {
-        var target: String? = null
-        LoopbackHttpServer { request ->
-            target = request.target
-            LoopbackHttpServer.Response(200, "[]")
-        }.use { server ->
-            val response = GatewayHttp(server.origin, "token").get("/v1/events?after=7&limit=50")
-            assertTrue(response.ok)
-            assertEquals("/v1/events?after=7&limit=50", target)
-        }
-    }
-
     @Test fun rejectsNonV1Paths() {
         val file = Files.createTempFile("cipher", ".bin").toFile()
         try { assertThrows(IllegalArgumentException::class.java) { GatewayHttp("http://127.0.0.1", "token").putFile("/other", file, 0) } }

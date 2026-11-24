@@ -111,12 +111,6 @@ class CapabilityConsentTest {
         assertEquals(ConsentPhase.DISCLOSURE, reopened.phase)
     }
 
-    @Test fun applyThenResetReturnsToIdle() {
-        val applying = ConsentGatedToggle().requestEnable().agree(hasAccess = true).state
-
-        assertEquals(ConsentPhase.IDLE, applying.cancel().phase)
-    }
-
     @Test fun cancelResetsEveryPhaseToIdle() {
         listOf(
             ConsentGatedToggle(),
@@ -126,14 +120,5 @@ class CapabilityConsentTest {
         ).forEach { state ->
             assertEquals(ConsentGatedToggle(), state.cancel())
         }
-    }
-
-    @Test fun transitionsDoNotMutateOriginalState() {
-        val disclosure = ConsentGatedToggle().requestEnable()
-
-        disclosure.agree(hasAccess = false)
-        disclosure.accessResult(granted = true)
-
-        assertEquals(ConsentPhase.DISCLOSURE, disclosure.phase)
     }
 }

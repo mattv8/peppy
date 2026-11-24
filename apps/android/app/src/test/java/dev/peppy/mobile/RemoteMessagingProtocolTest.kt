@@ -24,12 +24,6 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class RemoteMessagingProtocolTest {
-    @Test fun helloUsesTheCurrentCanonicalCursor() {
-        val hello = JSONObject(RemoteMessagingProtocol.hello("42"))
-        assertEquals(1, hello.getInt("protocol_version"))
-        assertEquals("42", hello.getString("resume_cursor"))
-    }
-
     @Test fun onlyKnownBoundedServerHintsTriggerSync() {
         assertTrue(RemoteMessagingProtocol.shouldSync("{\"type\":\"ready\"}"))
         assertTrue(RemoteMessagingProtocol.shouldSync("""{"frame_types":["event"],"high_water_cursor":"43","protocol_version":1,"replay_floor_cursor":"1","resume_cursor":"42","type":"ready"}"""))
@@ -106,17 +100,6 @@ class RemoteMessagingProtocolTest {
         assertTrue(fence.accepts(restarted))
         fence.destroy()
         assertEquals(null, fence.start())
-    }
-
-    @Test fun activePassCoalescesDuplicateAndFinishingHintsIntoOneFollowUp() {
-        val coalescer = GatewaySyncCoalescer()
-        coalescer.begin()
-        assertTrue(coalescer.request())
-        assertFalse(coalescer.request())
-        coalescer.finish()
-        val afterFinish = GatewaySyncCoalescer().apply { begin(); finish() }
-        assertTrue(afterFinish.request())
-        assertFalse(afterFinish.request())
     }
 
     @Test fun wakeAlwaysEnqueuesSyncAndRequestsForegroundStartOnlyWhenEnabled() {

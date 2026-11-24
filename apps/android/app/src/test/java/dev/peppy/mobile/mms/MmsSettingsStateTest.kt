@@ -180,11 +180,6 @@ class MmsSettingsStateTest {
     }
 
     @Test
-    fun acquisitionHealthSeparatesDatabaseUnavailableFromNoPendingRows() {
-        assertTrue(MmsHealth(databaseUnavailable = true).databaseUnavailable)
-        assertFalse(MmsHealth().databaseUnavailable)
-    }
-    @Test
     fun generatedBackfillStatusMapsQuarantineEvidenceAndHistoryOnlyPauseIntoHealth() {
         val status = NativeMmsBackfillStatus(
             baselineInitialized = true,

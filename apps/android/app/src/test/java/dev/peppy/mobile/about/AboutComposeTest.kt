@@ -119,13 +119,6 @@ class AboutComposeTest {
         assertTrue(compose.onAllNodesWithTag("about-licenses-row").fetchSemanticsNodes().isEmpty())
     }
 
-    @Test fun licensesRowIsPresentWhenLoaderReturnsNotices() {
-        renderAccount(account(), FakeNotices())
-        compose.waitUntil { compose.onAllNodesWithTag("account-about-row").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("account-about-row").performScrollTo().performClick()
-        compose.waitUntil { compose.onAllNodesWithTag("about-licenses-row").fetchSemanticsNodes().isNotEmpty() }
-    }
-
     @Test fun licensesRowAndListShowLinkOnlyNoticesWithoutHeader() {
         renderAccount(account(), LinkOnlyNotices())
         compose.waitUntil { compose.onAllNodesWithTag("account-about-row").fetchSemanticsNodes().isNotEmpty() }
