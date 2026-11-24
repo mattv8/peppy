@@ -455,7 +455,7 @@ func TestPreparedRcsPostAdmissionStopIsUnknownAndSingleUse(t *testing.T) {
 	})
 	link.Stop()
 	fixture.openGate()
-	if got := <-result; got != "outcome_unknown" {
+	if got := recvWithin(t, result, 5*time.Second); got != "outcome_unknown" {
 		t.Fatalf("post-admission stop = %s", got)
 	}
 	if got := fixture.countAction(gmproto.ActionType_SEND_MESSAGE.String()); got != 1 {

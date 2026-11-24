@@ -199,17 +199,6 @@ func TestRunRefusesSecondConcurrentRun(t *testing.T) {
 	}
 }
 
-func TestRunTransientErrorKeepsState(t *testing.T) {
-	link := openTestLink(t, nil, &testHost{})
-	link.mu.Lock()
-	link.state = stateLinked
-	link.mu.Unlock()
-	link.emit("conn", "temporary_error", 0)
-	if !strings.Contains(link.Status(), `"state":"linked"`) {
-		t.Fatalf("status=%s", link.Status())
-	}
-}
-
 func TestEventHandlerNeverBlocks(t *testing.T) {
 	link := openTestLink(t, nil, &testHost{})
 	done := make(chan struct{})

@@ -24,6 +24,18 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func recvWithin[T any](t *testing.T, ch <-chan T, d time.Duration) T {
+	t.Helper()
+	select {
+	case value := <-ch:
+		return value
+	case <-time.After(d):
+		t.Fatal("timed out waiting for channel")
+		var zero T
+		return zero
+	}
+}
+
 const (
 	fixtureConfigPath    = "/web/config"
 	fixtureSignInSuffix  = ".Registration/SignInGaia"

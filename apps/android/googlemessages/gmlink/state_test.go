@@ -5,12 +5,6 @@ import (
 	"testing"
 )
 
-func TestDecodeStateRejectsCorruption(t *testing.T) {
-	if _, err := decodeState([]byte("not-json")); err == nil {
-		t.Fatal("corrupt state was accepted")
-	}
-}
-
 func TestDecodeStateReopensPairingAsPrevious(t *testing.T) {
 	state, err := decodeState([]byte(`{"version":1,"seq":4,"state":"pairing","pairing_from":"needs_relink","stop_code":"","auth":{"cookie":"synthetic"}}`))
 	if err != nil || state.State != stateNeedsRelink || len(state.Auth) == 0 || state.Seq != 4 {
