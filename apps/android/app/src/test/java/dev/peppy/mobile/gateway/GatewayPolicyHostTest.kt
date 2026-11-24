@@ -1,7 +1,10 @@
 package dev.peppy.mobile.gateway
 
 import android.Manifest
+import android.content.ComponentName
+import android.provider.Settings
 import dev.peppy.mobile.GatewayDispatchPolicy
+import dev.peppy.mobile.NotificationMirrorService
 import dev.peppy.mobile.NotificationReconciliation
 import dev.peppy.mobile.NotificationTestCapture
 import dev.peppy.mobile.NotificationTestCaptureResult
@@ -56,11 +59,50 @@ class GatewayPolicyHostTest : GatewayTestBase() {
     }
 
     @Test
+    fun markReadDecisionNeedsSettingMirroringAndAndroid9() {
+        enrollAndUnlock()
+        grantListenerAccess()
+        val policy = GatewayPolicyHost(context)
+        fun applies() = policy.decision(notificationIsSilent = false)?.applyNotificationMarkRead == true
+
+        assertFalse(applies())
+        policy.setNotificationMarkReadEnabled(true)
+        assertFalse(applies())
+        policy.mirroringEnabled = true
+        assertTrue(applies())
+        assertEquals(true, policy.notificationMarkReadEnabledOrNull())
+        policy.setNotificationMarkReadEnabled(false)
+        assertFalse(applies())
+        assertEquals(false, policy.notificationMarkReadEnabledOrNull())
+    }
+
+    /** Below Android 9 the host reports no mark-read capability, even with the setting on and access granted. */
+    @Config(sdk = [26])
+    @Test
+    fun markReadDecisionIsOffBelowAndroid9() {
+        enrollAndUnlock()
+        grantListenerAccess()
+        val policy = GatewayPolicyHost(context)
+        policy.mirroringEnabled = true
+        policy.setNotificationMarkReadEnabled(true)
+
+        assertFalse(policy.decision(notificationIsSilent = false)?.applyNotificationMarkRead == true)
+    }
+
+    private fun grantListenerAccess() {
+        Settings.Secure.putString(
+            context.contentResolver,
+            "enabled_notification_listeners",
+            ComponentName(context, NotificationMirrorService::class.java).flattenToString(),
+        )
+    }
+
+    @Test
     fun syntheticTestCaptureCanBeDismissedAndCapturedAgain() {
         val client = enrollAndUnlock()
         val realKey = "0|com.example.chat|1|null|10001"
         client.captureNotification(NativeNotificationCapture(
-            realKey, "$realKey:1", "com.example.chat", "Chat", "Morgan", "Lunch?", null, System.currentTimeMillis(), true, null,
+            realKey, "$realKey:1", "com.example.chat", "Chat", "Morgan", "Lunch?", null, System.currentTimeMillis(), true, null, false,
         ))
         assertEquals(NotificationTestCaptureResult.CAPTURED, NotificationTestCapture.capture(client, permitted = true, enqueue = {}))
 
@@ -78,7 +120,7 @@ class GatewayPolicyHostTest : GatewayTestBase() {
         client.captureNotification(NativeNotificationCapture(
             NotificationTestCapture.SYNTHETIC_KEY, "${NotificationTestCapture.SYNTHETIC_KEY}:legacy",
             "dev.peppy.mobile.synthetic", "Peppy test", "Peppy test notification",
-            "This is a safe test record.", "peppy_test", System.currentTimeMillis(), false, null,
+            "This is a safe test record.", "peppy_test", System.currentTimeMillis(), false, null, false,
         ))
         val legacyLifetime = client.notificationSnapshot().notifications.single().target.lifetime
 

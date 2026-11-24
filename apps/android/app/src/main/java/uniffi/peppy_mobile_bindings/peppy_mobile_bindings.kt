@@ -869,6 +869,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_mms_acquisition_outcome(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_notification_mark_read(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_reaction_attempt(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_send_attempt(
@@ -1076,6 +1078,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_message_history_capture_requests(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_notification_dismissals(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_notification_mark_reads(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_outbox_json(
     ): Int
@@ -1501,6 +1505,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_mms_acquisition_outcome(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_notification_mark_read(`ptr`: Long,`id`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_reaction_attempt(`ptr`: Long,`requestId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_send_attempt(`ptr`: Long,`commandId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1708,6 +1714,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_message_history_capture_requests(`ptr`: Long,`providerGeneration`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_notification_dismissals(`ptr`: Long,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_notification_mark_reads(`ptr`: Long,`nowMs`: Long,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_outbox_json(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -2657,6 +2665,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_mms_acquisition_outcome() and 0xFFFF) != 53880) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_notification_mark_read() and 0xFFFF) != 53735) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_reaction_attempt() and 0xFFFF) != 44924) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2967,6 +2978,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_notification_dismissals() and 0xFFFF) != 22332) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_notification_mark_reads() and 0xFFFF) != 53298) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_outbox_json() and 0xFFFF) != 27899) {
@@ -4037,6 +4051,11 @@ public interface NativeClientInterface {
     
     fun `beginMmsAcquisitionOutcome`(`input`: NativeMmsAcquisitionInput): NativeMmsBeginOutcome
     
+    /**
+     * Consumes the one-use permit right before the OS action; never retry after `true`.
+     */
+    fun `beginNotificationMarkRead`(`id`: kotlin.String, `nowMs`: kotlin.Long): kotlin.Boolean
+    
     fun `beginReactionAttempt`(`requestId`: kotlin.String): NativeReactionAttemptDecision
     
     /**
@@ -4344,6 +4363,8 @@ public interface NativeClientInterface {
     fun `pendingMessageHistoryCaptureRequests`(`providerGeneration`: kotlin.String): kotlin.String
     
     fun `pendingNotificationDismissals`(`limit`: kotlin.ULong): List<NativeNotificationDismissal>
+    
+    fun `pendingNotificationMarkReads`(`nowMs`: kotlin.Long, `limit`: kotlin.ULong): List<NativeNotificationMarkRead>
     
     fun `pendingOutboxJson`(): List<kotlin.String>
     
@@ -5128,6 +5149,25 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterTypeNativeMmsAcquisitionInput.lower(`input`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Consumes the one-use permit right before the OS action; never retry after `true`.
+     */
+    @Throws(MobileBindingsException::class)override fun `beginNotificationMarkRead`(`id`: kotlin.String, `nowMs`: kotlin.Long): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_notification_mark_read(
+        it,
+        
+        FfiConverterString.lower(`id`),
+        FfiConverterLong.lower(`nowMs`),_status)
 }
     }
     )
@@ -6799,6 +6839,22 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_notification_dismissals(
         it,
         
+        FfiConverterULong.lower(`limit`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `pendingNotificationMarkReads`(`nowMs`: kotlin.Long, `limit`: kotlin.ULong): List<NativeNotificationMarkRead> {
+            return FfiConverterSequenceTypeNativeNotificationMarkRead.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_notification_mark_reads(
+        it,
+        
+        FfiConverterLong.lower(`nowMs`),
         FfiConverterULong.lower(`limit`),_status)
 }
     }
@@ -12770,6 +12826,8 @@ data class NativeGatewayCapabilities (
     var `rcsSupported`: kotlin.Boolean
     , 
     var `phoneReadSupported`: kotlin.Boolean
+    , 
+    var `notificationMarkReadSupported`: kotlin.Boolean
     
 ){
     
@@ -12791,6 +12849,7 @@ public object FfiConverterTypeNativeGatewayCapabilities: FfiConverterRustBuffer<
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -12799,7 +12858,8 @@ public object FfiConverterTypeNativeGatewayCapabilities: FfiConverterRustBuffer<
             FfiConverterBoolean.allocationSize(value.`smsSyncSupported`) +
             FfiConverterBoolean.allocationSize(value.`mmsSyncSupported`) +
             FfiConverterBoolean.allocationSize(value.`rcsSupported`) +
-            FfiConverterBoolean.allocationSize(value.`phoneReadSupported`)
+            FfiConverterBoolean.allocationSize(value.`phoneReadSupported`) +
+            FfiConverterBoolean.allocationSize(value.`notificationMarkReadSupported`)
     )
 
     override fun write(value: NativeGatewayCapabilities, buf: ByteBuffer) {
@@ -12808,6 +12868,7 @@ public object FfiConverterTypeNativeGatewayCapabilities: FfiConverterRustBuffer<
             FfiConverterBoolean.write(value.`mmsSyncSupported`, buf)
             FfiConverterBoolean.write(value.`rcsSupported`, buf)
             FfiConverterBoolean.write(value.`phoneReadSupported`, buf)
+            FfiConverterBoolean.write(value.`notificationMarkReadSupported`, buf)
     }
 }
 
@@ -12823,6 +12884,8 @@ data class NativeGatewayHostFacts (
     var `notificationIsSilent`: kotlin.Boolean
     , 
     var `phoneReadAvailable`: kotlin.Boolean
+    , 
+    var `notificationMarkReadAvailable`: kotlin.Boolean
     
 ){
     
@@ -12844,6 +12907,7 @@ public object FfiConverterTypeNativeGatewayHostFacts: FfiConverterRustBuffer<Nat
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -12852,7 +12916,8 @@ public object FfiConverterTypeNativeGatewayHostFacts: FfiConverterRustBuffer<Nat
             FfiConverterBoolean.allocationSize(value.`notificationListenerAvailable`) +
             FfiConverterBoolean.allocationSize(value.`smsAvailable`) +
             FfiConverterBoolean.allocationSize(value.`notificationIsSilent`) +
-            FfiConverterBoolean.allocationSize(value.`phoneReadAvailable`)
+            FfiConverterBoolean.allocationSize(value.`phoneReadAvailable`) +
+            FfiConverterBoolean.allocationSize(value.`notificationMarkReadAvailable`)
     )
 
     override fun write(value: NativeGatewayHostFacts, buf: ByteBuffer) {
@@ -12861,6 +12926,7 @@ public object FfiConverterTypeNativeGatewayHostFacts: FfiConverterRustBuffer<Nat
             FfiConverterBoolean.write(value.`smsAvailable`, buf)
             FfiConverterBoolean.write(value.`notificationIsSilent`, buf)
             FfiConverterBoolean.write(value.`phoneReadAvailable`, buf)
+            FfiConverterBoolean.write(value.`notificationMarkReadAvailable`, buf)
     }
 }
 
@@ -12926,6 +12992,8 @@ data class NativeGatewayPolicyDecision (
     var `applyPhoneRead`: kotlin.Boolean
     , 
     var `ingestPhoneRead`: kotlin.Boolean
+    , 
+    var `applyNotificationMarkRead`: kotlin.Boolean
     
 ){
     
@@ -12949,6 +13017,7 @@ public object FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -12959,7 +13028,8 @@ public object FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
             FfiConverterBoolean.allocationSize(value.`transferMedia`) +
             FfiConverterBoolean.allocationSize(value.`rcsSupported`) +
             FfiConverterBoolean.allocationSize(value.`applyPhoneRead`) +
-            FfiConverterBoolean.allocationSize(value.`ingestPhoneRead`)
+            FfiConverterBoolean.allocationSize(value.`ingestPhoneRead`) +
+            FfiConverterBoolean.allocationSize(value.`applyNotificationMarkRead`)
     )
 
     override fun write(value: NativeGatewayPolicyDecision, buf: ByteBuffer) {
@@ -12970,6 +13040,7 @@ public object FfiConverterTypeNativeGatewayPolicyDecision: FfiConverterRustBuffe
             FfiConverterBoolean.write(value.`rcsSupported`, buf)
             FfiConverterBoolean.write(value.`applyPhoneRead`, buf)
             FfiConverterBoolean.write(value.`ingestPhoneRead`, buf)
+            FfiConverterBoolean.write(value.`applyNotificationMarkRead`, buf)
     }
 }
 
@@ -12993,6 +13064,8 @@ data class NativeGatewaySettings (
     var `mediaWifiOnly`: kotlin.Boolean
     , 
     var `phoneReadEnabled`: kotlin.Boolean
+    , 
+    var `notificationMarkReadEnabled`: kotlin.Boolean
     
 ){
     
@@ -13016,6 +13089,7 @@ public object FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer<Nati
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -13026,7 +13100,8 @@ public object FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer<Nati
             FfiConverterBoolean.allocationSize(value.`smsSyncEnabled`) +
             FfiConverterBoolean.allocationSize(value.`mmsSyncEnabled`) +
             FfiConverterBoolean.allocationSize(value.`mediaWifiOnly`) +
-            FfiConverterBoolean.allocationSize(value.`phoneReadEnabled`)
+            FfiConverterBoolean.allocationSize(value.`phoneReadEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`notificationMarkReadEnabled`)
     )
 
     override fun write(value: NativeGatewaySettings, buf: ByteBuffer) {
@@ -13037,6 +13112,7 @@ public object FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer<Nati
             FfiConverterBoolean.write(value.`mmsSyncEnabled`, buf)
             FfiConverterBoolean.write(value.`mediaWifiOnly`, buf)
             FfiConverterBoolean.write(value.`phoneReadEnabled`, buf)
+            FfiConverterBoolean.write(value.`notificationMarkReadEnabled`, buf)
     }
 }
 
@@ -14621,6 +14697,8 @@ data class NativeNotificationCapture (
     var `dismissible`: kotlin.Boolean
     , 
     var `appIconPngBase64`: kotlin.String?
+    , 
+    var `markReadSupported`: kotlin.Boolean
     
 ){
     
@@ -14647,6 +14725,7 @@ public object FfiConverterTypeNativeNotificationCapture: FfiConverterRustBuffer<
             FfiConverterLong.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -14660,7 +14739,8 @@ public object FfiConverterTypeNativeNotificationCapture: FfiConverterRustBuffer<
             FfiConverterOptionalString.allocationSize(value.`category`) +
             FfiConverterLong.allocationSize(value.`postedAt`) +
             FfiConverterBoolean.allocationSize(value.`dismissible`) +
-            FfiConverterOptionalString.allocationSize(value.`appIconPngBase64`)
+            FfiConverterOptionalString.allocationSize(value.`appIconPngBase64`) +
+            FfiConverterBoolean.allocationSize(value.`markReadSupported`)
     )
 
     override fun write(value: NativeNotificationCapture, buf: ByteBuffer) {
@@ -14674,6 +14754,7 @@ public object FfiConverterTypeNativeNotificationCapture: FfiConverterRustBuffer<
             FfiConverterLong.write(value.`postedAt`, buf)
             FfiConverterBoolean.write(value.`dismissible`, buf)
             FfiConverterOptionalString.write(value.`appIconPngBase64`, buf)
+            FfiConverterBoolean.write(value.`markReadSupported`, buf)
     }
 }
 
@@ -14714,6 +14795,49 @@ public object FfiConverterTypeNativeNotificationDismissal: FfiConverterRustBuffe
     )
 
     override fun write(value: NativeNotificationDismissal, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterTypeNativeNotificationTarget.write(value.`target`, buf)
+            FfiConverterString.write(value.`instance`, buf)
+    }
+}
+
+
+
+data class NativeNotificationMarkRead (
+    var `id`: kotlin.String
+    , 
+    var `target`: NativeNotificationTarget
+    , 
+    var `instance`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeNotificationMarkRead: FfiConverterRustBuffer<NativeNotificationMarkRead> {
+    override fun read(buf: ByteBuffer): NativeNotificationMarkRead {
+        return NativeNotificationMarkRead(
+            FfiConverterString.read(buf),
+            FfiConverterTypeNativeNotificationTarget.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeNotificationMarkRead) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterTypeNativeNotificationTarget.allocationSize(value.`target`) +
+            FfiConverterString.allocationSize(value.`instance`)
+    )
+
+    override fun write(value: NativeNotificationMarkRead, buf: ByteBuffer) {
             FfiConverterString.write(value.`id`, buf)
             FfiConverterTypeNativeNotificationTarget.write(value.`target`, buf)
             FfiConverterString.write(value.`instance`, buf)
@@ -22532,6 +22656,34 @@ public object FfiConverterSequenceTypeNativeNotificationDismissal: FfiConverterR
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeNativeNotificationDismissal.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNativeNotificationMarkRead: FfiConverterRustBuffer<List<NativeNotificationMarkRead>> {
+    override fun read(buf: ByteBuffer): List<NativeNotificationMarkRead> {
+        val len = buf.getInt()
+        return List<NativeNotificationMarkRead>(len) {
+            FfiConverterTypeNativeNotificationMarkRead.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativeNotificationMarkRead>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativeNotificationMarkRead.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativeNotificationMarkRead>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativeNotificationMarkRead.write(it, buf)
         }
     }
 }

@@ -243,6 +243,7 @@ internal class NativePhoneReadIngestPolicy(
                 NativeGatewayHostFacts(
                     GatewayPolicyHost.onWifi(context), notificationAccess, true, false,
                     Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && notificationAccess,
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && notificationAccess,
                 ),
             )
             decision.ingestPhoneRead && (

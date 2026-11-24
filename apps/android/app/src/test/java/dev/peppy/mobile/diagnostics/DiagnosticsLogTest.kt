@@ -214,7 +214,7 @@ class DiagnosticsLogTest {
 
         val header = requireNotNull(snapshot).readLines().first()
         assertTrue(header.contains("recheck_identity_mismatch,pause)"))
-        assertTrue(header.contains("62:recheck_identity_mismatch,63:pause stages="))
+        assertTrue(header.contains("62:recheck_identity_mismatch,63:pause,64:mark_read_attempted,65:mark_read_sent,66:mark_read_canceled,67:mark_read_failed stages="))
         assertTrue(header.contains("mms_pause=0:none,1:absolute_recovery_capacity,2:recovery_capacity,3:local_capacity,4:remote_storage"))
     }
 

@@ -3,6 +3,7 @@ package dev.peppy.mobile
 import android.app.Notification
 import android.app.NotificationManager
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.provider.Settings
@@ -21,6 +22,7 @@ import dev.peppy.mobile.phoneread.AndroidPhoneReadNotifications
 import dev.peppy.mobile.phoneread.AndroidPhoneReadProvider
 import dev.peppy.mobile.phoneread.NativePhoneReadCore
 import dev.peppy.mobile.phoneread.PhoneReadEffects
+import dev.peppy.mobile.phoneread.PhoneReadMatcher
 import dev.peppy.mobile.phoneread.PhoneReadRun
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -90,7 +92,7 @@ internal object NotificationTestCapture {
     internal fun syntheticCapture(id: String): NativeNotificationCapture = NativeNotificationCapture(
         SYNTHETIC_KEY, "$SYNTHETIC_KEY:$id", "dev.peppy.mobile.synthetic",
         "", "New notification", "", null,
-        System.currentTimeMillis(), true, null,
+        System.currentTimeMillis(), true, null, false,
     )
 
     const val SYNTHETIC_KEY = "peppy-synthetic-test"
@@ -143,6 +145,8 @@ internal object NotificationExtraction {
         val dismissible: Boolean,
         val appIconPngBase64: String?,
         val isSilent: Boolean,
+        /** Only a boolean leaves the listener: the action and its intent never reach core. */
+        val markReadSupported: Boolean,
     )
 
     fun extract(context: Context, sbn: StatusBarNotification, isSilent: Boolean = false): Captured? {
@@ -160,8 +164,10 @@ internal object NotificationExtraction {
         val metadata = NotificationAppMetadata.resolve(context.packageManager, sbn.packageName)
         val label = metadata?.label ?: utf8Truncate(sbn.packageName, MAX_LABEL)
         // Android's key plus post time distinguishes ordinary remove/repost lifetimes where possible.
+        val markReadSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            PhoneReadMatcher.markReadAction(PhoneReadMatcher.facts(sbn)) != null
         return Captured(sbn.key, "${sbn.key}:${sbn.postTime}", sbn.packageName, label, title, text,
-            notification.category, sbn.postTime, sbn.isClearable, metadata?.iconPngBase64, isSilent)
+            notification.category, sbn.postTime, sbn.isClearable, metadata?.iconPngBase64, isSilent, markReadSupported)
     }
 
     private fun defaultSmsPackage(context: Context): String? = try { android.provider.Telephony.Sms.getDefaultSmsPackage(context) } catch (_: Exception) { null }
@@ -246,7 +252,7 @@ class NotificationMirrorService : NotificationListenerService() {
         try {
             val outcome = session.client.captureNotification(NativeNotificationCapture(
                 capture.key, capture.instance, capture.packageName, capture.appName, capture.title, capture.text,
-                capture.category, capture.postedAt, capture.dismissible, capture.appIconPngBase64,
+                capture.category, capture.postedAt, capture.dismissible, capture.appIconPngBase64, capture.markReadSupported,
             ))
             if (outcome == NativeNotificationCaptureOutcome.CAPTURED) GatewayWork.enqueueUrgent(applicationContext, GatewayEnqueueCause.NOTIFICATION_LISTENER)
         } catch (_: MobileBindingsException) {
@@ -336,6 +342,21 @@ class NotificationMirrorService : NotificationListenerService() {
     private fun dismissalPermitted(): Boolean =
         GatewayPolicyHost(this).decision(notificationIsSilent = false)?.captureNotification == true
 
+    internal fun applyMarkReads(): Int {
+        if (!NotificationMirrorAccess.granted(this)) return 0
+        val session = NativeGateway.session(applicationContext) ?: return 0
+        if (!markReadPermitted()) return 0
+        return NotificationMarkReadEffects(
+            core = NativeNotificationMarkReadCore(session.client),
+            notifications = AndroidNotificationMarkReadNotifications(this),
+            permitted = { markReadPermitted() },
+        ).run()
+    }
+
+    /** Core-owned decision for Mark as read; checked before each request so a switch-off stops the batch. */
+    private fun markReadPermitted(): Boolean =
+        GatewayPolicyHost(this).decision(notificationIsSilent = false)?.applyNotificationMarkRead == true
+
     private fun clearPending() {
         pending.clear(); callbacks.values.forEach(handler::removeCallbacks); callbacks.clear()
         phoneReadCallback?.let(handler::removeCallbacks); phoneReadCallback = null
@@ -348,6 +369,7 @@ class NotificationMirrorService : NotificationListenerService() {
         @Volatile private var connected: NotificationMirrorService? = null
         @Volatile private var phoneReadPendingHint = false
         fun runPendingDismissals(): Int = connected?.applyDismissals() ?: 0
+        fun runPendingMarkReads(): Int = connected?.applyMarkReads() ?: 0
         fun runPhoneReads() {
             val service = connected ?: return
             service.handler.post {

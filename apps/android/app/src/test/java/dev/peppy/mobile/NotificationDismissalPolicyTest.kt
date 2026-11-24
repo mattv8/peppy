@@ -186,7 +186,7 @@ class NotificationDismissalPolicyTest : GatewayTestBase() {
         val client = enrollAndUnlock()
         val key = "0|example.chat|lifetime"
         fun capture(instance: String, postedAt: Long) = client.captureNotification(NativeNotificationCapture(
-            key, instance, "example.chat", "Chat", "Ada", "body", null, postedAt, true, null,
+            key, instance, "example.chat", "Chat", "Ada", "body", null, postedAt, true, null, false,
         ))
 
         capture("$key:A", 1)
@@ -345,6 +345,7 @@ class NotificationDismissalPolicyTest : GatewayTestBase() {
                 notification.postTime,
                 true,
                 null,
+                false,
             )),
         )
     }
@@ -368,7 +369,7 @@ class NotificationDismissalPolicyTest : GatewayTestBase() {
             NativeNotificationCaptureOutcome.CAPTURED,
             client.captureNotification(NativeNotificationCapture(
                 notification.key, instance, notification.packageName, "Chat", "Title", "Body", null,
-                notification.postTime, true, null,
+                notification.postTime, true, null, false,
             )),
         )
         client.dismissNotification(

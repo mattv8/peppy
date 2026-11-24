@@ -1,6 +1,8 @@
 package dev.peppy.mobile.notifications
 
+import android.content.Context
 import android.content.Intent
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -45,9 +47,31 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * Test seams for the settings tab. Production uses the defaults: the OS, the Rust-owned policy,
+ * and the device SDK. Instrumentation tests substitute fakes for states the emulator cannot set.
+ */
+internal data class NotificationMirroringSettingsSeams(
+    val sdkInt: Int = Build.VERSION.SDK_INT,
+    val mirroringEnabled: (Context) -> Boolean = { NotificationMirrorPreferences.enabled(it) },
+    val accessGranted: (Context) -> Boolean = { NotificationMirrorAccess.granted(it) },
+    val markReadEnabled: (Context) -> Boolean? = { GatewayPolicyHost(it).notificationMarkReadEnabledOrNull() },
+    val setMarkReadEnabled: (Context, Boolean) -> Unit = { context, value -> GatewayPolicyHost(context).setNotificationMarkReadEnabled(value) },
+    /** Runs after a confirmed write: the master toggle's reconcile and settings sync. */
+    val afterMarkReadChanged: (Context) -> Unit = { context ->
+        NotificationMirrorService.reconcile()
+        GatewayWork.enqueue(context, GatewayEnqueueCause.SETTINGS)
+    },
+)
+
 /** Notification access and capture choices stay separate from SMS and vault-unlock status. */
 @Composable
-internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, onOpenAppFilters: () -> Unit) {
+internal fun NotificationMirroringSettings(
+    refresh: Int,
+    onChanged: () -> Unit,
+    onOpenAppFilters: () -> Unit,
+    seams: NotificationMirroringSettingsSeams = NotificationMirroringSettingsSeams(),
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var accessGranted by remember { mutableStateOf(false) }
@@ -57,6 +81,9 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
     var filterSummary by remember { mutableStateOf<NotificationAppFilterSummaryState>(NotificationAppFilterSummaryState.Loading) }
     var testResult by remember { mutableStateOf<NotificationTestCaptureResult?>(null) }
     var consent by remember { mutableStateOf(ConsentGatedToggle()) }
+    // Null until the core value is read back; the control stays disabled until then.
+    var markRead by remember { mutableStateOf<Boolean?>(null) }
+    var markReadConsent by remember { mutableStateOf(ConsentGatedToggle()) }
 
     fun applyEnabled(value: Boolean) {
         enabled = null
@@ -80,6 +107,24 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
         }
     }
 
+    fun writeMarkRead(value: Boolean) {
+        markRead = null
+        scope.launch {
+            val readBack = withContext(Dispatchers.IO) {
+                runCatching {
+                    seams.setMarkReadEnabled(context, value)
+                    seams.markReadEnabled(context)
+                }.getOrNull().also { confirmed ->
+                    // Same reconcile as the master toggle, so active notifications republish their capability.
+                    if (confirmed != null) seams.afterMarkReadChanged(context)
+                }
+            }
+            markRead = readBack
+            markReadConsent = markReadConsent.cancel()
+            onChanged()
+        }
+    }
+
     fun consumeAccessResult(granted: Boolean) {
         val transition = consent.accessResult(granted)
         consent = transition.state
@@ -88,18 +133,24 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
 
     val accessLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         scope.launch {
-            accessGranted = withContext(Dispatchers.IO) { NotificationMirrorAccess.granted(context) }
+            accessGranted = withContext(Dispatchers.IO) { seams.accessGranted(context) }
             consumeAccessResult(accessGranted)
             onChanged()
         }
     }
-    DisposableEffect(Unit) { onDispose { consent = consent.cancel() } }
+    DisposableEffect(Unit) {
+        onDispose {
+            consent = consent.cancel()
+            markReadConsent = markReadConsent.cancel()
+        }
+    }
 
     LaunchedEffect(refresh) {
-        accessGranted = NotificationMirrorAccess.granted(context)
-        enabled = withContext(Dispatchers.IO) { NotificationMirrorPreferences.enabled(context) }
+        accessGranted = seams.accessGranted(context)
+        enabled = withContext(Dispatchers.IO) { seams.mirroringEnabled(context) }
         wifiOnly = withContext(Dispatchers.IO) { GatewayPolicyHost(context).mirroringWifiOnly }
         skipSilent = withContext(Dispatchers.IO) { GatewayPolicyHost(context).skipSilent }
+        markRead = withContext(Dispatchers.IO) { seams.markReadEnabled(context) }
         filterSummary = withContext(Dispatchers.IO) {
             when (val loaded = NativeNotificationAppFilterActions(context.applicationContext, includeAppInventory = false).load()) {
                 is NotificationAppFilterLoadResult.Ready -> NotificationAppFilterSummaryState.Ready(loaded.mutedPackages)
@@ -154,6 +205,24 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
                     },
                     tag = "notification-mirroring-skip-silent-row",
             )
+            val markReadSupported = seams.sdkInt >= Build.VERSION_CODES.P
+            SettingToggleRow(
+                title = stringResource(R.string.peppy_toggle_android_mark_read_label),
+                checked = markRead == true,
+                // Turning off never needs the sheet or the prerequisites, so a stored "on" stays revocable.
+                enabled = markRead != null && markReadConsent.phase == ConsentPhase.IDLE &&
+                    (markRead == true || (markReadSupported && effectiveEnabled)),
+                onCheckedChange = { requested -> if (requested) markReadConsent = markReadConsent.requestEnable() else writeMarkRead(false) },
+                tag = "notification-mirroring-mark-read-row",
+                subtitle = when {
+                    !markReadSupported -> stringResource(R.string.peppy_toggle_android_mark_read_needs_android_9)
+                    // While the mirroring value is still loading, no reason is shown rather than a false one.
+                    enabled == null -> null
+                    enabled == false -> stringResource(R.string.peppy_toggle_android_mark_read_needs_mirroring)
+                    !accessGranted -> stringResource(R.string.peppy_toggle_android_mark_read_needs_access)
+                    else -> stringResource(R.string.peppy_toggle_android_mark_read_hint)
+                },
+            )
             if (effectiveEnabled) NotificationAppFiltersNavRow(filterSummary, onOpenAppFilters)
             else Text(stringResource(R.string.peppy_toggle_android_mirroring_app_filters_disabled), Modifier.testTag("app-filters-disabled-row"), style = MaterialTheme.typography.bodySmall)
             if (effectiveEnabled) {
@@ -166,6 +235,21 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
         }
         }
     }
+
+    if (markReadConsent.phase == ConsentPhase.DISCLOSURE) ConsentSheet(
+        title = stringResource(R.string.peppy_toggle_android_mark_read_consent_title),
+        body = stringResource(R.string.peppy_notification_mark_read_disclosure),
+        tag = "mark-read-consent-sheet",
+        disclosureTag = "notification-mark-read-disclosure",
+        confirmLabel = stringResource(R.string.peppy_toggle_android_agree),
+        nextStep = null,
+        onDismiss = { markReadConsent = markReadConsent.cancel() },
+        onConfirm = {
+            val transition = markReadConsent.agree(hasAccess = true)
+            markReadConsent = transition.state
+            if (transition.effect == ConsentEffect.APPLY) writeMarkRead(true)
+        },
+    )
 
     if (consent.phase == ConsentPhase.DISCLOSURE) ConsentSheet(
         title = stringResource(R.string.peppy_toggle_android_mirroring_consent_title),
