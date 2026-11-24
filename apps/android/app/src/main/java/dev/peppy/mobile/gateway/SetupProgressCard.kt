@@ -49,9 +49,10 @@ internal const val SETUP_FINISHED_QUEUE_MS = 30_000L
 
 /**
  * In-memory only: remembers that this process saw an import and then reached LIVE, so the SMS tab can show
- * "Setup finished" once. A cold start into LIVE never queues the notice.
+ * "Setup finished" once. A cold start into LIVE never queues the notice. The application owns one instance for
+ * the process lifetime; tests create their own.
  */
-internal object SetupFinishTracker {
+internal class SetupFinishTracker {
     private var sawSetup = false
     private var queuedAtMs = 0L
     private val pendingFinish = MutableStateFlow(false)
@@ -79,12 +80,6 @@ internal object SetupFinishTracker {
         pendingFinish.value = false
         return queued && nowMs - queuedAtMs <= SETUP_FINISHED_QUEUE_MS
     }
-
-    internal fun resetForTest() = synchronized(this) {
-        sawSetup = false
-        queuedAtMs = 0L
-        pendingFinish.value = false
-    }
 }
 
 /** Fraction for the determinate bar, clamped. Null when the total is unknown or zero, so the bar stays indeterminate. */
@@ -100,12 +95,12 @@ internal fun formatSetupCount(value: Long, format: NumberFormat = NumberFormat.g
  * stopped. Reads only [status], which the SMS tab loads off the main thread; it never calls the core.
  */
 @Composable
-internal fun SetupProgressCard(status: GatewayStatus?) {
-    val finishPending by SetupFinishTracker.pending.collectAsState()
+internal fun SetupProgressCard(status: GatewayStatus?, tracker: SetupFinishTracker) {
+    val finishPending by tracker.pending.collectAsState()
     var showFinished by remember { mutableStateOf(false) }
     // Two effects: acknowledging flips `finishPending` back to false, which would cancel a timer keyed on it.
     LaunchedEffect(finishPending) {
-        if (finishPending && SetupFinishTracker.takeFresh()) showFinished = true
+        if (finishPending && tracker.takeFresh()) showFinished = true
     }
     LaunchedEffect(showFinished) {
         if (showFinished) {

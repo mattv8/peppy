@@ -19,6 +19,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.waitUntilExactlyOneExists
 import dev.peppy.mobile.R
 import dev.peppy.mobile.gateway.GatewayPolicyHost
+import dev.peppy.mobile.gateway.SetupFinishTracker
 import dev.peppy.mobile.granted
 import dev.peppy.mobile.mms.MmsPreferences
 import dev.peppy.mobile.mms.MmsSettings
@@ -42,7 +43,7 @@ class SmsPermissionFlowTest {
         compose.setContent {
             PeppyTheme {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
-                    SmsTab(context = context, refresh = 0, databaseOpen = false, onChanged = {})
+                    SmsTab(context = context, refresh = 0, databaseOpen = false, onChanged = {}, setupFinishTracker = SetupFinishTracker())
                 }
             }
         }

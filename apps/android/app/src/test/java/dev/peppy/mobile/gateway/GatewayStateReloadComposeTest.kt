@@ -40,6 +40,8 @@ class GatewayStateReloadComposeTest : GatewayTestBase() {
     @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
 
     private var reloads = 0
+    /** A fresh tracker per test: the notice state belongs to the test, not to a process-wide object. */
+    private val tracker = SetupFinishTracker()
 
     @Test
     fun persistedProgressTooLargeAndFinishReachTheMountedScreenWithoutRefresh() {
@@ -47,9 +49,8 @@ class GatewayStateReloadComposeTest : GatewayTestBase() {
         val store = GatewayStateStore(context)
         store.setDownloading(42_000uL, 108_882uL)
         scheduled.clear()
-        SetupFinishTracker.resetForTest()
         compose.mainClock.autoAdvance = false
-        compose.setContent { MaterialTheme { StatusHost(context, onReload = { reloads++ }) } }
+        compose.setContent { MaterialTheme { StatusHost(context, tracker, onReload = { reloads++ }) } }
         pumpUntil { textShown(count(42_000, 108_882)) }
         awaitWatcher(store)
 
@@ -77,11 +78,10 @@ class GatewayStateReloadComposeTest : GatewayTestBase() {
         val store = GatewayStateStore(context)
         store.setDownloading(42_000uL, 108_882uL)
         scheduled.clear()
-        SetupFinishTracker.resetForTest()
         val registrationGate = CompletableDeferred<Unit>()
         compose.mainClock.autoAdvance = false
         compose.setContent {
-            MaterialTheme { StatusHost(context, beforeRegistration = { registrationGate.await() }, onReload = { reloads++ }) }
+            MaterialTheme { StatusHost(context, tracker, beforeRegistration = { registrationGate.await() }, onReload = { reloads++ }) }
         }
         pumpUntil { textShown(count(42_000, 108_882)) }
 
@@ -102,7 +102,7 @@ class GatewayStateReloadComposeTest : GatewayTestBase() {
         val registrationGate = CompletableDeferred<Unit>()
         compose.mainClock.autoAdvance = false
         compose.setContent {
-            MaterialTheme { StatusHost(context, beforeRegistration = { registrationGate.await() }, onReload = { reloads++ }) }
+            MaterialTheme { StatusHost(context, tracker, beforeRegistration = { registrationGate.await() }, onReload = { reloads++ }) }
         }
         pumpUntil { textShown(count(98_000, 108_882)) }
 
@@ -118,6 +118,7 @@ class GatewayStateReloadComposeTest : GatewayTestBase() {
     @Composable
     private fun StatusHost(
         context: Context,
+        tracker: SetupFinishTracker,
         beforeRegistration: suspend () -> Unit = {},
         onReload: () -> Unit,
     ) {
@@ -127,8 +128,8 @@ class GatewayStateReloadComposeTest : GatewayTestBase() {
             onReload()
             status = withContext(Dispatchers.IO) { NativeGateway.status(context) }
         }
-        LaunchedEffect(status) { SetupFinishTracker.observe(status) }
-        SetupProgressCard(status)
+        LaunchedEffect(status) { tracker.observe(status) }
+        SetupProgressCard(status, tracker)
         if (historyTooLargeRibbonVisible(status)) Text("too large", Modifier.testTag("host-too-large"))
     }
 

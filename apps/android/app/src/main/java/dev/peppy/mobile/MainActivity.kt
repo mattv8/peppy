@@ -122,7 +122,6 @@ import dev.peppy.mobile.sms.SyncDetailsRequests
 import dev.peppy.mobile.sms.StoppedSyncDetailsDialog
 import dev.peppy.mobile.sms.SyncDetailsRoute
 import dev.peppy.mobile.gateway.GatewayStateReloadEffect
-import dev.peppy.mobile.gateway.SetupFinishTracker
 import dev.peppy.mobile.gateway.historyTooLargeRibbonVisible
 import dev.peppy.mobile.sms.syncDetailsRoute
 import dev.peppy.mobile.sms.syncStopped
@@ -317,6 +316,7 @@ internal suspend fun signInSubscriptionRoute(
 @Composable
 private fun CompanionScreen(activity: ComponentActivity) {
     val context = LocalContext.current
+    val setupFinishTracker = (activity.application as PeppyApplication).setupFinishTracker
     val scope = rememberCoroutineScope()
     var status by remember { mutableStateOf<GatewayStatus?>(null) }
     var refresh by remember { mutableIntStateOf(0) }
@@ -444,7 +444,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
     LaunchedEffect(status?.enrolled) {
         if (status?.enrolled != true) appFiltersOpen = false
     }
-    LaunchedEffect(status) { SetupFinishTracker.observe(status) }
+    LaunchedEffect(status) { setupFinishTracker.observe(status) }
     LaunchedEffect(status?.enrolled, status?.origin, syncStopped(status)) {
         if (status?.enrolled != true || !syncStopped(status)) stoppedSyncDetailsOpen = false
     }
@@ -694,6 +694,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
                 onChanged = { refresh++ },
                 gatewayStatus = status,
                 onDetailsChanged = { smsDetailsOpen = it },
+                setupFinishTracker = setupFinishTracker,
             )
             if (!subscriptionOpen && !settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "mirroring") NotificationMirroringSettings(refresh = refresh, onChanged = { refresh++ }, onOpenAppFilters = { appFiltersOpen = true })
             if (!subscriptionOpen && !settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "contacts") {

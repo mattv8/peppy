@@ -18,7 +18,6 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
@@ -32,8 +31,19 @@ class SetupProgressCardTest {
     private val compose = createComposeRule()
     @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
 
-    @Before
-    fun resetTracker() = SetupFinishTracker.resetForTest()
+    /** JUnit builds a new test instance per method, so every test starts with its own tracker. */
+    private val tracker = SetupFinishTracker()
+
+    @Test
+    fun freshTrackerHasNoPendingNoticeAndTwoTrackersShareNothing() {
+        assertFalse(SetupFinishTracker().pending.value)
+        assertFalse(SetupFinishTracker().takeFresh())
+
+        tracker.observe(status(SetupProgress.Checking))
+        tracker.observe(status(progress = null, phase = SyncPhase.LIVE))
+        assertTrue(tracker.pending.value)
+        assertFalse("another tracker must not see this import", SetupFinishTracker().pending.value)
+    }
 
     @Test
     fun checkingShowsIndeterminateBarAndNoCount() {
@@ -137,8 +147,8 @@ class SetupProgressCardTest {
     @Test
     fun finishedNoticeShowsOnceAfterAnInSessionImportThenRemovesAfterSixSeconds() {
         compose.mainClock.autoAdvance = false
-        SetupFinishTracker.observe(status(SetupProgress.Organizing(remaining = 3)))
-        SetupFinishTracker.observe(status(progress = null, phase = SyncPhase.LIVE))
+        tracker.observe(status(SetupProgress.Organizing(remaining = 3)))
+        tracker.observe(status(progress = null, phase = SyncPhase.LIVE))
         show(status(progress = null, phase = SyncPhase.LIVE))
         compose.mainClock.advanceTimeBy(1)
 
@@ -154,8 +164,8 @@ class SetupProgressCardTest {
     @Test
     fun finishedNoticeIsOneMergedLiveRegionWithTitleAndBody() {
         compose.mainClock.autoAdvance = false
-        SetupFinishTracker.observe(status(SetupProgress.Checking))
-        SetupFinishTracker.observe(status(progress = null, phase = SyncPhase.LIVE))
+        tracker.observe(status(SetupProgress.Checking))
+        tracker.observe(status(progress = null, phase = SyncPhase.LIVE))
         show(status(progress = null, phase = SyncPhase.LIVE))
         compose.mainClock.advanceTimeBy(1)
 
@@ -175,8 +185,8 @@ class SetupProgressCardTest {
 
     @Test
     fun setupEndingInErrorStopShowsNoFinishedNotice() {
-        SetupFinishTracker.observe(status(SetupProgress.Checking))
-        SetupFinishTracker.observe(status(progress = null, phase = SyncPhase.RECOVERY_REQUIRED))
+        tracker.observe(status(SetupProgress.Checking))
+        tracker.observe(status(progress = null, phase = SyncPhase.RECOVERY_REQUIRED))
         show(status(progress = null, phase = SyncPhase.RECOVERY_REQUIRED))
 
         assertTrue(compose.onAllNodesWithTag("sync-setup-card").fetchSemanticsNodes().isEmpty())
@@ -193,29 +203,29 @@ class SetupProgressCardTest {
 
     @Test
     fun trackerQueuesOneNoticeOnlyForAnObservedImport() {
-        SetupFinishTracker.observe(status(progress = null, phase = SyncPhase.LIVE))
-        assertFalse(SetupFinishTracker.pending.value)
+        tracker.observe(status(progress = null, phase = SyncPhase.LIVE))
+        assertFalse(tracker.pending.value)
 
-        SetupFinishTracker.observe(status(SetupProgress.Checking))
-        SetupFinishTracker.observe(status(progress = null, phase = SyncPhase.LIVE))
-        assertTrue(SetupFinishTracker.pending.value)
-        assertTrue(SetupFinishTracker.takeFresh())
-        SetupFinishTracker.observe(status(progress = null, phase = SyncPhase.LIVE))
-        assertFalse(SetupFinishTracker.pending.value)
+        tracker.observe(status(SetupProgress.Checking))
+        tracker.observe(status(progress = null, phase = SyncPhase.LIVE))
+        assertTrue(tracker.pending.value)
+        assertTrue(tracker.takeFresh())
+        tracker.observe(status(progress = null, phase = SyncPhase.LIVE))
+        assertFalse(tracker.pending.value)
     }
 
     @Test
     fun queuedFinishedNoticeExpiresAfterThirtySeconds() {
-        SetupFinishTracker.observe(status(SetupProgress.Checking), nowMs = 0L)
-        SetupFinishTracker.observe(status(progress = null, phase = SyncPhase.LIVE), nowMs = 1_000L)
+        tracker.observe(status(SetupProgress.Checking), nowMs = 0L)
+        tracker.observe(status(progress = null, phase = SyncPhase.LIVE), nowMs = 1_000L)
 
-        assertFalse("a notice nobody saw in time is dropped", SetupFinishTracker.takeFresh(nowMs = 1_000L + SETUP_FINISHED_QUEUE_MS + 1))
-        assertFalse(SetupFinishTracker.pending.value)
+        assertFalse("a notice nobody saw in time is dropped", tracker.takeFresh(nowMs = 1_000L + SETUP_FINISHED_QUEUE_MS + 1))
+        assertFalse(tracker.pending.value)
     }
 
     private fun show(status: GatewayStatus?) {
         compose.setContent {
-            MaterialTheme { SetupProgressCard(status) }
+            MaterialTheme { SetupProgressCard(status, tracker) }
         }
     }
 
