@@ -46,7 +46,7 @@ Floating heads on macOS and Windows show a contact's typing as a pill in the unr
 
 ## Diagnostics
 
-Diagnostics is off by default. Turn on **Verbose logging** in **Settings → Diagnostics**; the section is the last entry in Settings. It appears only where the host provides the four diagnostics commands, so the desktop app has it and the web app does not. The commands are not on the locked-app allowlist in [lib.rs](../../apps/desktop/src-tauri/src/lib.rs), so the section works only while the app is unlocked. Android keeps its Diagnostics entry on a locked screen; the desktop does not.
+Diagnostics is off by default. Turn on **Verbose logging** in **Settings → Diagnostics**; it is the last category in the Settings navigation. It appears only where the host provides the four diagnostics commands, so the desktop app has it and the web app does not. The commands are not on the locked-app allowlist in [lib.rs](../../apps/desktop/src-tauri/src/lib.rs), so the section works only while the app is unlocked. Android keeps its Diagnostics entry on a locked screen; the desktop does not.
 
 When recording is on, the recorder writes content-free numeric records for the live socket, typing sends, inbound typing, floating-head typing, and the core's typing cause counters. The records hold numbers only: no message text, contacts, identifiers, or credentials. The core counters are read only while recording is on, so turn it on before the test.
 

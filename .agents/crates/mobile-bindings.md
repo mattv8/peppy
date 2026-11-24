@@ -10,14 +10,14 @@ Follow the canonical [contributing workflow](../../CONTRIBUTING.md) for shared s
 
 - `open_native_client(NativeOpenConfig)` receives a native-supplied 32-byte database key. `unlock(profile_json, header_json, passphrase)` accepts the shared vault passphrase only for manual unlock; hosts must not retain it in ordinary storage or view models.
 - `export_native_key_cache_for_native_storage` and `import_native_key_cache_from_native_storage` exchange opaque bytes with Android Keystore, iOS Keychain, or an equivalent native store. Views never receive database, passphrase, purpose, or envelope keys.
-- `pending_outbox_json_batch(limit)` returns opaque encrypted envelope JSON. Hosts call `ack_outbox` only after server acceptance. It performs neither I/O nor epoch activation.
+- `pending_outbox_json_batch(limit)` returns opaque encrypted envelope JSON. Hosts call `ack_outbox` only after server acceptance. It may first seal pending outbox records (a local database write); it performs no network I/O and no epoch activation.
 - `ingest_raw`, `apply_pending`, and snapshot methods support bounded journal/apply work. After `finish_snapshot`, call `apply_pending` until `snapshot_remaining` is zero.
 - `activate_verified_epoch(epoch)` is explicit after a successful manual unlock of that verified profile. Credential import and key-cache restoration do not activate an epoch.
 - `dispose()` rejects later calls with `MobileBindingsError.Closed`; already-admitted work retains its core handle and may finish.
 
 ## Gateway policy, capabilities, and pairing
 
-`NativeGatewaySettings` stores shared durable preferences: mirroring, Wi-Fi-only mirroring, skip-silent, SMS/MMS synchronization, and Wi-Fi-only media. `gateway_policy_decision` combines those preferences with host-supplied `NativeGatewayHostFacts`; native code must not create a parallel policy store. New mirroring defaults off. Capability and policy results are distinct: a host must report actual permission/listener/Wi-Fi facts and must enforce the resulting decision at the OS effect boundary.
+`NativeGatewaySettings` stores shared durable preferences: mirroring, Wi-Fi-only mirroring, skip-silent, SMS/MMS synchronization, Wi-Fi-only media, phone reads, and notification mark-read. `gateway_policy_decision` combines those preferences with host-supplied `NativeGatewayHostFacts`; native code must not create a parallel policy store. New mirroring defaults off. Capability and policy results are distinct: a host must report actual permission/listener/Wi-Fi facts and must enforce the resulting decision at the OS effect boundary.
 
 `NativeGatewayPlatform` and `gateway_capabilities` keep platform limits explicit. iOS hosts report no carrier executor or notification listener in this product build; Android must not infer RCS or privileged carrier access from SIM/default-app state.
 
