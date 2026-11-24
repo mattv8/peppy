@@ -360,23 +360,20 @@ struct NativeContactsCoordinator {
             report.retentionPaused = supported && !active
             return report
         }
-        let selection = try client.contactBookSelection()
-        let selected: (book: OwnedBook?, id: String, retireBookIds: [String])
-        switch selection {
-        case let .owned(bookId):
-            if let existing = try book(bookId) {
-                selected = (existing, bookId, [])
-            } else {
-                selected = (nil, UUID().uuidString.lowercased(), [])
-            }
-        case let .inherited(bookId, retireBookIds):
-            selected = (try book(bookId), bookId, retireBookIds)
+        retireSupersededBooks()
+        let resolution = try Self.resolveSelection(select: client.contactBookSelection, book: book)
+        let selected: (book: OwnedBook?, id: String, inherited: Bool)
+        switch resolution {
+        case let .selected(book, id, inherited):
+            selected = (book, id, inherited)
         case .wait:
             var report = ContactsSyncReport(outcome: .waitingForReplay)
             report.retentionPaused = supported && !active
             return report
-        case .mint:
-            selected = (nil, UUID().uuidString.lowercased(), [])
+        case .unavailable:
+            var report = ContactsSyncReport(outcome: .partial)
+            report.retentionPaused = supported && !active
+            return report
         }
         let existing = selected.book
         let access = try await provider.access()
@@ -421,10 +418,8 @@ struct NativeContactsCoordinator {
             try await processRequests(book: book, bookId: bookId, access: report.access ?? access,
                                       checkpoint: &checkpoint, report: &report, isCancelled: isCancelled)
         }
-        if report.authoritative, !isCancelled() {
-            for retireBookId in selected.retireBookIds where retireBookId != bookId {
-                try retireAfterFullScopeRemoval(retireBookId)
-            }
+        if selected.inherited, report.authoritative, !isCancelled() {
+            retireSupersededBooks()
         }
         report.photoWorkRemaining = !checkpoint.pendingPhotoKeys.isEmpty || checkpoint.sweepActive
         report.remoteScanPending = try hasPendingRemoteScan(bookId: bookId)
@@ -848,25 +843,38 @@ struct NativeContactsCoordinator {
         _ = try capture(book: body, entries: [])
     }
 
-    /// A takeover never hides a minted book until its existing members have gone through the same
-    /// authoritative empty-scope removal used by a normal full scan.
-    private func retireAfterFullScopeRemoval(_ bookId: String) throws {
-        guard let book = try book(bookId) else { return }
-        let scanId = UUID().uuidString.lowercased()
-        _ = try call(client.beginContactScan, [
-            "schema_version": 1, "scan_id": scanId, "book_id": book.id,
-            "generation": book.generation, "access": "full", "authoritative": true,
-        ])
-        let finished = try call(client.finishContactScan, ["schema_version": 1, "scan_id": scanId, "complete": true])
-        guard (finished["held"] as? Int ?? 0) == 0,
-              finished["state"] as? String != "awaiting_approval"
-        else { return }
-        try retire(book)
+    private func retireSupersededBooks() {
+        do { _ = try client.retireSupersededContactBooks() }
+        catch { NSLog("Peppy contact book retirement failed") }
     }
 
     // MARK: Book
 
     struct OwnedBook: Equatable { let id: String; let generation: String }
+
+    enum ResolvedSelection {
+        case selected(book: OwnedBook?, id: String, inherited: Bool)
+        case wait
+        case unavailable
+    }
+
+    /// The pass's book from the core selection. An owned book that is gone when read (retired since
+    /// the selection) is reselected once and never replaced by a new id.
+    static func resolveSelection(
+        select: () throws -> NativeContactBookSelection, book: (String) throws -> OwnedBook?
+    ) throws -> ResolvedSelection {
+        for _ in 0..<2 {
+            switch try select() {
+            case let .owned(bookId):
+                if let existing = try book(bookId) { return .selected(book: existing, id: bookId, inherited: false) }
+            case let .inherited(bookId, _):
+                return .selected(book: try book(bookId), id: bookId, inherited: true)
+            case .wait: return .wait
+            case .mint: return .selected(book: nil, id: UUID().uuidString.lowercased(), inherited: false)
+            }
+        }
+        return .unavailable
+    }
 
     func ownedBook() throws -> OwnedBook? {
         let books = try Self.object(client.listContactBooksJson())["books"] as? [[String: Any]] ?? []

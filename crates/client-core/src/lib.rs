@@ -23,6 +23,7 @@ mod attachment_retention;
 mod compose_create;
 mod contact_book_deletion;
 pub use contact_book_deletion::CompletionReplayNeed;
+mod contact_book_supersession;
 mod contact_media;
 mod contact_photos;
 mod contact_queries;
@@ -2811,6 +2812,18 @@ impl Client {
         let (conn, ctx) = store.parts();
         contact_book_deletion::delete(conn, &ctx, input)
     }
+    /// Retires this successor's superseded contact books. After a re-enrolled phone took over its
+    /// predecessor's book, the book it had started on its own loses its contacts (tombstones keep
+    /// the usual restore data), its open requests are closed, and it is published retired with
+    /// `superseded_by`. Hosts call it once per contacts pass, before `contact_book_selection`.
+    /// Requires unlocked keys. Returns `{"schema_version":1,"retired":[{"book_id","replaced_by",
+    /// "contacts_removed"}]}`, with an empty list when nothing is eligible.
+    pub fn retire_superseded_contact_books(&self) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        ensure_recovery_complete(&store)?;
+        let (conn, ctx) = store.parts();
+        contact_book_supersession::retire(conn, &ctx)
+    }
     /// Returns this caller's durable status for a requested book scan.
     pub fn contact_sync_request_status(&self, input: &str) -> Result<String, Error> {
         let store = self.lock()?;
@@ -5541,19 +5554,15 @@ impl Client {
         if !caught_up || !device_succession::local_hint_registered(conn)? {
             return Ok(ContactBookSelection::Wait);
         }
-        let inherited = device_succession::inherited_books(conn, &device_id)?;
-        if let Some(book_id) = inherited.first() {
-            let retire = conn.prepare("SELECT id FROM contact_books WHERE owner_device_id=? AND forgotten=0 AND state!='retired' AND id NOT IN (SELECT book_id FROM inherited_contact_books) ORDER BY id")?
-                .query_map([device_id.to_string()], |row| row.get(0))?
-                .collect::<Result<Vec<String>, _>>()?;
-            if retire.is_empty() && device_succession::takeover_complete(conn, book_id)? {
+        if let Some(inherited) = device_succession::inherited_selection(conn, &device_id)? {
+            if inherited.retire_book_ids.is_empty() && inherited.takeover_complete {
                 return Ok(ContactBookSelection::Owned {
-                    book_id: book_id.clone(),
+                    book_id: inherited.book_id,
                 });
             }
             return Ok(ContactBookSelection::Inherited {
-                book_id: book_id.clone(),
-                retire_book_ids: retire,
+                book_id: inherited.book_id,
+                retire_book_ids: inherited.retire_book_ids,
             });
         }
         let owned: Option<String> = conn.query_row("SELECT id FROM contact_books WHERE owner_device_id=? AND forgotten=0 AND state!='retired' ORDER BY id LIMIT 1", [device_id.to_string()], |row| row.get(0)).optional()?;

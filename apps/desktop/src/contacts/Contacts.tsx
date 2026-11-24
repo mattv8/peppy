@@ -30,6 +30,8 @@ import "./contacts.css";
 /** Core returns at most this many contacts per page (search runs before paging). */
 export { CONTACTS_PAGE_SIZE } from "./contact-target";
 
+/** The two-sentence replaced-book notice stays up longer than the default 4 s. */
+const REPLACED_NOTICE_HOLD_MS = 8000;
 const DETAIL_DEFAULT_WIDTH = 320;
 const DETAIL_MIN_WIDTH = 280;
 const BOOK_DEFAULT_WIDTH = 220;
@@ -160,6 +162,9 @@ export function ContactsView({ books: initialBooks = [], sync, serverConnected =
   const railVisible = !compactBookList && !bookCollapsed && !spaceCollapsed;
   const collapsedReason = compactBookList || railVisible ? undefined : bookCollapsed ? "user" : "space";
   const removedBookIdRef = useRef<string | null>(null);
+  const focusAfterReplacementRef = useRef<"restore" | "book" | null>(null);
+  const restoreRef = useRef(restore);
+  restoreRef.current = restore;
   const sortButtonRef = useRef<HTMLButtonElement>(null);
   const sortMenuRef = useRef<HTMLDivElement>(null);
   const [sortMenuPosition, setSortMenuPosition] = useState<CSSProperties>();
@@ -241,9 +246,22 @@ export function ContactsView({ books: initialBooks = [], sync, serverConnected =
       .then(next => {
         if (!mountedRef.current) return;
         const selectedBook = booksRef.current.find(item => item.id === currentBookRef.current);
+        const disappeared = selectedBook && !next.some(item => item.id === selectedBook.id);
+        const replacement = disappeared && !selectedBook.sourceRevoked && !removedBookIdRef.current
+          ? next.find(item => item.replacedBookIds?.includes(selectedBook.id))
+          : undefined;
         // A removed phone's book vanishing while this computer did not remove or delete it means another device deleted it.
         if (selectedBook?.sourceRevoked && !next.some(item => item.id === selectedBook.id) && !removedBookIdRef.current) {
           setActionNotice({ kind: "success", message: <><IsolatedText text={selectedBook.deviceName} />'s contacts were deleted from another device.</> });
+        } else if (replacement && selectedBook) {
+          const allExcluded = next.every(item => item.lookupExcluded);
+          setActionNotice({ kind: "success", holdMs: allExcluded ? REPLACED_NOTICE_HOLD_MS : undefined, message: <><IsolatedText text={selectedBook.deviceName} />'s earlier contact book was replaced by its current one.{allExcluded && " No contact book is used for names or recipient search."}</> });
+          focusAfterReplacementRef.current = restoreRef.current?.bookId === selectedBook.id ? "restore" : "book";
+        } else if (!removedBookIdRef.current && booksRef.current.some(book => !book.lookupExcluded) && next.every(book => book.lookupExcluded)) {
+          const vanished = booksRef.current.find(book => !book.sourceRevoked && !next.some(item => item.id === book.id) && next.some(item => item.replacedBookIds?.includes(book.id)));
+          if (vanished) {
+            setActionNotice({ kind: "success", holdMs: REPLACED_NOTICE_HOLD_MS, message: <><IsolatedText text={vanished.deviceName} />'s earlier contact book was replaced by its current one. No contact book is used for names or recipient search.</> });
+          }
         }
         setBooks(next);
         if (editorBookIdRef.current && !next.some(book => book.id === editorBookIdRef.current)) {
@@ -254,10 +272,16 @@ export function ContactsView({ books: initialBooks = [], sync, serverConnected =
         setBooksLoaded(true);
         const currentBookId = currentBookRef.current;
         if (currentBookId && next.some(book => book.id === currentBookId)) return;
-        const fallbackBookId = next[0]?.id ?? "";
+        const fallbackBookId = replacement?.id ?? next[0]?.id ?? "";
         if (fallbackBookId === currentBookId) return;
         currentBookRef.current = fallbackBookId;
         setBookId(fallbackBookId);
+        if (currentBookId) {
+          ++scanStatusRequestRef.current;
+          ++syncActionRef.current;
+          setScanStatus(null);
+          setSyncing(false);
+        }
         setRestore(null);
         if (!editingRef.current || !dirtyRef.current) {
           setSelected(null);
@@ -764,6 +788,17 @@ export function ContactsView({ books: initialBooks = [], sync, serverConnected =
     handleBookRemoved(deleted.id);
     setActionNotice({ kind: "success", message: <>Deleted <IsolatedText text={deleted.deviceName} />'s contacts for all devices. Other devices remove it as they sync.</> });
   };
+  // Restore focus only when the previously focused element disappeared with the replaced book.
+  useEffect(() => {
+    if (focusAfterReplacementRef.current) {
+      const target = focusAfterReplacementRef.current === "restore" ? restoreTriggerRef.current
+        : document.querySelector<HTMLElement>("#contacts-books .contacts-book-row[aria-current]")
+          ?? document.getElementById("contacts-book-selector") ?? document.getElementById("contacts-list-title") ?? document.getElementById("contacts-list");
+      focusAfterReplacementRef.current = null;
+      if (!document.activeElement || document.activeElement === document.body) target?.focus();
+    }
+  }, [books]);
+
   // The request stays armed until the removed book is actually gone, so an earlier books refresh cannot consume it.
   useEffect(() => {
     const removedId = removedBookIdRef.current;

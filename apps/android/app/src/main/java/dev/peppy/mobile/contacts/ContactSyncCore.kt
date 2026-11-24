@@ -18,6 +18,8 @@ import uniffi.peppy_mobile_bindings.NativeContactBookSelection
  * apply evidence; the host keeps no parallel copy of any of them.
  */
 internal interface ContactCore {
+    /** Retires eligible superseded books in the core. */
+    fun retireSupersededContactBooks(): JSONObject
     fun contactBookSelection(): NativeContactBookSelection
     fun listBooks(): JSONObject
     fun capture(input: JSONObject): JSONObject
@@ -50,6 +52,7 @@ internal interface ContactCore {
 }
 
 internal class NativeContactCore(private val client: NativeClientInterface) : ContactCore {
+    override fun retireSupersededContactBooks() = JSONObject(client.retireSupersededContactBooks())
     override fun contactBookSelection() = client.contactBookSelection()
     override fun listBooks() = JSONObject(client.listContactBooksJson())
     override fun capture(input: JSONObject) = JSONObject(client.capturePlatformContactsJson(input.toString()))

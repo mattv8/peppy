@@ -562,6 +562,10 @@ This reference records non-obvious Peppy domain constraints.
   at the current book generation, fence revisions changed since scan start,
   and apply the deletion policy before publishing removals. Expired or cancelled
   background scans preserve progress without authorizing deletion.
+- A re-enrolled phone's own earlier book is retired by core, without the
+  deletion policy's approval, once the inherited book's takeover scan
+  completes. It is then terminal on every device and never regains contacts.
+  See [contact book supersession](../crates/client-core/src/contact_book_supersession.rs).
 - Contact photo objects are private encrypted attachments. Retain restore data
   and referenced photos for their promised lifetime; a timer alone does not
   establish that every replay or restore reference has been released.

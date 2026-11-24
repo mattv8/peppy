@@ -126,23 +126,13 @@ impl BrowserCore {
     fn contact_books(&self) -> Result<Value, Failure> {
         let pending = shared::pending_counts(&self.ledger(None)?);
         let own = self.own_device_id()?.to_string();
-        Ok(Value::Array(
-            self.raw_books()?
-                .iter()
-                .filter_map(|book| {
-                    let mut view =
-                        shared::book_view(book, &own, &std::collections::HashMap::new(), &pending)?;
-                    if view
-                        .get("ownerDeviceId")
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| self.context.revoked_device_ids.contains(id))
-                    {
-                        view["sourceRevoked"] = json!(true);
-                    }
-                    Some(view)
-                })
-                .collect(),
-        ))
+        Ok(Value::Array(shared::book_list_view(
+            &self.raw_books()?,
+            &own,
+            &std::collections::HashMap::new(),
+            &pending,
+            &self.context.revoked_device_ids,
+        )))
     }
 
     /// Display-only contact state for a browser snapshot. No provider data, photo attachment ID,

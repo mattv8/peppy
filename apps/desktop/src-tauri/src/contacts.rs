@@ -97,20 +97,13 @@ pub fn list_books(session: &Session) -> BridgeResult<Vec<Value>> {
         .map(|gateway| (gateway.id, gateway.name))
         .collect::<HashMap<_, _>>();
     let revoked = session.revoked_devices();
-    Ok(core_books(&session.client)?
-        .iter()
-        .filter_map(|book| {
-            let mut view = shared::book_view(book, own, &device_names, &pending)?;
-            if view
-                .get("ownerDeviceId")
-                .and_then(Value::as_str)
-                .is_some_and(|id| revoked.contains(id))
-            {
-                view["sourceRevoked"] = json!(true);
-            }
-            Some(view)
-        })
-        .collect())
+    Ok(shared::book_list_view(
+        &core_books(&session.client)?,
+        own,
+        &device_names,
+        &pending,
+        &revoked,
+    ))
 }
 
 pub fn request_sync(session: &Session, book_id: &str) -> BridgeResult<Value> {

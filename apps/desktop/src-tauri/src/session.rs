@@ -88,6 +88,8 @@ const MAX_PREVIEW_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::fro
 const MAX_AVATAR_CACHE: usize = 256;
 const MAX_SEEN_IDS: usize = 1000;
 pub const GATEWAYS_FILE: &str = "gateways.json";
+const REVOKED_DEVICES_FILE: &str = "revoked-devices.json";
+const MAX_REVOKED_DEVICES: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VaultSummary {
@@ -542,6 +544,8 @@ pub struct Session {
     pub api: Api,
     pub data_dir: PathBuf,
     pub status: Mutex<NetStatus>,
+    pub(crate) gateway_refresh_sequence: std::sync::atomic::AtomicU64,
+    pub(crate) gateway_refresh_state: Mutex<crate::sync::GatewayRefreshState>,
     progress_mirror: Mutex<ProgressMirror>,
     pub(crate) apply_batch_lock: tokio::sync::Mutex<()>,
     pub(crate) live_typing: crate::live_typing::LiveTypingHost,
@@ -970,9 +974,15 @@ pub(crate) fn open_session_with_progress(
         .filter(|b| b.len() <= 256 * 1024)
         .and_then(|b| serde_json::from_slice(&b).ok())
         .map(sanitize_cached_gateways);
+    let revoked_device_ids = load_revoked_devices(&data_dir);
+    let gateways = gateways.map(|mut views| {
+        views.retain(|view| !revoked_device_ids.contains(&view.id));
+        views
+    });
     let status = NetStatus {
         gateways_known: gateways.is_some(),
         gateways: gateways.unwrap_or_default(),
+        revoked_device_ids,
         ..NetStatus::default()
     };
     Ok(Session {
@@ -982,6 +992,8 @@ pub(crate) fn open_session_with_progress(
         api,
         data_dir,
         status: Mutex::new(status),
+        gateway_refresh_sequence: std::sync::atomic::AtomicU64::new(0),
+        gateway_refresh_state: Mutex::new(crate::sync::GatewayRefreshState::default()),
         progress_mirror: Mutex::new(ProgressMirror::default()),
         apply_batch_lock: tokio::sync::Mutex::new(()),
         live_typing: crate::live_typing::LiveTypingHost::default(),
@@ -1076,6 +1088,26 @@ fn sanitize_cached_gateways(mut gateways: Vec<GatewayView>) -> Vec<GatewayView> 
         gateway.online = false;
     }
     gateways
+}
+
+fn load_revoked_devices(data_dir: &Path) -> HashSet<String> {
+    use std::io::Read;
+    let Some(ids) = fs::File::open(data_dir.join(REVOKED_DEVICES_FILE))
+        .ok()
+        .and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take(64 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+            (bytes.len() <= 64 * 1024).then_some(bytes)
+        })
+        .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
+        .filter(|ids| {
+            ids.len() <= MAX_REVOKED_DEVICES
+                && ids.iter().all(|id| uuid::Uuid::parse_str(id).is_ok())
+        })
+    else {
+        return HashSet::new();
+    };
+    ids.into_iter().collect()
 }
 
 pub use peppy_desktop_api::compose::DraftInput;
@@ -2790,6 +2822,19 @@ impl Session {
     pub fn persist_gateways(&self, views: &[GatewayView]) {
         if let Ok(bytes) = serde_json::to_vec(views) {
             let _ = crate::fsutil::write_private_atomic(&self.data_dir.join(GATEWAYS_FILE), &bytes);
+        }
+    }
+
+    pub(crate) fn persist_revoked_devices(&self, ids: &HashSet<String>) {
+        if ids.len() > MAX_REVOKED_DEVICES {
+            eprintln!("peppy: too many revoked devices to persist");
+            return;
+        }
+        if let Ok(bytes) = serde_json::to_vec(ids) {
+            let _ = crate::fsutil::write_private_atomic(
+                &self.data_dir.join(REVOKED_DEVICES_FILE),
+                &bytes,
+            );
         }
     }
 

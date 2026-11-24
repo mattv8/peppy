@@ -470,6 +470,29 @@ pub(crate) fn takeover_complete(conn: &Connection, book_id: &str) -> Result<bool
         .is_some_and(|complete| complete != 0))
 }
 
+pub(crate) struct InheritedSelection {
+    pub book_id: String,
+    pub takeover_complete: bool,
+    pub retire_book_ids: Vec<String>,
+}
+
+pub(crate) fn inherited_selection(
+    conn: &Connection,
+    owner: &DeviceId,
+) -> Result<Option<InheritedSelection>, Error> {
+    let Some(book_id) = inherited_books(conn, owner)?.into_iter().next() else {
+        return Ok(None);
+    };
+    let retire_book_ids = conn.prepare("SELECT id FROM contact_books WHERE owner_device_id=? AND forgotten=0 AND state!='retired' AND id NOT IN (SELECT book_id FROM inherited_contact_books) ORDER BY id")?
+        .query_map([owner.to_string()], |row| row.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(Some(InheritedSelection {
+        takeover_complete: takeover_complete(conn, &book_id)?,
+        book_id,
+        retire_book_ids,
+    }))
+}
+
 fn hint_tag(key: &peppy_crypto::PurposeKey, platform: &str, hint: &[u8]) -> String {
     let tag = peppy_crypto::compaction_hmac(key, b"device-hint-v1", &[platform.as_bytes(), hint]);
     tag.iter().map(|byte| format!("{byte:02x}")).collect()
