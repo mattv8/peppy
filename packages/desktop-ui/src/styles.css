@@ -523,60 +523,6 @@ select:focus-visible {
   max-width: calc(100vw - 16px);
   max-height: calc(100dvh - var(--peppy-titlebar-height) - 16px);
 }
-.recipient-picker {
-  position: relative;
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  flex: 1;
-  min-width: 0;
-}
-.recipient-picker input {
-  width: 100%;
-  min-width: 0;
-}
-.recipient-picker ul {
-  position: absolute;
-  top: 32px;
-  z-index: 4;
-  width: 100%;
-  padding: 4px;
-  margin: 0;
-  list-style: none;
-  border: 1px solid var(--peppy-glass-border);
-  border-radius: var(--peppy-radius-md);
-  background: var(--peppy-glass-surface);
-  -webkit-backdrop-filter: var(--peppy-glass-backdrop-filter);
-  backdrop-filter: var(--peppy-glass-backdrop-filter);
-  box-shadow: inset 0 1px 0 var(--peppy-glass-highlight), var(--peppy-shadow-floating);
-  max-height: 200px;
-  overflow-x: hidden;
-  overflow-y: auto;
-}
-.recipient-picker li {
-  padding: 6px;
-  cursor: pointer;
-}
-.recipient-picker-error {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 5;
-  color: var(--peppy-error);
-  font-size: 11px;
-}
-.chips {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-.chip {
-  border: 1px solid var(--peppy-border);
-  background: var(--peppy-surface-widget);
-  color: var(--peppy-text-primary);
-  border-radius: 12px;
-  font-size: 11px;
-}
 #conversation-list > ul {
   list-style: none;
   padding: 0;
@@ -1320,11 +1266,6 @@ select:focus-visible {
 .contact-avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
 @media (forced-colors: active) {
   .contact-avatar { forced-color-adjust: none; background: ButtonFace !important; color: ButtonText !important; outline: 1px solid ButtonText; }
-}
-.recipient-picker li[data-contact-address] {
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 #pairing-panel {
   display: grid;

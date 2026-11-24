@@ -14,7 +14,6 @@ import {
   Panel,
   RecipientPanel,
   RecipientChipInput,
-  RecipientPicker,
   ResizeHandle,
   StatusPopover,
   ConnectionDot,
@@ -743,85 +742,6 @@ describe("desktop UI controls", () => {
     rerender(<ConversationList conversations={[draft]} selectedId="draft" onSelect={() => {}} onDelete={onDelete} onCancelDelete={onCancelDelete} />);
     fireEvent.keyDown(screen.getByRole("button", { name: "Delete draft for New message" }), { key: "Escape" });
     expect(onCancelDelete).toHaveBeenCalledTimes(2);
-  });
-
-  it("selects recipients with an ARIA combobox keyboard flow", () => {
-    const changed = vi.fn();
-    render(<RecipientPicker recipients={people} onChange={changed} />);
-    const input = screen.getByRole("combobox");
-    fireEvent.change(input, { target: { value: "Aur" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(changed).toHaveBeenCalledWith(["conv-a"]);
-  });
-
-  it("selects an existing formatted phone conversation for canonical-equivalent queries", () => {
-    const changed = vi.fn();
-    const phoneConversation = [{ id: "phone-conversation", name: "(202) 555-0100", preview: "Hi", unread: 0 }];
-    render(<RecipientPicker recipients={phoneConversation} onChange={changed} onNewRecipient={() => {}} />);
-    const input = screen.getByRole("combobox");
-    fireEvent.change(input, { target: { value: "2025550100" } });
-    expect(screen.getByRole("option", { name: "(202) 555-0100" })).toHaveAttribute("aria-selected", "true");
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(changed).toHaveBeenCalledWith(["phone-conversation"]);
-
-    fireEvent.click(screen.getByRole("button", { name: "Remove (202) 555-0100" }));
-    fireEvent.change(input, { target: { value: "+12025550100" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(changed).toHaveBeenLastCalledWith(["phone-conversation"]);
-  });
-
-  it("offers a formatted, canonical new-recipient option for a valid number without a conversation", () => {
-    const changed = vi.fn(),
-      started = vi.fn();
-    render(
-      <RecipientPicker
-        recipients={people}
-        onChange={changed}
-        onNewRecipient={started}
-      />,
-    );
-    const input = screen.getByRole("combobox");
-    fireEvent.change(input, { target: { value: " +1 202 555 0100 " } });
-    expect(
-      screen.getByRole("option", { name: "Message (202) 555-0100" }),
-    ).toBeInTheDocument();
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(started).toHaveBeenCalledWith("+12025550100");
-    expect(changed).not.toHaveBeenCalled();
-  });
-
-  it("retains an invalid new-recipient search and exposes its validation error", () => {
-    const started = vi.fn();
-    render(<RecipientPicker recipients={people} onChange={() => {}} onNewRecipient={started} />);
-    const input = screen.getByRole("combobox");
-    fireEvent.change(input, { target: { value: "202 555" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(started).not.toHaveBeenCalled();
-    expect(input).toHaveValue("202 555");
-    expect(input).toHaveAttribute("aria-invalid", "true");
-    expect(screen.getByRole("alert")).toBeInTheDocument();
-    fireEvent.change(input, { target: { value: "2025550100" } });
-    expect(input).not.toHaveAttribute("aria-invalid");
-  });
-
-  it("selects an option after recipients appear following empty-result navigation", () => {
-    const changed = vi.fn();
-    const { rerender } = render(<RecipientPicker recipients={[]} onChange={changed} />);
-    const input = screen.getByRole("combobox");
-    fireEvent.change(input, { target: { value: "Aur" } });
-    fireEvent.keyDown(input, { key: "ArrowDown" });
-    rerender(<RecipientPicker recipients={people} onChange={changed} />);
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(changed).toHaveBeenCalledWith(["conv-a"]);
-  });
-
-  it("does not commit a recipient during IME composition", () => {
-    const changed = vi.fn();
-    render(<RecipientPicker recipients={people} onChange={changed} />);
-    const input = screen.getByRole("combobox");
-    fireEvent.change(input, { target: { value: "Aur" } });
-    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
-    expect(changed).not.toHaveBeenCalled();
   });
 
   it("does not send Enter during IME composition", () => {
@@ -1729,41 +1649,5 @@ describe("contact recipient discovery", () => {
     expect(await screen.findAllByRole("option")).toHaveLength(1);
     await act(async () => resolveOld(sol));
     expect(screen.getAllByRole("option")).toHaveLength(1);
-  });
-
-  it("starts a new message from a contact phone without an existing conversation", async () => {
-    const started = vi.fn();
-    render(<RecipientPicker recipients={people} onChange={() => {}} onNewRecipient={started} searchContacts={async () => sol} />);
-    const picker = screen.getByRole("combobox", { name: "Search recipients" });
-    fireEvent.change(picker, { target: { value: "Sol" } });
-    const option = await screen.findByText("work · (202) 555-0161");
-    fireEvent.mouseDown(option.closest("li")!);
-    expect(started).toHaveBeenCalledWith("+12025550161");
-  });
-
-  it("uses each contact row identity for duplicate-address picker options", async () => {
-    const started = vi.fn();
-    render(<RecipientPicker recipients={people} onChange={() => {}} onNewRecipient={started} searchContacts={async () => duplicateAddressSuggestions} />);
-    const picker = screen.getByRole("combobox", { name: "Search recipients" });
-    fireEvent.change(picker, { target: { value: "Ada" } });
-    const options = await screen.findAllByRole("option");
-    expect(new Set(options.map((option) => option.id)).size).toBe(2);
-    fireEvent.keyDown(picker, { key: "ArrowDown" });
-    expect(picker).toHaveAttribute("aria-activedescendant", options[1].id);
-    fireEvent.keyDown(picker, { key: "Enter" });
-    expect(started).toHaveBeenCalledWith("+12025550160");
-  });
-
-  it("gives a legacy id-only contact label a whitespace-free option id that matches aria-activedescendant", async () => {
-    const started = vi.fn();
-    const legacy = [{ id: "+12025550160", label: "Sol Rivera", detail: "mobile · (202) 555-0160" }];
-    render(<RecipientPicker recipients={people} onChange={() => {}} onNewRecipient={started} searchContacts={async () => legacy} />);
-    const picker = screen.getByRole("combobox", { name: "Search recipients" });
-    fireEvent.change(picker, { target: { value: "Sol" } });
-    const [option] = await screen.findAllByRole("option");
-    expect(option.id).not.toMatch(/\s/);
-    expect(picker).toHaveAttribute("aria-activedescendant", option.id);
-    fireEvent.keyDown(picker, { key: "Enter" });
-    expect(started).toHaveBeenCalledWith("+12025550160");
   });
 });
