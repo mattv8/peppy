@@ -1,24 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { acquireWorkerOwner, type OwnerLockManager } from "./owner.js";
+import { acquireWorkerOwner } from "./owner.js";
+import { deferred } from "./test-support/deferred.js";
+import { FakeLocks } from "./test-support/locks.js";
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>(done => { resolve = done; });
-  return { promise, resolve };
-}
-
-function locks(): OwnerLockManager {
-  let occupied = false;
-  return {
-    request: async (_name, options, operation) => {
-      expect(options).toEqual({mode:"exclusive",ifAvailable:true});
-      if (occupied) return operation(null);
-      occupied = true;
-      try { return await operation({name:"fixture"}); }
-      finally { occupied = false; }
-    },
-  };
-}
+const locks = () => new FakeLocks("peppy-fixture");
 
 describe("browser worker ownership", () => {
   it("keeps another worker out until the previous runtime finishes stopping", async () => {

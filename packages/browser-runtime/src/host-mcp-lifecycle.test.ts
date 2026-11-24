@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserEnrollment } from "./enrollment.js";
-import { BrowserWorkerHost, type BrowserNetwork, type BrowserPort, type HostSession } from "./host.js";
+import { BrowserWorkerHost, type BrowserNetwork, type HostSession } from "./host.js";
 import type { WebhookInput } from "@peppy/generated/mcp";
-import type { OwnerLockManager } from "./owner.js";
+import { FakeLocks } from "./test-support/locks.js";
+import { port } from "./test-support/port.js";
 import { OriginTransport } from "./transport.js";
 
 const ORIGIN = "https://peppy.test";
@@ -57,22 +58,7 @@ class RestoredSession implements HostSession {
   public async finishEnrollment(): Promise<void> { this.phase = "ready"; }
 }
 
-function locks(): OwnerLockManager {
-  return {
-    async request(name, _options, operation) { return operation({ name }); },
-  };
-}
-
-function port(): BrowserPort & { messages: unknown[]; emit(message: unknown): void } {
-  const result = {
-    messages: [] as unknown[],
-    onmessage: null as BrowserPort["onmessage"],
-    postMessage(message: unknown) { result.messages.push(message); },
-    close() {},
-    emit(message: unknown) { result.onmessage?.({ data: message } as MessageEvent); },
-  };
-  return result;
-}
+const locks = () => new FakeLocks("peppy-browser-v1");
 
 async function responseFor(portValue: ReturnType<typeof port>, id: number): Promise<unknown> {
   await vi.waitFor(() => expect(portValue.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === id)).toBe(true));
