@@ -100,7 +100,7 @@ func TestReentrantCloseDoesNotDependOnQueuedTerminalConsumer(t *testing.T) {
 	link.state = stateLinked
 	link.mu.Unlock()
 	link.queueEvent(&events.ListenRecovered{})
-	<-host.reached
+	recvWithin(t, host.reached, 5*time.Second)
 	link.queueEvent(&events.GaiaLoggedOut{})
 	close(host.allowClose)
 	select {
@@ -169,7 +169,7 @@ func TestCloseKeepsReplacementFencedUntilAdmittedEmojiReturns(t *testing.T) {
 	link.pairOwner = 3
 	link.mu.Unlock()
 	go link.showEmojiFor(3, "synthetic-emoji")
-	<-host.entered
+	recvWithin(t, host.entered, 5*time.Second)
 
 	link.Close()
 	replacement, err := Open(nil, newSafetyHost())
@@ -183,7 +183,7 @@ func TestCloseKeepsReplacementFencedUntilAdmittedEmojiReturns(t *testing.T) {
 		t.Fatalf("replacement Open error = %v", err)
 	}
 	close(host.release)
-	<-host.delivered
+	recvWithin(t, host.delivered, 5*time.Second)
 	awaitSafety(t, "old output slot release", func() bool {
 		replacement, openErr := Open(nil, newSafetyHost())
 		if openErr != nil {

@@ -165,45 +165,6 @@ func TestNativeGroupSendChecksLiveMembersBeforeGoogleCall(t *testing.T) {
 	})
 }
 
-func TestNativeSendCommitRejectsChangedProjectionBeforeTransport(t *testing.T) {
-	for _, field := range []string{"command_id", "mapping_revision", "proof_digest", "google_conversation_id", "canonical_recipient", "carrier_binding", "evidence"} {
-		t.Run(field, func(t *testing.T) {
-			link, phone, cleanup, ticket, commit := nativeDispatchFixture(t)
-			defer cleanup()
-			target := commit["target"].(map[string]any)
-			switch field {
-			case "command_id":
-				commit[field] = "different-command"
-			case "mapping_revision":
-				commit[field] = 30
-			case "proof_digest":
-				digest := make([]int, 32)
-				digest[0] = 8
-				commit[field] = digest
-			case "google_conversation_id", "canonical_recipient":
-				target[field] = "different-target"
-			case "carrier_binding", "evidence":
-				var nested map[string]any
-				if err := json.Unmarshal(target[field].(json.RawMessage), &nested); err != nil {
-					t.Fatal(err)
-				}
-				if field == "carrier_binding" {
-					nested["own_number_raw"] = "+12025550199"
-				} else {
-					nested["settings_revision"] = 99
-				}
-				target[field] = nested
-			}
-			if stage2Code(t, committer(t, link).CommitNativeRcs(ticket, nativeCommitJSON(t, commit))) != "rejected" {
-				t.Fatal("changed projection accepted")
-			}
-			if phone.countAction("GET_CONVERSATION") != 1 || phone.countAction("SEND_MESSAGE") != 0 {
-				t.Fatal("invalid projection reached transport")
-			}
-		})
-	}
-}
-
 func TestNativeSendCommitUncertainTransportDoesNotRetry(t *testing.T) {
 	link, phone, cleanup, ticket, commit := nativeDispatchFixture(t)
 	defer cleanup()

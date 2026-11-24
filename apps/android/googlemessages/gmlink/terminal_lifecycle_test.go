@@ -442,7 +442,7 @@ func TestUnlinkClosedBeforeUnpairSendsNothing(t *testing.T) {
 	expectErrorCode(t, callWithin(t, "Pair after Close", func() error { return link.Pair(canaryCookieJSON(t)) }), "link_closed")
 	released = true
 	close(release)
-	<-closed
+	recvWithin(t, closed, 5*time.Second)
 
 	expectErrorCode(t, awaitSafetyResult(t, unlinkResult, "Unlink"), "link_closed")
 	if got := fixture.countAction("UNPAIR_GAIA_PAIRING"); got != 0 {

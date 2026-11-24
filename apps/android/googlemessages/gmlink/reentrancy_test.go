@@ -36,7 +36,7 @@ func TestHostOutputsPreserveAdmissionOrder(t *testing.T) {
 	}
 	link := openTestLink(t, nil, host)
 	go link.emit("conn", "recovered", 0)
-	<-host.firstEntered
+	recvWithin(t, host.firstEntered, 5*time.Second)
 	go link.emit("conn", "temporary_error", 0)
 
 	awaitSafety(t, "later output admission", func() bool {
@@ -92,11 +92,11 @@ func TestOldOutputEntersHostBeforeReplacementPairAdmission(t *testing.T) {
 	link := openTestLink(t, nil, host)
 	setSafetyState(link, stateLinked, nil)
 	go link.emitFor(link.generation, "conn", "recovered", 0)
-	<-host.oldEntered
+	recvWithin(t, host.oldEntered, 5*time.Second)
 
 	unlinkDone := make(chan error, 1)
 	go func() { unlinkDone <- link.Unlink() }()
-	if err := <-unlinkDone; err != nil {
+	if err := recvWithin(t, unlinkDone, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
 
@@ -119,7 +119,7 @@ func TestOldOutputEntersHostBeforeReplacementPairAdmission(t *testing.T) {
 	host.mu.Unlock()
 	close(host.releaseOld)
 	link.Close()
-	<-pairDone
+	recvWithin(t, pairDone, 5*time.Second)
 
 	oldIndex := host.index("recovered")
 	pairIndex := host.index("pair_admitted")
@@ -145,8 +145,8 @@ func TestReplacementPairInvalidatesDelayedTerminalOutput(t *testing.T) {
 		<-releaseCompletion
 	}
 	go link.completeTerminal(completion)
-	<-completion.done
-	<-completionReady
+	recvWithin(t, completion.done, 5*time.Second)
+	recvWithin(t, completionReady, 5*time.Second)
 
 	candidate := libgm.NewAuthData()
 	candidate.SetCookies(syntheticCookies())
@@ -164,12 +164,12 @@ func TestReplacementPairInvalidatesDelayedTerminalOutput(t *testing.T) {
 	})
 	close(releaseCompletion)
 
-	<-completion.outputQueued
+	recvWithin(t, completion.outputQueued, 5*time.Second)
 	if host.hasEvent("link", "signed_out") {
 		t.Fatal("delayed terminal output crossed replacement Pair admission")
 	}
 	link.Close()
-	<-pairDone
+	recvWithin(t, pairDone, 5*time.Second)
 }
 
 func TestAuthRevisionIsAllocatedWithSnapshotCapture(t *testing.T) {
@@ -204,17 +204,17 @@ func TestAuthRevisionIsAllocatedWithSnapshotCapture(t *testing.T) {
 
 	firstDone := make(chan error, 1)
 	go func() { firstDone <- link.persistRuntimeAuth(4, candidate) }()
-	<-firstCapture
+	recvWithin(t, firstCapture, 5*time.Second)
 	secondDone := make(chan error, 1)
 	go func() { secondDone <- link.persistRuntimeAuth(4, candidate) }()
 
 	candidate.SetCookies(map[string]string{"SAPISID": "newer"})
 	close(releaseFirst)
-	<-secondCapture
-	if err := <-firstDone; err != nil {
+	recvWithin(t, secondCapture, 5*time.Second)
+	if err := recvWithin(t, firstDone, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-secondDone; err != nil {
+	if err := recvWithin(t, secondDone, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	persisted := persistedCookies(t, host)

@@ -84,7 +84,7 @@ func TestGapIngressPreventsQueuedPreGapSettingsFromRestoringAuthority(t *testing
 	link, host := openSafetyLink(t, nil)
 	reached, release := host.holdNextEvent("recovered")
 	link.queueEvent(&events.ListenRecovered{})
-	<-reached
+	recvWithin(t, reached, 5*time.Second)
 
 	link.queueEvent(&libgm.WrappedSettings{Settings: completeSyntheticSettings()})
 	beforeGap := time.Now()
@@ -113,7 +113,7 @@ func TestSettingsReceiptTimeIsCapturedAtIngress(t *testing.T) {
 	link, host := openSafetyLink(t, nil)
 	reached, release := host.holdNextEvent("recovered")
 	link.queueEvent(&events.ListenRecovered{})
-	<-reached
+	recvWithin(t, reached, 5*time.Second)
 
 	link.queueEvent(&libgm.WrappedSettings{Settings: completeSyntheticSettings()})
 	beforeRelease := time.Now()
@@ -146,7 +146,7 @@ func TestTerminalEventsRevokeReadinessAtIngress(t *testing.T) {
 			link, host := openSafetyLink(t, nil)
 			reached, release := host.holdNextEvent("recovered")
 			link.queueEvent(&events.ListenRecovered{})
-			<-reached
+			recvWithin(t, reached, 5*time.Second)
 			link.mu.Lock()
 			link.settings = completeSyntheticSettings()
 			link.settingsAt = time.Now()
@@ -234,7 +234,7 @@ func TestOldQueuedPhoneEventCannotMutateNewRunState(t *testing.T) {
 	link.mu.Unlock()
 	reached, release := host.holdNextEvent("recovered")
 	link.queueEvent(&events.ListenRecovered{})
-	<-reached
+	recvWithin(t, reached, 5*time.Second)
 	link.queueEvent(&events.PhoneNotResponding{})
 	link.Stop()
 	link.mu.Lock()
@@ -371,7 +371,7 @@ func TestHealthFailureIngressFencesQueuedSettings(t *testing.T) {
 		conversationTargets:    make(map[string][]string),
 	}
 	link.queueEventFor(5, &libgm.WrappedSettings{Settings: completeSyntheticSettings()})
-	queued := <-link.changes
+	queued := recvWithin(t, link.changes, 5*time.Second)
 
 	link.recordHealthFor(5, false, 0)
 	link.consumeQueuedEvent(queued)
@@ -463,13 +463,13 @@ func TestOldRunCleanupDoesNotSuppressTerminalPersistenceAndReport(t *testing.T) 
 	readyReached, releaseReady := host.holdNextEvent("ready")
 	t.Cleanup(func() { closeRound2Signal(releaseReady) })
 	runDone := startSafetyRun(t, link)
-	<-readyReached
+	recvWithin(t, readyReached, 5*time.Second)
 
 	persistReached, releasePersist := host.holdNextPersist(stateLinked)
 	t.Cleanup(func() { closeRound2Signal(releasePersist) })
 	persistDone := make(chan error, 1)
 	go func() { persistDone <- link.persist() }()
-	<-persistReached
+	recvWithin(t, persistReached, 5*time.Second)
 	statesBeforeTerminal := host.stateCount()
 
 	link.queueEvent(&events.GaiaLoggedOut{})
@@ -497,7 +497,7 @@ func TestOldRunCleanupDoesNotSuppressTerminalPersistenceAndReport(t *testing.T) 
 	if err := awaitSafetyResult(t, runDone, "retired Run"); err != nil {
 		t.Fatalf("Run error = %v", err)
 	}
-	if err := <-persistDone; err != nil {
+	if err := recvWithin(t, persistDone, 5*time.Second); err != nil {
 		t.Fatalf("blocking persistence error = %v", err)
 	}
 	select {
@@ -562,7 +562,7 @@ func TestPhoneNotRespondingFencesQueuedSettingsBeforeConsumerDrain(t *testing.T)
 	recoveredReached, releaseRecovered := host.holdNextEvent("recovered")
 	t.Cleanup(func() { closeRound2Signal(releaseRecovered) })
 	link.queueEvent(&events.ListenRecovered{})
-	<-recoveredReached
+	recvWithin(t, recoveredReached, 5*time.Second)
 
 	link.queueEvent(&libgm.WrappedSettings{Settings: settingsWithSIM("queued-before-terminal")})
 	link.queueEvent(&events.PhoneNotResponding{})
@@ -591,7 +591,7 @@ func TestTrueTerminalIngressCancelsRunBeforeConsumerDrain(t *testing.T) {
 	recoveredReached, releaseRecovered := host.holdNextEvent("recovered")
 	t.Cleanup(func() { closeRound2Signal(releaseRecovered) })
 	link.queueEvent(&events.ListenRecovered{})
-	<-recoveredReached
+	recvWithin(t, recoveredReached, 5*time.Second)
 	link.mu.Lock()
 	runCtx := link.runCtx
 	link.mu.Unlock()
@@ -635,7 +635,7 @@ func TestRetiredPairRedirectCannotSignOutReplacement(t *testing.T) {
 	link.generation++
 	link.mu.Unlock()
 	fixture.openGate()
-	if err := <-result; !errors.Is(err, errRedirectResponse) {
+	if err := recvWithin(t, result, 5*time.Second); !errors.Is(err, errRedirectResponse) {
 		t.Fatalf("FetchConfig error = %v, want redirect refusal", err)
 	}
 
@@ -678,7 +678,7 @@ func TestRetiredUnlinkPersistFailureCannotStopReplacement(t *testing.T) {
 	link.mu.Unlock()
 	host.setFailPersist(true)
 	fixture.openGate()
-	if err := <-result; !errors.Is(err, errPersistFailed) {
+	if err := recvWithin(t, result, 5*time.Second); !errors.Is(err, errPersistFailed) {
 		t.Fatalf("FetchConfig error = %v, want persist_failed", err)
 	}
 
@@ -702,7 +702,7 @@ func TestSuccessfulPairPublishesIndependentAuthSnapshot(t *testing.T) {
 	candidate.SetCookies(syntheticCookies())
 	result := make(chan error, 1)
 	go func() { result <- link.pair(candidate, false, "") }()
-	if err := <-result; err != nil {
+	if err := recvWithin(t, result, 5*time.Second); err != nil {
 		t.Fatalf("Pair error = %v", err)
 	}
 
@@ -730,7 +730,7 @@ func TestValidSettingsIngressWithdrawsPreviousAuthorityBeforeConsumerDrain(t *te
 	recoveredReached, releaseRecovered := host.holdNextEvent("recovered")
 	t.Cleanup(func() { closeRound2Signal(releaseRecovered) })
 	link.queueEvent(&events.ListenRecovered{})
-	<-recoveredReached
+	recvWithin(t, recoveredReached, 5*time.Second)
 
 	link.queueEvent(&libgm.WrappedSettings{Settings: settingsWithSIM("changed-current")})
 	link.mu.Lock()

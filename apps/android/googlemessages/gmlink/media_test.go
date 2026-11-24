@@ -317,7 +317,7 @@ func TestDownloadRcsMediaDoesNotOverwriteDestinationCreatedDuringTransfer(t *tes
 	}
 	result := make(chan string, 1)
 	go func() { result <- link.DownloadRcsMedia(string(request)) }()
-	<-opened
+	recvWithin(t, opened, 5*time.Second)
 	if err := os.WriteFile(destination, []byte("existing"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestDownloadRcsMediaDoesNotOverwriteDestinationCreatedDuringTransfer(t *tes
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if got := <-result; got != `{"code":"invalid_request"}` {
+	if got := recvWithin(t, result, 5*time.Second); got != `{"code":"invalid_request"}` {
 		t.Fatalf("result=%s", got)
 	}
 	contents, err := os.ReadFile(destination)
