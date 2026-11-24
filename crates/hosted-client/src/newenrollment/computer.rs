@@ -668,6 +668,100 @@ mod tests {
     }
 
     #[test]
+    fn claimant_rejects_tampered_approval_without_consuming_state() {
+        let mut claimant =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "computer".into()).unwrap();
+        let qr = claimant.begin_computer_claimant().unwrap();
+        let before = claimant.computer_status_request().unwrap();
+        let mut owner = owner();
+        owner.scan_computer_qr(qr).unwrap();
+        owner
+            .accept_computer_created(
+                serde_json::to_string(&ComputerEnrollmentCreated {
+                    server_nonce: URL_SAFE_NO_PAD.encode([7; 32]),
+                    expires_in_seconds: 60,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let material = owner.owner.as_ref().unwrap();
+        let root = std::env::temp_dir().join(format!("peppy-computer-proof-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let client = peppy_client_core::Client::open(
+            peppy_client_core::ClientConfig {
+                database_path: root.join("owner.db"),
+                vault_id: peppy_client_core::VaultId(material.profile.vault_id),
+                device_id: peppy_client_core::DeviceId(Uuid::from_u128(77)),
+            },
+            peppy_client_core::DatabaseKey::new(&[31; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&material.profile, &material.header, SECRET)
+            .unwrap();
+        let approval: ApproveComputerEnrollmentRequest = parse(
+            &owner
+                .approve_computer_enrollment_with_client(true, &client)
+                .unwrap(),
+        )
+        .unwrap();
+        let status = ComputerEnrollmentStatus {
+            state: EnrollmentState::Approved,
+            expires_in_seconds: 60,
+            transcript: Some(approval.transcript),
+            encrypted_key_package: Some(approval.encrypted_key_package),
+            transfer_nonce: Some(approval.transfer_nonce),
+            owner_proof: Some(approval.owner_proof),
+        };
+        let original = serde_json::to_value(&status).unwrap();
+        for (field, replacement) in [
+            (
+                "/owner_proof",
+                serde_json::json!(URL_SAFE_NO_PAD.encode([8; 32])),
+            ),
+            (
+                "/transcript/owner_transfer_public_key",
+                serde_json::json!(URL_SAFE_NO_PAD.encode([8; 32])),
+            ),
+            ("/transcript/granted_role", serde_json::json!("owner")),
+            (
+                "/transfer_nonce",
+                serde_json::json!(URL_SAFE_NO_PAD.encode([8; 24])),
+            ),
+            (
+                "/encrypted_key_package",
+                serde_json::json!(URL_SAFE_NO_PAD.encode([8; 32])),
+            ),
+        ] {
+            let mut tampered = original.clone();
+            *tampered.pointer_mut(field).unwrap() = replacement;
+            let result = claimant.confirm_computer_enrollment(tampered.to_string());
+            assert!(
+                matches!(result, Err(HostedClientError::InvalidRequest)),
+                "{field}: {result:?}"
+            );
+            assert_eq!(
+                claimant.computer_status_request().unwrap(),
+                before,
+                "{field}"
+            );
+            assert!(matches!(
+                claimant.computer,
+                Some(ComputerFlow::ClaimantAwaiting { .. })
+            ));
+        }
+        claimant
+            .confirm_computer_enrollment(original.to_string())
+            .unwrap();
+        assert!(matches!(
+            claimant.computer,
+            Some(ComputerFlow::PendingAdmission { .. })
+        ));
+        drop(client);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn qr_first_roundtrip_is_local_and_owner_creation_is_bound_to_it() {
         let mut claimant =
             EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "computer".into()).unwrap();
