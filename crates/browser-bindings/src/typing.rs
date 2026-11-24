@@ -46,17 +46,11 @@ impl BrowserCore {
     }
 
     fn enable_typing(&self, args: Value) -> Result<Value, Failure> {
-        let mut input: EnableInput = serde_json::from_value(args).map_err(|_| invalid())?;
-        let context = match input.explicit_context()? {
-            Some(context) => context,
-            None => self
-                .typing_trust()
-                .ok_or_else(|| live_error(LiveError::InvalidContext))?
-                .enable_context(),
-        };
-        if context.trusted_roster.len() > MAX_TRUSTED_ROSTER {
-            return Err(live_error(LiveError::InvalidContext));
-        }
+        let input: EnableInput = serde_json::from_value(args).map_err(|_| invalid())?;
+        let context = self
+            .typing_trust()
+            .ok_or_else(|| live_error(LiveError::InvalidContext))?
+            .enable_context();
         let generation = self
             .client()?
             .enable_live_typing(context, input.clock.into())
@@ -214,45 +208,7 @@ fn active_unlocked_epoch(client: &Client) -> Option<u32> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EnableInput {
-    trusted_roster: Option<Vec<String>>,
-    local_gateway_device_id: Option<String>,
-    executor: Option<ExecutorInput>,
     clock: ClockInput,
-}
-
-impl EnableInput {
-    /// The explicit context is accepted only as a complete group; otherwise the caller resolves it.
-    fn explicit_context(&mut self) -> Result<Option<LiveEnableContext>, Failure> {
-        match (
-            self.trusted_roster.take(),
-            self.local_gateway_device_id.take(),
-            self.executor.take(),
-        ) {
-            (None, None, None) => Ok(None),
-            (Some(roster), Some(gateway), Some(executor)) => Ok(Some(LiveEnableContext {
-                trusted_roster: parse_device_ids(roster)?,
-                local_gateway_device_id: parse_device_id(&gateway)?,
-                local_executor: executor.into(),
-            })),
-            _ => Err(invalid()),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ExecutorInput {
-    None,
-    CurrentGateway,
-}
-
-impl From<ExecutorInput> for LiveExecutor {
-    fn from(value: ExecutorInput) -> Self {
-        match value {
-            ExecutorInput::None => Self::None,
-            ExecutorInput::CurrentGateway => Self::CurrentGateway,
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -302,10 +258,6 @@ fn no_args(args: Value) -> Result<(), Failure> {
         Value::Object(ref object) if object.is_empty() => Ok(()),
         _ => Err(invalid()),
     }
-}
-
-fn parse_device_ids(ids: Vec<String>) -> Result<Vec<DeviceId>, Failure> {
-    ids.into_iter().map(|id| parse_device_id(&id)).collect()
 }
 
 fn parse_device_id(id: &str) -> Result<DeviceId, Failure> {
@@ -488,17 +440,12 @@ mod tests {
         (directory, core)
     }
 
-    fn enable(core: &mut BrowserCore, roster: &[DeviceId], gateway: DeviceId, executor: &str) {
+    fn enable(core: &mut BrowserCore) {
         assert_eq!(
             response(
                 core,
                 "_worker_typing_enable",
-                json!({
-                    "trustedRoster": roster,
-                    "localGatewayDeviceId": gateway,
-                    "executor": executor,
-                    "clock": {"wallMs": 1000, "monoMs": 1000},
-                })
+                json!({"clock": wall_clock()})
             )["ok"],
             true
         );
@@ -508,54 +455,6 @@ mod tests {
         let object = value.as_object().unwrap();
         assert_eq!(object.len(), keys.len());
         assert!(keys.iter().all(|key| object.contains_key(*key)));
-    }
-
-    fn deliver_gateway_capability(
-        gateway: &mut BrowserCore,
-        recipient: &mut BrowserCore,
-        conversation: ConversationId,
-        gateway_device: DeviceId,
-    ) {
-        gateway
-            .client()
-            .unwrap()
-            .publish_rcs_capability(
-                &RcsLinkStatusEvent {
-                    gateway_device_id: gateway_device,
-                    state: RcsCapabilityState::Linked,
-                    availability: true,
-                    health: true,
-                    phone_responsive: true,
-                    observed_at_ms: 1_000,
-                    capability_revision: 1,
-                    feature_bits: 1,
-                    linked_since_ms: Some(1_000),
-                },
-                &[RcsEligibilityProjection {
-                    conversation_id: conversation,
-                    eligibility: RcsEligibility::Eligible,
-                    feature_bits: 1,
-                    mapping_revision: 1,
-                    observed_at_ms: 1_000,
-                    gateway_device_id: gateway_device,
-                }],
-                1_000,
-            )
-            .unwrap();
-        let pending = response(gateway, "pending_outbox", json!({"limit": 10}));
-        let envelopes = pending["value"]["envelopes"].as_array().unwrap();
-        assert_eq!(envelopes.len(), 2);
-        for (index, envelope) in envelopes.iter().enumerate() {
-            let ingested = response(
-                recipient,
-                "ingest",
-                json!({"cursor": (index + 1).to_string(), "envelope": envelope}),
-            );
-            assert_eq!(ingested["ok"], true);
-            assert_eq!(ingested["value"]["state"], "journaled");
-        }
-        let applied = response(recipient, "apply_pending", json!({"limit": 10}));
-        assert_eq!(applied["ok"], true);
     }
 
     #[test]
@@ -571,63 +470,43 @@ mod tests {
     }
 
     #[test]
-    fn invalid_roster_is_reported_with_a_fixed_code() {
-        let vault = VaultId::new();
-        let device = DeviceId::new();
-        let (_directory, mut core) = unlocked_core(vault, device);
-        let response = response(
-            &mut core,
-            "_worker_typing_enable",
-            json!({
-                "trustedRoster": [],
-                "localGatewayDeviceId": device,
-                "executor": "current_gateway",
-                "clock": {"wallMs": 1000, "monoMs": 1000},
-            }),
-        );
-        assert_eq!(response["error"]["code"], "invalid-context");
+    fn caller_supplied_trust_fields_are_rejected_and_typing_stays_disabled() {
+        let (_directory, mut core, device, gateway) = trusted_core(Vec::new());
+        for args in [
+            json!({"trustedRoster": [device, gateway], "clock": wall_clock()}),
+            json!({"localGatewayDeviceId": gateway, "clock": wall_clock()}),
+            json!({"executor": "none", "clock": wall_clock()}),
+            json!({"trustedRoster": [device, gateway], "localGatewayDeviceId": gateway, "executor": "none", "clock": wall_clock()}),
+        ] {
+            let rejected = response(&mut core, "_worker_typing_enable", args);
+            assert_eq!(rejected["error"]["code"], "invalid-request", "{rejected}");
+            let disabled = response(
+                &mut core,
+                "_worker_typing_set_sharing",
+                json!({"sharing": true}),
+            );
+            assert_eq!(disabled["error"]["code"], "disabled", "{disabled}");
+        }
     }
 
     #[test]
     fn malformed_typing_identifiers_are_invalid_context() {
-        let vault = VaultId::new();
-        let device = DeviceId::new();
-        let (_directory, mut core) = unlocked_core(vault, device);
-        let oversized_roster = vec![device.to_string(); 101];
-        for args in [
-            json!({
-                "trustedRoster": ["not-a-device"],
-                "localGatewayDeviceId": device,
-                "executor": "current_gateway",
-                "clock": {"wallMs": 1000, "monoMs": 1000},
-            }),
-            json!({
-                "trustedRoster": oversized_roster,
-                "localGatewayDeviceId": device,
-                "executor": "current_gateway",
-                "clock": {"wallMs": 1000, "monoMs": 1000},
-            }),
-        ] {
-            assert_eq!(
-                response(&mut core, "_worker_typing_enable", args)["error"]["code"],
-                "invalid-context"
-            );
-        }
-        enable(&mut core, &[device], device, "current_gateway");
+        let (_directory, mut core, device, _gateway) = trusted_core(Vec::new());
+        enable(&mut core);
         for args in [
             json!({
                 "conversationId": "not-a-conversation",
                 "gatewayDeviceId": device,
                 "origin": "vault_device",
                 "state": "started",
-                "clock": {"wallMs": 1001, "monoMs": 1001},
+                "clock": wall_clock(),
             }),
             json!({
                 "conversationId": ConversationId::new(),
                 "gatewayDeviceId": "not-a-device",
                 "origin": "vault_device",
                 "state": "started",
-                "clock": {"wallMs": 1001, "monoMs": 1001},
+                "clock": wall_clock(),
             }),
         ] {
             assert_eq!(
@@ -653,10 +532,35 @@ mod tests {
         let (_gateway_directory, mut gateway) =
             unlocked_core_with_material(vault, gateway_device, profile, header);
         let conversation = ConversationId::new();
-        deliver_gateway_capability(&mut gateway, &mut sender, conversation, gateway_device);
+        assert_eq!(
+            deliver_fresh_status(
+                &mut gateway,
+                &mut sender,
+                gateway_device,
+                vec![(conversation, RcsEligibility::Eligible)],
+                0,
+            ),
+            2
+        );
         let roster = [sender_device, gateway_device];
-        enable(&mut sender, &roster, sender_device, "none");
-        enable(&mut gateway, &roster, gateway_device, "current_gateway");
+        apply_roster(&mut sender, sender_device, &[gateway_device], &[]);
+        enable(&mut sender);
+        // A native gateway executes intents; browser workers never receive that authority.
+        gateway
+            .client()
+            .unwrap()
+            .enable_live_typing(
+                LiveEnableContext {
+                    trusted_roster: roster.to_vec(),
+                    local_gateway_device_id: gateway_device,
+                    local_executor: LiveExecutor::CurrentGateway,
+                },
+                serde_json::from_value::<ClockInput>(wall_clock())
+                    .unwrap()
+                    .into(),
+            )
+            .unwrap();
+        let wall = now_ms();
 
         let sealed = response(
             &mut sender,
@@ -666,7 +570,7 @@ mod tests {
                 "gatewayDeviceId": gateway_device,
                 "origin": "vault_device",
                 "state": "started",
-                "clock": {"wallMs": 1001, "monoMs": 1001},
+                "clock": {"wallMs": wall + 1, "monoMs": 1001},
             }),
         );
         assert_keys(&sealed["value"], &["generation", "frameJson"]);
@@ -675,7 +579,7 @@ mod tests {
             "_worker_typing_open",
             json!({
                 "frameJson": sealed["value"]["frameJson"],
-                "clock": {"wallMs": 1001, "monoMs": 1001},
+                "clock": {"wallMs": wall + 1, "monoMs": 1001},
             }),
         );
         assert_keys(
@@ -695,7 +599,7 @@ mod tests {
             "_worker_typing_open",
             json!({
                 "frameJson": challenge["value"]["replyFrameJson"],
-                "clock": {"wallMs": 1002, "monoMs": 1002},
+                "clock": {"wallMs": wall + 2, "monoMs": 1002},
             }),
         );
         assert_keys(
@@ -721,7 +625,7 @@ mod tests {
             "_worker_typing_open",
             json!({
                 "frameJson": acknowledgement["value"]["replyFrameJson"],
-                "clock": {"wallMs": 1003, "monoMs": 1003},
+                "clock": {"wallMs": wall + 3, "monoMs": 1003},
             }),
         );
         assert_keys(
@@ -752,7 +656,7 @@ mod tests {
                 "gatewayDeviceId": gateway_device,
                 "origin": "vault_device",
                 "state": "started",
-                "clock": {"wallMs": 4001, "monoMs": 4001},
+                "clock": {"wallMs": wall + 3001, "monoMs": 4001},
             }),
         );
         let opened = response(
@@ -760,7 +664,7 @@ mod tests {
             "_worker_typing_open",
             json!({
                 "frameJson": fresh["value"]["frameJson"],
-                "clock": {"wallMs": 4001, "monoMs": 4001},
+                "clock": {"wallMs": wall + 3001, "monoMs": 4001},
             }),
         );
         assert_keys(
@@ -885,6 +789,7 @@ mod tests {
                 json!({"cursor": cursor.to_string(), "envelope": envelope}),
             );
             assert_eq!(ingested["ok"], true, "{ingested}");
+            assert_eq!(ingested["value"]["state"], "journaled", "{ingested}");
         }
         let applied = response(recipient, "apply_pending", json!({"limit": 10}));
         assert_eq!(applied["ok"], true, "{applied}");
@@ -1048,6 +953,22 @@ mod tests {
             json!({"clock": wall_clock()}),
         );
         assert_eq!(rejected["error"]["code"], "invalid-context", "{rejected}");
+    }
+
+    #[test]
+    fn empty_roster_and_missing_gateway_refuse_trust() {
+        let (_directory, mut core, device, gateway) = trusted_core(Vec::new());
+        for roster in [vec![], vec![device]] {
+            core.context.rcs_live_roster = roster;
+            assert_eq!(context_key(&mut core), Value::Null);
+            let rejected = response(
+                &mut core,
+                "_worker_typing_enable",
+                json!({"clock": wall_clock()}),
+            );
+            assert_eq!(rejected["error"]["code"], "invalid-context", "{rejected}");
+        }
+        assert_ne!(device, gateway);
     }
 
     #[test]
@@ -1263,16 +1184,14 @@ mod tests {
 
     #[test]
     fn malformed_frames_return_an_empty_outcome() {
-        let vault = VaultId::new();
-        let device = DeviceId::new();
-        let (_directory, mut core) = unlocked_core(vault, device);
-        enable(&mut core, &[device], device, "current_gateway");
+        let (_directory, mut core, _device, _gateway) = trusted_core(Vec::new());
+        enable(&mut core);
         let opened = response(
             &mut core,
             "_worker_typing_open",
             json!({
                 "frameJson": "not-json",
-                "clock": {"wallMs": 1001, "monoMs": 1001},
+                "clock": wall_clock(),
             }),
         );
         assert_eq!(opened["ok"], true);
