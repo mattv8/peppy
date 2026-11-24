@@ -1,0 +1,31 @@
+{
+  "state": "waiting",
+  "expires_in_seconds": 300,
+  "claim": null,
+  "transcript": null,
+  "encrypted_key_package": null,
+  "transfer_nonce": null,
+  "profile": {
+    "crypto_suite": 1,
+    "key_epoch": 1,
+    "salt": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "vault_id": "11111111-1111-4111-8111-111111111111"
+  }
+}

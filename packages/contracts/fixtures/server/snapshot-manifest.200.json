@@ -1,0 +1,12 @@
+{
+  "compaction_generation": "1",
+  "entries": [
+    {
+      "cursor": "1",
+      "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "flags": 0
+    }
+  ],
+  "high_water_cursor": "1",
+  "next_after": null
+}

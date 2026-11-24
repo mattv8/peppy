@@ -7514,3 +7514,41 @@ async fn cursor_zero_under_a_positive_floor_resyncs_and_records_nothing() {
     assert_eq!(cursor_report(&server, device.id).await, before);
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn native_snapshot_start_response_golden() {
+    let profile = KeyProfile {
+        crypto_suite: 1,
+        salt: [0; 16],
+        vault_id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
+        key_epoch: 1,
+    };
+    let header = peppy_crypto::VaultCheckHeader {
+        profile: profile.clone(),
+        check: peppy_crypto::EncryptedEnvelope {
+            nonce: [0; 24],
+            ciphertext: vec![0; 32],
+        },
+    };
+    let server = TestServer::start_real_without_maintenance(&profile, &header).await;
+    let (status, actual) = server.get(&server.owner_token, "/v1/snapshot").await;
+    server.shutdown().await;
+    assert_eq!(status, StatusCode::OK);
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/contracts/fixtures/server/snapshot.200.json");
+    if std::env::var_os("UPDATE_GOLDENS").is_some() {
+        std::fs::write(&path, serde_json::to_string_pretty(&actual).unwrap() + "\n").unwrap();
+    }
+    let expected: Value = serde_json::from_str(
+        &std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!("{}: {error}; regenerate with UPDATE_GOLDENS=1 cargo test -p peppy-server --test transport native_snapshot_start_response_golden", path.display())
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        actual,
+        expected,
+        "{} differs; regenerate with UPDATE_GOLDENS=1 cargo test -p peppy-server --test transport native_snapshot_start_response_golden",
+        path.display()
+    );
+}

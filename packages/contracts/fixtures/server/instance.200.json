@@ -1,0 +1,8 @@
+{
+  "mode": "community",
+  "claimed": false,
+  "setup_required": true,
+  "password_auth": false,
+  "qr_pairing": false,
+  "shared_secret_pairing": false
+}

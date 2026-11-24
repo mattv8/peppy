@@ -1,0 +1,16 @@
+{
+  "compaction_active": false,
+  "compaction_generation": "0",
+  "compaction_supported": true,
+  "high_water_cursor": "0",
+  "key_epoch": 1,
+  "manifest_supported": true,
+  "max_manifest_page_size": 5000,
+  "max_page_size": 200,
+  "origin_tags_supported": true,
+  "profile_fingerprint": "dd07beaa2c96733a546c6f63918f68298a6b5478af7931cdeb669f5a5422a877",
+  "record_count": "0",
+  "replay_floor_cursor": "0",
+  "snapshot_version": 1,
+  "vault_id": "11111111-1111-4111-8111-111111111111"
+}

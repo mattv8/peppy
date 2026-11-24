@@ -1,0 +1,54 @@
+{
+  "state": "approved",
+  "expires_in_seconds": 300,
+  "claim": {
+    "device": {
+      "device_id": "11111111-1111-4111-8111-111111111111",
+      "kind": "android",
+      "name": "Example phone",
+      "signing_public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    "transfer_public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "credential_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "claim_authenticator": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  },
+  "transcript": {
+    "origin": "https://example.test",
+    "vault_id": "11111111-1111-4111-8111-111111111111",
+    "fingerprint": "dd07beaa2c96733a546c6f63918f68298a6b5478af7931cdeb669f5a5422a877",
+    "key_epoch": 1,
+    "enrollment_id": "11111111-1111-4111-8111-111111111111",
+    "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "owner_transfer_public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "recipient_transfer_public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "signing_public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "device_id": "11111111-1111-4111-8111-111111111111",
+    "credential_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "role": "gateway"
+  },
+  "encrypted_key_package": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "transfer_nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "profile": {
+    "crypto_suite": 1,
+    "key_epoch": 1,
+    "salt": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "vault_id": "11111111-1111-4111-8111-111111111111"
+  }
+}
