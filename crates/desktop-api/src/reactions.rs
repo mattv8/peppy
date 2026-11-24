@@ -13,33 +13,67 @@ use std::str::FromStr;
 
 const NONE: &str = "none";
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+/// Route a reaction travels by: `native` over RCS or `text` over SMS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(rename = "ReactionRoute")]
+pub enum ReactionRouteDto {
+    Native,
+    Text,
+}
+
+/// State of this device's own reaction request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnReactionRequestState {
+    Sending,
+    NotSent,
+    Unknown,
+}
+
+/// Why a reaction request was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnReactionRefusal {
+    Expired,
+    MessageUnavailable,
+    NotRcs,
+    LinkUnavailable,
+    Rejected,
+    Busy,
+    InvalidEmoji,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageReactionView {
     pub emoji: String,
     pub actors: Vec<ReactionActorView>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ReactionActorView {
     #[serde(rename = "self")]
     pub is_self: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub address: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct OwnReactionRequestView {
     pub request_id: String,
     /// `null` asks for the user's reaction to be removed.
     pub emoji: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub previous_emoji: Option<String>,
-    pub state: &'static str,
+    pub state: OwnReactionRequestState,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub refusal: Option<&'static str>,
+    #[ts(optional)]
+    pub refusal: Option<OwnReactionRefusal>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -49,7 +83,7 @@ pub struct ReactionSubmitView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub route: Option<&'static str>,
+    pub route: Option<ReactionRouteDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
 }
@@ -101,15 +135,15 @@ pub fn own_reaction_request_view(request: &OwnReactionRequest) -> OwnReactionReq
         emoji: request.emoji.clone(),
         previous_emoji: request.previous_emoji.clone(),
         state: match request.state {
-            OwnReactionState::Sending => "sending",
-            OwnReactionState::NotSent => "not_sent",
-            OwnReactionState::Unknown => "unknown",
+            OwnReactionState::Sending => OwnReactionRequestState::Sending,
+            OwnReactionState::NotSent => OwnReactionRequestState::NotSent,
+            OwnReactionState::Unknown => OwnReactionRequestState::Unknown,
         },
         refusal: request.refusal.as_ref().map(refusal_wire),
     }
 }
 
-pub fn reactable_wire(route: Option<ReactionRoute>) -> Option<&'static str> {
+pub fn reactable_wire(route: Option<ReactionRoute>) -> Option<ReactionRouteDto> {
     route.map(route_wire)
 }
 
@@ -131,22 +165,22 @@ fn unsupported() -> ReactionSubmitView {
     }
 }
 
-fn route_wire(route: ReactionRoute) -> &'static str {
+fn route_wire(route: ReactionRoute) -> ReactionRouteDto {
     match route {
-        ReactionRoute::Native => "native",
-        ReactionRoute::Text => "text",
+        ReactionRoute::Native => ReactionRouteDto::Native,
+        ReactionRoute::Text => ReactionRouteDto::Text,
     }
 }
 
-fn refusal_wire(refusal: &ReactionRefusal) -> &'static str {
+fn refusal_wire(refusal: &ReactionRefusal) -> OwnReactionRefusal {
     match refusal {
-        ReactionRefusal::Expired => "expired",
-        ReactionRefusal::MessageUnavailable => "message_unavailable",
-        ReactionRefusal::NotRcs => "not_rcs",
-        ReactionRefusal::LinkUnavailable => "link_unavailable",
-        ReactionRefusal::Rejected => "rejected",
-        ReactionRefusal::Busy => "busy",
-        ReactionRefusal::InvalidEmoji => "invalid_emoji",
+        ReactionRefusal::Expired => OwnReactionRefusal::Expired,
+        ReactionRefusal::MessageUnavailable => OwnReactionRefusal::MessageUnavailable,
+        ReactionRefusal::NotRcs => OwnReactionRefusal::NotRcs,
+        ReactionRefusal::LinkUnavailable => OwnReactionRefusal::LinkUnavailable,
+        ReactionRefusal::Rejected => OwnReactionRefusal::Rejected,
+        ReactionRefusal::Busy => OwnReactionRefusal::Busy,
+        ReactionRefusal::InvalidEmoji => OwnReactionRefusal::InvalidEmoji,
     }
 }
 
@@ -421,18 +455,33 @@ mod tests {
     #[test]
     fn refusal_and_route_values_match_the_contract() {
         for (refusal, expected) in [
-            (ReactionRefusal::Expired, "expired"),
-            (ReactionRefusal::MessageUnavailable, "message_unavailable"),
-            (ReactionRefusal::NotRcs, "not_rcs"),
-            (ReactionRefusal::LinkUnavailable, "link_unavailable"),
-            (ReactionRefusal::Rejected, "rejected"),
-            (ReactionRefusal::Busy, "busy"),
-            (ReactionRefusal::InvalidEmoji, "invalid_emoji"),
+            (ReactionRefusal::Expired, OwnReactionRefusal::Expired),
+            (
+                ReactionRefusal::MessageUnavailable,
+                OwnReactionRefusal::MessageUnavailable,
+            ),
+            (ReactionRefusal::NotRcs, OwnReactionRefusal::NotRcs),
+            (
+                ReactionRefusal::LinkUnavailable,
+                OwnReactionRefusal::LinkUnavailable,
+            ),
+            (ReactionRefusal::Rejected, OwnReactionRefusal::Rejected),
+            (ReactionRefusal::Busy, OwnReactionRefusal::Busy),
+            (
+                ReactionRefusal::InvalidEmoji,
+                OwnReactionRefusal::InvalidEmoji,
+            ),
         ] {
             assert_eq!(refusal_wire(&refusal), expected);
         }
-        assert_eq!(reactable_wire(Some(ReactionRoute::Native)), Some("native"));
-        assert_eq!(reactable_wire(Some(ReactionRoute::Text)), Some("text"));
+        assert_eq!(
+            reactable_wire(Some(ReactionRoute::Native)),
+            Some(ReactionRouteDto::Native)
+        );
+        assert_eq!(
+            reactable_wire(Some(ReactionRoute::Text)),
+            Some(ReactionRouteDto::Text)
+        );
         assert_eq!(reactable_wire(None), None);
         for (support, expected) in [
             (ReactionSupport::Native, "native"),

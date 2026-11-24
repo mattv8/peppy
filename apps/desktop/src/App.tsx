@@ -1168,7 +1168,7 @@ function MessageList({
   const submitReaction = async (messageId: string, emoji: string | null): Promise<ReactionSubmitView | undefined> => {
     if (writesPaused) return undefined;
     const message = messagesById.get(messageId);
-    const previousEmoji = message ? nativeSelection(message) ?? null : null;
+    const previousEmoji = message ? nativeSelection(message) ?? undefined : undefined;
     const startedAt = snapshotSeq.current;
     let result: ReactionSubmitView | undefined;
     try {

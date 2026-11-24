@@ -5,19 +5,28 @@ use peppy_client_core::{Client, Direction, Error, Message, SendRouteKind, SendSt
 use serde::Serialize;
 use std::collections::HashSet;
 
+/// Kind of a recovery state the UI reads as `SendRecoveryView.kind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum SendRecoveryKind {
+    NotSent,
+    UnconfirmedRemoved,
+    UnconfirmedRemovedCancel,
+}
+
 /// The message-level recovery state the UI reads as `MessageView.sendRecovery`.
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SendRecoveryView {
-    /// `not-sent`, `unconfirmed-removed` or `unconfirmed-removed-cancel`.
-    pub kind: &'static str,
+    pub kind: SendRecoveryKind,
     pub can_send_again: bool,
     /// The "Send again" copy of this message, when this device holds it.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub sent_again: Option<SentAgainView>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SentAgainView {
     pub message_id: String,
@@ -37,14 +46,16 @@ pub fn send_recovery_view(
         return Ok(None);
     }
     let kind = match message.send_state {
-        Some(SendState::FailedBeforeSubmission) if message.send_refusal.is_none() => "not-sent",
+        Some(SendState::FailedBeforeSubmission) if message.send_refusal.is_none() => {
+            SendRecoveryKind::NotSent
+        }
         Some(SendState::QueuedLocal | SendState::AcceptedServer | SendState::PersistedGateway)
             if target_revoked(message, revoked_devices) =>
         {
             if message.send_cancel_requested {
-                "unconfirmed-removed-cancel"
+                SendRecoveryKind::UnconfirmedRemovedCancel
             } else {
-                "unconfirmed-removed"
+                SendRecoveryKind::UnconfirmedRemoved
             }
         }
         _ => return Ok(None),
@@ -58,7 +69,7 @@ pub fn send_recovery_view(
     // It also reports a one-member roster as a group, which only hides the button (never shows one
     // the core would refuse). A route the core cannot establish (`None`) is shown but not offered.
     let can_send_again = message.send_route == Some(SendRouteKind::Carrier)
-        && kind != "unconfirmed-removed-cancel"
+        && kind != SendRecoveryKind::UnconfirmedRemovedCancel
         && sent_again.is_none()
         && client
             .group_view(
@@ -175,7 +186,7 @@ mod tests {
 
         let view = project(&fixture.client, &outgoing, &HashSet::new()).unwrap();
 
-        assert_eq!(view.kind, "not-sent");
+        assert_eq!(view.kind, SendRecoveryKind::NotSent);
         assert!(view.can_send_again);
         assert!(view.sent_again.is_none());
     }
@@ -199,13 +210,13 @@ mod tests {
 
         let view = project(&fixture.client, &outgoing, &HashSet::new()).unwrap();
 
-        assert_eq!(view.kind, "not-sent");
+        assert_eq!(view.kind, SendRecoveryKind::NotSent);
         assert!(!view.can_send_again);
         let mut removed = message(Transport::Sms, Direction::Outgoing, ConversationId::new());
         removed.send_route = None;
         let roster = revoked(&removed);
         let view = project(&fixture.client, &removed, &roster).unwrap();
-        assert_eq!(view.kind, "unconfirmed-removed");
+        assert_eq!(view.kind, SendRecoveryKind::UnconfirmedRemoved);
         assert!(!view.can_send_again);
     }
 
@@ -231,7 +242,7 @@ mod tests {
             outgoing.send_state = Some(state);
             let view = project(&fixture.client, &outgoing, &revoked(&outgoing)).unwrap();
 
-            assert_eq!(view.kind, "unconfirmed-removed", "{state:?}");
+            assert_eq!(view.kind, SendRecoveryKind::UnconfirmedRemoved, "{state:?}");
             assert!(view.can_send_again);
         }
     }
@@ -283,7 +294,7 @@ mod tests {
 
         let view = project(&fixture.client, &outgoing, &revoked(&outgoing)).unwrap();
 
-        assert_eq!(view.kind, "unconfirmed-removed-cancel");
+        assert_eq!(view.kind, SendRecoveryKind::UnconfirmedRemovedCancel);
         assert!(!view.can_send_again);
     }
 
@@ -297,7 +308,7 @@ mod tests {
 
         let view = project(&fixture.client, &outgoing, &HashSet::new()).unwrap();
 
-        assert_eq!(view.kind, "not-sent");
+        assert_eq!(view.kind, SendRecoveryKind::NotSent);
         assert!(!view.can_send_again);
         assert_eq!(
             view.sent_again,
@@ -345,14 +356,14 @@ mod tests {
 
         let view = project(&fixture.client, &outgoing, &HashSet::new()).unwrap();
 
-        assert_eq!(view.kind, "not-sent");
+        assert_eq!(view.kind, SendRecoveryKind::NotSent);
         assert!(!view.can_send_again);
     }
 
     #[test]
     fn the_projection_serializes_camel_case_and_omits_an_absent_copy() {
         let view = SendRecoveryView {
-            kind: "not-sent",
+            kind: SendRecoveryKind::NotSent,
             can_send_again: true,
             sent_again: None,
         };
@@ -363,7 +374,7 @@ mod tests {
         );
 
         let copy = SendRecoveryView {
-            kind: "unconfirmed-removed",
+            kind: SendRecoveryKind::UnconfirmedRemoved,
             can_send_again: false,
             sent_again: Some(SentAgainView {
                 message_id: "message-copy".into(),
@@ -409,7 +420,7 @@ mod tests {
 
         let view = project(&fixture.client, &stored, &roster).unwrap();
 
-        assert_eq!(view.kind, "unconfirmed-removed");
+        assert_eq!(view.kind, SendRecoveryKind::UnconfirmedRemoved);
         assert!(view.can_send_again);
         assert!(project(&fixture.client, &stored, &HashSet::new()).is_none());
         assert_eq!(

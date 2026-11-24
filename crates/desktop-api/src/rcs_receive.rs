@@ -1,9 +1,11 @@
 use crate::{
-    AttachmentView, MessageView, SendCancellationView, SentAgainView,
-    message_view as base_message_view, send_recovery_view,
+    AttachmentStateDto, AttachmentView, MessageStatus, MessageTransport, MessageView,
+    RcsAttachmentState, RcsSendStatus, SendCancellationStateDto, SendCancellationView,
+    SentAgainView, message_view as base_message_view, send_recovery_view,
 };
 use peppy_client_core::{
-    Client, Direction, Error, Message, RcsMessageStatus, SendCancellationState, Transport,
+    Client, Direction, Error, Message, RcsMediaSyncState, RcsMessageStatus, SendCancellationState,
+    Transport,
 };
 use std::collections::HashSet;
 
@@ -28,11 +30,11 @@ fn project_send_cancellation(
 ) -> SendCancellationView {
     SendCancellationView {
         state: match view.state {
-            SendCancellationState::None => "none",
-            SendCancellationState::Requested => "requested",
-            SendCancellationState::Confirmed => "confirmed",
-            SendCancellationState::TooLate => "too-late",
-            SendCancellationState::Unknown => "unknown",
+            SendCancellationState::None => SendCancellationStateDto::None,
+            SendCancellationState::Requested => SendCancellationStateDto::Requested,
+            SendCancellationState::Confirmed => SendCancellationStateDto::Confirmed,
+            SendCancellationState::TooLate => SendCancellationStateDto::TooLate,
+            SendCancellationState::Unknown => SendCancellationStateDto::Unknown,
         },
         can_cancel: view.can_request,
         requires_gateway_update: view.requires_gateway_update,
@@ -57,7 +59,7 @@ fn incoming_attachments(
             name: receive.display_name.clone(),
             media_type: receive.media_type.clone(),
             byte_size: receive.plaintext_bytes,
-            state: "pending",
+            state: AttachmentStateDto::Pending,
             error: None,
             preview_url: None,
             transfer: None,
@@ -75,11 +77,48 @@ fn incoming_attachments(
         attachment.media_type = receive.media_type;
         attachment.byte_size = receive.plaintext_bytes;
         attachment.index = Some(receive.attachment_index);
-        attachment.rcs_state = Some(receive.state.code());
+        attachment.rcs_state = Some(attachment_rcs_state(receive.state)?);
         projected.push(attachment);
     }
     projected.extend(attachments);
     Ok(projected)
+}
+
+/// Receive states a pending or stored RCS attachment can be in. Send-only states are an
+/// invariant violation here, as the receive table never stores them.
+fn attachment_rcs_state(state: RcsMediaSyncState) -> Result<RcsAttachmentState, Error> {
+    Ok(match state {
+        RcsMediaSyncState::Downloading => RcsAttachmentState::Downloading,
+        RcsMediaSyncState::Stored => RcsAttachmentState::Stored,
+        RcsMediaSyncState::TooLarge => RcsAttachmentState::TooLarge,
+        RcsMediaSyncState::QuotaFull => RcsAttachmentState::QuotaFull,
+        RcsMediaSyncState::Failed => RcsAttachmentState::Failed,
+        RcsMediaSyncState::Expired => RcsAttachmentState::Expired,
+        RcsMediaSyncState::Sending
+        | RcsMediaSyncState::Sent
+        | RcsMediaSyncState::NotSent
+        | RcsMediaSyncState::OutcomeUnknown
+        | RcsMediaSyncState::MembersChanged
+        | RcsMediaSyncState::SendFailed => return Err(Error::Database),
+    })
+}
+
+/// Outgoing slot states. Receive-only states are an invariant violation here.
+fn outgoing_rcs_send_status(state: RcsMediaSyncState) -> Result<RcsSendStatus, Error> {
+    Ok(match state {
+        RcsMediaSyncState::Sending => RcsSendStatus::Sending,
+        RcsMediaSyncState::Sent => RcsSendStatus::Sent,
+        RcsMediaSyncState::NotSent => RcsSendStatus::NotSent,
+        RcsMediaSyncState::OutcomeUnknown => RcsSendStatus::OutcomeUnknown,
+        RcsMediaSyncState::MembersChanged => RcsSendStatus::MembersChanged,
+        RcsMediaSyncState::SendFailed => RcsSendStatus::SendFailed,
+        RcsMediaSyncState::Downloading
+        | RcsMediaSyncState::Stored
+        | RcsMediaSyncState::TooLarge
+        | RcsMediaSyncState::QuotaFull
+        | RcsMediaSyncState::Failed
+        | RcsMediaSyncState::Expired => return Err(Error::Database),
+    })
 }
 
 /// Definitive outgoing slot outcomes that outrank raw receipt history for the whole message.
@@ -90,17 +129,17 @@ struct OutgoingMediaOutcome {
 }
 
 impl OutgoingMediaOutcome {
-    fn record(&mut self, code: &str) {
-        self.send_failed |= code == "send_failed";
-        self.outcome_unknown |= code == "outcome_unknown";
+    fn record(&mut self, status: RcsSendStatus) {
+        self.send_failed |= status == RcsSendStatus::SendFailed;
+        self.outcome_unknown |= status == RcsSendStatus::OutcomeUnknown;
     }
 
     /// Unknown wins over failure, and both win over any receipt.
-    fn definitive_status(&self) -> Option<&'static str> {
+    fn definitive_status(&self) -> Option<MessageStatus> {
         if self.outcome_unknown {
-            Some("unknown")
+            Some(MessageStatus::Unknown)
         } else if self.send_failed {
-            Some("failed-confirmed")
+            Some(MessageStatus::FailedConfirmed)
         } else {
             None
         }
@@ -118,7 +157,7 @@ pub fn message_view(
     revoked_devices: &HashSet<String>,
 ) -> Result<MessageView, Error> {
     let mut view = conversation_message_view(client, message, attachments)?;
-    let displays_as_rcs = view.transport == Some("rcs");
+    let displays_as_rcs = view.transport == Some(MessageTransport::Rcs);
     view.sent_again = if displays_as_rcs {
         None
     } else {
@@ -183,9 +222,10 @@ fn conversation_message_view(
                     return Err(Error::Database);
                 }
                 has_outgoing_rcs_media = true;
-                outgoing_outcome.record(status.state.code());
+                let send_status = outgoing_rcs_send_status(status.state)?;
+                outgoing_outcome.record(send_status);
                 attachment.index = Some(index);
-                attachment.rcs_send_status = Some(status.state.code());
+                attachment.rcs_send_status = Some(send_status);
                 if let Some(reason) = status.reason {
                     attachment.error = Some(reason.code().to_owned());
                 }
@@ -199,7 +239,7 @@ fn conversation_message_view(
     if !is_rcs && !has_outgoing_rcs_media && !has_rcs_evidence {
         return Ok(view);
     }
-    view.transport = Some("rcs");
+    view.transport = Some(MessageTransport::Rcs);
     let definitive = outgoing_outcome.definitive_status();
     if let Some(status) = definitive {
         view.status = Some(status);
@@ -212,11 +252,11 @@ fn conversation_message_view(
         && let Some(status) = rcs_status
     {
         view.status = Some(match status.status {
-            RcsMessageStatus::Sending => "submitted",
-            RcsMessageStatus::Sent => "sent",
-            RcsMessageStatus::Delivered => "delivery-confirmed",
-            RcsMessageStatus::Read => "read",
-            RcsMessageStatus::Failed => "failed-confirmed",
+            RcsMessageStatus::Sending => MessageStatus::Submitted,
+            RcsMessageStatus::Sent => MessageStatus::Sent,
+            RcsMessageStatus::Delivered => MessageStatus::DeliveryConfirmed,
+            RcsMessageStatus::Read => MessageStatus::Read,
+            RcsMessageStatus::Failed => MessageStatus::FailedConfirmed,
         });
         if status.status == RcsMessageStatus::Read {
             view.status_at = None;
@@ -228,6 +268,7 @@ fn conversation_message_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SendRecoveryKind;
     use peppy_client_core::{
         ClientConfig, ConversationId, DatabaseKey, DeviceId, Direction, GatewayRoute,
         MessagePayload, MessageRecord, OutgoingMms, SourceSequence, VaultId,
@@ -250,11 +291,23 @@ mod tests {
     #[test]
     fn cancellation_projection_uses_frozen_wire_states() {
         for (state, expected) in [
-            (SendCancellationState::None, "none"),
-            (SendCancellationState::Requested, "requested"),
-            (SendCancellationState::Confirmed, "confirmed"),
-            (SendCancellationState::TooLate, "too-late"),
-            (SendCancellationState::Unknown, "unknown"),
+            (SendCancellationState::None, SendCancellationStateDto::None),
+            (
+                SendCancellationState::Requested,
+                SendCancellationStateDto::Requested,
+            ),
+            (
+                SendCancellationState::Confirmed,
+                SendCancellationStateDto::Confirmed,
+            ),
+            (
+                SendCancellationState::TooLate,
+                SendCancellationStateDto::TooLate,
+            ),
+            (
+                SendCancellationState::Unknown,
+                SendCancellationStateDto::Unknown,
+            ),
         ] {
             let view = project_send_cancellation(peppy_client_core::SendCancellationView {
                 state,
@@ -348,16 +401,22 @@ mod tests {
     fn rcs_without_a_status_row_preserves_m2_send_state() {
         let client = client();
         for (state, expected) in [
-            (peppy_client_core::SendState::QueuedLocal, "queued-local"),
+            (
+                peppy_client_core::SendState::QueuedLocal,
+                MessageStatus::QueuedLocal,
+            ),
             (
                 peppy_client_core::SendState::FailedBeforeSubmission,
-                "failed-before-submit",
+                MessageStatus::FailedBeforeSubmit,
             ),
-            (peppy_client_core::SendState::OutcomeUnknown, "unknown"),
+            (
+                peppy_client_core::SendState::OutcomeUnknown,
+                MessageStatus::Unknown,
+            ),
         ] {
             let view =
                 message_view(&client, &rcs_message(Some(state)), vec![], &HashSet::new()).unwrap();
-            assert_eq!(view.transport, Some("rcs"));
+            assert_eq!(view.transport, Some(MessageTransport::Rcs));
             assert_eq!(view.status, Some(expected));
             assert_eq!(view.status_at.as_deref(), Some("2"));
             assert!(!view.rcs_reported);
@@ -382,10 +441,10 @@ mod tests {
         message.send_route = Some(peppy_client_core::SendRouteKind::Carrier);
 
         let before = message_view(&client, &message, vec![], &HashSet::new()).unwrap();
-        assert_eq!(before.transport, Some("sms"));
+        assert_eq!(before.transport, Some(MessageTransport::Sms));
         assert_eq!(
             before.send_recovery.as_ref().map(|r| r.kind),
-            Some("not-sent")
+            Some(SendRecoveryKind::NotSent)
         );
 
         // RCS evidence for the same message makes the displayed transport RCS.
@@ -403,7 +462,7 @@ mod tests {
         }
         let after = message_view(&client, &message, vec![], &HashSet::new()).unwrap();
 
-        assert_eq!(after.transport, Some("rcs"));
+        assert_eq!(after.transport, Some(MessageTransport::Rcs));
         assert!(after.send_recovery.is_none());
     }
 
@@ -425,7 +484,7 @@ mod tests {
 
         assert_eq!(
             view.send_recovery.as_ref().map(|r| r.kind),
-            Some("not-sent")
+            Some(SendRecoveryKind::NotSent)
         );
         let value = serde_json::to_value(&view).unwrap();
         assert_eq!(value["sentAgain"]["messageId"], copy);
@@ -459,7 +518,7 @@ mod tests {
 
         let view = message_view(&client, &message, vec![], &HashSet::new()).unwrap();
 
-        assert_eq!(view.transport, Some("rcs"));
+        assert_eq!(view.transport, Some(MessageTransport::Rcs));
         assert!(view.sent_again.is_none());
         assert!(
             serde_json::to_value(&view)
@@ -473,7 +532,7 @@ mod tests {
     fn outgoing_mms_without_rcs_media_status_stays_mms() {
         let view = message_view(&client(), &mms_message(), vec![], &HashSet::new()).unwrap();
 
-        assert_eq!(view.transport, Some("mms"));
+        assert_eq!(view.transport, Some(MessageTransport::Mms));
         assert!(!view.rcs_reported);
     }
 
@@ -632,7 +691,7 @@ mod tests {
                 "first.mp4",
                 "video/mp4",
                 10,
-                "too_large",
+                RcsAttachmentState::TooLarge,
             ),
             (
                 &view.attachments[1],
@@ -640,7 +699,7 @@ mod tests {
                 "third.png",
                 "image/png",
                 30,
-                "downloading",
+                RcsAttachmentState::Downloading,
             ),
         ] {
             assert_eq!(attachment.id, format!("{id}:{index}"));
@@ -649,7 +708,7 @@ mod tests {
             assert_eq!(attachment.media_type, media_type);
             assert_eq!(attachment.byte_size, bytes);
             assert_eq!(attachment.rcs_state, Some(state));
-            assert_eq!(attachment.state, "pending");
+            assert_eq!(attachment.state, AttachmentStateDto::Pending);
         }
         db.execute(
             "INSERT INTO rcs_media_receive(message_id,attachment_index,state,media_type,display_name,plaintext_bytes,attachment_id) VALUES(?,2,'downloading','image/png','bad.png',1,'invalid')",
@@ -666,8 +725,8 @@ mod tests {
         let media = outgoing_media(2);
         media.seed(&[(0, "send_failed"), (1, "sent")], Some(READ_RANK));
         let view = media.project(Transport::Rcs);
-        assert_eq!(view.transport, Some("rcs"));
-        assert_eq!(view.status, Some("failed-confirmed"));
+        assert_eq!(view.transport, Some(MessageTransport::Rcs));
+        assert_eq!(view.status, Some(MessageStatus::FailedConfirmed));
         assert_eq!(view.status_at, media.base().status_at);
     }
 
@@ -679,7 +738,7 @@ mod tests {
             Some(READ_RANK),
         );
         let view = media.project(Transport::Rcs);
-        assert_eq!(view.status, Some("unknown"));
+        assert_eq!(view.status, Some(MessageStatus::Unknown));
         assert_eq!(view.status_at, media.base().status_at);
     }
 
@@ -688,8 +747,8 @@ mod tests {
         let media = outgoing_media(2);
         media.seed(&[(0, "send_failed"), (1, "sent")], Some(READ_RANK));
         let view = media.project(Transport::Mms);
-        assert_eq!(view.transport, Some("rcs"));
-        assert_eq!(view.status, Some("failed-confirmed"));
+        assert_eq!(view.transport, Some(MessageTransport::Rcs));
+        assert_eq!(view.status, Some(MessageStatus::FailedConfirmed));
         assert_eq!(view.status_at, media.base().status_at);
     }
 
@@ -698,8 +757,8 @@ mod tests {
         let media = outgoing_media(2);
         media.seed(&[(0, "send_failed"), (1, "outcome_unknown")], None);
         let view = media.project(Transport::Mms);
-        assert_eq!(view.transport, Some("rcs"));
-        assert_eq!(view.status, Some("unknown"));
+        assert_eq!(view.transport, Some(MessageTransport::Rcs));
+        assert_eq!(view.status, Some(MessageStatus::Unknown));
     }
 
     #[test]
@@ -707,7 +766,7 @@ mod tests {
         let media = outgoing_media(2);
         media.seed(&[(0, "sent"), (1, "sending")], Some(READ_RANK));
         let view = media.project(Transport::Mms);
-        assert_eq!(view.transport, Some("rcs"));
+        assert_eq!(view.transport, Some(MessageTransport::Rcs));
         assert_eq!(view.status, media.base().status);
         assert_eq!(view.status_at, media.base().status_at);
         assert!(!view.rcs_reported);
@@ -718,7 +777,7 @@ mod tests {
         let media = outgoing_media(2);
         media.seed(&[(0, "sent"), (1, "sent")], Some(READ_RANK));
         let view = media.project(Transport::Rcs);
-        assert_eq!(view.status, Some("read"));
+        assert_eq!(view.status, Some(MessageStatus::Read));
         assert_eq!(view.status_at, None);
     }
 
@@ -727,7 +786,7 @@ mod tests {
         let media = outgoing_media(1);
         media.seed(&[], Some(DELIVERED_RANK));
         let view = media.project(Transport::Rcs);
-        assert_eq!(view.status, Some("delivery-confirmed"));
+        assert_eq!(view.status, Some(MessageStatus::DeliveryConfirmed));
         assert_eq!(view.status_at, media.base().status_at);
     }
 
@@ -739,8 +798,8 @@ mod tests {
 
             let view = media.project(transport);
 
-            assert_eq!(view.transport, Some("rcs"));
-            assert_eq!(view.status, Some("read"));
+            assert_eq!(view.transport, Some(MessageTransport::Rcs));
+            assert_eq!(view.status, Some(MessageStatus::Read));
             assert_eq!(view.status_at, None);
             assert!(view.rcs_reported);
         }
@@ -753,14 +812,17 @@ mod tests {
 
         let view = media.project(Transport::Mms);
 
-        assert_eq!(view.transport, Some("rcs"));
+        assert_eq!(view.transport, Some(MessageTransport::Rcs));
         assert_eq!(view.status, media.base().status);
         assert!(view.rcs_reported);
     }
 
     #[test]
     fn outgoing_mms_and_sms_with_unreported_echo_only_evidence_keep_their_transport() {
-        for (transport, expected) in [(Transport::Mms, "mms"), (Transport::Sms, "sms")] {
+        for (transport, expected) in [
+            (Transport::Mms, MessageTransport::Mms),
+            (Transport::Sms, MessageTransport::Sms),
+        ] {
             let media = outgoing_media(1);
             media.seed_reported(&[], None, false);
 
@@ -778,8 +840,8 @@ mod tests {
 
         let view = media.project(Transport::Mms);
 
-        assert_eq!(view.transport, Some("rcs"));
-        assert_eq!(view.status, Some("failed-confirmed"));
+        assert_eq!(view.transport, Some(MessageTransport::Rcs));
+        assert_eq!(view.status, Some(MessageStatus::FailedConfirmed));
         assert!(!view.rcs_reported);
     }
 }

@@ -32,8 +32,8 @@ pub use launch_progress::*;
 pub mod quick_reply;
 pub mod reactions;
 pub use reactions::{
-    ConversationReactions, MessageReactionView, OwnReactionRequestView, ReactionActorView,
-    ReactionSubmitView,
+    ConversationReactions, MessageReactionView, OwnReactionRefusal, OwnReactionRequestState,
+    OwnReactionRequestView, ReactionActorView, ReactionRouteDto, ReactionSubmitView,
 };
 pub mod rcs_status;
 pub use rcs_status::*;
@@ -42,7 +42,7 @@ pub use search::*;
 pub mod search_history;
 pub use search_history::*;
 pub mod send_recovery;
-pub use send_recovery::{SendRecoveryView, SentAgainView, send_recovery_view};
+pub use send_recovery::{SendRecoveryKind, SendRecoveryView, SentAgainView, send_recovery_view};
 #[cfg(test)]
 mod send_again_flow_tests;
 #[cfg(test)]
@@ -441,100 +441,253 @@ pub struct HistoryPage {
     pub has_more: bool,
 }
 
-#[derive(Serialize)]
+/// Sender side of a message view: `self` for outgoing, `other` for incoming.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageSender {
+    #[serde(rename = "self")]
+    SelfSent,
+    Other,
+}
+
+/// Send or receipt status of a message. Serialized values are the UI contract's `MessageStatus`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum MessageStatus {
+    QueuedLocal,
+    ServerAccepted,
+    GatewayPersisted,
+    Preparing,
+    Submitted,
+    Sent,
+    DeliveryConfirmed,
+    FailedBeforeSubmit,
+    FailedConfirmed,
+    Unknown,
+    Read,
+}
+
+/// Group refusal or outcome shown on a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupHint {
+    MembersChanged,
+    UpdateRequired,
+    Withdrawn,
+    CreateUnknown,
+    CreateNotRcs,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageTransport {
+    Sms,
+    Mms,
+    Rcs,
+}
+
+/// Cancellation state of a send. Serialized as the UI contract's `SendCancellationState`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(rename = "SendCancellationState")]
+pub enum SendCancellationStateDto {
+    None,
+    Requested,
+    Confirmed,
+    TooLate,
+    Unknown,
+}
+
+/// Attachment state. Serialized as the UI contract's `AttachmentState`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(rename = "AttachmentState")]
+pub enum AttachmentStateDto {
+    Pending,
+    Uploading,
+    Failed,
+    Ready,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachmentTransfer {
+    Upload,
+    Download,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaHold {
+    Held,
+    Requested,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum DraftAttachmentState {
+    Saving,
+    Local,
+    Waiting,
+    Uploading,
+    Uploaded,
+    UploadFailed,
+    Downloading,
+    DownloadFailed,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RcsAttachmentState {
+    Downloading,
+    Stored,
+    TooLarge,
+    QuotaFull,
+    Failed,
+    Expired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RcsSendStatus {
+    Sending,
+    Sent,
+    NotSent,
+    SendFailed,
+    OutcomeUnknown,
+    MembersChanged,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaPreviewUnavailable {
+    ThumbnailUnavailable,
+}
+
+#[derive(Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageView {
     pub id: String,
     pub revision: String,
-    pub sender: &'static str,
+    pub sender: MessageSender,
     /// Actual incoming sender, retained separately from the self/other display category.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub sender_address: Option<String>,
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub one_time_code: Option<String>,
     /// Empty only when the provider did not supply a timestamp; never synthesized from arrival.
     pub timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<&'static str>,
+    #[ts(optional)]
+    pub status: Option<MessageStatus>,
     /// Gateway-recorded time of `status`, as positive decimal epoch milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub status_at: Option<String>,
     /// Group refusal or outcome the message view shows (see `group_hint`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub group_hint: Option<&'static str>,
+    #[ts(optional)]
+    pub group_hint: Option<GroupHint>,
     pub attachments: Vec<AttachmentView>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub transport: Option<&'static str>,
+    #[ts(optional)]
+    pub transport: Option<MessageTransport>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub subject: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub participants: Option<Vec<String>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[ts(as = "Option<bool>", optional)]
     pub rcs_reported: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub send_cancellation: Option<SendCancellationView>,
     /// Recovery state of a carrier send that may not have reached the carrier (see `send_recovery`).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub send_recovery: Option<SendRecoveryView>,
     /// This device's explicit "Send again" copy of this message, independent of the recovery state.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub sent_again: Option<SentAgainView>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub reactions: Option<Vec<MessageReactionView>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub own_reaction_request: Option<OwnReactionRequestView>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reactable: Option<&'static str>,
+    #[ts(optional)]
+    pub reactable: Option<ReactionRouteDto>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SendCancellationView {
-    pub state: &'static str,
+    pub state: SendCancellationStateDto,
     pub can_cancel: bool,
     pub requires_gateway_update: bool,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentView {
     pub id: String,
     pub name: String,
     pub media_type: String,
+    #[ts(type = "number")]
     pub byte_size: u64,
-    pub state: &'static str,
+    pub state: AttachmentStateDto,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub error: Option<String>,
     /// Native-generated, re-encoded PNG thumbnail data URL only (never a path or SVG/HTML).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub preview_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub transfer: Option<&'static str>,
+    #[ts(optional)]
+    pub transfer: Option<AttachmentTransfer>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub retryable: Option<bool>,
     /// A deferred original is waiting for the gateway's upload policy or an accepted manual sync.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub media_hold: Option<&'static str>,
+    #[ts(optional)]
+    pub media_hold: Option<MediaHold>,
     /// Producer metadata links a ready thumbnail independently from the original's transfer state.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub media_meta: Option<Box<MediaMetadataView>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(inline)]
     pub remote_state: Option<RemoteAttachmentStateDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub local_available: Option<bool>,
     /// Draft-transfer state, present only for attachments displayed in a draft.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub draft_state: Option<&'static str>,
+    #[ts(optional)]
+    pub draft_state: Option<DraftAttachmentState>,
     /// Original position in an RCS message; used to address a retry demand safely.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub index: Option<u32>,
     /// Sanitized incoming RCS media state for a known receive placeholder.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rcs_state: Option<&'static str>,
+    #[ts(optional)]
+    pub rcs_state: Option<RcsAttachmentState>,
     /// Sanitized outgoing RCS media state, never an internal ledger state.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rcs_send_status: Option<&'static str>,
+    #[ts(optional)]
+    pub rcs_send_status: Option<RcsSendStatus>,
 }
 
 #[derive(Serialize)]
@@ -557,20 +710,25 @@ pub struct MediaPageItemView {
     pub media_meta: Option<MediaMetadataView>,
     pub cursor: MediaCursorView,
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaMetadataView {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub height: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub duration_ms: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub thumbnail: Option<AttachmentView>,
     /// `thumbnail_unavailable` is producer-authenticated v3 completion evidence, not a host guess.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub preview_unavailable: Option<&'static str>,
+    #[ts(optional)]
+    pub preview_unavailable: Option<MediaPreviewUnavailable>,
 }
 
 pub fn media_metadata_view(meta: peppy_client_core::MediaMetadata) -> MediaMetadataView {
@@ -582,7 +740,10 @@ pub fn media_metadata_view(meta: peppy_client_core::MediaMetadata) -> MediaMetad
             .thumbnail
             .as_ref()
             .map(|item| attachment_view(item, None, None)),
-        preview_unavailable: meta.thumbnail.is_none().then_some("thumbnail_unavailable"),
+        preview_unavailable: meta
+            .thumbnail
+            .is_none()
+            .then_some(MediaPreviewUnavailable::ThumbnailUnavailable),
     }
 }
 
@@ -702,26 +863,26 @@ pub struct PublicCopyView {
     pub expires_in_seconds: u64,
 }
 
-pub fn send_state_label(state: SendState) -> &'static str {
+pub fn send_state_label(state: SendState) -> MessageStatus {
     match state {
-        SendState::QueuedLocal => "queued-local",
-        SendState::AcceptedServer => "server-accepted",
-        SendState::PersistedGateway => "gateway-persisted",
-        SendState::AttemptRecorded => "preparing",
-        SendState::SubmittedToOs => "submitted",
-        SendState::Sent => "sent",
-        SendState::Delivered => "delivery-confirmed",
-        SendState::FailedBeforeSubmission => "failed-before-submit",
-        SendState::FailedConfirmed => "failed-confirmed",
-        SendState::OutcomeUnknown => "unknown",
+        SendState::QueuedLocal => MessageStatus::QueuedLocal,
+        SendState::AcceptedServer => MessageStatus::ServerAccepted,
+        SendState::PersistedGateway => MessageStatus::GatewayPersisted,
+        SendState::AttemptRecorded => MessageStatus::Preparing,
+        SendState::SubmittedToOs => MessageStatus::Submitted,
+        SendState::Sent => MessageStatus::Sent,
+        SendState::Delivered => MessageStatus::DeliveryConfirmed,
+        SendState::FailedBeforeSubmission => MessageStatus::FailedBeforeSubmit,
+        SendState::FailedConfirmed => MessageStatus::FailedConfirmed,
+        SendState::OutcomeUnknown => MessageStatus::Unknown,
     }
 }
 
-pub fn attachment_state_label(state: AttachmentState) -> &'static str {
+pub fn attachment_state_label(state: AttachmentState) -> AttachmentStateDto {
     match state {
-        AttachmentState::PendingUpload => "uploading",
-        AttachmentState::Uploaded | AttachmentState::Available => "ready",
-        AttachmentState::PendingDownload => "pending",
+        AttachmentState::PendingUpload => AttachmentStateDto::Uploading,
+        AttachmentState::Uploaded | AttachmentState::Available => AttachmentStateDto::Ready,
+        AttachmentState::PendingDownload => AttachmentStateDto::Pending,
     }
 }
 
@@ -737,15 +898,15 @@ pub fn attachment_view(
         media_type: info.media_type.clone(),
         byte_size: info.plaintext_bytes,
         state: if error.is_some() {
-            "failed"
+            AttachmentStateDto::Failed
         } else {
             attachment_state_label(info.state)
         },
         error,
         preview_url,
         transfer: match info.state {
-            AttachmentState::PendingUpload => Some("upload"),
-            AttachmentState::PendingDownload => Some("download"),
+            AttachmentState::PendingUpload => Some(AttachmentTransfer::Upload),
+            AttachmentState::PendingDownload => Some(AttachmentTransfer::Download),
             AttachmentState::Uploaded | AttachmentState::Available => None,
         },
         retryable,
@@ -771,10 +932,10 @@ pub fn attachment_view_with_media_status(
     view.media_hold = match status {
         Some(DeferredMediaStatus::Retryable { reason }) => {
             view.error = Some(reason.to_owned());
-            Some("held")
+            Some(MediaHold::Held)
         }
-        Some(DeferredMediaStatus::Held) => Some("held"),
-        Some(DeferredMediaStatus::UploadQueued) => Some("requested"),
+        Some(DeferredMediaStatus::Held) => Some(MediaHold::Held),
+        Some(DeferredMediaStatus::UploadQueued) => Some(MediaHold::Requested),
         Some(DeferredMediaStatus::Available) | None => None,
     };
     view
@@ -794,7 +955,7 @@ pub fn snapshot_attachment_view(
                 Some("Media availability could not be verified. Refresh to try again.".into()),
                 None,
             );
-            view.state = "failed";
+            view.state = AttachmentStateDto::Failed;
             view.retryable = Some(false);
             view
         }
@@ -917,9 +1078,9 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
         id: message.payload.record.message_id.to_string(),
         revision: message.payload.record.source_sequence.0.to_string(),
         sender: if message.payload.direction == Direction::Outgoing {
-            "self"
+            MessageSender::SelfSent
         } else {
-            "other"
+            MessageSender::Other
         },
         sender_address: (message.payload.direction == Direction::Incoming)
             .then(|| message.payload.sender_address.clone())
@@ -935,8 +1096,8 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
         group_hint: message.send_refusal.and_then(group_hint),
         attachments,
         transport: match message.payload.transport {
-            Transport::Sms => Some("sms"),
-            Transport::Mms => Some("mms"),
+            Transport::Sms => Some(MessageTransport::Sms),
+            Transport::Mms => Some(MessageTransport::Mms),
             Transport::Rcs => None,
         },
         subject: message.payload.subject.clone(),
@@ -965,13 +1126,13 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
 /// The message-level hint for a group refusal, one wire value per core reason. The composer
 /// shows the same reasons on the send result; the message keeps them so they survive a restart
 /// and reach every device.
-fn group_hint(reason: SendRefusalReason) -> Option<&'static str> {
+fn group_hint(reason: SendRefusalReason) -> Option<GroupHint> {
     match reason {
-        SendRefusalReason::MembersChanged => Some("members_changed"),
-        SendRefusalReason::UpdateRequired => Some("update_required"),
-        SendRefusalReason::Withdrawn => Some("withdrawn"),
-        SendRefusalReason::CreateUnconfirmed => Some("create_unknown"),
-        SendRefusalReason::CreateNotRcs => Some("create_not_rcs"),
+        SendRefusalReason::MembersChanged => Some(GroupHint::MembersChanged),
+        SendRefusalReason::UpdateRequired => Some(GroupHint::UpdateRequired),
+        SendRefusalReason::Withdrawn => Some(GroupHint::Withdrawn),
+        SendRefusalReason::CreateUnconfirmed => Some(GroupHint::CreateUnknown),
+        SendRefusalReason::CreateNotRcs => Some(GroupHint::CreateNotRcs),
     }
 }
 
@@ -1352,14 +1513,26 @@ mod tests {
 
     #[test]
     fn status_labels_remain_bridge_compatible() {
-        assert_eq!(send_state_label(SendState::QueuedLocal), "queued-local");
-        assert_eq!(send_state_label(SendState::Delivered), "delivery-confirmed");
-        assert_eq!(send_state_label(SendState::OutcomeUnknown), "unknown");
+        assert_eq!(
+            send_state_label(SendState::QueuedLocal),
+            MessageStatus::QueuedLocal
+        );
+        assert_eq!(
+            send_state_label(SendState::Delivered),
+            MessageStatus::DeliveryConfirmed
+        );
+        assert_eq!(
+            send_state_label(SendState::OutcomeUnknown),
+            MessageStatus::Unknown
+        );
         assert_eq!(
             attachment_state_label(AttachmentState::PendingDownload),
-            "pending"
+            AttachmentStateDto::Pending
         );
-        assert_eq!(attachment_state_label(AttachmentState::Available), "ready");
+        assert_eq!(
+            attachment_state_label(AttachmentState::Available),
+            AttachmentStateDto::Ready
+        );
     }
 
     #[test]
@@ -1368,24 +1541,27 @@ mod tests {
         message.send_refusal = Some(SendRefusalReason::MembersChanged);
         assert_eq!(
             message_view(&message, vec![]).group_hint,
-            Some("members_changed")
+            Some(GroupHint::MembersChanged)
         );
         message.send_refusal = Some(SendRefusalReason::CreateUnconfirmed);
         assert_eq!(
             message_view(&message, vec![]).group_hint,
-            Some("create_unknown")
+            Some(GroupHint::CreateUnknown)
         );
         message.send_refusal = Some(SendRefusalReason::UpdateRequired);
         assert_eq!(
             message_view(&message, vec![]).group_hint,
-            Some("update_required")
+            Some(GroupHint::UpdateRequired)
         );
         message.send_refusal = Some(SendRefusalReason::Withdrawn);
-        assert_eq!(message_view(&message, vec![]).group_hint, Some("withdrawn"));
+        assert_eq!(
+            message_view(&message, vec![]).group_hint,
+            Some(GroupHint::Withdrawn)
+        );
         message.send_refusal = Some(SendRefusalReason::CreateNotRcs);
         assert_eq!(
             message_view(&message, vec![]).group_hint,
-            Some("create_not_rcs")
+            Some(GroupHint::CreateNotRcs)
         );
         message.send_refusal = None;
         let json = serde_json::to_value(message_view(&message, vec![])).unwrap();
@@ -1571,3 +1747,670 @@ mod tests {
 pub mod contact_error;
 pub mod contacts;
 pub use contact_error::{ContactError, ContactResult};
+
+#[cfg(test)]
+mod message_wire_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn wire<T: Serialize>(value: &T) -> Value {
+        serde_json::to_value(value).unwrap()
+    }
+
+    fn with_field(mut value: Value, key: &str, field: Value) -> Value {
+        value[key] = field;
+        value
+    }
+
+    fn minimal_attachment_json() -> Value {
+        json!({
+            "id": "attachment-1",
+            "name": "photo.jpg",
+            "mediaType": "image/jpeg",
+            "byteSize": 42,
+            "state": "pending"
+        })
+    }
+
+    fn attachment(state: AttachmentStateDto) -> AttachmentView {
+        AttachmentView {
+            id: "attachment-1".into(),
+            name: "photo.jpg".into(),
+            media_type: "image/jpeg".into(),
+            byte_size: 42,
+            state,
+            error: None,
+            preview_url: None,
+            transfer: None,
+            retryable: None,
+            media_hold: None,
+            media_meta: None,
+            remote_state: None,
+            local_available: None,
+            draft_state: None,
+            index: None,
+            rcs_state: None,
+            rcs_send_status: None,
+        }
+    }
+
+    fn minimal_message_json() -> Value {
+        json!({
+            "id": "message-1",
+            "revision": "7",
+            "sender": "other",
+            "body": "",
+            "timestamp": "",
+            "attachments": []
+        })
+    }
+
+    fn message(sender: MessageSender) -> MessageView {
+        MessageView {
+            id: "message-1".into(),
+            revision: "7".into(),
+            sender,
+            sender_address: None,
+            body: String::new(),
+            one_time_code: None,
+            timestamp: String::new(),
+            status: None,
+            status_at: None,
+            group_hint: None,
+            attachments: vec![],
+            transport: None,
+            subject: None,
+            participants: None,
+            rcs_reported: false,
+            send_cancellation: None,
+            send_recovery: None,
+            sent_again: None,
+            reactions: None,
+            own_reaction_request: None,
+            reactable: None,
+        }
+    }
+
+    #[test]
+    fn attachment_json_is_unchanged() {
+        assert_eq!(
+            wire(&attachment(AttachmentStateDto::Pending)),
+            minimal_attachment_json()
+        );
+
+        let full = AttachmentView {
+            error: Some("Upload failed".into()),
+            preview_url: Some("data:image/png;base64,AAAA".into()),
+            transfer: Some(AttachmentTransfer::Upload),
+            retryable: Some(true),
+            media_hold: Some(MediaHold::Held),
+            media_meta: Some(Box::new(MediaMetadataView {
+                width: Some(640),
+                height: Some(480),
+                duration_ms: Some("1500".into()),
+                thumbnail: Some(attachment(AttachmentStateDto::Ready)),
+                preview_unavailable: None,
+            })),
+            remote_state: Some(RemoteAttachmentStateDto::RemovedByStoragePolicy),
+            local_available: Some(false),
+            draft_state: Some(DraftAttachmentState::UploadFailed),
+            index: Some(2),
+            rcs_state: Some(RcsAttachmentState::TooLarge),
+            rcs_send_status: Some(RcsSendStatus::SendFailed),
+            ..attachment(AttachmentStateDto::Uploading)
+        };
+        assert_eq!(
+            wire(&full),
+            json!({
+                "id": "attachment-1",
+                "name": "photo.jpg",
+                "mediaType": "image/jpeg",
+                "byteSize": 42,
+                "state": "uploading",
+                "error": "Upload failed",
+                "previewUrl": "data:image/png;base64,AAAA",
+                "transfer": "upload",
+                "retryable": true,
+                "mediaHold": "held",
+                "mediaMeta": {
+                    "width": 640,
+                    "height": 480,
+                    "durationMs": "1500",
+                    "thumbnail": {
+                        "id": "attachment-1",
+                        "name": "photo.jpg",
+                        "mediaType": "image/jpeg",
+                        "byteSize": 42,
+                        "state": "ready"
+                    }
+                },
+                "remoteState": "removed_by_storage_policy",
+                "localAvailable": false,
+                "draftState": "upload-failed",
+                "index": 2,
+                "rcsState": "too_large",
+                "rcsSendStatus": "send_failed"
+            })
+        );
+    }
+
+    #[test]
+    fn attachment_union_values_are_unchanged() {
+        for (state, wire_value) in [
+            (AttachmentStateDto::Pending, "pending"),
+            (AttachmentStateDto::Uploading, "uploading"),
+            (AttachmentStateDto::Failed, "failed"),
+            (AttachmentStateDto::Ready, "ready"),
+        ] {
+            assert_eq!(
+                wire(&attachment(state)),
+                with_field(minimal_attachment_json(), "state", json!(wire_value))
+            );
+        }
+        for (transfer, wire_value) in [
+            (AttachmentTransfer::Upload, "upload"),
+            (AttachmentTransfer::Download, "download"),
+        ] {
+            let view = AttachmentView {
+                transfer: Some(transfer),
+                ..attachment(AttachmentStateDto::Pending)
+            };
+            assert_eq!(
+                wire(&view),
+                with_field(minimal_attachment_json(), "transfer", json!(wire_value))
+            );
+        }
+        for (hold, wire_value) in [
+            (MediaHold::Held, "held"),
+            (MediaHold::Requested, "requested"),
+        ] {
+            let view = AttachmentView {
+                media_hold: Some(hold),
+                ..attachment(AttachmentStateDto::Pending)
+            };
+            assert_eq!(
+                wire(&view),
+                with_field(minimal_attachment_json(), "mediaHold", json!(wire_value))
+            );
+        }
+        for (draft_state, wire_value) in [
+            (DraftAttachmentState::Saving, "saving"),
+            (DraftAttachmentState::Local, "local"),
+            (DraftAttachmentState::Waiting, "waiting"),
+            (DraftAttachmentState::Uploading, "uploading"),
+            (DraftAttachmentState::Uploaded, "uploaded"),
+            (DraftAttachmentState::UploadFailed, "upload-failed"),
+            (DraftAttachmentState::Downloading, "downloading"),
+            (DraftAttachmentState::DownloadFailed, "download-failed"),
+            (DraftAttachmentState::Unavailable, "unavailable"),
+        ] {
+            let view = AttachmentView {
+                draft_state: Some(draft_state),
+                ..attachment(AttachmentStateDto::Pending)
+            };
+            assert_eq!(
+                wire(&view),
+                with_field(minimal_attachment_json(), "draftState", json!(wire_value))
+            );
+        }
+        for (rcs_state, wire_value) in [
+            (RcsAttachmentState::Downloading, "downloading"),
+            (RcsAttachmentState::Stored, "stored"),
+            (RcsAttachmentState::TooLarge, "too_large"),
+            (RcsAttachmentState::QuotaFull, "quota_full"),
+            (RcsAttachmentState::Failed, "failed"),
+            (RcsAttachmentState::Expired, "expired"),
+        ] {
+            let view = AttachmentView {
+                rcs_state: Some(rcs_state),
+                ..attachment(AttachmentStateDto::Pending)
+            };
+            assert_eq!(
+                wire(&view),
+                with_field(minimal_attachment_json(), "rcsState", json!(wire_value))
+            );
+        }
+        for (rcs_send_status, wire_value) in [
+            (RcsSendStatus::Sending, "sending"),
+            (RcsSendStatus::Sent, "sent"),
+            (RcsSendStatus::NotSent, "not_sent"),
+            (RcsSendStatus::SendFailed, "send_failed"),
+            (RcsSendStatus::OutcomeUnknown, "outcome_unknown"),
+            (RcsSendStatus::MembersChanged, "members_changed"),
+        ] {
+            let view = AttachmentView {
+                rcs_send_status: Some(rcs_send_status),
+                ..attachment(AttachmentStateDto::Pending)
+            };
+            assert_eq!(
+                wire(&view),
+                with_field(
+                    minimal_attachment_json(),
+                    "rcsSendStatus",
+                    json!(wire_value)
+                )
+            );
+        }
+        for (remote, wire_value) in [
+            (RemoteAttachmentStateDto::Available, "available"),
+            (
+                RemoteAttachmentStateDto::RemovedByStoragePolicy,
+                "removed_by_storage_policy",
+            ),
+        ] {
+            let view = AttachmentView {
+                remote_state: Some(remote),
+                ..attachment(AttachmentStateDto::Pending)
+            };
+            assert_eq!(
+                wire(&view),
+                with_field(minimal_attachment_json(), "remoteState", json!(wire_value))
+            );
+        }
+    }
+
+    #[test]
+    fn media_metadata_json_is_unchanged() {
+        assert_eq!(
+            wire(&MediaMetadataView {
+                width: None,
+                height: None,
+                duration_ms: None,
+                thumbnail: None,
+                preview_unavailable: None,
+            }),
+            json!({})
+        );
+        assert_eq!(
+            wire(&MediaMetadataView {
+                width: None,
+                height: None,
+                duration_ms: None,
+                thumbnail: None,
+                preview_unavailable: Some(MediaPreviewUnavailable::ThumbnailUnavailable),
+            }),
+            json!({"previewUnavailable": "thumbnail_unavailable"})
+        );
+    }
+
+    #[test]
+    fn send_cancellation_json_is_unchanged() {
+        for (state, wire_value) in [
+            (SendCancellationStateDto::None, "none"),
+            (SendCancellationStateDto::Requested, "requested"),
+            (SendCancellationStateDto::Confirmed, "confirmed"),
+            (SendCancellationStateDto::TooLate, "too-late"),
+            (SendCancellationStateDto::Unknown, "unknown"),
+        ] {
+            let view = SendCancellationView {
+                state,
+                can_cancel: true,
+                requires_gateway_update: false,
+            };
+            assert_eq!(
+                wire(&view),
+                json!({"state": wire_value, "canCancel": true, "requiresGatewayUpdate": false})
+            );
+        }
+    }
+
+    #[test]
+    fn send_recovery_json_is_unchanged() {
+        for (kind, wire_value) in [
+            (SendRecoveryKind::NotSent, "not-sent"),
+            (SendRecoveryKind::UnconfirmedRemoved, "unconfirmed-removed"),
+            (
+                SendRecoveryKind::UnconfirmedRemovedCancel,
+                "unconfirmed-removed-cancel",
+            ),
+        ] {
+            let view = SendRecoveryView {
+                kind,
+                can_send_again: false,
+                sent_again: None,
+            };
+            assert_eq!(
+                wire(&view),
+                json!({"kind": wire_value, "canSendAgain": false})
+            );
+        }
+        let copy = SendRecoveryView {
+            kind: SendRecoveryKind::UnconfirmedRemoved,
+            can_send_again: false,
+            sent_again: Some(SentAgainView {
+                message_id: "copy-1".into(),
+            }),
+        };
+        assert_eq!(
+            wire(&copy),
+            json!({
+                "kind": "unconfirmed-removed",
+                "canSendAgain": false,
+                "sentAgain": {"messageId": "copy-1"}
+            })
+        );
+        assert_eq!(
+            wire(&SentAgainView {
+                message_id: "copy-1".into()
+            }),
+            json!({"messageId": "copy-1"})
+        );
+    }
+
+    #[test]
+    fn reaction_json_is_unchanged() {
+        assert_eq!(
+            wire(&MessageReactionView {
+                emoji: "👍".into(),
+                actors: vec![
+                    ReactionActorView {
+                        is_self: true,
+                        address: None,
+                    },
+                    ReactionActorView {
+                        is_self: false,
+                        address: Some("+15555550101".into()),
+                    },
+                ],
+            }),
+            json!({
+                "emoji": "👍",
+                "actors": [
+                    {"self": true},
+                    {"self": false, "address": "+15555550101"}
+                ]
+            })
+        );
+        assert_eq!(
+            wire(&MessageReactionView {
+                emoji: "❤️".into(),
+                actors: vec![],
+            }),
+            json!({"emoji": "❤️", "actors": []})
+        );
+    }
+
+    #[test]
+    fn own_reaction_request_json_is_unchanged() {
+        assert_eq!(
+            wire(&OwnReactionRequestView {
+                request_id: "req-1".into(),
+                emoji: Some("👍".into()),
+                previous_emoji: None,
+                state: OwnReactionRequestState::Sending,
+                refusal: None,
+            }),
+            json!({"requestId": "req-1", "emoji": "👍", "state": "sending"})
+        );
+        assert_eq!(
+            wire(&OwnReactionRequestView {
+                request_id: "req-1".into(),
+                emoji: None,
+                previous_emoji: Some("❤️".into()),
+                state: OwnReactionRequestState::NotSent,
+                refusal: Some(OwnReactionRefusal::InvalidEmoji),
+            }),
+            json!({
+                "requestId": "req-1",
+                "emoji": null,
+                "previousEmoji": "❤️",
+                "state": "not_sent",
+                "refusal": "invalid_emoji"
+            })
+        );
+        for (state, wire_value) in [
+            (OwnReactionRequestState::Sending, "sending"),
+            (OwnReactionRequestState::NotSent, "not_sent"),
+            (OwnReactionRequestState::Unknown, "unknown"),
+        ] {
+            let view = OwnReactionRequestView {
+                request_id: "req-1".into(),
+                emoji: Some("👍".into()),
+                previous_emoji: None,
+                state,
+                refusal: None,
+            };
+            assert_eq!(
+                wire(&view),
+                json!({"requestId": "req-1", "emoji": "👍", "state": wire_value})
+            );
+        }
+        for (refusal, wire_value) in [
+            (OwnReactionRefusal::Expired, "expired"),
+            (
+                OwnReactionRefusal::MessageUnavailable,
+                "message_unavailable",
+            ),
+            (OwnReactionRefusal::NotRcs, "not_rcs"),
+            (OwnReactionRefusal::LinkUnavailable, "link_unavailable"),
+            (OwnReactionRefusal::Rejected, "rejected"),
+            (OwnReactionRefusal::Busy, "busy"),
+            (OwnReactionRefusal::InvalidEmoji, "invalid_emoji"),
+        ] {
+            let view = OwnReactionRequestView {
+                request_id: "req-1".into(),
+                emoji: Some("👍".into()),
+                previous_emoji: None,
+                state: OwnReactionRequestState::Sending,
+                refusal: Some(refusal),
+            };
+            assert_eq!(
+                wire(&view),
+                json!({"requestId": "req-1", "emoji": "👍", "state": "sending", "refusal": wire_value})
+            );
+        }
+    }
+
+    #[test]
+    fn message_json_is_unchanged() {
+        assert_eq!(wire(&message(MessageSender::Other)), minimal_message_json());
+        assert!(
+            wire(&message(MessageSender::Other))
+                .get("rcsReported")
+                .is_none()
+        );
+        assert_eq!(
+            wire(&message(MessageSender::SelfSent)),
+            with_field(minimal_message_json(), "sender", json!("self"))
+        );
+
+        let full = MessageView {
+            sender_address: Some("+15555550100".into()),
+            one_time_code: Some("123456".into()),
+            status: Some(MessageStatus::Read),
+            status_at: Some("1700000000001".into()),
+            group_hint: Some(GroupHint::MembersChanged),
+            attachments: vec![attachment(AttachmentStateDto::Ready)],
+            transport: Some(MessageTransport::Rcs),
+            subject: Some("Subject".into()),
+            participants: Some(vec!["+15555550100".into()]),
+            rcs_reported: true,
+            send_cancellation: Some(SendCancellationView {
+                state: SendCancellationStateDto::TooLate,
+                can_cancel: false,
+                requires_gateway_update: true,
+            }),
+            send_recovery: Some(SendRecoveryView {
+                kind: SendRecoveryKind::UnconfirmedRemovedCancel,
+                can_send_again: false,
+                sent_again: Some(SentAgainView {
+                    message_id: "copy-1".into(),
+                }),
+            }),
+            sent_again: Some(SentAgainView {
+                message_id: "copy-2".into(),
+            }),
+            reactions: Some(vec![MessageReactionView {
+                emoji: "👍".into(),
+                actors: vec![
+                    ReactionActorView {
+                        is_self: true,
+                        address: None,
+                    },
+                    ReactionActorView {
+                        is_self: false,
+                        address: Some("+15555550101".into()),
+                    },
+                ],
+            }]),
+            own_reaction_request: Some(OwnReactionRequestView {
+                request_id: "req-1".into(),
+                emoji: None,
+                previous_emoji: Some("❤️".into()),
+                state: OwnReactionRequestState::NotSent,
+                refusal: Some(OwnReactionRefusal::InvalidEmoji),
+            }),
+            reactable: Some(ReactionRouteDto::Native),
+            ..message(MessageSender::Other)
+        };
+        assert_eq!(
+            wire(&full),
+            json!({
+                "id": "message-1",
+                "revision": "7",
+                "sender": "other",
+                "senderAddress": "+15555550100",
+                "body": "",
+                "oneTimeCode": "123456",
+                "timestamp": "",
+                "status": "read",
+                "statusAt": "1700000000001",
+                "groupHint": "members_changed",
+                "attachments": [{
+                    "id": "attachment-1",
+                    "name": "photo.jpg",
+                    "mediaType": "image/jpeg",
+                    "byteSize": 42,
+                    "state": "ready"
+                }],
+                "transport": "rcs",
+                "subject": "Subject",
+                "participants": ["+15555550100"],
+                "rcsReported": true,
+                "sendCancellation": {"state": "too-late", "canCancel": false, "requiresGatewayUpdate": true},
+                "sendRecovery": {
+                    "kind": "unconfirmed-removed-cancel",
+                    "canSendAgain": false,
+                    "sentAgain": {"messageId": "copy-1"}
+                },
+                "sentAgain": {"messageId": "copy-2"},
+                "reactions": [{
+                    "emoji": "👍",
+                    "actors": [{"self": true}, {"self": false, "address": "+15555550101"}]
+                }],
+                "ownReactionRequest": {
+                    "requestId": "req-1",
+                    "emoji": null,
+                    "previousEmoji": "❤️",
+                    "state": "not_sent",
+                    "refusal": "invalid_emoji"
+                },
+                "reactable": "native"
+            })
+        );
+    }
+
+    #[test]
+    fn message_union_values_are_unchanged() {
+        for (sender, wire_value) in [
+            (MessageSender::SelfSent, "self"),
+            (MessageSender::Other, "other"),
+        ] {
+            assert_eq!(
+                wire(&message(sender)),
+                with_field(minimal_message_json(), "sender", json!(wire_value))
+            );
+        }
+        for (status, wire_value) in [
+            (MessageStatus::QueuedLocal, "queued-local"),
+            (MessageStatus::ServerAccepted, "server-accepted"),
+            (MessageStatus::GatewayPersisted, "gateway-persisted"),
+            (MessageStatus::Preparing, "preparing"),
+            (MessageStatus::Submitted, "submitted"),
+            (MessageStatus::Sent, "sent"),
+            (MessageStatus::DeliveryConfirmed, "delivery-confirmed"),
+            (MessageStatus::FailedBeforeSubmit, "failed-before-submit"),
+            (MessageStatus::FailedConfirmed, "failed-confirmed"),
+            (MessageStatus::Unknown, "unknown"),
+            (MessageStatus::Read, "read"),
+        ] {
+            let view = MessageView {
+                status: Some(status),
+                ..message(MessageSender::Other)
+            };
+            assert_eq!(
+                wire(&view),
+                with_field(minimal_message_json(), "status", json!(wire_value))
+            );
+        }
+        for (group_hint, wire_value) in [
+            (GroupHint::MembersChanged, "members_changed"),
+            (GroupHint::UpdateRequired, "update_required"),
+            (GroupHint::Withdrawn, "withdrawn"),
+            (GroupHint::CreateUnknown, "create_unknown"),
+            (GroupHint::CreateNotRcs, "create_not_rcs"),
+        ] {
+            let view = MessageView {
+                group_hint: Some(group_hint),
+                ..message(MessageSender::Other)
+            };
+            assert_eq!(
+                wire(&view),
+                with_field(minimal_message_json(), "groupHint", json!(wire_value))
+            );
+        }
+        for (transport, wire_value) in [
+            (MessageTransport::Sms, "sms"),
+            (MessageTransport::Mms, "mms"),
+            (MessageTransport::Rcs, "rcs"),
+        ] {
+            let view = MessageView {
+                transport: Some(transport),
+                ..message(MessageSender::Other)
+            };
+            assert_eq!(
+                wire(&view),
+                with_field(minimal_message_json(), "transport", json!(wire_value))
+            );
+        }
+        for (reactable, wire_value) in [
+            (ReactionRouteDto::Native, "native"),
+            (ReactionRouteDto::Text, "text"),
+        ] {
+            let view = MessageView {
+                reactable: Some(reactable),
+                ..message(MessageSender::Other)
+            };
+            assert_eq!(
+                wire(&view),
+                with_field(minimal_message_json(), "reactable", json!(wire_value))
+            );
+        }
+    }
+
+    #[test]
+    fn media_metadata_preview_is_nested_in_attachment_json() {
+        let meta = MediaMetadataView {
+            width: None,
+            height: None,
+            duration_ms: None,
+            thumbnail: None,
+            preview_unavailable: Some(MediaPreviewUnavailable::ThumbnailUnavailable),
+        };
+        let view = AttachmentView {
+            media_meta: Some(Box::new(meta)),
+            ..attachment(AttachmentStateDto::Ready)
+        };
+        assert_eq!(
+            wire(&view),
+            json!({
+                "id": "attachment-1",
+                "name": "photo.jpg",
+                "mediaType": "image/jpeg",
+                "byteSize": 42,
+                "state": "ready",
+                "mediaMeta": {"previewUnavailable": "thumbnail_unavailable"}
+            })
+        );
+    }
+}

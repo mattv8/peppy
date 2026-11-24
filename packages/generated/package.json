@@ -9,6 +9,7 @@
     "./notification-dismissal": "./src/notification-dismissal.ts",
     "./launch-progress": "./src/launch-progress.ts",
     "./gateway": "./src/gateway.ts",
+    "./message": "./src/message.ts",
     "./attachment-retention": "./src/attachment-retention.ts",
     "./account-access": "./src/account-access.ts",
     "./rcs-status": "./src/rcs-status.ts",

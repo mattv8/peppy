@@ -869,17 +869,27 @@ fn pasted_attachment_display_name(name: &str, media_type: &str) -> String {
     }
 }
 
-fn draft_attachment_state_label(state: peppy_client_core::DraftAttachmentState) -> &'static str {
+fn draft_attachment_state_label(
+    state: peppy_client_core::DraftAttachmentState,
+) -> dto::DraftAttachmentState {
     match state {
-        peppy_client_core::DraftAttachmentState::Saving => "saving",
-        peppy_client_core::DraftAttachmentState::Local => "local",
-        peppy_client_core::DraftAttachmentState::Waiting => "waiting",
-        peppy_client_core::DraftAttachmentState::Uploading => "uploading",
-        peppy_client_core::DraftAttachmentState::Uploaded => "uploaded",
-        peppy_client_core::DraftAttachmentState::UploadFailed => "upload-failed",
-        peppy_client_core::DraftAttachmentState::Downloading => "downloading",
-        peppy_client_core::DraftAttachmentState::DownloadFailed => "download-failed",
-        peppy_client_core::DraftAttachmentState::Unavailable => "unavailable",
+        peppy_client_core::DraftAttachmentState::Saving => dto::DraftAttachmentState::Saving,
+        peppy_client_core::DraftAttachmentState::Local => dto::DraftAttachmentState::Local,
+        peppy_client_core::DraftAttachmentState::Waiting => dto::DraftAttachmentState::Waiting,
+        peppy_client_core::DraftAttachmentState::Uploading => dto::DraftAttachmentState::Uploading,
+        peppy_client_core::DraftAttachmentState::Uploaded => dto::DraftAttachmentState::Uploaded,
+        peppy_client_core::DraftAttachmentState::UploadFailed => {
+            dto::DraftAttachmentState::UploadFailed
+        }
+        peppy_client_core::DraftAttachmentState::Downloading => {
+            dto::DraftAttachmentState::Downloading
+        }
+        peppy_client_core::DraftAttachmentState::DownloadFailed => {
+            dto::DraftAttachmentState::DownloadFailed
+        }
+        peppy_client_core::DraftAttachmentState::Unavailable => {
+            dto::DraftAttachmentState::Unavailable
+        }
     }
 }
 
@@ -892,7 +902,7 @@ pub(crate) fn missing_draft_attachment_view(
         name: "Attachment".into(),
         media_type: "application/octet-stream".into(),
         byte_size: 0,
-        state: "pending",
+        state: dto::AttachmentStateDto::Pending,
         error: None,
         preview_url: None,
         transfer: None,
@@ -2170,10 +2180,10 @@ impl Session {
                         name: "Attachment".into(),
                         media_type: "application/octet-stream".into(),
                         byte_size: 0,
-                        state: "pending",
+                        state: dto::AttachmentStateDto::Pending,
                         error: None,
                         preview_url: None,
-                        transfer: Some("download"),
+                        transfer: Some(dto::AttachmentTransfer::Download),
                         retryable: None,
                         media_hold: None,
                         media_meta: None,
@@ -3141,24 +3151,27 @@ mod tests {
             Some(peppy_client_core::DraftAttachmentState::Saving),
         );
 
-        assert_eq!(view.state, "pending");
-        assert_eq!(view.draft_state, Some("saving"));
-        assert_ne!(view.draft_state, Some("unavailable"));
+        assert_eq!(view.state, dto::AttachmentStateDto::Pending);
+        assert_eq!(view.draft_state, Some(dto::DraftAttachmentState::Saving));
+        assert_ne!(
+            view.draft_state,
+            Some(dto::DraftAttachmentState::Unavailable)
+        );
     }
 
     #[test]
     fn draft_attachment_state_labels_cover_all_variants() {
         use peppy_client_core::DraftAttachmentState::*;
         for (state, label) in [
-            (Saving, "saving"),
-            (Local, "local"),
-            (Waiting, "waiting"),
-            (Uploading, "uploading"),
-            (Uploaded, "uploaded"),
-            (UploadFailed, "upload-failed"),
-            (Downloading, "downloading"),
-            (DownloadFailed, "download-failed"),
-            (Unavailable, "unavailable"),
+            (Saving, dto::DraftAttachmentState::Saving),
+            (Local, dto::DraftAttachmentState::Local),
+            (Waiting, dto::DraftAttachmentState::Waiting),
+            (Uploading, dto::DraftAttachmentState::Uploading),
+            (Uploaded, dto::DraftAttachmentState::Uploaded),
+            (UploadFailed, dto::DraftAttachmentState::UploadFailed),
+            (Downloading, dto::DraftAttachmentState::Downloading),
+            (DownloadFailed, dto::DraftAttachmentState::DownloadFailed),
+            (Unavailable, dto::DraftAttachmentState::Unavailable),
         ] {
             assert_eq!(draft_attachment_state_label(state), label);
         }

@@ -1,6 +1,7 @@
 //! Shared local draft composition policy for native and browser hosts.
 use crate::{
-    DraftView, GatewayAvailability, GatewayView, SendResultView, draft_view, group_refusal_view,
+    DraftView, GatewayAvailability, GatewayView, SendRecoveryKind, SendResultView, draft_view,
+    group_refusal_view,
     mms_plan::{MmsImage, MmsPlan, MmsPlanError, plan_mms},
     send_recovery_view,
 };
@@ -426,7 +427,7 @@ pub fn send_again(
     };
     // A "not sent" message may go back through its own phone, which is ready again. A removed
     // phone is revoked, so it is never a route; any revoked gateway is refused by the lookup.
-    let own_phone_allowed = recovery.kind == "not-sent";
+    let own_phone_allowed = recovery.kind == SendRecoveryKind::NotSent;
     let gateway = gateways
         .and_then(|gateways| find_route(gateways, &input.gateway_id, &input.sim_id))
         .filter(|gateway| !revoked_devices.contains(&gateway.id))

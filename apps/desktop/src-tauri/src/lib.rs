@@ -3168,11 +3168,19 @@ async fn cancel_send(
     session.notify();
     Ok(SendCancellationView {
         state: match result.state {
-            peppy_client_core::SendCancellationState::None => "none",
-            peppy_client_core::SendCancellationState::Requested => "requested",
-            peppy_client_core::SendCancellationState::Confirmed => "confirmed",
-            peppy_client_core::SendCancellationState::TooLate => "too-late",
-            peppy_client_core::SendCancellationState::Unknown => "unknown",
+            peppy_client_core::SendCancellationState::None => dto::SendCancellationStateDto::None,
+            peppy_client_core::SendCancellationState::Requested => {
+                dto::SendCancellationStateDto::Requested
+            }
+            peppy_client_core::SendCancellationState::Confirmed => {
+                dto::SendCancellationStateDto::Confirmed
+            }
+            peppy_client_core::SendCancellationState::TooLate => {
+                dto::SendCancellationStateDto::TooLate
+            }
+            peppy_client_core::SendCancellationState::Unknown => {
+                dto::SendCancellationStateDto::Unknown
+            }
         },
         can_cancel: result.can_request,
         requires_gateway_update: result.requires_gateway_update,

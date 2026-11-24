@@ -2,7 +2,7 @@
 //! that swallows a send during setup retires it as not sent, and the sender's own phone, now ready,
 //! is the route for the copy.
 use crate::compose::{self, SendAgainInput};
-use crate::{GatewayAvailability, GatewayView, send_recovery_view};
+use crate::{GatewayAvailability, GatewayView, SendRecoveryKind, send_recovery_view};
 use peppy_client_core::{
     ApplyReport, Client, ClientConfig, CommandId, ConversationId, Cursor, DatabaseKey, DeviceId,
     Envelope, GatewayRoute, IngestResult, MessageId, OutgoingSms, SendState, SnapshotPurpose,
@@ -195,7 +195,7 @@ fn a_swallowed_send_is_copied_through_its_own_ready_phone_and_runs_once() {
     let view = send_recovery_view(&computer, &before, &no_revocations)
         .unwrap()
         .unwrap();
-    assert_eq!(view.kind, "not-sent");
+    assert_eq!(view.kind, SendRecoveryKind::NotSent);
     assert!(view.can_send_again);
 
     // The only phone is the one that retired the send: its own route is the copy's route.
@@ -227,7 +227,7 @@ fn a_swallowed_send_is_copied_through_its_own_ready_phone_and_runs_once() {
     let view = send_recovery_view(&computer, &after, &no_revocations)
         .unwrap()
         .unwrap();
-    assert_eq!(view.kind, "not-sent");
+    assert_eq!(view.kind, SendRecoveryKind::NotSent);
     assert!(!view.can_send_again);
     assert_eq!(
         view.sent_again.map(|copy| copy.message_id),
