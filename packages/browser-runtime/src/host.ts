@@ -237,8 +237,7 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   unread_message_batches: { coreCommand: "unread_message_batches", mutation: false },
   mark_read_batch: { coreCommand: "mark_read_batch", mutation: true },
   evict_attachment_ciphertext: { coreCommand: "evict_attachment_ciphertext", mutation: true },
-  dismiss_notification: { coreCommand: "dismiss_notification", mutation: true },
-  dismiss_all_notifications: { coreCommand: "dismiss_all_notifications", mutation: true },
+  dismiss_notifications: { coreCommand: "dismiss_notifications", mutation: true },
   set_app_muted: { coreCommand: "set_app_muted", mutation: true },
   set_conversation_pinned: { coreCommand: "set_conversation_pinned", mutation: true },
   request_sender_unblock: { coreCommand: "request_sender_unblock", mutation: true },
@@ -380,7 +379,7 @@ function errorFor(error: unknown): RpcError {
   if (error instanceof BrowserSessionError) return { code: error.code, message: "Browser session is not ready." };
   if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
     const details = errorDetails(error);
-    const codes = new Set(["already-open", "attachment-invalid", "attachment-local", "busy", "core", "database-key-mismatch", "gateway-offline", "gateway-unavailable", "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found", "request-too-large", "stale-draft", "draft-moved", "draft-not-discardable", "recipientless-draft-exists", "draft-merge-overflow", "unknown-command", "unlock-failed", "invalid-contact-edit", "contact-book-read-only", "contact-book-deleted", "contact-book-not-deletable", "contact-field-read-only", "contact-photo-invalid", "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable", "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message", "message-too-long", "already-sent-again", "route-unavailable", "attachments-unavailable", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "media-pending", "public-copy-unsupported", "public-copy-too-large", "host-state", "device-revoked", "unsupported", "http-401", "http-403", "invalid_setup_token", "instance_already_claimed", "setup_window_closed"]);
+    const codes = new Set(["already-open", "attachment-invalid", "attachment-local", "busy", "core", "database-key-mismatch", "gateway-offline", "gateway-unavailable", "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found", "request-too-large", "stale-draft", "draft-moved", "draft-not-discardable", "recipientless-draft-exists", "draft-merge-overflow", "unknown-command", "unlock-failed", "update-in-progress", "invalid-contact-edit", "contact-book-read-only", "contact-book-deleted", "contact-book-not-deletable", "contact-field-read-only", "contact-photo-invalid", "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable", "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message", "message-too-long", "already-sent-again", "route-unavailable", "attachments-unavailable", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "media-pending", "public-copy-unsupported", "public-copy-too-large", "host-state", "device-revoked", "unsupported", "http-401", "http-403", "invalid_setup_token", "instance_already_claimed", "setup_window_closed"]);
     const code = codes.has(error.code) ? error.code : "unavailable";
     return { code, message: "Browser operation failed.", ...details };
   }

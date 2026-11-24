@@ -104,7 +104,8 @@ use error::{core_error, BridgeError, BridgeResult};
 use notifications::{NotificationPreferences, NotificationSettings, NotificationView};
 use peppy_client_core::{
     AttachmentId, AttachmentInfo, ConversationFolder, ConversationId, DraftId, LocalSearchRequest,
-    MessageId, NativePlaintextFile, NotificationTarget, OneTimeCodeTarget, SearchIndexState,
+    MessageId, NativePlaintextFile, NotificationDismissResult, NotificationTarget,
+    OneTimeCodeTarget, SearchIndexState,
 };
 use peppy_desktop_api::compose::{self, DiscardDraftInput};
 #[cfg(target_os = "macos")]
@@ -5951,36 +5952,23 @@ async fn open_composer(
     new_composer(app, conversation_id).await
 }
 
-/// Requests a dismissal effect from core. The phone applies it when it next synchronizes; this
-/// command never claims that its Android notification-center item was already removed.
+/// Records up to 100 dismissals through the shared core policy and reports each target's outcome.
+/// The phone applies them when it next synchronizes; this command never claims that its
+/// Android notification-center item was already removed.
 #[tauri::command]
-async fn dismiss_notification(
+async fn dismiss_notifications(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
-    target: NotificationTarget,
-) -> BridgeResult<()> {
+    targets: Vec<NotificationTarget>,
+) -> BridgeResult<Vec<NotificationDismissResult>> {
     let operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let session = state.require_session_admitted(&operation).await?;
     let s = session.clone();
-    blocking(move || s.client.dismiss_notification(target).map_err(core_error)).await?;
+    let results =
+        blocking(move || s.client.dismiss_notifications(targets).map_err(core_error)).await?;
     session.notify();
-    Ok(())
-}
-
-/// Queues at most 100 durable effects through the shared core eligibility policy.
-#[tauri::command]
-async fn dismiss_all_notifications(
-    window: tauri::WebviewWindow,
-    state: State<'_, AppState>,
-) -> BridgeResult<()> {
-    let operation = admit_update_operation(&state)?;
-    require_main(window.label())?;
-    let session = state.require_session_admitted(&operation).await?;
-    let s = session.clone();
-    blocking(move || s.client.dismiss_all_notifications().map_err(core_error)).await?;
-    session.notify();
-    Ok(())
+    Ok(results)
 }
 
 #[tauri::command]
@@ -7374,8 +7362,7 @@ pub fn run() {
         open_media_viewer,
         publish_attachment,
         open_composer,
-        dismiss_notification,
-        dismiss_all_notifications,
+        dismiss_notifications,
         set_app_muted,
         set_conversation_pinned,
         request_sender_unblock,

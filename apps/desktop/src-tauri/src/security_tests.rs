@@ -767,6 +767,21 @@ fn notification_persistence_commands_require_the_main_window_at_runtime() {
 }
 
 #[test]
+fn dismiss_notifications_requires_the_main_window_and_an_admitted_session() {
+    let definition = include_str!("lib.rs")
+        .split("async fn dismiss_notifications(")
+        .nth(1)
+        .unwrap()
+        .split("\n}")
+        .next()
+        .unwrap();
+    assert!(definition.contains("window: tauri::WebviewWindow"));
+    assert!(definition.contains("let operation = admit_update_operation(&state)?;"));
+    assert!(definition.contains("require_main(window.label())?;"));
+    assert!(definition.contains("state.require_session_admitted(&operation)"));
+}
+
+#[test]
 fn mark_all_read_requires_a_visible_focused_main_window() {
     assert!(crate::require_mark_all_read_window("main", true, false, true).is_ok());
     assert_eq!(
