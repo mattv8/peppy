@@ -30,7 +30,7 @@ use uuid::Uuid;
 use crate::{
     api::{EnrollmentAuthorization, EnrollmentAuthorizationRequest, EnrollmentOperation},
     enrollment::{
-        client_kind_name,
+        canonical_configured_origin, client_kind_name,
         owner_authorization::{OwnerAuthorizationError, OwnerCredential, resolve_owner_credential},
         validate_device_name,
     },
@@ -64,7 +64,7 @@ impl ComputerEnrollmentRouterState {
             authorization,
             hosted,
             rls_enforced: false,
-            origin: canonical_origin(&origin)?,
+            origin: canonical_configured_origin(&origin)?,
             admissions: Arc::new(tokio::sync::Mutex::new(
                 crate::api::admission::LocalAdmissions::new(),
             )),
@@ -903,30 +903,13 @@ fn parse_state(value: String) -> Result<EnrollmentState, Error> {
         _ => Err(unauthorized("computer_enrollment_invalid")),
     }
 }
-fn canonical_origin(value: &str) -> Result<String, &'static str> {
-    let url = url::Url::parse(value).map_err(|_| "configured enrollment origin is invalid")?;
-    let loopback = url.host_str().is_some_and(|host| {
-        host == "localhost"
-            || host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback())
-    });
-    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
-        return Err("configured enrollment origin must be HTTPS or loopback HTTP");
-    }
-    let origin = url.origin().ascii_serialization();
-    if origin == "null" || origin != value.trim_end_matches('/') {
-        return Err("configured enrollment origin must not include a path, query, or fragment");
-    }
-    Ok(origin)
-}
 fn request_origin(state: &ComputerEnrollmentRouterState, headers: &HeaderMap) -> Result<(), Error> {
     if state.hosted {
         return Ok(());
     }
     if let Some(value) = headers.get("origin") {
         let value = value.to_str().map_err(|_| bad("invalid_origin"))?;
-        if canonical_origin(value).map_err(bad)? != state.origin {
+        if canonical_configured_origin(value).map_err(bad)? != state.origin {
             return Err(Error(StatusCode::FORBIDDEN, "origin_mismatch"));
         }
     }

@@ -73,6 +73,24 @@ pub fn validate_device_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn canonical_configured_origin(value: &str) -> Result<String, &'static str> {
+    let url = url::Url::parse(value).map_err(|_| "configured enrollment origin is invalid")?;
+    let loopback = url.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+        return Err("configured enrollment origin must be HTTPS or loopback HTTP");
+    }
+    let origin = url.origin().ascii_serialization();
+    if origin == "null" || origin != value.trim_end_matches('/') {
+        return Err("configured enrollment origin must not include a path, query, or fragment");
+    }
+    Ok(origin)
+}
+
 pub fn client_kind_name(kind: ClientKind) -> &'static str {
     match kind {
         ClientKind::Browser => "browser",

@@ -28,7 +28,7 @@ use uuid::Uuid;
 use crate::{
     api::{EnrollmentAuthorization, EnrollmentAuthorizationRequest, EnrollmentOperation},
     enrollment::{
-        client_kind_name,
+        canonical_configured_origin, client_kind_name,
         owner_authorization::{OwnerAuthorizationError, OwnerCredential, resolve_owner_credential},
         validate_device_name,
     },
@@ -353,7 +353,7 @@ async fn invitation_status(
             "invitation_unauthorized",
         ));
     }
-    status_from_row(&row, is_owner || is_claimant)
+    status_from_row(&row)
 }
 
 async fn approve_invitation(
@@ -408,7 +408,7 @@ async fn approve_invitation(
     }
     let row = sqlx::query("SELECT p.*,v.public_key_profile,p.expires_at > now() AS expires_valid,GREATEST(0,floor(extract(epoch FROM p.expires_at-now())))::bigint AS expires_remaining FROM phone_invitations p JOIN vaults v ON v.vault_id=p.vault_id WHERE p.id=$1").bind(invitation_id).fetch_one(&mut *tx).await.map_err(database)?;
     tx.commit().await.map_err(database)?;
-    status_from_row(&row, true)
+    status_from_row(&row)
 }
 
 async fn confirm_invitation(
@@ -802,23 +802,6 @@ fn random_secret() -> String {
 fn digest(value: &str) -> [u8; 32] {
     Sha256::digest(value.as_bytes()).into()
 }
-fn canonical_configured_origin(value: &str) -> Result<String, &'static str> {
-    let url = url::Url::parse(value).map_err(|_| "configured enrollment origin is invalid")?;
-    let loopback = url.host_str().is_some_and(|host| {
-        host == "localhost"
-            || host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|address| address.is_loopback())
-    });
-    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
-        return Err("configured enrollment origin must be HTTPS or loopback HTTP");
-    }
-    let origin = url.origin().ascii_serialization();
-    if origin == "null" || origin != value.trim_end_matches('/') {
-        return Err("configured enrollment origin must not include a path, query, or fragment");
-    }
-    Ok(origin)
-}
 fn request_origin(
     state: &InvitationRouterState,
     headers: &HeaderMap,
@@ -913,10 +896,7 @@ fn transcript_matches(context: &EnrollmentContext, hash: &str) -> Result<(), Inv
         Err(InvitationError(StatusCode::CONFLICT, "transcript_mismatch"))
     }
 }
-fn status_from_row(
-    row: &sqlx::postgres::PgRow,
-    authorized: bool,
-) -> Result<Json<InvitationStatus>, InvitationError> {
+fn status_from_row(row: &sqlx::postgres::PgRow) -> Result<Json<InvitationStatus>, InvitationError> {
     let expired = !row.get::<bool, _>("expires_valid");
     let state = if expired {
         EnrollmentState::Expired
@@ -940,12 +920,12 @@ fn status_from_row(
     } else {
         None
     };
-    let transcript = if authorized && claim.is_some() {
+    let transcript = if claim.is_some() {
         Some(transcript_from_row(row)?)
     } else {
         None
     };
-    let approved = authorized && matches!(state, EnrollmentState::Approved);
+    let approved = matches!(state, EnrollmentState::Approved);
     Ok(Json(InvitationStatus {
         state,
         expires_in_seconds: remaining(row),
@@ -963,7 +943,7 @@ fn status_from_row(
                     .map(|value| encode_base64url(&value))
             })
             .flatten(),
-        profile: authorized.then(|| row.get("public_key_profile")),
+        profile: Some(row.get("public_key_profile")),
     }))
 }
 fn transcript_from_row(
