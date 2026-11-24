@@ -1849,28 +1849,6 @@ func (link *Link) persistIfGeneration(generation uint64) error {
 	return nil
 }
 
-func (link *Link) persistForGeneration(generation uint64) error {
-	link.persistMu.Lock()
-	defer link.persistMu.Unlock()
-	link.mu.Lock()
-	if link.closed || generation != link.generation || link.runGeneration != generation {
-		link.mu.Unlock()
-		return nil
-	}
-	link.seq++
-	auth, err := json.Marshal(link.auth)
-	state := persistedState{Version: stateVersion, Seq: link.seq, State: link.state, PairingFrom: link.pairingFrom, StopCode: link.stopCode, PairingEvidenceID: link.pairingEvidenceID, Auth: auth}
-	encoded, marshalErr := json.Marshal(state)
-	link.mu.Unlock()
-	if err != nil || marshalErr != nil {
-		return errPersistFailed
-	}
-	if err := link.host.PersistState(encoded); err != nil {
-		return errPersistFailed
-	}
-	return nil
-}
-
 func (link *Link) persist() error {
 	link.persistMu.Lock()
 	defer link.persistMu.Unlock()
