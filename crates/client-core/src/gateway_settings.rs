@@ -58,6 +58,38 @@ pub struct GatewayCapabilities {
     pub notification_mark_read_supported: bool,
 }
 
+/// Why this phone cannot currently dismiss mirrored notifications. Stored and sent as snake_case
+/// codes; codes this build does not know decode as [`Self::Other`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationDismissalBlockReason {
+    MirroringOff,
+    NotificationAccessOff,
+    WaitingForWifi,
+    #[serde(other)]
+    Other,
+}
+
+impl NotificationDismissalBlockReason {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::MirroringOff => "mirroring_off",
+            Self::NotificationAccessOff => "notification_access_off",
+            Self::WaitingForWifi => "waiting_for_wifi",
+            Self::Other => "other",
+        }
+    }
+
+    pub(crate) fn from_code(code: &str) -> Self {
+        match code {
+            "mirroring_off" => Self::MirroringOff,
+            "notification_access_off" => Self::NotificationAccessOff,
+            "waiting_for_wifi" => Self::WaitingForWifi,
+            _ => Self::Other,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GatewayPolicyDecision {
     pub capture_notification: bool,
@@ -132,13 +164,10 @@ impl Client {
     ) -> Result<GatewayPolicyDecision, Error> {
         let settings = self.gateway_settings()?;
         let capabilities = Self::gateway_capabilities(platform, facts);
-        let wifi_permits = !settings.mirroring_wifi_only || facts.wifi_connected;
-        let notification_allowed = settings.mirroring_enabled
-            && capabilities.notification_mirroring_supported
-            && wifi_permits
-            && (!settings.skip_silent || !facts.notification_is_silent);
+        let block = notification_policy_block(&settings, &capabilities, facts);
         Ok(GatewayPolicyDecision {
-            capture_notification: notification_allowed,
+            capture_notification: block.is_none()
+                && (!settings.skip_silent || !facts.notification_is_silent),
             capture_sms: settings.sms_sync_enabled && capabilities.sms_sync_supported,
             capture_mms: settings.sms_sync_enabled
                 && settings.mms_sync_enabled
@@ -154,11 +183,26 @@ impl Client {
                 && platform == GatewayPlatform::Android
                 && capabilities.sms_sync_supported,
             apply_notification_mark_read: settings.notification_mark_read_enabled
-                && settings.mirroring_enabled
-                && capabilities.notification_mirroring_supported
-                && capabilities.notification_mark_read_supported
-                && wifi_permits,
+                && block.is_none()
+                && capabilities.notification_mark_read_supported,
         })
+    }
+}
+
+/// Shared mirroring gate: `None` means this phone can dismiss and capture mirrored notifications.
+pub(crate) fn notification_policy_block(
+    settings: &GatewaySettings,
+    caps: &GatewayCapabilities,
+    facts: GatewayHostFacts,
+) -> Option<NotificationDismissalBlockReason> {
+    if !settings.mirroring_enabled {
+        Some(NotificationDismissalBlockReason::MirroringOff)
+    } else if !caps.notification_mirroring_supported {
+        Some(NotificationDismissalBlockReason::NotificationAccessOff)
+    } else if settings.mirroring_wifi_only && !facts.wifi_connected {
+        Some(NotificationDismissalBlockReason::WaitingForWifi)
+    } else {
+        None
     }
 }
 
@@ -184,7 +228,7 @@ pub(super) fn seed(conn: &Connection, legacy_enabled_installation: bool) -> Resu
     Ok(())
 }
 
-fn load(conn: &Connection) -> Result<GatewaySettings, Error> {
+pub(crate) fn load(conn: &Connection) -> Result<GatewaySettings, Error> {
     conn.query_row(
         "SELECT mirroring_enabled,mirroring_wifi_only,skip_silent,sms_sync_enabled,mms_sync_enabled,media_wifi_only,phone_read_enabled,notification_mark_read_enabled FROM gateway_settings WHERE id=1",
         [],
@@ -202,4 +246,152 @@ fn save(conn: &Connection, settings: &GatewaySettings) -> Result<(), Error> {
         params![settings.mirroring_enabled, settings.mirroring_wifi_only, settings.skip_silent, settings.sms_sync_enabled, settings.mms_sync_enabled, settings.media_wifi_only, settings.phone_read_enabled, settings.notification_mark_read_enabled],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_REASONS: [NotificationDismissalBlockReason; 4] = [
+        NotificationDismissalBlockReason::MirroringOff,
+        NotificationDismissalBlockReason::NotificationAccessOff,
+        NotificationDismissalBlockReason::WaitingForWifi,
+        NotificationDismissalBlockReason::Other,
+    ];
+
+    fn caps(supported: bool) -> GatewayCapabilities {
+        GatewayCapabilities {
+            notification_mirroring_supported: supported,
+            sms_sync_supported: false,
+            mms_sync_supported: false,
+            rcs_supported: false,
+            phone_read_supported: false,
+            notification_mark_read_supported: false,
+        }
+    }
+
+    fn settings(mirroring_enabled: bool, wifi_only: bool, skip_silent: bool) -> GatewaySettings {
+        GatewaySettings {
+            mirroring_enabled,
+            mirroring_wifi_only: wifi_only,
+            skip_silent,
+            ..GatewaySettings::default()
+        }
+    }
+
+    fn facts(wifi_connected: bool, notification_is_silent: bool) -> GatewayHostFacts {
+        GatewayHostFacts {
+            wifi_connected,
+            notification_is_silent,
+            ..GatewayHostFacts::default()
+        }
+    }
+
+    /// The pre-refactor formulas, kept verbatim so the refactor is checked against them.
+    fn legacy_capture(s: &GatewaySettings, c: &GatewayCapabilities, f: GatewayHostFacts) -> bool {
+        let wifi_permits = !s.mirroring_wifi_only || f.wifi_connected;
+        s.mirroring_enabled
+            && c.notification_mirroring_supported
+            && wifi_permits
+            && (!s.skip_silent || !f.notification_is_silent)
+    }
+
+    fn legacy_mark_read(s: &GatewaySettings, c: &GatewayCapabilities, f: GatewayHostFacts) -> bool {
+        let wifi_permits = !s.mirroring_wifi_only || f.wifi_connected;
+        s.notification_mark_read_enabled
+            && s.mirroring_enabled
+            && c.notification_mirroring_supported
+            && c.notification_mark_read_supported
+            && wifi_permits
+    }
+
+    #[test]
+    fn dismissal_block_reason_precedence() {
+        let f = facts(false, false);
+        assert_eq!(
+            notification_policy_block(&settings(false, true, true), &caps(false), f),
+            Some(NotificationDismissalBlockReason::MirroringOff)
+        );
+        assert_eq!(
+            notification_policy_block(&settings(true, true, true), &caps(false), f),
+            Some(NotificationDismissalBlockReason::NotificationAccessOff)
+        );
+        assert_eq!(
+            notification_policy_block(&settings(true, true, true), &caps(true), f),
+            Some(NotificationDismissalBlockReason::WaitingForWifi)
+        );
+        assert_eq!(
+            notification_policy_block(&settings(true, false, true), &caps(true), f),
+            None
+        );
+        assert_eq!(
+            notification_policy_block(&settings(true, true, true), &caps(true), facts(true, false)),
+            None
+        );
+    }
+
+    #[test]
+    fn capture_notification_matches_dismissal_availability_for_every_fact_combination() {
+        let mut combinations = 0;
+        for mirroring_enabled in [false, true] {
+            for mirroring_wifi_only in [false, true] {
+                for skip_silent in [false, true] {
+                    for listener_available in [false, true] {
+                        for wifi_connected in [false, true] {
+                            for notification_is_silent in [false, true] {
+                                let mut s =
+                                    settings(mirroring_enabled, mirroring_wifi_only, skip_silent);
+                                s.notification_mark_read_enabled = true;
+                                let c = GatewayCapabilities {
+                                    notification_mark_read_supported: true,
+                                    ..caps(listener_available)
+                                };
+                                let f = GatewayHostFacts {
+                                    wifi_connected,
+                                    notification_is_silent,
+                                    notification_listener_available: listener_available,
+                                    ..GatewayHostFacts::default()
+                                };
+                                let block = notification_policy_block(&s, &c, f);
+                                let silence_allows = !skip_silent || !notification_is_silent;
+                                let capture = block.is_none() && silence_allows;
+                                assert_eq!(capture, legacy_capture(&s, &c, f));
+                                let mark_read = s.notification_mark_read_enabled
+                                    && block.is_none()
+                                    && c.notification_mark_read_supported;
+                                assert_eq!(mark_read, legacy_mark_read(&s, &c, f));
+                                combinations += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(combinations, 64);
+    }
+
+    #[test]
+    fn dismissal_block_reason_codes_round_trip_and_unknown_is_other() {
+        for reason in ALL_REASONS {
+            assert_eq!(
+                NotificationDismissalBlockReason::from_code(reason.code()),
+                reason
+            );
+            let json = serde_json::to_string(&reason).unwrap();
+            assert_eq!(json, format!("\"{}\"", reason.code()));
+            assert_eq!(
+                serde_json::from_str::<NotificationDismissalBlockReason>(&json).unwrap(),
+                reason
+            );
+        }
+        assert_eq!(
+            NotificationDismissalBlockReason::from_code("from_the_future"),
+            NotificationDismissalBlockReason::Other
+        );
+        assert_eq!(
+            serde_json::from_str::<NotificationDismissalBlockReason>("\"from_the_future\"")
+                .unwrap(),
+            NotificationDismissalBlockReason::Other
+        );
+    }
 }

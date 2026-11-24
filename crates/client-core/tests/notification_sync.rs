@@ -873,3 +873,179 @@ fn locked_phone_lists_and_begins_nothing() {
     );
     assert!(!reopened.begin_notification_mark_read(&id, now()).unwrap());
 }
+
+fn android_facts() -> GatewayHostFacts {
+    GatewayHostFacts {
+        wifi_connected: true,
+        notification_listener_available: true,
+        ..GatewayHostFacts::default()
+    }
+}
+
+#[test]
+fn computer_sees_phone_block_and_its_recovery() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone_cfg = config(&dir, "block-phone", &vault);
+    let phone = unlocked(&phone_cfg, &vault);
+    let desktop = unlocked(&config(&dir, "block-desktop", &vault), &vault);
+    let mut server = Server::default();
+    let phone_id = phone_cfg.device_id.to_string();
+
+    phone
+        .capture_notification(capture("k1", "i1", "hello"))
+        .unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+    let item = desktop
+        .notification_snapshot()
+        .unwrap()
+        .notifications
+        .remove(0);
+    desktop.dismiss_notification(item.target.clone()).unwrap();
+    server.upload(&desktop);
+    server.sync(&phone);
+    assert_eq!(phone.pending_notification_dismissals(10).unwrap().len(), 1);
+
+    // Mirroring is off on the phone, so it cannot dismiss and says so.
+    assert!(
+        phone
+            .publish_notification_dismissal_status(GatewayPlatform::Android, android_facts(), 1_000)
+            .unwrap()
+    );
+    server.upload(&phone);
+    server.sync(&desktop);
+    settle(&desktop);
+    assert_eq!(
+        desktop.notification_snapshot().unwrap().dismissal_blocks,
+        vec![NotificationDismissalBlock {
+            source_device_id: phone_id,
+            reason: NotificationDismissalBlockReason::MirroringOff,
+            observed_at_ms: 1_000,
+        }]
+    );
+
+    // Mirroring comes back: the phone reports that it can dismiss, and the block clears.
+    phone
+        .set_gateway_settings(GatewaySettings {
+            mirroring_enabled: true,
+            ..GatewaySettings::default()
+        })
+        .unwrap();
+    assert!(
+        phone
+            .publish_notification_dismissal_status(GatewayPlatform::Android, android_facts(), 2_000)
+            .unwrap()
+    );
+    server.upload(&phone);
+    server.sync(&desktop);
+    settle(&desktop);
+    assert!(
+        desktop
+            .notification_snapshot()
+            .unwrap()
+            .dismissal_blocks
+            .is_empty()
+    );
+}
+
+#[test]
+fn snapshot_import_keeps_the_phones_newest_dismissal_status_and_authorizes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone_cfg = config(&dir, "snap-status-phone", &vault);
+    let phone = unlocked(&phone_cfg, &vault);
+    let desktop = unlocked(&config(&dir, "snap-status-desktop", &vault), &vault);
+    let mut server = Server::default();
+
+    phone
+        .capture_notification(capture("k1", "i1", "hello"))
+        .unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+    let item = desktop
+        .notification_snapshot()
+        .unwrap()
+        .notifications
+        .remove(0);
+    desktop.dismiss_notification(item.target).unwrap();
+    server.upload(&desktop);
+    server.sync(&phone);
+
+    // Three states in order: mirroring off, then waiting for wifi, then able to dismiss.
+    assert!(
+        phone
+            .publish_notification_dismissal_status(GatewayPlatform::Android, android_facts(), 1_000)
+            .unwrap()
+    );
+    server.upload(&phone);
+    phone
+        .set_gateway_settings(GatewaySettings {
+            mirroring_enabled: true,
+            mirroring_wifi_only: true,
+            ..GatewaySettings::default()
+        })
+        .unwrap();
+    assert!(
+        phone
+            .publish_notification_dismissal_status(
+                GatewayPlatform::Android,
+                GatewayHostFacts {
+                    wifi_connected: false,
+                    ..android_facts()
+                },
+                2_000,
+            )
+            .unwrap()
+    );
+    server.upload(&phone);
+    assert!(
+        phone
+            .publish_notification_dismissal_status(GatewayPlatform::Android, android_facts(), 3_000)
+            .unwrap()
+    );
+    server.upload(&phone);
+    let high_water = server.log.len();
+
+    // A fresh computer imports the whole uncompacted history: the newest state wins.
+    let full: Vec<SnapshotRecord> = server
+        .log
+        .iter()
+        .enumerate()
+        .map(|(index, envelope)| SnapshotRecord {
+            cursor: Cursor(index as u64 + 1),
+            envelope: envelope.clone(),
+        })
+        .collect();
+    let uncompacted = unlocked(&config(&dir, "snap-status-full", &vault), &vault);
+    uncompacted.set_server_compaction_supported(true).unwrap();
+    import(&uncompacted, &full, high_water, 21);
+    settle(&uncompacted);
+
+    // Another imports the compacted history, which keeps only the newest status for the phone.
+    let retained = compact(&server.log, false);
+    assert_eq!(
+        retained.len(),
+        server.log.len() - 2,
+        "older statuses are superseded"
+    );
+    let compacted = unlocked(&config(&dir, "snap-status-compacted", &vault), &vault);
+    compacted.set_server_compaction_supported(true).unwrap();
+    import(&compacted, &retained, high_water, 22);
+    settle(&compacted);
+
+    for fresh in [&uncompacted, &compacted] {
+        assert_eq!(
+            fresh.notification_snapshot().unwrap().dismissal_blocks,
+            Vec::new(),
+            "the phone's newest status says it can dismiss"
+        );
+        assert!(
+            fresh
+                .pending_notification_dismissals(10)
+                .unwrap()
+                .is_empty(),
+            "a status imported from history authorizes no dismissal"
+        );
+    }
+}

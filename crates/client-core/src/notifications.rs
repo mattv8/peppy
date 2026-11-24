@@ -324,9 +324,11 @@ impl Client {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let dismissal_blocks = notification_dismissal_status::snapshot_blocks(&s.conn)?;
         Ok(NotificationSnapshot {
             notifications,
             app_filters,
+            dismissal_blocks,
         })
     }
 
