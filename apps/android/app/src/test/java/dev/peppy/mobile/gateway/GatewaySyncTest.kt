@@ -1269,6 +1269,179 @@ class GatewaySyncTest : GatewayTestBase() {
     }
 
     @Test
+    fun repeatedInvalidSnapshotCutDoesNotRequestAnotherPass() {
+        val client = live()
+        eventsStatus = 409
+        snapshotCut = "0" to "1"
+        assertThrows(MobileBindingsException.InvalidRequest::class.java) {
+            client.beginSnapshotWithCompaction("0", 1uL, NativeSnapshotPurpose.RESYNC, null)
+        }
+        val first = sync(client).run()
+        assertNull(first.failure)
+        assertEquals("0", client.receiveCursor())
+        assertNull(client.snapshotProgress())
+        val eventRequests = requests.count { it.first.startsWith("GET /v1/events") }
+        val repeated = sync(client).run()
+        assertNull(repeated.failure)
+        assertEquals("0", client.receiveCursor())
+        assertNull(client.snapshotProgress())
+        assertFalse(repeated.commandsProgressed)
+        assertEquals(eventRequests + 1, requests.count { it.first.startsWith("GET /v1/events") })
+        assertFalse("unchanged InvalidRequest must not perpetuate successful continuation", repeated.more)
+    }
+
+    @Test
+    fun liveStagingBudgetContinuesWhenRecordsAdvance() {
+        val client = live()
+        snapshotRecords(1_000)
+        eventsStatus = 409
+        var elapsed = 0L
+        val timedClient = object : NativeClientInterface by client {
+            override fun appendSnapshotRawPage(generation: ULong, records: List<NativeRawSnapshotRecord>) =
+                client.appendSnapshotRawPage(generation, records).also {
+                    elapsed += GatewaySync.SNAPSHOT_STAGE_BUDGET_MS + 1
+                }
+        }
+        val result = sync(timedClient, elapsedMs = { elapsed }).run()
+        assertNull(result.failure)
+        assertEquals(200uL, client.snapshotProgress()?.receivedRecords)
+        assertTrue(result.more)
+    }
+
+    @Test
+    fun repeatedManifestBudgetExhaustionWithoutStagedRowsDoesNotRequestAnotherPass() {
+        val client = live()
+        twoSnapshotRecords()
+        snapshotManifestSupported = true
+        eventsStatus = 409
+        var elapsed = 0L
+        val timedClient = object : NativeClientInterface by client {
+            override fun appendSnapshotManifest(generation: ULong, entries: List<NativeSnapshotManifestEntry>) =
+                client.appendSnapshotManifest(generation, entries).also {
+                    elapsed += GatewaySync.SNAPSHOT_STAGE_BUDGET_MS + 1
+                }
+        }
+        val first = sync(timedClient, elapsedMs = { elapsed }).run()
+        assertNull(first.failure)
+        val before = client.snapshotProgress()!!
+        assertEquals(0uL, before.receivedRecords)
+        assertEquals("0", before.lastCursor)
+        val repeated = sync(timedClient, elapsedMs = { elapsed }).run()
+        assertNull(repeated.failure)
+        val after = client.snapshotProgress()!!
+        assertEquals(before.generation, after.generation)
+        assertEquals(before.receivedRecords, after.receivedRecords)
+        assertEquals(before.lastCursor, after.lastCursor)
+        assertEquals(2, requests.count { it.first.startsWith("GET /v1/snapshot/manifest") })
+        assertTrue(requests.none { it.first.startsWith("GET /v1/snapshot/records") })
+        assertFalse("An unchanged snapshot must wait for an ordinary wake", repeated.more)
+    }
+
+    @Test
+    fun liveDrainBudgetWithRejectedBeginStillReportsContinuation() {
+        val client = live()
+        snapshotRecords(3_000)
+        eventsStatus = 409
+        var elapsed = 0L
+        var exhaustNextDrain = true
+        val timedClient = object : NativeClientInterface by client {
+            override fun applyPending(limit: ULong) = client.applyPending(limit).also {
+                if (exhaustNextDrain && it.snapshotRemaining > 0uL) {
+                    exhaustNextDrain = false
+                    elapsed += GatewaySync.SNAPSHOT_DRAIN_BUDGET_MS + 1
+                }
+            }
+        }
+        // Pass 1 publishes the cut; the post-receive drain stops at its budget with records still undrained.
+        assertNull(sync(timedClient, elapsedMs = { elapsed }).run().failure)
+        assertNull(client.snapshotProgress())
+        assertNull(client.snapshotProjectionStatus())
+
+        // Pass 2: the pre-receive drain stops at its budget; the published generation is still draining,
+        // so the 409 begin is refused and receive returns false. The pass must still report continuation.
+        val eventRequests = requests.count { it.first.startsWith("GET /v1/events") }
+        val recordRequests = requests.count { it.first.startsWith("GET /v1/snapshot/records") }
+        exhaustNextDrain = true
+        val second = sync(timedClient, elapsedMs = { elapsed }).run()
+
+        assertNull(second.failure)
+        assertEquals(eventRequests + 1, requests.count { it.first.startsWith("GET /v1/events") })
+        assertEquals("a refused begin stages nothing", recordRequests, requests.count { it.first.startsWith("GET /v1/snapshot/records") })
+        assertTrue("an undrained published snapshot keeps the pass continuing", second.more)
+    }
+
+    @Test
+    fun manifestPrefixProgressWithoutDownloadsStillReportsContinuation() {
+        val client = live()
+        val (_, second) = desktopCommandEnvelope(SimRoutes.routeId(3), "snapshot two")
+        client.ingestRaw(PINNED_PLAIN_ENVELOPE.toByteArray(), "1")
+        snapshot = JSONArray().put(record(1, PINNED_PLAIN_ENVELOPE)).put(record(2, second))
+        snapshotManifestSupported = true
+        manifestResponder = {
+            LoopbackHttpServer.Response(
+                200,
+                JSONObject().put(
+                    "entries",
+                    JSONArray()
+                        .put(JSONObject().put("cursor", "1").put("digest", PINNED_PLAIN_DIGEST).put("flags", 0))
+                        .put(JSONObject().put("cursor", "2").put("digest", "0".repeat(64)).put("flags", 0)),
+                ).toString(),
+            )
+        }
+        eventsStatus = 409
+        var elapsed = 0L
+        val timedClient = object : NativeClientInterface by client {
+            override fun appendSnapshotManifest(generation: ULong, entries: List<NativeSnapshotManifestEntry>) =
+                client.appendSnapshotManifest(generation, entries).also {
+                    // The verified prefix is durable; the window then ends before the missing record is requested.
+                    elapsed += GatewaySync.SNAPSHOT_STAGE_BUDGET_MS + 1
+                }
+        }
+
+        val result = sync(timedClient, elapsedMs = { elapsed }).run()
+
+        assertNull(result.failure)
+        val progress = client.snapshotProgress()!!
+        assertEquals(1uL, progress.receivedRecords)
+        assertEquals("1", progress.lastCursor)
+        assertEquals(1, requests.count { it.first.startsWith("GET /v1/snapshot/manifest") })
+        assertTrue(requests.none { it.first.startsWith("GET /v1/snapshot/records") })
+        assertTrue("verified manifest prefixes are durable progress and continue the pass", result.more)
+    }
+
+    @Test
+    fun restartedCutNotAboveThePassEntryCountDoesNotRequestAnotherPass() {
+        val client = live()
+        snapshotRecords(3_000)
+        eventsStatus = 409
+        var elapsed = 0L
+        var pages = 0
+        val timedClient = object : NativeClientInterface by client {
+            override fun appendSnapshotRawPage(generation: ULong, records: List<NativeRawSnapshotRecord>) =
+                client.appendSnapshotRawPage(generation, records).also {
+                    // Pass 1 ends after the first page; pass 2 ends after the restarted cut's first page.
+                    if (++pages == 1 || pages == 2) elapsed += GatewaySync.SNAPSHOT_STAGE_BUDGET_MS + 1
+                }
+        }
+        val first = sync(timedClient, elapsedMs = { elapsed }).run()
+        assertNull(first.failure)
+        val entry = client.snapshotProgress()!!
+        assertEquals(200uL, entry.receivedRecords)
+
+        // The staged generation's next page is refused, so staging restarts from a new cut that stages 200 records.
+        elapsed = 0L
+        snapshotCut = "3001" to "3000"
+        brokenRecordPages.add(LoopbackHttpServer.Response(409))
+        val second = sync(timedClient, elapsedMs = { elapsed }).run()
+
+        assertNull(second.failure)
+        val restarted = client.snapshotProgress()!!
+        assertNotEquals("the pass restarted from a new generation", entry.generation, restarted.generation)
+        assertEquals(200uL, restarted.receivedRecords)
+        assertFalse("a restart that stages no more than the pass-entry count waits for an ordinary wake", second.more)
+    }
+
+    @Test
     fun repeatedStaleFullReplayPageDoesNotRequestAnotherPass() {
         val client = live()
         val page = JSONArray(replayRecords(50))

@@ -611,8 +611,15 @@ class GatewaySync(
     }
 
     private fun receive(): Boolean {
+        fun stageForReceive(progress: NativeSnapshotProgress): Boolean {
+            return when (stage(progress, NativeSnapshotPurpose.RESYNC, detectOwnRecords = false)) {
+                Stage.STAGING -> (client.snapshotProgress()?.receivedRecords ?: 0uL) > progress.receivedRecords
+                Stage.DEFERRED -> false
+                else -> true // A finished generation still has to drain.
+            }
+        }
         client.snapshotProgress()?.let {
-            return stage(it, NativeSnapshotPurpose.RESYNC, detectOwnRecords = false) != Stage.DEFERRED // a finished generation still has to drain
+            return stageForReceive(it)
         }
         repeat(RECEIVE_PAGES) { pageIndex ->
             if (pageIndex > 0) ensureEffectsPermitted()
@@ -623,9 +630,9 @@ class GatewaySync(
                 val progress = try {
                     beginSnapshot(NativeSnapshotPurpose.RESYNC)
                 } catch (_: MobileBindingsException.InvalidRequest) {
-                    return true // A published generation is still draining; drain first, then retry.
+                    return false // Drain independently requests continuation if work remains.
                 }
-                return stage(progress, NativeSnapshotPurpose.RESYNC, detectOwnRecords = false) != Stage.DEFERRED
+                return stageForReceive(progress)
             }
             val page = JSONObject(checkBody(response))
             val events = page.getJSONArray("events")
