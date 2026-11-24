@@ -631,7 +631,8 @@ class GatewaySync(
             page.optString("high_water_cursor").takeIf { it.isNotBlank() }?.let(client::observeServerHighWater)
             if (diagnosticsEnabled) received += events.length().toLong()
             if (events.length() < EVENT_PAGE) return false
-            if (client.receiveCursor() == cursor) return true
+            // An unchanged full page alone does not justify continuation; retry on the next ordinary wake.
+            if (client.receiveCursor() == cursor) return false
         }
         return true
     }

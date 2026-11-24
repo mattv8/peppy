@@ -1190,6 +1190,19 @@ class GatewaySyncTest : GatewayTestBase() {
     }
 
     @Test
+    fun receiveStopsAfterAnAdvancingFullPageAndShortPage() {
+        val client = live()
+        serveEventPages(replayRecords(70))
+
+        val result = sync(client).run()
+
+        assertNull(result.failure)
+        assertFalse(result.more)
+        assertEquals("70", client.receiveCursor())
+        assertEquals(2, requests.count { it.first.startsWith("GET /v1/events") })
+    }
+
+    @Test
     fun receiveStartsResyncWhenTheSecondPageReturns409() {
         val client = live()
         val firstPage = replayRecords(50)
@@ -1215,9 +1228,43 @@ class GatewaySyncTest : GatewayTestBase() {
 
         val result = sync(client).run()
 
-        assertTrue(result.more)
+        assertFalse(result.more)
         assertEquals("50", client.receiveCursor())
         assertEquals(2, requests.count { it.first.startsWith("GET /v1/events") })
+    }
+
+    @Test
+    fun repeatedStaleFullReplayPageDoesNotRequestAnotherPass() {
+        val client = live()
+        val page = JSONArray(replayRecords(50))
+        eventResponder = {
+            LoopbackHttpServer.Response(200, JSONObject().put("events", page).toString())
+        }
+        sync(client).run()
+        assertEquals("50", client.receiveCursor())
+
+        val repeated = sync(client).run()
+
+        assertNull(repeated.failure)
+        assertEquals("50", client.receiveCursor())
+        assertFalse(repeated.more)
+    }
+
+    @Test
+    fun staleFullReplayPageDoesNotSuppressDispatchContinuation() {
+        val client = live()
+        val page = JSONArray(replayRecords(50))
+        eventResponder = { LoopbackHttpServer.Response(200, JSONObject().put("events", page).toString()) }
+        sync(client).run()
+        assertEquals("50", client.receiveCursor())
+        val requestsBefore = requests.count { it.first.startsWith("GET /v1/events") }
+
+        val repeated = sync(client, dispatch = { DispatchSummary(0, 0, 0, true) }).run()
+
+        assertNull(repeated.failure)
+        assertEquals("50", client.receiveCursor())
+        assertEquals(requestsBefore + 1, requests.count { it.first.startsWith("GET /v1/events") })
+        assertTrue(repeated.more)
     }
 
     @Test
