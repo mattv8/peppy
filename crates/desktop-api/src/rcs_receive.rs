@@ -7,8 +7,6 @@ use peppy_client_core::{
 };
 use std::collections::HashSet;
 
-const MAX_RCS_MEDIA_ATTACHMENTS: u32 = 10;
-
 fn send_cancellation_view(
     client: &Client,
     message: &Message,
@@ -47,12 +45,7 @@ fn incoming_attachments(
     mut attachments: Vec<AttachmentView>,
 ) -> Result<Vec<AttachmentView>, Error> {
     let mut projected = Vec::new();
-    for index in 0..=MAX_RCS_MEDIA_ATTACHMENTS {
-        let Some(receive) =
-            client.rcs_media_receive_view(message.payload.record.message_id, index)?
-        else {
-            continue;
-        };
+    for receive in client.rcs_media_receive_views(message.payload.record.message_id)? {
         let stored = receive.attachment_id.as_ref().and_then(|attachment_id| {
             attachments
                 .iter()
@@ -614,6 +607,58 @@ mod tests {
         fn base(&self) -> MessageView {
             base_message_view(&self.message, vec![])
         }
+    }
+
+    #[test]
+    fn incoming_slots_project_in_index_order_and_propagate_malformed_rows() {
+        let media = outgoing_media(0);
+        let db = rusqlite::Connection::open(&media.database_path).unwrap();
+        db.execute_batch(&format!("PRAGMA key = \"{SQLCIPHER_KEY}\";"))
+            .unwrap();
+        let id = media.message.payload.record.message_id.to_string();
+        db.execute(
+            "INSERT INTO rcs_media_receive(message_id,attachment_index,state,media_type,display_name,plaintext_bytes) VALUES(?,3,'downloading','image/png','third.png',30),(?,1,'too_large','video/mp4','first.mp4',10)",
+            rusqlite::params![id, id],
+        ).unwrap();
+        let mut message = media.message.clone();
+        message.payload.direction = Direction::Incoming;
+        message.payload.transport = Transport::Rcs;
+        let view = message_view(&media.client, &message, vec![], &HashSet::new()).unwrap();
+        assert_eq!(view.attachments.len(), 2);
+        for (attachment, index, name, media_type, bytes, state) in [
+            (
+                &view.attachments[0],
+                1,
+                "first.mp4",
+                "video/mp4",
+                10,
+                "too_large",
+            ),
+            (
+                &view.attachments[1],
+                3,
+                "third.png",
+                "image/png",
+                30,
+                "downloading",
+            ),
+        ] {
+            assert_eq!(attachment.id, format!("{id}:{index}"));
+            assert_eq!(attachment.index, Some(index));
+            assert_eq!(attachment.name, name);
+            assert_eq!(attachment.media_type, media_type);
+            assert_eq!(attachment.byte_size, bytes);
+            assert_eq!(attachment.rcs_state, Some(state));
+            assert_eq!(attachment.state, "pending");
+        }
+        db.execute(
+            "INSERT INTO rcs_media_receive(message_id,attachment_index,state,media_type,display_name,plaintext_bytes,attachment_id) VALUES(?,2,'downloading','image/png','bad.png',1,'invalid')",
+            [id],
+        ).unwrap();
+        assert!(matches!(
+            message_view(&media.client, &message, vec![], &HashSet::new()),
+            Err(Error::Database)
+        ));
     }
 
     #[test]

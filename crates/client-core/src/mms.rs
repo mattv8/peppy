@@ -293,24 +293,20 @@ impl Client {
         } = reconciliation
         {
             let mut stored_input = input;
-            let (acquisition_id, old_conversation) = if let Some(existing) = existing.as_ref() {
+            let acquisition_id = if let Some(existing) = existing.as_ref() {
                 validate_thread_update(&existing.input.source, &stored_input.source)?;
                 stored_input.imported = existing.input.imported;
                 stored_input.source.provider_thread_id =
                     existing.input.source.provider_thread_id.clone();
-                (
-                    existing.acquisition_id.clone(),
-                    Some(existing.conversation_id),
-                )
+                existing.acquisition_id.clone()
             } else {
-                (uuid::Uuid::new_v4().to_string(), None)
+                uuid::Uuid::new_v4().to_string()
             };
             link_reconciled_thread(
                 &tx,
                 &ctx.device_id.to_string(),
                 &stored_input.source,
                 conversation_id,
-                old_conversation,
                 &acquisition_id,
                 ctx.device_id,
             )?;
@@ -1795,7 +1791,6 @@ fn link_reconciled_thread(
     device_id: &str,
     source: &MmsSource,
     target: ConversationId,
-    old_conversation: Option<ConversationId>,
     current_acquisition: &str,
     local_device: crate::DeviceId,
 ) -> Result<(), Error> {
@@ -1849,7 +1844,6 @@ fn link_reconciled_thread(
     }
     // The current exact match is moved separately by its caller. A pre-feature row may have used
     // an isolated empty conversation without a thread mapping; that is safe to abandon.
-    let _ = old_conversation;
     Ok(())
 }
 

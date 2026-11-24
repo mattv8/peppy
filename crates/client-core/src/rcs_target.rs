@@ -13,20 +13,21 @@ const PHONE_IDENTIFIER_TYPE: i32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedCarrierRouteContext {
-    subscription_id: String,
-    link_generation: u64,
-    session_generation: u64,
-    context_revision: u64,
-    go_runtime_id: String,
-    go_run_generation: u64,
-    go_stream_epoch: u64,
-    identity_region: String,
-    canonicalizer_revision: u32,
+    pub(crate) subscription_id: String,
+    pub(crate) link_generation: u64,
+    pub(crate) session_generation: u64,
+    pub(crate) context_revision: u64,
+    pub(crate) go_runtime_id: String,
+    pub(crate) go_run_generation: u64,
+    pub(crate) go_stream_epoch: u64,
+    pub(crate) identity_region: String,
+    pub(crate) canonicalizer_revision: u32,
     // This stays absent until the route layer can supply current accepted native evidence.
-    confirmed_own_identity: Option<String>,
+    pub(crate) confirmed_own_identity: Option<String>,
 }
 
 impl ValidatedCarrierRouteContext {
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         subscription_id: String,

@@ -353,18 +353,7 @@ impl Client {
         ensure_scope(&tx, generation, scope, observed_max_id)?;
         let (baseline, complete, pause, recheck_cursor, descending, floor, history_cursor) =
             scope_row(&tx, generation, scope)?;
-        let baseline = match baseline {
-            Some(baseline) => baseline,
-            None => {
-                tx.execute(
-                    "UPDATE mms_backfill_scopes SET history_upper_bound=?,history_complete=0 WHERE source_generation=? AND subscription_id=?",
-                    params![observed_max_id, generation, scope],
-                )?;
-                ensure_checkpoint(&tx, generation, scope, false, observed_max_id)?;
-                ensure_checkpoint(&tx, generation, scope, true, "")?;
-                observed_max_id.to_owned()
-            }
-        };
+        let baseline = baseline.ok_or(Error::Database)?;
         rewind_live_checkpoint_on_regression(&tx, generation, scope, observed_max_id)?;
         let pause = refresh_local_pause(&tx, generation, scope, pending_bytes, pause)?;
         let gate_open = if complete {

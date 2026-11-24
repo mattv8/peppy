@@ -672,18 +672,136 @@ pub(crate) fn receivable_conversations_for_roster(
     conn: &Connection,
     participants: &BTreeSet<String>,
 ) -> Result<Vec<ConversationId>, Error> {
-    let ids = conn
-        .prepare("SELECT conversation_id FROM rcs_group_mapping WHERE state IN ('live','paused','proving') ORDER BY conversation_id")?
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut statement = conn.prepare(
+        "SELECT g.conversation_id, m.canonical_address FROM rcs_group_mapping g LEFT JOIN conversation_group_members m ON m.conversation_id=g.conversation_id WHERE g.state IN ('live','paused','proving') ORDER BY g.conversation_id, m.canonical_address",
+    )?;
+    let mut rows = statement.query([])?;
     let mut matches = Vec::new();
-    for id in ids {
-        let conversation_id = crate::parse(&id).map_err(|_| Error::Database)?;
-        if roster(conn, conversation_id)? == *participants {
-            matches.push(conversation_id);
+    let mut current: Option<(String, ConversationId, BTreeSet<String>, bool)> = None;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        if current
+            .as_ref()
+            .is_none_or(|(stored, _, _, _)| *stored != id)
+        {
+            if let Some((_, conversation_id, members, _)) = current.take()
+                && members == *participants
+            {
+                matches.push(conversation_id);
+            }
+            let conversation_id: ConversationId = crate::parse(&id).map_err(|_| Error::Database)?;
+            let canonical = conversation_id.to_string() == id;
+            let members = if canonical {
+                BTreeSet::new()
+            } else {
+                roster(conn, conversation_id)?
+            };
+            current = Some((id, conversation_id, members, canonical));
+        }
+        if let Some((_, _, members, true)) = &mut current
+            && let Some(address) = row.get::<_, Option<String>>(1)?
+        {
+            members.insert(address);
         }
     }
+    if let Some((_, conversation_id, members, _)) = current
+        && members == *participants
+    {
+        matches.push(conversation_id);
+    }
     Ok(matches)
+}
+
+#[cfg(test)]
+mod roster_query_tests {
+    use super::*;
+
+    #[test]
+    fn noncanonical_mapping_id_uses_canonical_roster() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::RCS_GROUP_MIGRATION_53).unwrap();
+        let id: ConversationId = crate::parse("abcdefab-cdef-4abc-8def-abcdefabcdef").unwrap();
+        let canonical = id.to_string();
+        let noncanonical = canonical.to_uppercase();
+        conn.execute(
+            "INSERT INTO rcs_group_mapping VALUES (?, 'google', ?, 'live', 0, '', 0, '', 0, 0)",
+            params![noncanonical, DeviceId::new().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_group_members VALUES (?, '+15550000001'), (?, '+15550000002')",
+            params![canonical, noncanonical],
+        )
+        .unwrap();
+        for (address, expected) in [("+15550000001", vec![id]), ("+15550000002", vec![])] {
+            let participants = [address.to_owned()].into_iter().collect();
+            assert_eq!(
+                receivable_conversations_for_roster(&conn, &participants).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn receivable_rosters_preserve_order_and_exact_set_matching() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::RCS_GROUP_MIGRATION_53).unwrap();
+        let ids: Vec<ConversationId> = (0..6).map(|_| ConversationId::new()).collect();
+        for (index, state) in ["live", "paused", "proving", "withdrawn", "unlinked", "live"]
+            .iter()
+            .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO rcs_group_mapping VALUES (?, ?, ?, ?, 0, '', 0, '', 0, 0)",
+                params![
+                    ids[index].to_string(),
+                    format!("google-{index}"),
+                    DeviceId::new().to_string(),
+                    state
+                ],
+            )
+            .unwrap();
+            if index != 5 {
+                let addresses = if index == 2 {
+                    ["+15550000003", "+15550000004"]
+                } else {
+                    ["+15550000001", "+15550000002"]
+                };
+                for address in addresses {
+                    conn.execute(
+                        "INSERT INTO conversation_group_members VALUES (?, ?)",
+                        params![ids[index].to_string(), address],
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        let mut expected = ids[..2].to_vec();
+        expected.sort_by_key(ToString::to_string);
+        for addresses in [
+            vec!["+15550000001", "+15550000002"],
+            vec!["+15550000002", "+15550000001"],
+            vec!["+15550000001", "+15550000002", "+15550000001"],
+        ] {
+            let participants = addresses.into_iter().map(str::to_owned).collect();
+            assert_eq!(
+                receivable_conversations_for_roster(&conn, &participants).unwrap(),
+                expected
+            );
+        }
+        let proving = ["+15550000003", "+15550000004"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            receivable_conversations_for_roster(&conn, &proving).unwrap(),
+            vec![ids[2]]
+        );
+        assert_eq!(
+            receivable_conversations_for_roster(&conn, &BTreeSet::new()).unwrap(),
+            vec![ids[5]]
+        );
+    }
 }
 
 /// Desktop group fields that accompany a draft send to two or more recipients. Stored in the
