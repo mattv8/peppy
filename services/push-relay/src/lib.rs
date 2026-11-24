@@ -2226,6 +2226,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_wake_delivery_updates_retry_exhaustion_and_invalid_token_state() {
+        let (pool, schema) = test_pool().await;
+        let route_id = Uuid::new_v4();
+        let registration_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO relay_registrations(id,provider,token,challenge_digest,expires_at) VALUES($1,'fcm','token',$2,now()+interval '10 minutes')")
+            .bind(registration_id).bind(vec![0_u8; 32]).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO relay_routes(id,registration_id,provider,token,manage_digest,wake_digest) VALUES($1,$2,'fcm','token',$3,$3)")
+            .bind(route_id).bind(registration_id).bind(vec![0_u8; 32]).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO relay_wake_jobs(route_id,idempotency_id,opaque_nonce,state) VALUES($1,'idem','nonce','pending')")
+            .bind(route_id).execute(&pool).await.unwrap();
+        let provider = Arc::new(FailingProvider(StdMutex::new(vec![
+            ProviderError::Retryable,
+            ProviderError::Retryable,
+            ProviderError::InvalidToken,
+        ])));
+        let state = AppState::with_provider(pool.clone(), provider);
+
+        assert!(deliver_one(&state).await.unwrap());
+        let retry: (String, i32, bool) = sqlx::query_as("SELECT state,attempts,next_attempt_at = updated_at + interval '5 seconds' FROM relay_wake_jobs WHERE route_id=$1")
+            .bind(route_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(retry, ("pending".into(), 1, true));
+
+        sqlx::query(
+            "UPDATE relay_wake_jobs SET attempts=8,next_attempt_at=now() WHERE route_id=$1",
+        )
+        .bind(route_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(deliver_one(&state).await.unwrap());
+        let exhausted: (String, i32, bool) = sqlx::query_as("SELECT state,attempts,next_attempt_at = updated_at + interval '1280 seconds' FROM relay_wake_jobs WHERE route_id=$1")
+            .bind(route_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(exhausted, ("failed".into(), 9, true));
+
+        sqlx::query(
+            "UPDATE relay_wake_jobs SET state='pending',next_attempt_at=now() WHERE route_id=$1",
+        )
+        .bind(route_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(deliver_one(&state).await.unwrap());
+        let route: (bool, String) =
+            sqlx::query_as("SELECT revoked_at IS NOT NULL,token FROM relay_routes WHERE id=$1")
+                .bind(route_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let registration: (bool, String) = sqlx::query_as(
+            "SELECT revoked_at IS NOT NULL,token FROM relay_registrations WHERE id=$1",
+        )
+        .bind(registration_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(route, (true, String::new()));
+        assert_eq!(registration, (true, String::new()));
+        let jobs: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM relay_wake_jobs WHERE route_id=$1")
+                .bind(route_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(jobs, 0);
+        cleanup(pool, schema).await;
+    }
+
+    #[tokio::test]
     async fn terminal_delivery_failures_emit_fixed_diagnostics_and_empty_queue_is_quiet() {
         let captured = Arc::new(StdMutex::new(Vec::new()));
         let subscriber = Registry::default().with(DiagnosticCapture(captured.clone()));
