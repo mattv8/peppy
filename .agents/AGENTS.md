@@ -77,8 +77,7 @@ This reference records non-obvious Peppy domain constraints.
   carrier submission, and delivery evidence distinct. `SendState` defines
   which states may retry transport or carrier work; `OutcomeUnknown` requires
   reconciliation and must not be automatically resent. See
-  [send states](../crates/domain/src/command.rs) and
-  [retry policy](../crates/sync-core/src/retry.rs).
+  [send states](../crates/domain/src/command.rs).
 - A gateway receives a durable, one-use carrier permit only for a command in
   its received-command ledger. An unfinished attempt reopens as
   `OutcomeUnknown`, never with a second permit. See
