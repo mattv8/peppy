@@ -395,6 +395,18 @@ async fn revoke_credential_and_release(
     holder.commit().await.unwrap();
 }
 
+async fn revoke_device_and_release(
+    mut holder: sqlx::Transaction<'static, sqlx::Postgres>,
+    device_id: Uuid,
+) {
+    sqlx::query("UPDATE devices SET revoked_at=now() WHERE device_id=$1")
+        .bind(device_id)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+}
+
 async fn revoked_reserve(server: &TestServer, token: String, device_id: Uuid) -> Value {
     let (holder, holder_pid) = hold_vault_lock(server).await;
     let task = tokio::spawn(reserve_detached(server.base_url.clone(), token));
@@ -407,6 +419,278 @@ async fn revoked_reserve(server: &TestServer, token: String, device_id: Uuid) ->
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(body["code"], "invalid_bearer");
     body
+}
+
+#[tokio::test]
+async fn reference_registration_rejects_a_credential_revoked_while_waiting_for_the_vault_lock() {
+    let _guard = TEST_LOCK.lock().await;
+    for device_revoked in [false, true] {
+        let server = TestServer::start().await;
+        let token = server.add_device("gateway").await;
+        let device_id: Uuid =
+            sqlx::query_scalar("SELECT device_id FROM device_credentials WHERE token_digest=$1")
+                .bind(Sha256::digest(token.as_bytes()).as_slice())
+                .fetch_one(&server.pool)
+                .await
+                .unwrap();
+        let attachment = server.tracked_attachment(b"p1 repro").await;
+        assert_eq!(
+            server
+                .register_as(&token, attachment, reference(device_id, "1"))
+                .await,
+            StatusCode::NO_CONTENT
+        );
+        let (holder, holder_pid) = hold_vault_lock(&server).await;
+        let base_url = server.base_url.clone();
+        let task = tokio::spawn(async move {
+            Client::new()
+                .post(format!("{base_url}/v1/attachments/{attachment}/references"))
+                .bearer_auth(token)
+                .json(&json!({ "references": reference(device_id, "2") }))
+                .send()
+                .await
+                .unwrap()
+        });
+        wait_for_reserve_to_block(&server, holder_pid).await;
+        if device_revoked {
+            revoke_device_and_release(holder, device_id).await;
+        } else {
+            revoke_credential_and_release(holder, device_id).await;
+        }
+        let response = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let status = response.status();
+        let registered: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM attachment_record_references WHERE vault_id=$1 AND attachment_id=$2 AND producer_sequence=2",
+    ).bind(server.vault).bind(attachment).fetch_one(&server.pool).await.unwrap();
+        eprintln!("status={status} registered_after_revocation={registered}");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["code"],
+            "invalid_bearer"
+        );
+        assert_eq!(registered, 0);
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn finalize_rejects_a_credential_revoked_while_waiting_for_the_vault_lock() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let bytes = ciphertext(b"revoked finalize");
+    let control = server.reserve_id(&bytes).await;
+    assert_eq!(
+        server.upload(control, bytes.clone()).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(server.finalize(control).await.status(), StatusCode::OK);
+    let attachment = server.reserve_id(&bytes).await;
+    assert_eq!(
+        server.upload(attachment, bytes).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    let device_id: Uuid =
+        sqlx::query_scalar("SELECT device_id FROM device_credentials WHERE token_digest=$1")
+            .bind(Sha256::digest(server.owner_token.as_bytes()).as_slice())
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE attachment_retention_devices SET cleanup_ready=TRUE,reconciliation_needed=FALSE WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault).bind(device_id).execute(&server.pool).await.unwrap();
+    let (holder, holder_pid) = hold_vault_lock(&server).await;
+    let base_url = server.base_url.clone();
+    let token = server.owner_token.clone();
+    let task = tokio::spawn(async move {
+        Client::new()
+            .post(format!("{base_url}/v1/attachments/{attachment}/finalize"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+    });
+    wait_for_reserve_to_block(&server, holder_pid).await;
+    revoke_credential_and_release(holder, device_id).await;
+    let response = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let status = response.status();
+    let (finalized, attachments, device_active): (bool, i64, bool) = sqlx::query_as(
+        "SELECT (SELECT finalized_at IS NOT NULL FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2), (SELECT count(*) FROM attachments WHERE vault_id=$1 AND attachment_id=$2), (SELECT revoked_at IS NULL FROM devices WHERE vault_id=$1 AND device_id=$3)",
+    ).bind(server.vault).bind(attachment).bind(device_id).fetch_one(&server.pool).await.unwrap();
+    eprintln!(
+        "status={status} finalized={finalized} attachments={attachments} device_active={device_active}"
+    );
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["code"],
+        "invalid_bearer"
+    );
+    assert!(!finalized);
+    assert_eq!(attachments, 0);
+    assert!(device_active);
+    let readiness: (bool, bool) = sqlx::query_as("SELECT cleanup_ready,reconciliation_needed FROM attachment_retention_devices WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault).bind(device_id).fetch_one(&server.pool).await.unwrap();
+    assert_eq!(readiness, (true, false));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn finalize_rejects_a_credential_revoked_between_lookup_and_commit() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let bytes = ciphertext(b"revoked between finalize transactions");
+    let attachment = server.reserve_id(&bytes).await;
+    assert_eq!(
+        server.upload(attachment, bytes).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    let device_id: Uuid =
+        sqlx::query_scalar("SELECT device_id FROM device_credentials WHERE token_digest=$1")
+            .bind(Sha256::digest(server.owner_token.as_bytes()).as_slice())
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    let mut readiness_holder = server.pool.begin().await.unwrap();
+    let readiness_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *readiness_holder)
+        .await
+        .unwrap();
+    sqlx::query(
+        "SELECT 1 FROM attachment_retention_devices WHERE vault_id=$1 AND device_id=$2 FOR UPDATE",
+    )
+    .bind(server.vault)
+    .bind(device_id)
+    .fetch_one(&mut *readiness_holder)
+    .await
+    .unwrap();
+    let base_url = server.base_url.clone();
+    let token = server.owner_token.clone();
+    let finalize = tokio::spawn(async move {
+        Client::new()
+            .post(format!("{base_url}/v1/attachments/{attachment}/finalize"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+    });
+    wait_until(5, "finalize lookup blocked on readiness", || async {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%attachment_retention_devices%')")
+            .bind(readiness_pid).fetch_one(&server.admin).await.unwrap()
+    }).await;
+    let lookup_pid: i32 = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%attachment_retention_devices%'")
+        .bind(readiness_pid).fetch_one(&server.admin).await.unwrap();
+    let pool = server.pool.clone();
+    let vault = server.vault;
+    let vault_holder = tokio::spawn(async move {
+        let mut tx = pool.begin().await.unwrap();
+        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("SELECT vault_id FROM vaults WHERE vault_id=$1 FOR UPDATE")
+            .bind(vault)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        (tx, pid)
+    });
+    wait_for_reserve_to_block(&server, lookup_pid).await;
+    readiness_holder.commit().await.unwrap();
+    let (holder, holder_pid) = tokio::time::timeout(Duration::from_secs(10), vault_holder)
+        .await
+        .unwrap()
+        .unwrap();
+    wait_for_reserve_to_block(&server, holder_pid).await;
+    revoke_credential_and_release(holder, device_id).await;
+    let response = tokio::time::timeout(Duration::from_secs(10), finalize)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["code"],
+        "invalid_bearer"
+    );
+    let (finalized, attachments): (bool, i64) = sqlx::query_as("SELECT (SELECT finalized_at IS NOT NULL FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2), (SELECT count(*) FROM attachments WHERE vault_id=$1 AND attachment_id=$2)")
+        .bind(server.vault).bind(attachment).fetch_one(&server.pool).await.unwrap();
+    assert!(!finalized);
+    assert_eq!(attachments, 0);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn upload_rejects_a_credential_revoked_while_waiting_for_the_vault_lock() {
+    let _guard = TEST_LOCK.lock().await;
+    for device_revoked in [false, true] {
+        let server = TestServer::start().await;
+        let bytes = ciphertext(b"revoked upload");
+        let control = server.reserve_id(&bytes).await;
+        assert_eq!(
+            server.upload(control, bytes.clone()).await.status(),
+            StatusCode::NO_CONTENT
+        );
+        let attachment = server.reserve_id(&bytes).await;
+        let original_key = server.object_key(attachment).await;
+        let device_id: Uuid =
+            sqlx::query_scalar("SELECT device_id FROM device_credentials WHERE token_digest=$1")
+                .bind(Sha256::digest(server.owner_token.as_bytes()).as_slice())
+                .fetch_one(&server.pool)
+                .await
+                .unwrap();
+        let (holder, holder_pid) = hold_vault_lock(&server).await;
+        let base_url = server.base_url.clone();
+        let token = server.owner_token.clone();
+        let task = tokio::spawn(async move {
+            Client::new()
+                .put(format!("{base_url}/v1/attachments/{attachment}/upload"))
+                .bearer_auth(token)
+                .body(bytes)
+                .send()
+                .await
+                .unwrap()
+        });
+        wait_for_reserve_to_block(&server, holder_pid).await;
+        let key: String = sqlx::query_scalar(
+        "SELECT object_key FROM storage_deletions WHERE vault_id=$1 AND reason='upload_attempt'",
+    )
+    .bind(server.vault)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+        assert!(server.storage.head_bytes(&key).await.is_ok());
+        if device_revoked {
+            revoke_device_and_release(holder, device_id).await;
+        } else {
+            revoke_credential_and_release(holder, device_id).await;
+        }
+        let response = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let status = response.status();
+        let (uploaded, reservation_key): (bool, String) = sqlx::query_as("SELECT uploaded_at IS NOT NULL, object_key FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2")
+        .bind(server.vault).bind(attachment).fetch_one(&server.pool).await.unwrap();
+        eprintln!(
+            "status={status} uploaded={uploaded} attached_attempt={}",
+            reservation_key == key
+        );
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["code"],
+            "invalid_bearer"
+        );
+        assert!(!uploaded);
+        assert_eq!(reservation_key, original_key);
+        wait_until(10, "rejected upload object deletion", || async {
+            server.storage.head_bytes(&key).await.is_err()
+        })
+        .await;
+        server.shutdown().await;
+    }
 }
 
 #[tokio::test]

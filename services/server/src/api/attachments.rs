@@ -740,6 +740,7 @@ async fn attach_upload(
         .await
         .map_err(|error| database_unavailable(&error, "attachment_upload_begin"))?;
     lock_vault(&mut tx, vault).await?;
+    revalidate_principal(&mut tx, principal).await?;
     withdraw_legacy_retention_mutation(&mut tx, headers, vault, device).await?;
     removal_error(&mut tx, vault, attachment_id).await?;
     let previous = sqlx::query(&format!("SELECT object_key,uploaded_at IS NOT NULL AS uploaded FROM upload_reservations WHERE {OPEN_RESERVATION} FOR UPDATE"))
@@ -797,6 +798,7 @@ pub(super) async fn finalize_attachment(
             .await
             .map_err(|error| database_unavailable(&error, "attachment_finalize_lookup_begin"))?;
         lock_vault(&mut lookup_tx, principal.vault).await?;
+        revalidate_principal(&mut lookup_tx, &principal).await?;
         withdraw_legacy_retention_mutation(&mut lookup_tx, &h, principal.vault, principal.device)
             .await?;
         removal_error(&mut lookup_tx, principal.vault, attachment_id).await?;
@@ -837,6 +839,7 @@ pub(super) async fn finalize_attachment(
             .await
             .map_err(|error| database_unavailable(&error, "attachment_finalize_begin"))?;
         lock_vault(&mut tx, principal.vault).await?;
+        revalidate_principal(&mut tx, &principal).await?;
         withdraw_legacy_retention_mutation(&mut tx, &h, principal.vault, principal.device).await?;
         let active = sqlx::query_scalar::<_, i32>(
             "SELECT 1 FROM devices WHERE vault_id=$1 AND device_id=$2 AND revoked_at IS NULL FOR UPDATE",
@@ -1298,6 +1301,7 @@ pub(super) async fn register_attachment_references(
         .await
         .map_err(|error| database_unavailable(&error, "register_attachment_refs_begin"))?;
     lock_vault(&mut tx, principal.vault).await?;
+    revalidate_principal(&mut tx, &principal).await?;
     withdraw_legacy_retention_mutation(&mut tx, &h, principal.vault, principal.device).await?;
     removal_error(&mut tx, principal.vault, attachment_id).await?;
     // FOR SHARE on the live row blocks a concurrent release (which deletes it)
