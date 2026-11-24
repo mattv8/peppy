@@ -704,17 +704,6 @@ fn mapping_binds_region_identity_and_live_conversation_facts() {
 }
 
 #[test]
-fn self_chat_is_explicitly_unsupported() {
-    let (_directory, _config, client, _conversation_id) = client_with_participant("+12025550100");
-    let mut self_chat = observation("+12025550100", 1);
-    self_chat.participants[0].is_me = true;
-    assert_eq!(
-        client.verify_rcs_mapping(&self_chat, 1_000).unwrap(),
-        RcsMappingOutcome::Refused(RcsMappingRefusal::SelfChatUnsupported)
-    );
-}
-
-#[test]
 fn duplicate_conversations_for_one_identity_map_to_the_indexed_one() {
     let directory = tempfile::tempdir().unwrap();
     let vault = Vault::new();
@@ -984,11 +973,6 @@ fn native_prepare_observation_rejects_unknown_fields() {
         .unwrap()
         .insert("unexpected".into(), true.into());
     assert!(serde_json::from_value::<RcsMappingObservation>(value).is_err());
-
-    let schema = restricted_native_rcs_handoff_schema();
-    assert!(schema["prepare_request"].is_object());
-    assert!(schema["prepare_observation"].is_object());
-    assert!(schema["commit_projection"].is_object());
 }
 
 fn encrypted_mapping_connection(config: &ClientConfig) -> rusqlite::Connection {

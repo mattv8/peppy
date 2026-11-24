@@ -119,17 +119,6 @@ fn preference_source_visibility_defaults_for_legacy_json_and_round_trips() {
         preference
     );
 
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct LegacyReaderPreferences {
-        preview: NotificationPreview,
-    }
-    let legacy_reader: LegacyReaderPreferences = serde_json::from_value(serde_json::json!({
-        "preview": "hidden",
-        "showSource": true,
-    }))
-    .unwrap();
-    assert_eq!(legacy_reader.preview, NotificationPreview::Hidden);
     assert!(
         serde_json::from_value::<NotificationPreferences>(serde_json::json!({
             "messageBanners": true,

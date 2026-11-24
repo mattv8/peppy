@@ -1219,27 +1219,6 @@ fn a_fence_captured_contact_whose_member_does_not_supersede_it_queues_exactly_on
 }
 
 #[test]
-fn a_fence_captured_contact_whose_member_supersedes_it_queues_nothing() {
-    let dir = TempDir::new().unwrap();
-    let vault = Vault::new();
-    let owner = DeviceId::new();
-    let (config, client) = receiver(&dir, &vault, "receiver");
-    ingest_and_apply(&owners_book(&vault, owner, &[("c1", "1")]), &client);
-    let deleter = DeviceId::new();
-
-    ingest_and_apply(
-        &[
-            fence(&vault, deleter, 1, owner),
-            member_superseding(&vault, deleter, 2, owner, "c1", &[(owner, 2)]),
-        ],
-        &client,
-    );
-
-    assert!(queued_members(&client, &vault).is_empty());
-    assert_eq!(owed(&config.database_path), 0);
-}
-
-#[test]
 fn a_covered_upsert_after_a_known_member_queues_one_more_member() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();

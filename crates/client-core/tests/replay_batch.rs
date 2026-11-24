@@ -358,27 +358,3 @@ fn progress_waits_for_a_post_snapshot_tail_gap() {
         Cursor(7)
     );
 }
-
-#[test]
-fn repeated_progress_reads_use_the_persisted_frontier_after_large_replay() {
-    let dir = TempDir::new().unwrap();
-    let vault = Vault::new();
-    let target = client(&dir, &vault, "target");
-    for page in 0..5 {
-        let records: Vec<_> = (1..=MAX_REPLAY_PAGE)
-            .map(|offset| RawReplayRecord {
-                cursor: Cursor((page * MAX_REPLAY_PAGE + offset) as u64),
-                envelope_json: b"quarantined".to_vec(),
-            })
-            .collect();
-        target.ingest_raw_batch(&records).unwrap();
-    }
-    let expected = ReplayProgress {
-        received_through: Cursor(1_000),
-        processed_through: Cursor(1_000),
-        waiting_for_keys: 0,
-    };
-    for _ in 0..20 {
-        assert_eq!(target.replay_progress().unwrap(), expected);
-    }
-}

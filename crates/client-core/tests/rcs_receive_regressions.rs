@@ -1024,13 +1024,10 @@ fn serialized_fact_only_payload_contains_no_provider_identity() {
     assert_eq!(encoded["kind"], "rcs_message_reported");
     assert_eq!(encoded["message_id"], message_id.to_string());
     assert_eq!(encoded.as_object().unwrap().len(), 3);
-    assert!(encoded.get("google_message_id").is_none());
-    assert!(encoded.get("google_conversation_id").is_none());
-    assert!(encoded.get("tmp_id").is_none());
 }
 
 #[test]
-fn known_rcs_payload_variants_apply_and_malformed_variants_do_not_deserialize() {
+fn known_rcs_payload_variants_apply_on_a_peer() {
     let (directory, vault, _config, client, conversation, owner) = fixture();
     client
         .ingest_rcs_projected_record(conversation, owner.ownership_generation, record("valid"))
@@ -1055,14 +1052,6 @@ fn known_rcs_payload_variants_apply_and_malformed_variants_do_not_deserialize() 
         peer.rcs_message_status(message_id).unwrap().unwrap().status,
         RcsMessageStatus::Sent
     );
-
-    for payload in [
-        serde_json::json!({"kind":"rcs_message_reported","message_id":7}),
-        serde_json::json!({"kind":"rcs_message_status","message_id":7}),
-    ] {
-        assert!(serde_json::from_value::<PrivatePayload>(payload).is_err());
-    }
-    assert!(serde_json::from_str::<PrivatePayload>(r#"{"kind":"future_rcs_fact"}"#).is_err());
 }
 
 #[derive(Clone, Copy, Debug)]

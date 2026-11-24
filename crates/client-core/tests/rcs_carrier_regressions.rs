@@ -1166,6 +1166,23 @@ fn proof_expiry_and_clock_rollback_never_admit_a_stale_proof() {
     assert!(!lab.proof_stored());
 }
 
+#[test]
+fn classification_requires_current_route_context() {
+    let lab = Lab::new(PEER);
+    lab.book("home", "US");
+    let candidate = snapshot(Vec::new(), 1);
+    assert!(lab.gateway.carrier_route_context(SIM).unwrap().is_none());
+    assert!(matches!(
+        lab.classify(PEER, &candidate, 1_000).unwrap(),
+        RcsTargetDecision::Unknown { .. }
+    ));
+    lab.link();
+    assert!(matches!(
+        lab.classify(PEER, &candidate, 1_000).unwrap(),
+        RcsTargetDecision::NotFoundComplete { .. }
+    ));
+}
+
 // Guards: 78824404 (route freshness at classification). Accepted native route evidence is current
 // only inside the freshness window, so an old route cannot classify a later snapshot.
 #[test]

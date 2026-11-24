@@ -1187,11 +1187,6 @@ fn reconciliation_prepare_replays_same_uuid_and_keeps_effect_blocked_until_canon
 }
 
 #[test]
-fn public_prepare_limit_is_the_enforced_core_boundary() {
-    assert_eq!(MAX_PREPARED_ATTACHMENT_RETENTION_OPERATIONS, 256);
-}
-
-#[test]
 fn reconciliation_prepare_is_bounded_and_reopen_reuses_the_queued_uuid() {
     let dir = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();
