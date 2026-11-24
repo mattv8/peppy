@@ -422,13 +422,7 @@ impl NativeRcsSendPreparation {
             .map_err(|_| peppy_client_core::Error::Database)?
             .take()
             .ok_or(peppy_client_core::Error::Conflict)?;
-        if observation_json.len() > RCS_NATIVE_JSON_CAP {
-            return Err(peppy_client_core::Error::InvalidRequest(
-                "observation too large",
-            ));
-        }
-        let observation: RcsMappingObservation = serde_json::from_str(&observation_json)
-            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid observation"))?;
+        let observation = mapping_observation(&observation_json)?;
         let projection = core.begin_native_rcs_send(preparation, &observation, now_ms)?;
         serialize_commit(projection)
     }
@@ -594,13 +588,7 @@ pub fn gateway_verify_rcs_group_observation(
     now_ms: i64,
 ) -> Result<NativeRcsGroupVerification, MobileBindingsError> {
     with_client(&client.client, |core| {
-        if observation_json.len() > RCS_NATIVE_JSON_CAP {
-            return Err(peppy_client_core::Error::InvalidRequest(
-                "observation too large",
-            ));
-        }
-        let observation = serde_json::from_str::<RcsMappingObservation>(&observation_json)
-            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid observation"))?;
+        let observation = mapping_observation(&observation_json)?;
         core.verify_rcs_group_observation(&observation, now_ms)
     })
     .map(|outcome| match outcome {
@@ -621,13 +609,7 @@ pub fn gateway_verify_rcs_group_route(
     now_ms: i64,
 ) -> Result<bool, MobileBindingsError> {
     with_client(&client.client, |core| {
-        if observation_json.len() > RCS_NATIVE_JSON_CAP {
-            return Err(peppy_client_core::Error::InvalidRequest(
-                "observation too large",
-            ));
-        }
-        let observation = serde_json::from_str::<RcsMappingObservation>(&observation_json)
-            .map_err(|_| peppy_client_core::Error::InvalidRequest("invalid observation"))?;
+        let observation = mapping_observation(&observation_json)?;
         core.verify_rcs_group_route(&observation, now_ms)
     })
 }

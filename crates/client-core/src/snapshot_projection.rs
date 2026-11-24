@@ -1317,7 +1317,8 @@ fn known_book(
         .optional()?)
 }
 
-/// Stages book state. `Ok(false)`: the producer does not own the book (ignored record).
+/// Stages book state. `Ok(false)` means the producer does not own the book or a deletion
+/// fence covers the publication (ignored record).
 fn stage_book(
     conn: &Connection,
     generation: i64,

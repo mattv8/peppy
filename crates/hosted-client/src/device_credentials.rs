@@ -9,7 +9,6 @@ use zeroize::{Zeroize, Zeroizing};
 
 // Constants
 pub const MAX_CREDENTIAL_BYTES: usize = 16 * 1024;
-pub const CREDENTIAL_EXPORT_FILENAME: &str = "peppy-credentials.json";
 
 // Error types
 #[derive(Debug, PartialEq, Eq)]

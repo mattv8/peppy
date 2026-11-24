@@ -230,20 +230,7 @@ impl RuntimeRegistry {
     }
 
     async fn retry_pending_cleanup(&self) {
-        let pending = self
-            .context
-            .identities
-            .lock()
-            .await
-            .values()
-            .filter(|identity| identity.cleanup_pending)
-            .copied()
-            .collect::<Vec<_>>();
-        for identity in pending {
-            if let Err(error) = self.revoke(identity.vault_id, identity.device_id).await {
-                log_failure("cleanup", identity.vault_id, &error);
-            }
-        }
+        retry_pending_cleanup(&self.context).await;
     }
 
     async fn spawn_cleanup_retry(&self) {
