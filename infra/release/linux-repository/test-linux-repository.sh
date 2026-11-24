@@ -3,7 +3,8 @@ set -euo pipefail
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 setup=(bash "$script_dir/setup-peppy-updates.sh")
 build=(bash "$script_dir/build-repository.sh")
-root=$(mktemp -d); trap 'rm -rf "$root"' EXIT
+root=$(mktemp -d "${TMPDIR:-/tmp}/peppy-linux-repository.XXXXXX"); trap 'rm -rf "$root"' EXIT
+export TMPDIR="$root"
 
 expect_failure() { if "$@" >/dev/null 2>&1; then echo "expected failure: $*" >&2; exit 1; fi; }
 setup_args=(--distro debian --channel stable --repo-url https://packages.example.invalid/peppy --key-url https://packages.example.invalid/peppy/key.asc --key-fingerprint 0123456789abcdef0123456789abcdef01234567 --dry-run)
