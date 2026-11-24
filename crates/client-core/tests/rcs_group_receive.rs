@@ -416,6 +416,120 @@ fn group_provider_rows_route_by_exact_roster_and_detect_only_restricted_text() {
 }
 
 #[test]
+fn provider_group_roster_routing_handles_states_ambiguity_and_empty_rosters() {
+    let (_directory, client, config, context) = linked_group(&[ALEX, SAM]);
+    let observed = now_ms();
+    let record = RcsProjectedRecord {
+        alternate_message_ids: vec!["MxRosterProbe".into()],
+        ..incoming("roster-probe", "probe")
+    };
+    assert_eq!(
+        client
+            .ingest_rcs_receive_observation(
+                context.conversation_id,
+                context.ownership_generation,
+                record,
+                Some(RcsGroupSender::Address(ALEX.into())),
+                RcsObservationProvenance::Live,
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Inserted
+    );
+    let row = |id, addresses: &[&str]| RcsProviderRow {
+        transaction_id: Some(mirrored_transaction_id("MxRosterProbe")),
+        ..restricted_text_row(id, addresses, observed)
+    };
+    let db = sqlcipher(&config.database_path);
+    for (id, state) in [(401, "live"), (402, "paused"), (403, "proving")] {
+        db.execute("UPDATE rcs_group_mapping SET state=?", [state])
+            .unwrap();
+        assert_eq!(
+            client
+                .route_rcs_provider_row(row(id, &[ALEX, SAM]))
+                .unwrap(),
+            RcsProviderRowRoute::DetectorRecorded,
+            "{state}"
+        );
+        let routed: String = db
+            .query_row(
+                "SELECT conversation_id FROM rcs_provider_detectors WHERE provider_row_id=?",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(routed, context.conversation_id.to_string());
+    }
+    assert_eq!(
+        client.route_rcs_provider_row(row(404, &[ALEX])).unwrap(),
+        RcsProviderRowRoute::Alert
+    );
+    assert_eq!(
+        client
+            .route_rcs_provider_row(row(405, &[ALEX, SAM, LEE]))
+            .unwrap(),
+        RcsProviderRowRoute::Alert
+    );
+
+    let other = ConversationId::new().to_string();
+    let original = context.conversation_id.to_string();
+    db.execute(
+        "INSERT INTO rcs_group_mapping SELECT ?, 'other-google', gateway_device_id, state, proved_member_revision, member_set_digest, proof_observed_at_ms, snapshot_token, created_at_ms, updated_at_ms FROM rcs_group_mapping WHERE conversation_id=?",
+        rusqlite::params![other, original],
+    ).unwrap();
+    db.execute(
+        "INSERT INTO conversation_group_members SELECT ?, canonical_address FROM conversation_group_members WHERE conversation_id=?",
+        rusqlite::params![other, original],
+    ).unwrap();
+    assert_eq!(
+        client
+            .route_rcs_provider_row(row(406, &[ALEX, SAM]))
+            .unwrap(),
+        RcsProviderRowRoute::Alert
+    );
+    db.execute(
+        "DELETE FROM rcs_group_mapping WHERE conversation_id=?",
+        [&other],
+    )
+    .unwrap();
+    db.execute(
+        "DELETE FROM conversation_group_members WHERE conversation_id=?",
+        [&other],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE rcs_group_mapping SET state='withdrawn' WHERE conversation_id=?",
+        [&original],
+    )
+    .unwrap();
+    assert_eq!(
+        client
+            .route_rcs_provider_row(row(407, &[ALEX, SAM]))
+            .unwrap(),
+        RcsProviderRowRoute::Alert
+    );
+    db.execute(
+        "UPDATE rcs_group_mapping SET state='live' WHERE conversation_id=?",
+        [&original],
+    )
+    .unwrap();
+    db.execute(
+        "DELETE FROM conversation_group_members WHERE conversation_id=?",
+        [&original],
+    )
+    .unwrap();
+    assert_eq!(
+        client
+            .route_rcs_provider_row(row(408, &[ALEX, SAM]))
+            .unwrap(),
+        RcsProviderRowRoute::Alert
+    );
+    assert_eq!(
+        client.route_rcs_provider_row(row(409, &[SELF])).unwrap(),
+        RcsProviderRowRoute::Alert
+    );
+}
+
+#[test]
 fn group_typing_attributes_only_live_roster_members() {
     let (_directory, client, config, context) = linked_group(&[ALEX, SAM]);
     let conversation = context.conversation_id;

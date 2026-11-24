@@ -182,6 +182,10 @@ mod tests {
             + MAX_CHALLENGES_PER_MINUTE
             + MAX_REPLAYS_PER_MINUTE
             + MEMBERSHIP_CHALLENGES_PER_MINUTE;
+        assert_eq!(
+            total, 119,
+            "budget sum changed; update the breakdown at the top of this file"
+        );
         assert!(total <= 120, "sender maximum {total} exceeds server limit");
     }
 

@@ -754,13 +754,7 @@ fn historical_snapshot_edit_request_never_yields_a_permit() {
     let permit = p
         .owner
         .next_contact_apply_permit(&json!({"schema_version": 1, "request_id": "r1"}).to_string());
-    if let Ok(permit) = permit {
-        assert_ne!(
-            serde_json::from_str::<Value>(&permit).unwrap()["status"],
-            "permit",
-            "historical request must not authorize an OS write"
-        );
-    }
+    assert_eq!(permit, Err(Error::NotFound));
     assert_eq!(visible(&p.owner, BOOK), ["c1"]);
 }
 

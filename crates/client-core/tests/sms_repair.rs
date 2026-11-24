@@ -281,7 +281,9 @@ fn c5_first_plan_seeds_live_checkpoint_at_history_baseline() {
 fn c6_more_than_a_thousand_completed_history_rows_continue() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
-    let client = open(&config(&dir, "gateway", &vault));
+    let cfg = config(&dir, "gateway", &vault);
+    let client = open(&cfg);
+    let mut captured = Vec::new();
     for index in 0..1_005 {
         let mut input = row(
             &index.to_string(),
@@ -291,7 +293,27 @@ fn c6_more_than_a_thousand_completed_history_rows_continue() {
             Some(0),
         );
         input.imported = true;
-        capture(&client, input);
+        let result = capture(&client, input);
+        assert!(!result.duplicate);
+        captured.push(result);
+    }
+    let conversation = captured[0].conversation_id;
+    assert!(
+        captured
+            .iter()
+            .all(|item| item.conversation_id == conversation)
+    );
+    drop(client);
+    let reopened = open(&cfg);
+    let messages = reopened.messages(conversation).unwrap();
+    assert_eq!(messages.len(), 1_005);
+    for result in captured {
+        assert!(
+            messages.iter().any(
+                |message| message.payload.record.message_id == result.message_id
+                    && message.payload.body == "history"
+            )
+        );
     }
 }
 

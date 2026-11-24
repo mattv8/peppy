@@ -72,6 +72,341 @@ fn unmatched_outgoing_media_record() -> RcsProjectedRecord {
     record
 }
 
+fn probe_receive_views(
+    client: &Client,
+    message_id: MessageId,
+) -> Vec<Result<Option<RcsMediaReceiveView>, Error>> {
+    (0..=10)
+        .map(|index| client.rcs_media_receive_view(message_id, index))
+        .collect()
+}
+
+fn receive_slot_fixture() -> (tempfile::TempDir, Client, ClientConfig, MessageId) {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "receive-slot-edges", &vault);
+    let client = unlocked(&config, &vault);
+    publish_current_gateway(&client, &config);
+    let conversation = ConversationId::new();
+    let ownership = client.begin_rcs_link_ownership(conversation, 0).unwrap();
+    assert_eq!(
+        client
+            .ingest_rcs_projected_record(
+                conversation,
+                ownership.ownership_generation,
+                incoming_media_record(),
+            )
+            .unwrap(),
+        RcsReceiveOutcome::Inserted
+    );
+    let message_id = only_message(&client, conversation)
+        .payload
+        .record
+        .message_id;
+    (directory, client, config, message_id)
+}
+
+fn fixture_slot(message_id: MessageId, index: u32) -> RcsMediaReceiveView {
+    RcsMediaReceiveView {
+        message_id,
+        attachment_index: index,
+        placeholder_id: format!("{message_id}:{index}"),
+        media_type: "image/png".into(),
+        display_name: format!("edge-{index}.png"),
+        plaintext_bytes: 200 + u64::from(index),
+        state: RcsMediaSyncState::Downloading,
+        attachment_id: None,
+    }
+}
+
+fn insert_fixture_slot(config: &ClientConfig, message_id: MessageId, index: u32) {
+    let view = fixture_slot(message_id, index);
+    sqlcipher(&config.database_path)
+        .execute(
+            "INSERT INTO rcs_media_receive(message_id,attachment_index,state,media_type,display_name,plaintext_bytes) VALUES(?,?,'downloading',?,?,?)",
+            rusqlite::params![message_id.to_string(), index, view.media_type, view.display_name, view.plaintext_bytes],
+        )
+        .unwrap();
+}
+
+fn fixture_upper_bound_slots(config: &ClientConfig, message_id: MessageId) {
+    // The manifest limit is 10 attachments (indices 0..9), but the adapter probes through 10.
+    insert_fixture_slot(config, message_id, 10);
+}
+
+fn fixture_malformed_slots(config: &ClientConfig, message_id: MessageId) {
+    let db = sqlcipher(&config.database_path);
+    db.execute(
+        "INSERT INTO rcs_media_receive(message_id,attachment_index,state,media_type,display_name,plaintext_bytes,attachment_id) VALUES(?,2,'downloading','image/png','bad-id.png',1,'not-an-attachment-id'),(?,5,'downloading','image/png','negative.png',-1,NULL),(?,7,'downloading','image/png',NULL,1,NULL)",
+        rusqlite::params![message_id.to_string(), message_id.to_string(), message_id.to_string()],
+    ).unwrap();
+}
+
+fn assert_bulk_matches_probes(client: &Client, message_id: MessageId) {
+    let expected: Result<Vec<_>, Error> = probe_receive_views(client, message_id)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map(|views| views.into_iter().flatten().collect());
+    assert_eq!(client.rcs_media_receive_views(message_id), expected);
+}
+
+#[test]
+fn bulk_receive_views_match_ordered_probes_for_slot_fixtures() {
+    let (_directory, client, config, message_id) = receive_slot_fixture();
+    assert_bulk_matches_probes(&client, message_id);
+    fixture_upper_bound_slots(&config, message_id);
+    insert_fixture_slot(&config, message_id, 11);
+    assert_bulk_matches_probes(&client, message_id);
+    let db = sqlcipher(&config.database_path);
+    db.execute(
+        "DELETE FROM rcs_media_receive_local WHERE message_id=? AND attachment_index=0",
+        [message_id.to_string()],
+    )
+    .unwrap();
+    db.execute(
+        "DELETE FROM rcs_media_receive WHERE message_id=? AND attachment_index=0",
+        [message_id.to_string()],
+    )
+    .unwrap();
+    assert_bulk_matches_probes(&client, message_id);
+    fixture_malformed_slots(&config, message_id);
+    assert_bulk_matches_probes(&client, message_id);
+    db.execute(
+        "DELETE FROM rcs_media_receive WHERE message_id=? AND attachment_index=2",
+        [message_id.to_string()],
+    )
+    .unwrap();
+    assert_bulk_matches_probes(&client, message_id);
+    db.execute(
+        "DELETE FROM rcs_media_receive WHERE message_id=? AND attachment_index=5",
+        [message_id.to_string()],
+    )
+    .unwrap();
+    assert_bulk_matches_probes(&client, message_id);
+    db.execute(
+        "DELETE FROM rcs_media_receive_local WHERE message_id=?",
+        [message_id.to_string()],
+    )
+    .unwrap();
+    db.execute(
+        "DELETE FROM rcs_media_receive WHERE message_id=?",
+        [message_id.to_string()],
+    )
+    .unwrap();
+    assert_bulk_matches_probes(&client, message_id);
+}
+
+#[test]
+fn bulk_receive_views_match_probes_for_projected_text_sparse_and_multiple_messages() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "bulk-slot-probes", &vault);
+    let client = unlocked(&config, &vault);
+    publish_current_gateway(&client, &config);
+    let conversation = ConversationId::new();
+    let ownership = client.begin_rcs_link_ownership(conversation, 0).unwrap();
+    for (name, count) in [("sparse", 4), ("text", 0), ("several", 4)] {
+        let mut record = incoming_media_record();
+        record.google_message_id = format!("bulk-probe-{name}");
+        record.attachments = (0..count)
+            .map(|index| RcsIncomingAttachment {
+                original_index: index,
+                media_type: "image/jpeg".into(),
+                display_name: format!("slot-{index}.jpg"),
+                plaintext_bytes: 100 + u64::from(index),
+                too_large: false,
+                media_ref: format!("ref-{name}-{index}"),
+            })
+            .collect();
+        let previous: Vec<_> = client
+            .messages(conversation)
+            .unwrap()
+            .into_iter()
+            .map(|message| message.payload.record.message_id)
+            .collect();
+        client
+            .ingest_rcs_projected_record(conversation, ownership.ownership_generation, record)
+            .unwrap();
+        let message_id = client
+            .messages(conversation)
+            .unwrap()
+            .into_iter()
+            .find(|message| !previous.contains(&message.payload.record.message_id))
+            .unwrap()
+            .payload
+            .record
+            .message_id;
+        if name == "sparse" {
+            let db = sqlcipher(&config.database_path);
+            for table in ["rcs_media_receive_local", "rcs_media_receive"] {
+                db.execute(
+                    &format!(
+                        "DELETE FROM {table} WHERE message_id=? AND attachment_index IN (1,2)"
+                    ),
+                    [message_id.to_string()],
+                )
+                .unwrap();
+            }
+        }
+        assert_bulk_matches_probes(&client, message_id);
+    }
+}
+
+#[test]
+fn receive_probe_includes_index_ten_and_ignores_out_of_range_slot() {
+    let (_directory, client, config, message_id) = receive_slot_fixture();
+    fixture_upper_bound_slots(&config, message_id);
+    let mut expected = vec![Ok(None); 11];
+    expected[0] = Ok(Some(RcsMediaReceiveView {
+        message_id,
+        attachment_index: 0,
+        placeholder_id: format!("{message_id}:0"),
+        media_type: "video/mp4".into(),
+        display_name: "oversized.mp4".into(),
+        plaintext_bytes: 32 * 1024 * 1024 + 1,
+        state: RcsMediaSyncState::TooLarge,
+        attachment_id: None,
+    }));
+    expected[1] = Ok(Some(RcsMediaReceiveView {
+        message_id,
+        attachment_index: 1,
+        placeholder_id: format!("{message_id}:1"),
+        media_type: "image/jpeg".into(),
+        display_name: "photo.jpg".into(),
+        plaintext_bytes: 12_345,
+        state: RcsMediaSyncState::Downloading,
+        attachment_id: None,
+    }));
+    expected[10] = Ok(Some(fixture_slot(message_id, 10)));
+    assert_eq!(probe_receive_views(&client, message_id), expected);
+
+    insert_fixture_slot(&config, message_id, 11);
+    assert_eq!(probe_receive_views(&client, message_id), expected);
+    assert_eq!(
+        client.rcs_media_receive_view(message_id, 11),
+        Ok(Some(fixture_slot(message_id, 11)))
+    );
+}
+
+#[test]
+fn receive_probe_preserves_ordered_errors_and_incomplete_metadata() {
+    let (_directory, client, config, message_id) = receive_slot_fixture();
+    let mut expected = probe_receive_views(&client, message_id);
+    assert_eq!(
+        expected[0].as_ref().unwrap().as_ref().unwrap().state,
+        RcsMediaSyncState::TooLarge
+    );
+    assert_eq!(
+        expected[1].as_ref().unwrap().as_ref().unwrap().state,
+        RcsMediaSyncState::Downloading
+    );
+    fixture_malformed_slots(&config, message_id);
+    expected[2] = Err(Error::Database);
+    expected[5] = Err(Error::Database);
+    assert_eq!(probe_receive_views(&client, message_id), expected);
+    assert_eq!(
+        client
+            .rcs_media_receive_view(message_id, 2)
+            .unwrap_err()
+            .to_string(),
+        "database unavailable or corrupt"
+    );
+    assert_eq!(
+        client
+            .rcs_media_receive_view(message_id, 5)
+            .unwrap_err()
+            .to_string(),
+        "database unavailable or corrupt"
+    );
+    assert_eq!(client.rcs_media_receive_view(message_id, 7), Ok(None));
+}
+
+#[test]
+fn receive_view_returns_exact_slots_across_full_probe_range() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "slot-probes", &vault);
+    let client = unlocked(&config, &vault);
+    publish_current_gateway(&client, &config);
+    let conversation = ConversationId::new();
+    let ownership = client.begin_rcs_link_ownership(conversation, 0).unwrap();
+
+    for (name, indices) in [
+        ("sparse", vec![0, 3]),
+        ("text", vec![]),
+        ("several", vec![0, 1, 2, 3]),
+    ] {
+        let previous: Vec<_> = client
+            .messages(conversation)
+            .unwrap()
+            .into_iter()
+            .map(|message| message.payload.record.message_id)
+            .collect();
+        let mut record = incoming_media_record();
+        record.google_message_id = format!("probe-{name}");
+        let manifest_indices: Vec<u32> = if name == "sparse" {
+            vec![0, 1, 2, 3]
+        } else {
+            indices.clone()
+        };
+        record.attachments = manifest_indices
+            .iter()
+            .map(|&index| RcsIncomingAttachment {
+                original_index: index,
+                media_type: "image/jpeg".into(),
+                display_name: format!("slot-{index}.jpg"),
+                plaintext_bytes: 100 + u64::from(index),
+                too_large: false,
+                media_ref: format!("ref-{name}-{index}"),
+            })
+            .collect();
+        assert_eq!(
+            client
+                .ingest_rcs_projected_record(conversation, ownership.ownership_generation, record)
+                .unwrap(),
+            RcsReceiveOutcome::Inserted
+        );
+        let message_id = client
+            .messages(conversation)
+            .unwrap()
+            .into_iter()
+            .find(|message| !previous.contains(&message.payload.record.message_id))
+            .unwrap()
+            .payload
+            .record
+            .message_id;
+        if name == "sparse" {
+            let connection = sqlcipher(&config.database_path);
+            for table in ["rcs_media_receive_local", "rcs_media_receive"] {
+                connection
+                    .execute(
+                        &format!(
+                            "DELETE FROM {table} WHERE message_id=? AND attachment_index IN (1,2)"
+                        ),
+                        [message_id.to_string()],
+                    )
+                    .unwrap();
+            }
+        }
+        for index in 0..=10 {
+            let view = client.rcs_media_receive_view(message_id, index).unwrap();
+            if indices.contains(&index) {
+                let view = view.unwrap();
+                assert_eq!(view.message_id, message_id);
+                assert_eq!(view.attachment_index, index);
+                assert_eq!(view.placeholder_id, format!("{message_id}:{index}"));
+                assert_eq!(view.media_type, "image/jpeg");
+                assert_eq!(view.display_name, format!("slot-{index}.jpg"));
+                assert_eq!(view.plaintext_bytes, 100 + u64::from(index));
+                assert_eq!(view.state, RcsMediaSyncState::Downloading);
+                assert_eq!(view.attachment_id, None);
+            } else {
+                assert_eq!(view, None, "{name} index {index}");
+            }
+        }
+    }
+}
+
 #[test]
 fn sealed_media_placeholders_replicate_to_a_second_client_without_download_authority() {
     let directory = tempfile::TempDir::new().unwrap();
