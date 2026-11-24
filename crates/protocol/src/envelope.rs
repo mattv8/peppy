@@ -1,7 +1,4 @@
-use base64::{
-    Engine as _,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use peppy_domain::{CommandId, DeviceId, EnvelopeId, SourceSequence, VaultId};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeStruct};
@@ -234,14 +231,6 @@ pub enum EnvelopeError {
     InvalidCompaction,
     #[error("origin tag is only valid on event envelopes")]
     UnexpectedOriginTag,
-    #[error("invalid pairing HTTPS origin")]
-    InvalidPairingOrigin,
-    #[error("invalid pairing challenge token")]
-    InvalidPairingToken,
-    #[error("invalid pairing device binding")]
-    InvalidDeviceBinding,
-    #[error("pairing challenge is expired")]
-    ExpiredPairingChallenge,
 }
 
 impl Envelope {
@@ -497,85 +486,4 @@ where
     }
 
     deserializer.deserialize_seq(References)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct PairingQrRecord {
-    pub https_origin: String,
-    pub challenge_token: String,
-    pub expires_at_unix_seconds: u64,
-    pub protocol_version: u16,
-    pub vault_id: VaultId,
-    pub key_epoch: u32,
-    pub profile_fingerprint: String,
-    pub device_binding: DeviceId,
-}
-
-impl PairingQrRecord {
-    pub fn validate_at(&self, now_unix_seconds: u64) -> Result<(), EnvelopeError> {
-        if !is_strict_https_origin(&self.https_origin) {
-            return Err(EnvelopeError::InvalidPairingOrigin);
-        }
-        if self.challenge_token.len() != 43
-            || URL_SAFE_NO_PAD
-                .decode(&self.challenge_token)
-                .map_or(true, |bytes| bytes.len() != 32)
-        {
-            return Err(EnvelopeError::InvalidPairingToken);
-        }
-        if self.protocol_version != PROTOCOL_VERSION {
-            return Err(EnvelopeError::UnsupportedVersion);
-        }
-        if self.key_epoch == 0 {
-            return Err(EnvelopeError::InvalidKeyEpoch);
-        }
-        validate_profile_fingerprint(&self.profile_fingerprint)?;
-        if self.device_binding.0.is_nil() {
-            return Err(EnvelopeError::InvalidDeviceBinding);
-        }
-        if self.expires_at_unix_seconds <= now_unix_seconds {
-            return Err(EnvelopeError::ExpiredPairingChallenge);
-        }
-        Ok(())
-    }
-}
-
-fn is_strict_https_origin(value: &str) -> bool {
-    if !value.starts_with("https://") || value.contains(['?', '#', '@', ' ']) {
-        return false;
-    }
-    let authority = &value[8..];
-    let authority = authority.strip_suffix('/').unwrap_or(authority);
-    if authority.is_empty()
-        || authority.contains('/')
-        || !authority.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
-        })
-    {
-        return false;
-    }
-    let (host, port) = if authority.starts_with('[') {
-        let Some((host, remainder)) = authority.split_once(']') else {
-            return false;
-        };
-        let port = if remainder.is_empty() {
-            None
-        } else if let Some(port) = remainder.strip_prefix(':') {
-            Some(port)
-        } else {
-            return false;
-        };
-        let Some(host) = host.strip_prefix('[') else {
-            return false;
-        };
-        if host.parse::<std::net::Ipv6Addr>().is_err() {
-            return false;
-        }
-        (host, port)
-    } else {
-        authority
-            .split_once(':')
-            .map_or((authority, None), |(host, port)| (host, Some(port)))
-    };
-    !host.is_empty() && port.is_none_or(|port| !port.is_empty() && port.parse::<u16>().is_ok())
 }

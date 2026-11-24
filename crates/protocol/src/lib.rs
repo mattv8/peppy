@@ -8,7 +8,7 @@ mod vault_identity;
 pub use envelope::{
     COMPACTION_KEY_BYTES, CompactionMetadata, CompactionReference, Envelope, EnvelopeError,
     EnvelopePurpose, GatewayRoute, MAX_BASE64_CIPHERTEXT_CHARS, MAX_CIPHERTEXT_BYTES,
-    MAX_COMPACTION_SUPERSEDES, ORIGIN_TAG_BYTES, OriginTag, PROTOCOL_VERSION, PairingQrRecord,
+    MAX_COMPACTION_SUPERSEDES, ORIGIN_TAG_BYTES, OriginTag, PROTOCOL_VERSION,
 };
 pub use ephemeral::{
     ChallengePlaintextV2, EPHEMERAL_FUTURE_TOLERANCE_MS, EPHEMERAL_PROTOCOL_VERSION,

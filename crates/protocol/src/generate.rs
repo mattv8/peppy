@@ -1,8 +1,8 @@
 use crate::{
     ChallengePlaintextV2, Envelope, EphemeralSignalV1, EphemeralSignalV2, EstablishVaultIdentityV1,
     LiveHelloV1, LiveHelloV2, MembershipBootstrapV1, MembershipChallengeV1, MembershipControlV1,
-    MembershipDeviceV1, MembershipHintV1, MembershipResponseV1, PairingQrRecord,
-    SessionAckPlaintextV2, TypingPlaintextV2, VaultIdentityStatusV1,
+    MembershipDeviceV1, MembershipHintV1, MembershipResponseV1, SessionAckPlaintextV2,
+    TypingPlaintextV2, VaultIdentityStatusV1,
 };
 use schemars::schema_for;
 use serde_json::{Map, Value, json};
@@ -16,8 +16,6 @@ pub struct GeneratedContracts {
 
 pub fn generate_contracts() -> GeneratedContracts {
     let envelope = serde_json::to_value(schema_for!(Envelope)).expect("Envelope schema serializes");
-    let pairing =
-        serde_json::to_value(schema_for!(PairingQrRecord)).expect("Pairing schema serializes");
     let ephemeral = serde_json::to_value(schema_for!(EphemeralSignalV1))
         .expect("ephemeral signal schema serializes");
     let ephemeral_v2 = serde_json::to_value(schema_for!(EphemeralSignalV2))
@@ -48,7 +46,6 @@ pub fn generate_contracts() -> GeneratedContracts {
         .expect("vault identity status schema serializes");
     let mut components = BTreeMap::new();
     components.extend(extract_components("Envelope", envelope));
-    components.extend(extract_components("PairingQrRecord", pairing));
     components.extend(extract_components("EphemeralSignalV1", ephemeral));
     components.extend(extract_components("EphemeralSignalV2", ephemeral_v2));
     let hello =
