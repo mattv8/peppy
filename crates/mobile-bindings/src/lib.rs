@@ -2345,6 +2345,23 @@ impl NativeClient {
         })
     }
 
+    /// Publishes this phone's notification dismissal availability when it changed or a computer
+    /// has new dismissals to hear about. Android only; returns whether a status event was queued.
+    pub fn publish_notification_dismissal_status(
+        &self,
+        platform: NativeGatewayPlatform,
+        facts: NativeGatewayHostFacts,
+        now_ms: i64,
+    ) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.publish_notification_dismissal_status(
+                gateway_platform(platform),
+                gateway_facts(facts),
+                now_ms,
+            )
+        })
+    }
+
     /// Returns whether this gateway's current RCS link satisfies the core's
     /// capability gate. This is a display capability, not a permit or transport
     /// authority.
@@ -5414,6 +5431,54 @@ mod tests {
         assert_eq!(client.reconcile_provider_archive(Vec::new()).unwrap(), 0);
         assert!(client.pending_sender_unblocks().unwrap().is_empty());
         assert!(client.interrupted_sender_unblocks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn notification_dismissal_status_publish_forwards_to_core() {
+        let path = TempDatabase::new(format!(
+            "peppy-mobile-dismissal-status-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let vault_id = uuid::Uuid::new_v4().to_string();
+        let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
+        let client = open_native_client(NativeOpenConfig {
+            database_path: path.to_string_lossy().into_owned(),
+            vault_id,
+            device_id: uuid::Uuid::new_v4().to_string(),
+            database_key: vec![7; 32],
+        })
+        .unwrap();
+        client
+            .unlock(
+                material.profile_json,
+                material.header_json,
+                "test passphrase".into(),
+            )
+            .unwrap();
+        let facts = NativeGatewayHostFacts {
+            wifi_connected: true,
+            notification_listener_available: true,
+            sms_available: true,
+            notification_is_silent: false,
+            phone_read_available: true,
+            notification_mark_read_available: true,
+        };
+
+        // No prior status and no computer dismissals: nothing to publish on either platform.
+        assert!(
+            !client
+                .publish_notification_dismissal_status(
+                    NativeGatewayPlatform::Android,
+                    facts.clone(),
+                    1_000,
+                )
+                .unwrap()
+        );
+        assert!(
+            !client
+                .publish_notification_dismissal_status(NativeGatewayPlatform::Ios, facts, 1_000)
+                .unwrap()
+        );
     }
 
     #[test]
