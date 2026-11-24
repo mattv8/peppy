@@ -19,6 +19,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.util.Locale
 
 
 /** Pure provider <-> core mapping and patch planning; no core, no OS provider. */
@@ -79,6 +80,29 @@ class ContactMappingTest {
         assertEquals("--02-29", ContactMapping.startDate(ContactMapping.birthday("--02-29")!!))
         assertNull(ContactMapping.birthday("2001-02-29"))
         assertNull(ContactMapping.birthday("Dec 10"))
+    }
+
+    @Test fun multibyteNoteReadbackIsTruncatedAtUtf8ByteLimit() {
+        // The provider accepts notes up to a character limit; mapping truncates readback at a UTF-8 byte limit.
+        // Pins current behaviour of review finding D-07; flip this assertion when the fix is authorized.
+        val note = "é".repeat(AndroidContactsProvider.MAX_NOTE)
+        val c = contact().let { it.copy(fields = it.fields + Field(
+            105, 10, Kind.NOTE, mapOf(android.provider.ContactsContract.CommonDataKinds.Note.NOTE to note), false, false, 0,
+        )) }
+        assertEquals("é".repeat(4096), ContactMapping.fields(c).getString("notes"))
+    }
+
+    @Test fun arabicLocaleBirthdayDoesNotRoundTrip() {
+        // Pins current behaviour of review finding D-38; flip this assertion when the fix is authorized.
+        val previous = Locale.getDefault()
+        try {
+            Locale.setDefault(Locale.forLanguageTag("ar"))
+            val formatted = ContactMapping.startDate(JSONObject().put("year", 2000).put("month", 2).put("day", 29))
+            assertEquals("٢٠٠٠-٠٢-٢٩", formatted)
+            assertNull(ContactMapping.birthday(formatted))
+        } finally {
+            Locale.setDefault(previous)
+        }
     }
 
     private fun sources(vararg pairs: Pair<String, Long>) = JSONArray().apply {
