@@ -846,7 +846,6 @@ export function AppTitlebar({
   onMinimize?(): void;
   onMaximize?(): void;
   onClose?(): void;
-  simulated?: boolean;
   platform?: "macos" | "windows" | "linux";
   nativeWindowControls?: boolean;
   isComposer?: boolean;
