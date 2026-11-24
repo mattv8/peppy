@@ -1274,274 +1274,300 @@ val verifyReleaseRestrictedSetupExclusionFixtures = tasks.register("verifyReleas
         val fixtureDirectory = layout.buildDirectory.dir("tmp/restricted-setup-exclusion-fixtures").get().asFile
         fixtureDirectory.deleteRecursively()
         fixtureDirectory.mkdirs()
-        val provenanceFixtureDirectory = fixtureDirectory.resolve("google-messages-provenance")
-        val provenanceFixtureGmlinkDirectory = provenanceFixtureDirectory.resolve("gmlink").apply { mkdirs() }
-        provenanceFixtureGmlinkDirectory.resolve("fixture.go").writeText("package gmlink\n")
-        provenanceFixtureDirectory.resolve("go.mod").writeText("go.mau.fi/mautrix-gmessages v0.0.0\n")
-        provenanceFixtureDirectory.resolve("go.sum").writeText("fixture\n")
-        val provenanceFixturePatch = provenanceFixtureDirectory.resolve("upstream-safety.patch")
-        val provenanceFixtureChecksum = provenanceFixtureDirectory.resolve("upstream-safety.patch.sha256")
-        val provenanceFixtureAar = provenanceFixtureDirectory.resolve("gmlink.aar").apply { writeText("old AAR") }
-        val provenanceFixtureFile = provenanceFixtureDirectory.resolve("gmlink.aar.provenance")
-        provenanceFixturePatch.writeText("original patch\n")
-        provenanceFixtureChecksum.writeText("${sha256(provenanceFixturePatch)}  upstream-safety.patch\n")
-        provenanceFixtureFile.writeText(
-            googleMessagesProvenanceInputs(provenanceFixtureDirectory, provenanceFixtureAar)
-                .entries.joinToString("\n") { (name, value) -> "$name=$value" } + "\n",
-        )
-        check(runCatching {
-            verifyGoogleMessagesAarProvenance(
-                provenanceFixtureDirectory,
-                provenanceFixtureAar,
-                provenanceFixtureFile,
+        fun verifyProvenanceFixtures() {
+            val provenanceFixtureDirectory = fixtureDirectory.resolve("google-messages-provenance")
+            val provenanceFixtureGmlinkDirectory = provenanceFixtureDirectory.resolve("gmlink").apply { mkdirs() }
+            provenanceFixtureGmlinkDirectory.resolve("fixture.go").writeText("package gmlink\n")
+            provenanceFixtureDirectory.resolve("go.mod").writeText("go.mau.fi/mautrix-gmessages v0.0.0\n")
+            provenanceFixtureDirectory.resolve("go.sum").writeText("fixture\n")
+            val provenanceFixturePatch = provenanceFixtureDirectory.resolve("upstream-safety.patch")
+            val provenanceFixtureChecksum = provenanceFixtureDirectory.resolve("upstream-safety.patch.sha256")
+            val provenanceFixtureAar = provenanceFixtureDirectory.resolve("gmlink.aar").apply { writeText("old AAR") }
+            val provenanceFixtureFile = provenanceFixtureDirectory.resolve("gmlink.aar.provenance")
+            provenanceFixturePatch.writeText("original patch\n")
+            provenanceFixtureChecksum.writeText("${sha256(provenanceFixturePatch)}  upstream-safety.patch\n")
+            provenanceFixtureFile.writeText(
+                googleMessagesProvenanceInputs(provenanceFixtureDirectory, provenanceFixtureAar)
+                    .entries.joinToString("\n") { (name, value) -> "$name=$value" } + "\n",
             )
-        }.isSuccess) { "Consistent patch, checksum pin and AAR provenance must pass verification" }
-        provenanceFixturePatch.appendText("changed without checksum\n")
-        val staleChecksumFailure = runCatching {
-            googleMessagesProvenanceInputs(provenanceFixtureDirectory, provenanceFixtureAar)
-        }.exceptionOrNull()
-        check(staleChecksumFailure?.message?.contains("does not match upstream-safety.patch") == true) {
-            "Changed safety patch must fail the checksum comparison, got: ${staleChecksumFailure?.message}"
+            check(runCatching {
+                verifyGoogleMessagesAarProvenance(
+                    provenanceFixtureDirectory,
+                    provenanceFixtureAar,
+                    provenanceFixtureFile,
+                )
+            }.isSuccess) { "Consistent patch, checksum pin and AAR provenance must pass verification" }
+            provenanceFixturePatch.appendText("changed without checksum\n")
+            val staleChecksumFailure = runCatching {
+                googleMessagesProvenanceInputs(provenanceFixtureDirectory, provenanceFixtureAar)
+            }.exceptionOrNull()
+            check(staleChecksumFailure?.message?.contains("does not match upstream-safety.patch") == true) {
+                "Changed safety patch must fail the checksum comparison, got: ${staleChecksumFailure?.message}"
+            }
+            provenanceFixtureChecksum.writeText("${sha256(provenanceFixturePatch)}  upstream-safety.patch\n")
+            val staleProvenanceFailure = runCatching {
+                verifyGoogleMessagesAarProvenance(
+                    provenanceFixtureDirectory,
+                    provenanceFixtureAar,
+                    provenanceFixtureFile,
+                )
+            }.exceptionOrNull()
+            check(staleProvenanceFailure?.message?.contains("does not match current inputs") == true) {
+                "Changed safety patch must reject stale AAR provenance, got: ${staleProvenanceFailure?.message}"
+            }
         }
-        provenanceFixtureChecksum.writeText("${sha256(provenanceFixturePatch)}  upstream-safety.patch\n")
-        val staleProvenanceFailure = runCatching {
-            verifyGoogleMessagesAarProvenance(
-                provenanceFixtureDirectory,
-                provenanceFixtureAar,
-                provenanceFixtureFile,
-            )
-        }.exceptionOrNull()
-        check(staleProvenanceFailure?.message?.contains("does not match current inputs") == true) {
-            "Changed safety patch must reject stale AAR provenance, got: ${staleProvenanceFailure?.message}"
-        }
+        verifyProvenanceFixtures()
+
         val fixtureApk = fixtureDirectory.resolve("app-release-unsigned.apk")
-        ZipOutputStream(fixtureApk.outputStream()).use { archive ->
-            archive.putNextEntry(ZipEntry("classes.dex"))
-            archive.write("${restrictedSetupDexPrefix}RestrictedSetupController;".toByteArray())
-            archive.closeEntry()
-        }
         val metadata = fixtureDirectory.resolve("output-metadata.json")
-        metadata.writeText("""{"artifactType":{"type":"APK"},"variantName":"release","elements":[{"outputFile":"app-release-unsigned.apk"}]}""")
-        check(runCatching { restrictedSetupDexClasses(apksFromMetadata(metadata, "release")) }.isSuccess)
-        check(runCatching {
-            check(restrictedSetupDexClasses(apksFromMetadata(metadata, "release")).all(permittedRestrictedSetupDexClasses::matches))
-        }.isFailure) { "Synthetic development class must fail the release DEX exclusion guard" }
-
-        val manifest = fixtureDirectory.resolve("AndroidManifest.xml")
-        manifest.writeText("""<manifest xmlns:android="$androidNamespace"><application><service android:name="dev.peppy.mobile.restrictedsetup.RestrictedSetupController" /></application></manifest>""")
-        check(runCatching { verifyRestrictedSetupManifest(manifest, "release") }.isFailure) {
-            "Synthetic restricted setup component must fail the release manifest exclusion guard"
-        }
-        manifest.writeText("""<manifest xmlns:android="$androidNamespace"><application><service android:name="dev.peppy.mobile.ForegroundService" android:foregroundServiceType="connectedDevice" /></application></manifest>""")
-        check(runCatching { verifyRestrictedSetupManifest(manifest, "release") }.isFailure) {
-            "Synthetic connectedDevice foreground service must fail the release manifest exclusion guard"
-        }
-
-        ZipOutputStream(fixtureApk.outputStream()).use { archive ->
-            archive.putNextEntry(ZipEntry("lib/arm64-v8a/libadb.so"))
-            archive.closeEntry()
-        }
-        check(restrictedSetupNativeLibraries(apksFromMetadata(metadata, "release")).isNotEmpty()) {
-            "Synthetic restricted setup native library must be detected"
-        }
-        writeArchiveFixture(fixtureApk, mapOf("assets/third_party/NOTICE.txt" to ByteArray(0)))
-        listOf(false, true).forEach { enabled ->
+        fun verifyRestrictedSetupApkFixtures() {
+            ZipOutputStream(fixtureApk.outputStream()).use { archive ->
+                archive.putNextEntry(ZipEntry("classes.dex"))
+                archive.write("${restrictedSetupDexPrefix}RestrictedSetupController;".toByteArray())
+                archive.closeEntry()
+            }
+            metadata.writeText("""{"artifactType":{"type":"APK"},"variantName":"release","elements":[{"outputFile":"app-release-unsigned.apk"}]}""")
+            check(runCatching { restrictedSetupDexClasses(apksFromMetadata(metadata, "release")) }.isSuccess)
             check(runCatching {
-                verifyReleaseThirdPartyNotices(apksFromMetadata(metadata, "release"), "assets/third_party/", "Release APK", enabled)
-            }.isFailure) { "Restricted-setup notices must fail the release APK exclusion guard when link=$enabled" }
+                check(restrictedSetupDexClasses(apksFromMetadata(metadata, "release")).all(permittedRestrictedSetupDexClasses::matches))
+            }.isFailure) { "Synthetic development class must fail the release DEX exclusion guard" }
+
+            val manifest = fixtureDirectory.resolve("AndroidManifest.xml")
+            manifest.writeText("""<manifest xmlns:android="$androidNamespace"><application><service android:name="dev.peppy.mobile.restrictedsetup.RestrictedSetupController" /></application></manifest>""")
+            check(runCatching { verifyRestrictedSetupManifest(manifest, "release") }.isFailure) {
+                "Synthetic restricted setup component must fail the release manifest exclusion guard"
+            }
+            manifest.writeText("""<manifest xmlns:android="$androidNamespace"><application><service android:name="dev.peppy.mobile.ForegroundService" android:foregroundServiceType="connectedDevice" /></application></manifest>""")
+            check(runCatching { verifyRestrictedSetupManifest(manifest, "release") }.isFailure) {
+                "Synthetic connectedDevice foreground service must fail the release manifest exclusion guard"
+            }
+
+            ZipOutputStream(fixtureApk.outputStream()).use { archive ->
+                archive.putNextEntry(ZipEntry("lib/arm64-v8a/libadb.so"))
+                archive.closeEntry()
+            }
+            check(restrictedSetupNativeLibraries(apksFromMetadata(metadata, "release")).isNotEmpty()) {
+                "Synthetic restricted setup native library must be detected"
+            }
+            writeArchiveFixture(fixtureApk, mapOf("assets/third_party/NOTICE.txt" to ByteArray(0)))
+            listOf(false, true).forEach { enabled ->
+                check(runCatching {
+                    verifyReleaseThirdPartyNotices(apksFromMetadata(metadata, "release"), "assets/third_party/", "Release APK", enabled)
+                }.isFailure) { "Restricted-setup notices must fail the release APK exclusion guard when link=$enabled" }
+            }
+            listOf(false, true).forEach { enabled ->
+                writeArchiveFixture(fixtureApk, mapOf("assets/third_party/nested/NOTICE.txt" to ByteArray(0)))
+                check(runCatching {
+                    verifyReleaseThirdPartyNotices(apksFromMetadata(metadata, "release"), "assets/third_party/", "Release APK", enabled)
+                }.isFailure) { "Nested restricted-setup notices must fail the release APK exclusion guard when link=$enabled" }
+            }
         }
-        listOf(false, true).forEach { enabled ->
-            writeArchiveFixture(fixtureApk, mapOf("assets/third_party/nested/NOTICE.txt" to ByteArray(0)))
-            check(runCatching {
-                verifyReleaseThirdPartyNotices(apksFromMetadata(metadata, "release"), "assets/third_party/", "Release APK", enabled)
-            }.isFailure) { "Nested restricted-setup notices must fail the release APK exclusion guard when link=$enabled" }
-        }
+        verifyRestrictedSetupApkFixtures()
 
         val googleMessagesArtifacts = mapOf(
             googleMessagesNativeLibrary to mapOf("lib/arm64-v8a/$googleMessagesNativeLibrary" to ByteArray(0)),
             "dev/peppy/gmlink/" to mapOf("classes.dex" to "${googleMessagesDexPrefix}Gmlink;".toByteArray()),
             googleMessagesNotice to mapOf(googleMessagesNotice to ByteArray(0)),
         )
-        writeArchiveFixture(fixtureApk, mapOf("classes.dex" to ByteArray(0)))
-        check(runCatching { verifyGoogleMessagesLinkExclusion(apksFromMetadata(metadata, "release"), "Release APK") }.isSuccess) {
-            "Clean APK must pass the Google Messages link exclusion guard"
-        }
-        googleMessagesArtifacts.forEach { (artifact, entries) ->
-            writeArchiveFixture(fixtureApk, entries)
-            check(runCatching { verifyGoogleMessagesLinkExclusion(apksFromMetadata(metadata, "release"), "Release APK") }.isFailure) {
-                "Synthetic $artifact APK artifact must fail the release exclusion guard"
+        fun verifyGoogleMessagesApkFixtures() {
+            writeArchiveFixture(fixtureApk, mapOf("classes.dex" to ByteArray(0)))
+            check(runCatching { verifyGoogleMessagesLinkExclusion(apksFromMetadata(metadata, "release"), "Release APK") }.isSuccess) {
+                "Clean APK must pass the Google Messages link exclusion guard"
+            }
+            googleMessagesArtifacts.forEach { (artifact, entries) ->
+                writeArchiveFixture(fixtureApk, entries)
+                check(runCatching { verifyGoogleMessagesLinkExclusion(apksFromMetadata(metadata, "release"), "Release APK") }.isFailure) {
+                    "Synthetic $artifact APK artifact must fail the release exclusion guard"
+                }
+            }
+            writeArchiveFixture(fixtureApk, mapOf("classes.dex" to "Ldev/peppy/mobile/googlemessages/GoogleMessagesLink;".toByteArray()))
+            check(runCatching { verifyGoogleMessagesLinkExclusion(apksFromMetadata(metadata, "release"), "Release APK") }.isSuccess) {
+                "Google Messages link stub seam must not fail the release exclusion guard"
+            }
+            val requiredGoogleMessagesArtifacts = googleMessagesArtifacts.keys
+            requiredGoogleMessagesArtifacts.forEach { artifact ->
+                check(runCatching {
+                    verifySideloadGoogleMessagesLinkArtifacts(requiredGoogleMessagesArtifacts - artifact, true)
+                }.isFailure) { "Flag-on guard must reject a missing $artifact" }
+            }
+
+            writeArchiveFixture(
+                fixtureApk,
+                googleMessagesNoticeFileNames.associate { "assets/third_party/$it" to ByteArray(0) },
+            )
+            check(runCatching {
+                verifyReleaseThirdPartyNotices(apksFromMetadata(metadata, "release"), "assets/third_party/", "Release APK", true)
+            }.isSuccess) { "Only Google Messages link notices must pass the flag-on release notice guard" }
+            requiredGoogleMessagesArtifacts.forEach { artifact ->
+                check(runCatching {
+                    verifySideloadGoogleMessagesLinkArtifacts(setOf(artifact), false)
+                }.isFailure) { "Flag-off guard must reject $artifact" }
             }
         }
-        writeArchiveFixture(fixtureApk, mapOf("classes.dex" to "Ldev/peppy/mobile/googlemessages/GoogleMessagesLink;".toByteArray()))
-        check(runCatching { verifyGoogleMessagesLinkExclusion(apksFromMetadata(metadata, "release"), "Release APK") }.isSuccess) {
-            "Google Messages link stub seam must not fail the release exclusion guard"
-        }
-        val requiredGoogleMessagesArtifacts = googleMessagesArtifacts.keys
-        requiredGoogleMessagesArtifacts.forEach { artifact ->
-            check(runCatching {
-                verifySideloadGoogleMessagesLinkArtifacts(requiredGoogleMessagesArtifacts - artifact, true)
-            }.isFailure) { "Flag-on guard must reject a missing $artifact" }
-        }
-
-        writeArchiveFixture(
-            fixtureApk,
-            googleMessagesNoticeFileNames.associate { "assets/third_party/$it" to ByteArray(0) },
-        )
-        check(runCatching {
-            verifyReleaseThirdPartyNotices(apksFromMetadata(metadata, "release"), "assets/third_party/", "Release APK", true)
-        }.isSuccess) { "Only Google Messages link notices must pass the flag-on release notice guard" }
-        requiredGoogleMessagesArtifacts.forEach { artifact ->
-            check(runCatching {
-                verifySideloadGoogleMessagesLinkArtifacts(setOf(artifact), false)
-            }.isFailure) { "Flag-off guard must reject $artifact" }
-        }
+        verifyGoogleMessagesApkFixtures()
 
         val alignedGoogleMessagesFixture = fixtureDirectory.resolve("app-sideload-aligned.apk")
-        writeAlignedGoogleMessagesFixture(alignedGoogleMessagesFixture, 0x4000)
-        check(runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.isSuccess) {
-            "Synthetic 16 KiB-aligned Google Messages library must pass the sideload guard"
-        }
-        writeAlignedGoogleMessagesFixture(alignedGoogleMessagesFixture, 0x1000)
-        check(runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.isFailure) {
-            "Synthetic 4 KiB-aligned Google Messages library must fail the sideload guard"
-        }
-        writeArchiveFixture(alignedGoogleMessagesFixture, mapOf("lib/arm64-v8a/$googleMessagesNativeLibrary" to elfFixture(0x4000)))
-        check(runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.isFailure) {
-            "Synthetic ZIP-misaligned Google Messages library must fail the sideload guard"
-        }
-        val compressedGoogleMessagesAab = fixtureDirectory.resolve("app-sideload-compressed.aab")
-        ZipOutputStream(compressedGoogleMessagesAab.outputStream()).use { archive ->
-            archive.putNextEntry(ZipEntry("base/lib/arm64-v8a/$googleMessagesNativeLibrary"))
-            archive.write(elfFixture(0x4000))
-            archive.closeEntry()
-        }
-        check(runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(compressedGoogleMessagesAab)) }.isSuccess) {
-            "Compressed AAB Google Messages library with aligned ELF must pass the sideload guard"
-        }
-        listOf(
-            ByteArray(3),
-            elfFixture(0x4000).also { writeLittleEndian(it, 32, 4096, 8) },
-            elfFixture(0x4000).also { writeLittleEndian(it, 56, 2, 2) },
-            elfFixture(0x4000).also { writeLittleEndian(it, 32, Int.MAX_VALUE.toLong() + 1, 8) },
-            elfFixture(0x4000).also { it[4] = 1 },
-        ).forEach { malformedElf ->
-            writeAlignedGoogleMessagesFixture(alignedGoogleMessagesFixture, 0x4000, malformedElf)
-            val failure = runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.exceptionOrNull()
-            check(failure?.message == "Google Messages link native library verification failed") {
-                "Malformed ELF must fail with the fixed verification message"
+        fun verifyGoogleMessagesAlignmentFixtures() {
+            writeAlignedGoogleMessagesFixture(alignedGoogleMessagesFixture, 0x4000)
+            check(runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.isSuccess) {
+                "Synthetic 16 KiB-aligned Google Messages library must pass the sideload guard"
             }
-        }
-        alignedGoogleMessagesFixture.writeBytes(byteArrayOf(1, 2, 3))
-        val malformedZipFailure = runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.exceptionOrNull()
-        check(malformedZipFailure?.message == "Google Messages link native library verification failed") {
-            "Malformed ZIP must fail with the fixed verification message"
-        }
-
-        val fixtureAab = fixtureDirectory.resolve("app-release.aab")
-        ZipOutputStream(fixtureAab.outputStream()).use { archive ->
-            archive.putNextEntry(ZipEntry("base/dex/classes.dex"))
-            archive.write("Lio/github/muntashirakon/adb/AdbManager;".toByteArray())
-            archive.closeEntry()
-            archive.putNextEntry(ZipEntry("base/lib/arm64-v8a/libspake2.so"))
-            archive.closeEntry()
-            archive.putNextEntry(ZipEntry("base/assets/third_party/NOTICE.txt"))
-            archive.closeEntry()
-        }
-        check(restrictedSetupDexClasses(listOf(fixtureAab)).isNotEmpty()) {
-            "Synthetic libadb class must fail the release AAB DEX exclusion guard"
-        }
-        check(restrictedSetupNativeLibraries(listOf(fixtureAab)).contains("libspake2.so")) {
-            "Synthetic restricted setup native library must fail the release AAB exclusion guard"
-        }
-        check(runCatching {
-            verifyReleaseThirdPartyNotices(listOf(fixtureAab), "base/assets/third_party/", "Release AAB")
-        }.isFailure) { "Restricted-setup notices must fail the release AAB exclusion guard" }
-        listOf(false, true).forEach { enabled ->
-            writeArchiveFixture(fixtureAab, mapOf("base/assets/third_party/nested/LGPL-2.1.txt" to ByteArray(0)))
-            check(runCatching {
-                verifyReleaseThirdPartyNotices(listOf(fixtureAab), "base/assets/third_party/", "Release AAB", enabled)
-            }.isFailure) { "Nested restricted-setup notices must fail the release AAB exclusion guard when link=$enabled" }
-        }
-
-        googleMessagesArtifacts.forEach { (artifact, entries) ->
-            writeArchiveFixture(fixtureAab, entries.mapKeys { (name, _) -> if (name == "classes.dex") "base/dex/classes.dex" else "base/$name" })
-            check(runCatching { verifyGoogleMessagesLinkExclusion(listOf(fixtureAab), "Release AAB", "base/$googleMessagesNotice") }.isFailure) {
-                "Synthetic $artifact AAB artifact must fail the release exclusion guard"
+            writeAlignedGoogleMessagesFixture(alignedGoogleMessagesFixture, 0x1000)
+            check(runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.isFailure) {
+                "Synthetic 4 KiB-aligned Google Messages library must fail the sideload guard"
             }
-        }
-
-        val releaseGoogleMessagesEntries = buildMap {
-            put("base/dex/classes.dex", "${googleMessagesDexPrefix}Gmlink;".toByteArray())
-            put("base/lib/arm64-v8a/$googleMessagesNativeLibrary", elfFixture(0x4000))
-            put("base/lib/x86_64/$googleMessagesNativeLibrary", elfFixture(0x4000))
-            put("base/lib/x86_64/libpeppy_mobile_bindings.so", ByteArray(0))
-            googleMessagesNoticeFileNames.forEach { put("base/assets/third_party/$it", ByteArray(0)) }
-        }
-        writeArchiveFixture(fixtureAab, releaseGoogleMessagesEntries)
-        check(runCatching {
-            verifyReleaseGoogleMessagesLinkArtifacts(
-                listOf(fixtureAab),
-                true,
-                "base/assets/third_party/",
-                "Release AAB",
-            )
-        }.isSuccess) { "Flag-on release archive with the Google Messages link must pass" }
-        check(runCatching {
-            verifyReleaseGoogleMessagesLinkArtifacts(
-                listOf(fixtureAab),
-                false,
-                "base/assets/third_party/",
-                "Release AAB",
-            )
-        }.isFailure) { "Flag-off release archive with Google Messages link artifacts must fail" }
-        writeArchiveFixture(fixtureAab, releaseGoogleMessagesEntries - "base/lib/x86_64/$googleMessagesNativeLibrary")
-        check(runCatching {
-            verifyReleaseGoogleMessagesLinkArtifacts(
-                listOf(fixtureAab),
-                true,
-                "base/assets/third_party/",
-                "Release AAB",
-            )
-        }.isFailure) { "Flag-on release archive missing one Google Messages ABI must fail" }
-
-        val debugFixture = fixtureDirectory.resolve("app-debug.apk")
-        writeArchiveFixture(debugFixture, googleMessagesArtifacts.getValue(googleMessagesNativeLibrary))
-        check(runCatching { verifyGoogleMessagesLinkExclusion(listOf(debugFixture), "Debug APK") }.isFailure) {
-            "Synthetic Google Messages link artifact must fail the debug exclusion guard"
-        }
-
-        ZipOutputStream(fixtureApk.outputStream()).use { archive ->
-            archive.putNextEntry(ZipEntry("classes.dex"))
-            archive.write("${restrictedSetupDexPrefix}RestrictedSetupEntryKt;${restrictedSetupDexPrefix}RestrictedSetupEntryKt${'$'}${'$'}ExternalSyntheticLambda0;".toByteArray())
-            archive.closeEntry()
-        }
-        check(restrictedSetupDexClasses(apksFromMetadata(metadata, "release")).all(permittedRestrictedSetupDexClasses::matches)) {
-            "Synthetic no-op entry classes must remain allowed"
-        }
-
-        val sideloadFixture = fixtureDirectory.resolve("app-sideload-unsigned.apk")
-        ZipOutputStream(sideloadFixture.outputStream()).use { archive ->
-            archive.putNextEntry(ZipEntry("classes.dex"))
-            archive.write("${restrictedSetupDexPrefix}RestrictedSetupService;Lio/github/muntashirakon/adb/AdbManager;".toByteArray())
-            archive.closeEntry()
-            for (library in listOf("libspake2.so", "libconscrypt_jni.so")) {
-                archive.putNextEntry(ZipEntry("lib/arm64-v8a/$library"))
+            writeArchiveFixture(alignedGoogleMessagesFixture, mapOf("lib/arm64-v8a/$googleMessagesNativeLibrary" to elfFixture(0x4000)))
+            check(runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.isFailure) {
+                "Synthetic ZIP-misaligned Google Messages library must fail the sideload guard"
+            }
+            val compressedGoogleMessagesAab = fixtureDirectory.resolve("app-sideload-compressed.aab")
+            ZipOutputStream(compressedGoogleMessagesAab.outputStream()).use { archive ->
+                archive.putNextEntry(ZipEntry("base/lib/arm64-v8a/$googleMessagesNativeLibrary"))
+                archive.write(elfFixture(0x4000))
                 archive.closeEntry()
             }
+            check(runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(compressedGoogleMessagesAab)) }.isSuccess) {
+                "Compressed AAB Google Messages library with aligned ELF must pass the sideload guard"
+            }
         }
-        val sideloadArchives = listOf(sideloadFixture)
-        check(restrictedSetupDexClasses(sideloadArchives).any { it.contains("RestrictedSetupService") })
-        check(archiveDexContains(sideloadArchives, "Lio/github/muntashirakon/adb/"))
-        check(setOf("libspake2.so", "libconscrypt_jni.so").all(restrictedSetupNativeLibraries(sideloadArchives)::contains))
+        verifyGoogleMessagesAlignmentFixtures()
 
-        ZipOutputStream(sideloadFixture.outputStream()).use { archive ->
-            archive.putNextEntry(ZipEntry("classes.dex"))
-            archive.write("${restrictedSetupDexPrefix}RestrictedSetupService;".toByteArray())
-            archive.closeEntry()
+        fun verifyMalformedNativeLibraryFixtures() {
+            listOf(
+                ByteArray(3),
+                elfFixture(0x4000).also { writeLittleEndian(it, 32, 4096, 8) },
+                elfFixture(0x4000).also { writeLittleEndian(it, 56, 2, 2) },
+                elfFixture(0x4000).also { writeLittleEndian(it, 32, Int.MAX_VALUE.toLong() + 1, 8) },
+                elfFixture(0x4000).also { it[4] = 1 },
+            ).forEach { malformedElf ->
+                writeAlignedGoogleMessagesFixture(alignedGoogleMessagesFixture, 0x4000, malformedElf)
+                val failure = runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.exceptionOrNull()
+                check(failure?.message == "Google Messages link native library verification failed") {
+                    "Malformed ELF must fail with the fixed verification message"
+                }
+            }
+            alignedGoogleMessagesFixture.writeBytes(byteArrayOf(1, 2, 3))
+            val malformedZipFailure = runCatching { verifyGoogleMessagesNativeLibraryAlignment(listOf(alignedGoogleMessagesFixture)) }.exceptionOrNull()
+            check(malformedZipFailure?.message == "Google Messages link native library verification failed") {
+                "Malformed ZIP must fail with the fixed verification message"
+            }
         }
-        check(!archiveDexContains(listOf(sideloadFixture), "Lio/github/muntashirakon/adb/")) {
-            "Synthetic sideload fixture without libadb classes must fail inclusion"
+        verifyMalformedNativeLibraryFixtures()
+
+        val fixtureAab = fixtureDirectory.resolve("app-release.aab")
+        fun verifyRestrictedSetupAabFixtures() {
+            ZipOutputStream(fixtureAab.outputStream()).use { archive ->
+                archive.putNextEntry(ZipEntry("base/dex/classes.dex"))
+                archive.write("Lio/github/muntashirakon/adb/AdbManager;".toByteArray())
+                archive.closeEntry()
+                archive.putNextEntry(ZipEntry("base/lib/arm64-v8a/libspake2.so"))
+                archive.closeEntry()
+                archive.putNextEntry(ZipEntry("base/assets/third_party/NOTICE.txt"))
+                archive.closeEntry()
+            }
+            check(restrictedSetupDexClasses(listOf(fixtureAab)).isNotEmpty()) {
+                "Synthetic libadb class must fail the release AAB DEX exclusion guard"
+            }
+            check(restrictedSetupNativeLibraries(listOf(fixtureAab)).contains("libspake2.so")) {
+                "Synthetic restricted setup native library must fail the release AAB exclusion guard"
+            }
+            check(runCatching {
+                verifyReleaseThirdPartyNotices(listOf(fixtureAab), "base/assets/third_party/", "Release AAB")
+            }.isFailure) { "Restricted-setup notices must fail the release AAB exclusion guard" }
+            listOf(false, true).forEach { enabled ->
+                writeArchiveFixture(fixtureAab, mapOf("base/assets/third_party/nested/LGPL-2.1.txt" to ByteArray(0)))
+                check(runCatching {
+                    verifyReleaseThirdPartyNotices(listOf(fixtureAab), "base/assets/third_party/", "Release AAB", enabled)
+                }.isFailure) { "Nested restricted-setup notices must fail the release AAB exclusion guard when link=$enabled" }
+            }
         }
+        verifyRestrictedSetupAabFixtures()
+
+        fun verifyGoogleMessagesAabFixtures() {
+            googleMessagesArtifacts.forEach { (artifact, entries) ->
+                writeArchiveFixture(fixtureAab, entries.mapKeys { (name, _) -> if (name == "classes.dex") "base/dex/classes.dex" else "base/$name" })
+                check(runCatching { verifyGoogleMessagesLinkExclusion(listOf(fixtureAab), "Release AAB", "base/$googleMessagesNotice") }.isFailure) {
+                    "Synthetic $artifact AAB artifact must fail the release exclusion guard"
+                }
+            }
+
+            val releaseGoogleMessagesEntries = buildMap {
+                put("base/dex/classes.dex", "${googleMessagesDexPrefix}Gmlink;".toByteArray())
+                put("base/lib/arm64-v8a/$googleMessagesNativeLibrary", elfFixture(0x4000))
+                put("base/lib/x86_64/$googleMessagesNativeLibrary", elfFixture(0x4000))
+                put("base/lib/x86_64/libpeppy_mobile_bindings.so", ByteArray(0))
+                googleMessagesNoticeFileNames.forEach { put("base/assets/third_party/$it", ByteArray(0)) }
+            }
+            writeArchiveFixture(fixtureAab, releaseGoogleMessagesEntries)
+            check(runCatching {
+                verifyReleaseGoogleMessagesLinkArtifacts(
+                    listOf(fixtureAab),
+                    true,
+                    "base/assets/third_party/",
+                    "Release AAB",
+                )
+            }.isSuccess) { "Flag-on release archive with the Google Messages link must pass" }
+            check(runCatching {
+                verifyReleaseGoogleMessagesLinkArtifacts(
+                    listOf(fixtureAab),
+                    false,
+                    "base/assets/third_party/",
+                    "Release AAB",
+                )
+            }.isFailure) { "Flag-off release archive with Google Messages link artifacts must fail" }
+            writeArchiveFixture(fixtureAab, releaseGoogleMessagesEntries - "base/lib/x86_64/$googleMessagesNativeLibrary")
+            check(runCatching {
+                verifyReleaseGoogleMessagesLinkArtifacts(
+                    listOf(fixtureAab),
+                    true,
+                    "base/assets/third_party/",
+                    "Release AAB",
+                )
+            }.isFailure) { "Flag-on release archive missing one Google Messages ABI must fail" }
+        }
+        verifyGoogleMessagesAabFixtures()
+
+        fun verifyDebugAndSideloadFixtures() {
+            val debugFixture = fixtureDirectory.resolve("app-debug.apk")
+            writeArchiveFixture(debugFixture, googleMessagesArtifacts.getValue(googleMessagesNativeLibrary))
+            check(runCatching { verifyGoogleMessagesLinkExclusion(listOf(debugFixture), "Debug APK") }.isFailure) {
+                "Synthetic Google Messages link artifact must fail the debug exclusion guard"
+            }
+
+            ZipOutputStream(fixtureApk.outputStream()).use { archive ->
+                archive.putNextEntry(ZipEntry("classes.dex"))
+                archive.write("${restrictedSetupDexPrefix}RestrictedSetupEntryKt;${restrictedSetupDexPrefix}RestrictedSetupEntryKt${'$'}${'$'}ExternalSyntheticLambda0;".toByteArray())
+                archive.closeEntry()
+            }
+            check(restrictedSetupDexClasses(apksFromMetadata(metadata, "release")).all(permittedRestrictedSetupDexClasses::matches)) {
+                "Synthetic no-op entry classes must remain allowed"
+            }
+
+            val sideloadFixture = fixtureDirectory.resolve("app-sideload-unsigned.apk")
+            ZipOutputStream(sideloadFixture.outputStream()).use { archive ->
+                archive.putNextEntry(ZipEntry("classes.dex"))
+                archive.write("${restrictedSetupDexPrefix}RestrictedSetupService;Lio/github/muntashirakon/adb/AdbManager;".toByteArray())
+                archive.closeEntry()
+                for (library in listOf("libspake2.so", "libconscrypt_jni.so")) {
+                    archive.putNextEntry(ZipEntry("lib/arm64-v8a/$library"))
+                    archive.closeEntry()
+                }
+            }
+            val sideloadArchives = listOf(sideloadFixture)
+            check(restrictedSetupDexClasses(sideloadArchives).any { it.contains("RestrictedSetupService") })
+            check(archiveDexContains(sideloadArchives, "Lio/github/muntashirakon/adb/"))
+            check(setOf("libspake2.so", "libconscrypt_jni.so").all(restrictedSetupNativeLibraries(sideloadArchives)::contains))
+
+            ZipOutputStream(sideloadFixture.outputStream()).use { archive ->
+                archive.putNextEntry(ZipEntry("classes.dex"))
+                archive.write("${restrictedSetupDexPrefix}RestrictedSetupService;".toByteArray())
+                archive.closeEntry()
+            }
+            check(!archiveDexContains(listOf(sideloadFixture), "Lio/github/muntashirakon/adb/")) {
+                "Synthetic sideload fixture without libadb classes must fail inclusion"
+            }
+        }
+        verifyDebugAndSideloadFixtures()
     }
 }
 
