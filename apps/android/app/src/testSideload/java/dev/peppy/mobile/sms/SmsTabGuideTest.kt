@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
+import dev.peppy.mobile.gateway.SetupFinishTracker
 import dev.peppy.mobile.testing.ComposeTestActivityRule
 import dev.peppy.mobile.ui.theme.PeppyTheme
 import kotlinx.coroutines.Dispatchers
@@ -45,7 +46,7 @@ class SmsTabGuideTest {
     @Test fun `Sync details guide opens its exact URL and keeps failures separate from SMS action errors`() {
         val context = SmsGuideContext(ApplicationProvider.getApplicationContext())
         compose.setContent {
-            PeppyTheme { SmsTab(context, refresh = 0, databaseOpen = false, onChanged = {}) }
+            PeppyTheme { SmsTab(context, refresh = 0, databaseOpen = false, onChanged = {}, setupFinishTracker = SetupFinishTracker()) }
         }
         compose.waitUntil { compose.onAllNodesWithTag("sms-details-row").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("sms-details-row").performClick()

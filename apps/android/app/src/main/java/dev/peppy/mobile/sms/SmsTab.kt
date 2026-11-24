@@ -77,6 +77,7 @@ import dev.peppy.mobile.restrictedsetup.restrictedSetupAvailable
 import dev.peppy.mobile.restrictedsetup.RestrictedSetupEntry
 import dev.peppy.mobile.googlemessages.GoogleMessagesLink
 import dev.peppy.mobile.billing.isPlayDistribution
+import dev.peppy.mobile.gateway.SetupFinishTracker
 import dev.peppy.mobile.gateway.SetupProgressCard
 import dev.peppy.mobile.phoneread.PhoneReadSettings
 import dev.peppy.mobile.syncMessage
@@ -118,6 +119,7 @@ internal fun SmsTab(
     onChanged: () -> Unit,
     gatewayStatus: GatewayStatus? = null,
     onDetailsChanged: (Boolean) -> Unit = {},
+    setupFinishTracker: SetupFinishTracker,
 ) {
     val scope = rememberCoroutineScope()
     var policy by remember(refresh) { mutableStateOf<Boolean?>(null) }
@@ -359,7 +361,7 @@ internal fun SmsTab(
             "sms-hero",
         )
         dev.peppy.mobile.ui.ScreenBody("sms-tab-body") {
-        SetupProgressCard(gatewayStatus)
+        SetupProgressCard(gatewayStatus, setupFinishTracker)
         GoogleMessagesLink.Entry(
             onChanged = onChanged,
             notice = linkNotice,
