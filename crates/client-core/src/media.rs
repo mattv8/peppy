@@ -26,14 +26,51 @@ use std::{
 };
 use zeroize::Zeroize;
 
+/// Upper bound for every test-pause wait: a missed release fails loudly instead of hanging.
+#[cfg(test)]
+const INSTALL_PAUSE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One-shot latch. `open` releases every current and future `wait_open` caller.
+#[cfg(test)]
+#[derive(Default)]
+struct PauseGate {
+    open: std::sync::Mutex<bool>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl PauseGate {
+    fn open(&self) {
+        *self.open.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.changed.notify_all();
+    }
+
+    fn wait_open(&self, attachment_id: AttachmentId, phase: &str) {
+        let (open, result) = self
+            .changed
+            .wait_timeout_while(
+                self.open.lock().unwrap_or_else(|e| e.into_inner()),
+                INSTALL_PAUSE_WAIT,
+                |open| !*open,
+            )
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(
+            *open || !result.timed_out(),
+            "install pause for attachment {attachment_id} timed out after {INSTALL_PAUSE_WAIT:?} {phase}"
+        );
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone)]
 struct InstallPromotionPauseSignal {
     attachment_id: AttachmentId,
-    entered: Arc<std::sync::Barrier>,
-    resume: Arc<std::sync::Barrier>,
+    entered: Arc<PauseGate>,
+    resume: Arc<PauseGate>,
 }
 
+/// Attachment to pending pause. The lock is held only to insert, remove or take a signal, never
+/// while waiting on a gate.
 #[cfg(test)]
 static INSTALL_PROMOTION_PAUSES: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<AttachmentId, InstallPromotionPauseSignal>>,
@@ -45,24 +82,34 @@ pub(crate) struct InstallPromotionPause(InstallPromotionPauseSignal);
 #[cfg(test)]
 impl InstallPromotionPause {
     pub(crate) fn wait_until_entered(&self) {
-        self.0.entered.wait();
+        self.0.entered.wait_open(
+            self.0.attachment_id,
+            "waiting for the installer to reach publication",
+        );
     }
 
     pub(crate) fn resume(&self) {
-        self.0.resume.wait();
+        self.0.resume.open();
     }
 }
 
+/// Runs on normal end and on unwinding: removes an unclaimed pause and releases an installer
+/// already waiting on it, so no thread stays blocked.
 #[cfg(test)]
 impl Drop for InstallPromotionPause {
     fn drop(&mut self) {
-        let mut pauses = INSTALL_PROMOTION_PAUSES.lock().unwrap();
-        if pauses
-            .get(&self.0.attachment_id)
-            .is_some_and(|active| Arc::ptr_eq(&active.entered, &self.0.entered))
         {
-            pauses.remove(&self.0.attachment_id);
+            let mut pauses = INSTALL_PROMOTION_PAUSES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if pauses
+                .get(&self.0.attachment_id)
+                .is_some_and(|active| Arc::ptr_eq(&active.entered, &self.0.entered))
+            {
+                pauses.remove(&self.0.attachment_id);
+            }
         }
+        self.0.resume.open();
     }
 }
 
@@ -70,12 +117,12 @@ impl Drop for InstallPromotionPause {
 pub(crate) fn pause_install_before_promotion(attachment_id: AttachmentId) -> InstallPromotionPause {
     let signal = InstallPromotionPauseSignal {
         attachment_id,
-        entered: Arc::new(std::sync::Barrier::new(2)),
-        resume: Arc::new(std::sync::Barrier::new(2)),
+        entered: Arc::new(PauseGate::default()),
+        resume: Arc::new(PauseGate::default()),
     };
     INSTALL_PROMOTION_PAUSES
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .insert(attachment_id, signal.clone());
     InstallPromotionPause(signal)
 }
@@ -84,11 +131,13 @@ pub(crate) fn pause_install_before_promotion(attachment_id: AttachmentId) -> Ins
 pub(crate) fn pause_before_install_publication(attachment_id: AttachmentId) {
     let signal = INSTALL_PROMOTION_PAUSES
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .remove(&attachment_id);
     if let Some(signal) = signal {
-        signal.entered.wait();
-        signal.resume.wait();
+        signal.entered.open();
+        signal
+            .resume
+            .wait_open(attachment_id, "waiting to resume before publication");
     }
 }
 

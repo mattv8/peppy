@@ -247,10 +247,6 @@ use zeroize::Zeroizing;
 
 const SCHEMA_VERSION: i64 = 66;
 const PENDING_COMMAND_ELIGIBILITY: &str = "a.command_id IS NULL AND l.historical=0 AND l.retired=0 AND l.subscription_id<>'' AND l.key_epoch=? AND NOT EXISTS(SELECT 1 FROM rcs_media_send_ledger m WHERE m.command_id=l.command_id) AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.command_id=l.command_id AND x.target_gateway_id=? AND x.state IN ('requested','confirmed'))";
-#[cfg(test)]
-thread_local! {
-    static SEAL_PENDING_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 4;
 
@@ -9634,13 +9630,6 @@ fn stage_cancellation_result(
     )? != 0)
 }
 
-// Test probe: statements run by the batched read-evidence lookup on this thread. A read runs at most
-// two (metadata, then the outbox fallback only when a command has no recorded route).
-#[cfg(test)]
-thread_local! {
-    pub(crate) static READ_EVIDENCE_STATEMENTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
 /// Message columns, then the first command's gateway id, whether a cancellation exists, the message
 /// id (the key of its device-local "Send again" marker), and the first command id (its route evidence).
 type StoredMessage = (
@@ -9707,8 +9696,6 @@ fn read_evidence(conn: &Connection, rows: &[StoredMessage]) -> Result<ReadEviden
             keys.push(command_route_key_str(command));
         }
     }
-    #[cfg(test)]
-    READ_EVIDENCE_STATEMENTS.with(|count| count.set(count.get() + 1));
     let json = serde_json::to_string(&keys).map_err(|_| Error::Database)?;
     let mut query = conn.prepare(
         "SELECT k,v,EXISTS(SELECT 1 FROM messages x WHERE x.id=metadata.v) FROM metadata WHERE k IN (SELECT value FROM json_each(?1))",
@@ -9743,8 +9730,6 @@ fn read_evidence(conn: &Connection, rows: &[StoredMessage]) -> Result<ReadEviden
         .collect();
     let mut authored: HashMap<String, String> = HashMap::new();
     if !missing.is_empty() {
-        #[cfg(test)]
-        READ_EVIDENCE_STATEMENTS.with(|count| count.set(count.get() + 1));
         let json = serde_json::to_string(&missing).map_err(|_| Error::Database)?;
         let mut query = conn.prepare(
             "SELECT command_id,route FROM outbox WHERE purpose='command' AND route IS NOT NULL AND command_id IN (SELECT value FROM json_each(?1))",
@@ -12689,8 +12674,6 @@ fn count_decoder_recovery_rows(
     needs_applied: bool,
     after: i64,
 ) -> Result<u64, Error> {
-    #[cfg(test)]
-    DECODER_ROW_COUNTS.with(|counts| counts.borrow_mut().push(epoch));
     Ok(conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM journal WHERE key_epoch=? AND cursor>? AND {}",
@@ -15821,30 +15804,9 @@ fn parse_authenticated_payload(
 }
 
 fn seal_with_store(store: &mut Store) -> Result<(), Error> {
-    #[cfg(test)]
-    if FAIL_NEXT_SEAL.with(|fail| fail.replace(false)) {
-        return Err(Error::Database);
-    }
     seal_store_batch(store, MAX_SEAL_BATCH).map(|_| ())
 }
 
-#[cfg(test)]
-thread_local! {
-    static FAIL_NEXT_SEAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static DECODER_ROW_COUNTS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Makes the next `seal_with_store` call fail once, for retry tests.
-#[cfg(test)]
-pub(crate) fn fail_next_seal() {
-    FAIL_NEXT_SEAL.with(|fail| fail.set(true));
-}
-
-/// Epochs whose eligible decoder rows were counted on this thread, in order.
-#[cfg(test)]
-pub(crate) fn take_decoder_row_counts() -> Vec<u32> {
-    DECODER_ROW_COUNTS.with(|counts| std::mem::take(&mut *counts.borrow_mut()))
-}
 fn exists(conn: &Connection, query: &str) -> Result<bool, Error> {
     Ok(conn.query_row(&format!("SELECT EXISTS({query})"), [], |row| row.get(0))?)
 }
@@ -15927,7 +15889,6 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
             // MMS rows are held until every object has a remote ID, then media metadata is resolved
             // from SQLCipher at seal time. Contact photo rows are held the same way, per row.
             let mut photo_registrations = contact_media::Registrations::new();
-            note_seal_pending_decode();
             let plain = match decode::<PrivatePayload>(&plain)? {
                 PrivatePayload::MmsMessage { message, .. } => {
                     match resolve_media(conn, &message)? {
@@ -15994,7 +15955,6 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
                     .transpose()?,
                 ciphertext: Vec::new(),
             };
-            note_seal_pending_decode();
             let payload: PrivatePayload = decode(&plain)?;
             if let PrivatePayload::ContactScanResult { result } = &payload
                 && contact_scan_result_has_earlier_book_event(conn, sequence, result)?
@@ -16038,14 +15998,6 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
     }
     Ok(count)
 }
-
-#[cfg(test)]
-fn note_seal_pending_decode() {
-    SEAL_PENDING_DECODE_COUNT.with(|count| count.set(count.get() + 1));
-}
-
-#[cfg(not(test))]
-fn note_seal_pending_decode() {}
 
 /// A scan result is a book-level completion barrier. It must not overtake an earlier contact
 /// update whose photo is still held and therefore cannot yet be sealed.
@@ -16098,14 +16050,6 @@ fn next_source_sequence(
     )?;
     let last = u64::try_from(last).map_err(|_| Error::Database)?;
     Ok(SourceSequence(last.checked_add(1).ok_or(Error::Database)?))
-}
-
-#[cfg(test)]
-fn queued_outbox_sequence_sql() -> String {
-    format!(
-        "SELECT seq FROM outbox WHERE state='queued' AND {} ORDER BY priority,seq",
-        history_import::outbox_upload_eligible_predicate()
-    )
 }
 
 fn queued_outbox_sql() -> String {
@@ -21248,13 +21192,15 @@ mod tests {
                 .unwrap()
             })
             .collect();
-        SEAL_PENDING_DECODE_COUNT.with(|count| count.set(0));
+        let sealable: Vec<i64> = conn
+            .prepare(SEAL_PENDING_SQL)
+            .unwrap()
+            .query_map(params![i64::MIN, i64::MIN, 0_i64], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(sealable, vec![ready_sequence]);
         assert_eq!(seal_pending(conn, &ctx, 1).unwrap(), 1);
-        assert_eq!(
-            SEAL_PENDING_DECODE_COUNT.with(|count| count.get()),
-            2,
-            "only the ready row is decoded"
-        );
         let held_after: Vec<Vec<u8>> = held_sequences
             .iter()
             .map(|sequence| {
@@ -21367,8 +21313,8 @@ mod tests {
         let store = client.lock().unwrap();
         for (seq, priority) in [(1, 3), (2, 1), (3, 2), (4, 0)] {
             store.conn.execute(
-                "INSERT INTO outbox(seq,envelope_id,purpose,state,priority) VALUES(?,?, 'event','queued',?)",
-                params![seq, format!("priority-{seq}"), priority],
+                "INSERT INTO outbox(seq,envelope_id,purpose,state,priority,wire) VALUES(?,?, 'event','queued',?,?)",
+                params![seq, format!("priority-{seq}"), priority, vec![seq as u8]],
             ).unwrap();
         }
         store.conn.execute(
@@ -21383,23 +21329,31 @@ mod tests {
             "INSERT INTO outbox_attachments(envelope_id,attachment_id) VALUES('held-priority','held')",
             [],
         ).unwrap();
-        let rows: Vec<i64> = store
+        store.conn.execute_batch(
+            "INSERT INTO outbox(seq,envelope_id,purpose,state,priority,wire) VALUES
+                (6,'blocked-priority','event','queued',0,X'06'),
+                (7,'removed-priority','event','queued',0,X'07');
+             INSERT INTO attachment_retention_requirements(envelope_id,attachment_id,kind)
+                VALUES('blocked-priority','blocked','message_history');
+             INSERT INTO attachments(attachment_id,state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,stream_version,file_key)
+                VALUES('removed','uploaded','text/plain','removed',0,0,'digest',1,X'00');
+             INSERT INTO outbox_attachments(envelope_id,attachment_id) VALUES('removed-priority','removed');
+             INSERT INTO attachment_remote_state(attachment_id,removed_by_storage_policy) VALUES('removed',1);",
+        ).unwrap();
+        let rows: Vec<Vec<u8>> = store
             .conn
-            .prepare(&queued_outbox_sequence_sql())
+            .prepare(&queued_outbox_sql())
             .unwrap()
-            .query_map([], |row| row.get(0))
+            .query_map([10], |row| row.get(0))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(rows, vec![4, 2, 3, 1]);
+        assert_eq!(rows, vec![vec![4], vec![2], vec![3], vec![1]]);
         let plan: Vec<String> = store
             .conn
-            .prepare(&format!(
-                "EXPLAIN QUERY PLAN {}",
-                queued_outbox_sequence_sql()
-            ))
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", queued_outbox_sql()))
             .unwrap()
-            .query_map([], |row| row.get(3))
+            .query_map([10], |row| row.get(3))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();

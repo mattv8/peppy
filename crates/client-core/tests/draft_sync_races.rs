@@ -4,6 +4,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
+use std::time::Duration;
+
+/// Upper bound for every cross-thread wait, so a missed signal fails the test
+/// instead of hanging the run.
+const WAIT: Duration = Duration::from_secs(30);
 
 #[test]
 fn expiry_restore_retries_after_a_concurrent_attachment_replacement() {
@@ -40,25 +45,36 @@ fn expiry_restore_retries_after_a_concurrent_attachment_replacement() {
     let target = saved.draft_id;
     let resume_rx = Arc::new(Mutex::new(resume_rx));
     let paused = Arc::new(AtomicBool::new(false));
-    client.set_resurrection_test_hook(Some(Arc::new(move |draft_id| {
-        if draft_id == target && !paused.swap(true, Ordering::SeqCst) {
-            prepared_tx.send(()).unwrap();
-            resume_rx.lock().unwrap().recv().unwrap();
-        }
-    })));
+    let hook = client.install_resurrection_test_hook(
+        target,
+        Arc::new(move |draft_id| {
+            if draft_id == target && !paused.swap(true, Ordering::SeqCst) {
+                prepared_tx.send(()).expect("race test: prepared signal");
+                resume_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(WAIT)
+                    .expect("race test: resume signal timed out");
+            }
+        }),
+    );
 
     let restoring = client.clone();
-    let restore = std::thread::spawn(move || {
-        restoring.apply_draft_changes(
+    let (restored_tx, restored_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = restoring.apply_draft_changes(
             vec![RemoteDraftChange::Terminal {
                 draft_id: target,
                 reason: DraftTerminalReasonCore::Expired,
                 command_id: None,
             }],
             "1",
-        )
+        );
+        let _ = restored_tx.send(result);
     });
-    prepared_rx.recv().unwrap();
+    prepared_rx
+        .recv_timeout(WAIT)
+        .expect("race test: restore never reached the resurrection hook");
     let edited = client
         .save_compose_draft(
             saved.draft_id,
@@ -72,9 +88,12 @@ fn expiry_restore_retries_after_a_concurrent_attachment_replacement() {
             },
         )
         .unwrap();
-    resume_tx.send(()).unwrap();
-    restore.join().unwrap().unwrap();
-    client.set_resurrection_test_hook(None);
+    resume_tx.send(()).expect("race test: resume signal");
+    restored_rx
+        .recv_timeout(WAIT)
+        .expect("race test: restore did not finish after resume")
+        .unwrap();
+    drop(hook);
 
     assert!(client.compose_draft(saved.draft_id).unwrap().is_none());
     let restored = client.compose_drafts().unwrap().pop().unwrap();

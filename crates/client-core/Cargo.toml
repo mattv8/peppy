@@ -108,4 +108,5 @@ rusqlite = { version = "=0.32.1", features = ["bundled-sqlcipher-vendored-openss
 
 [dev-dependencies]
 peppy-client-core = { path = ".", features = ["test-support"] }
+rusqlite = { version = "=0.32.1", features = ["hooks"] }
 tempfile.workspace = true
