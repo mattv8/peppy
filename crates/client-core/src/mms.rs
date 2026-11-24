@@ -1128,6 +1128,7 @@ impl Client {
         }
         let detached = current.3.map(|value| super::parse(&value)).transpose()?;
         tx.commit()?;
+        drop(guard);
         if let Some(detached) = detached {
             self.discard_unreferenced_attachment(detached)?;
         }
