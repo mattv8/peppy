@@ -64,6 +64,7 @@ describe("App accent color", () => {
     expect(screen.getByRole("dialog", { name: "Accent color" })).toBeVisible();
     fireEvent.click(document.getElementById("settings-accent-color-panel")!);
     expect(screen.getByRole("dialog", { name: "Accent color" })).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Default (Coral)" })).toHaveFocus());
     fireEvent.click(await screen.findByRole("radio", { name: "Blue" }));
 
     await waitFor(() => expect(shell()).toHaveAttribute("data-accent", "99"));

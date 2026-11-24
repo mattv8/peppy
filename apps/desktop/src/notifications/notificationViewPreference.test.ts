@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   NOTIFICATIONS_PREFERENCE_ITEM,
@@ -8,6 +8,7 @@ import {
 } from "./notificationViewPreference";
 
 describe("notification view preference", () => {
+  afterEach(cleanup);
   beforeEach(() => {
     const values = new Map<string, string>();
     vi.stubGlobal("localStorage", {

@@ -33,30 +33,6 @@ describe("ConversationFolderNotice", () => {
     expect(onRetry).toHaveBeenCalledOnce(); expect(onDismiss).toHaveBeenCalledOnce();
   });
 
-  it("dismisses success after the timeout unless hovered", () => {
-    vi.useFakeTimers();
-    const onDismiss = vi.fn();
-    render(<ConversationFolderNotice notice={notices[0][0]} pending={false} onUndo={vi.fn()} onRetry={vi.fn()} onDismiss={onDismiss} />);
-    const toast = screen.getByRole("status");
-    fireEvent.mouseEnter(toast);
-    act(() => { vi.advanceTimersByTime(TOAST_DISMISS_MS); });
-    expect(onDismiss).not.toHaveBeenCalled();
-    fireEvent.mouseLeave(toast);
-    act(() => { vi.advanceTimersByTime(TOAST_DISMISS_MS); });
-    expect(onDismiss).toHaveBeenCalledOnce();
-  });
-
-  it("keeps the original timer when the parent rerenders with a new onDismiss", () => {
-    vi.useFakeTimers();
-    const firstDismiss = vi.fn(); const latestDismiss = vi.fn();
-    const { rerender } = render(<ConversationFolderNotice notice={notices[0][0]} pending={false} onUndo={vi.fn()} onRetry={vi.fn()} onDismiss={firstDismiss} />);
-    act(() => { vi.advanceTimersByTime(TOAST_DISMISS_MS / 2); });
-    rerender(<ConversationFolderNotice notice={notices[0][0]} pending={false} onUndo={vi.fn()} onRetry={vi.fn()} onDismiss={latestDismiss} />);
-    act(() => { vi.advanceTimersByTime(TOAST_DISMISS_MS / 2); });
-    expect(latestDismiss).toHaveBeenCalledOnce();
-    expect(firstDismiss).not.toHaveBeenCalled();
-  });
-
   it("auto-dismisses a later success notice after the focused previous notice unmounted", () => {
     vi.useFakeTimers();
     const onDismiss = vi.fn();

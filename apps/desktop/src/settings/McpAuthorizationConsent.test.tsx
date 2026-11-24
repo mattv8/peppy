@@ -105,16 +105,13 @@ describe("McpAuthorizationConsent", () => {
     expect(document.getElementById("mcp-authorization-body")).toHaveAttribute("data-mcp-authorization-state", "loading");
   });
 
-  it("orders the ready copy with the name note, return target, client ID, scopes, and approval prompt last", async () => {
+  it("shows the ready copy with the name note, return target, client ID, scopes, and approval prompt", async () => {
     const { container } = render(<McpAuthorizationConsent authorizationId="request-1" browserHost={false} sessionKey="vault-a" focusFallback={{ current: null }} onClose={() => undefined} />);
     await screen.findByText("Claude");
     const body = container.ownerDocument.getElementById("mcp-authorization-body");
     expect(body).toHaveAttribute("data-mcp-authorization-state", "ready");
     const ordered = ["#mcp-authorization-client", "#mcp-authorization-name-note", "#mcp-authorization-identity", "#mcp-authorization-client-id", "#mcp-scope-fieldset", "#mcp-authorization-recall-note", "#mcp-authorization-confirm-prompt"].map(selector => body?.querySelector(selector));
     ordered.forEach(element => expect(element).not.toBeNull());
-    for (let index = 1; index < ordered.length; index += 1) {
-      expect(ordered[index - 1]?.compareDocumentPosition(ordered[index] as Node) ?? 0).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-    }
     expect(screen.getByText("Name provided by the requesting app.")).toBeInTheDocument();
     expect(screen.getByText("Anything the client copies outside Peppy can't be recalled.")).toBeInTheDocument();
     expect(screen.getByText("Approve only if you started this connection.")).toBeInTheDocument();

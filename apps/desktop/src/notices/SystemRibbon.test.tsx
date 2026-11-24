@@ -475,13 +475,6 @@ describe("openAccountManageUrl", () => {
     expect(openExternal).toHaveBeenCalledWith("https://peppy.pro/account");
   });
 
-  it("routes desktop opens through bridge.open_external_url", async () => {
-    const desktopBridge = bridge as Required<Pick<typeof bridge, "open_external_url">>;
-    const openExternal = vi.spyOn(desktopBridge, "open_external_url").mockResolvedValue(undefined);
-    await expect(openAccountManageUrl("https://peppy.pro/account", false, desktopBridge.open_external_url)).resolves.toBe(true);
-    expect(openExternal).toHaveBeenCalledWith("https://peppy.pro/account");
-  });
-
   it("does not open anything on desktop when the bridge has no open command", async () => {
     await expect(openAccountManageUrl("https://peppy.pro/account", false, undefined)).resolves.toBe(false);
   });

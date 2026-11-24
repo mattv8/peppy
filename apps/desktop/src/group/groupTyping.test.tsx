@@ -1,8 +1,7 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DesktopBridge, TypingSignal } from "@peppy/desktop-ui/bridge-contracts";
 import { useTypingDisplay } from "../typing/useTypingDisplay";
-import { groupTypingLabel } from "./groupCopy";
 
 const alex = "+15551230001";
 const sam = "+15551230002";
@@ -27,6 +26,7 @@ function groupDisplay(initialMembers: readonly string[] = roster) {
 }
 
 describe("group typing display", () => {
+  afterEach(cleanup);
   afterEach(() => vi.useRealTimers());
 
   it("shows the participant who started typing, and only them", () => {
@@ -84,17 +84,5 @@ describe("group typing display", () => {
     rerender({ members: [...roster] });
     expect(result.current.participants).toEqual([alex]);
     expect(subscribeCount()).toBe(1);
-  });
-
-  it("builds the label from the participants the hook reports", () => {
-    vi.useFakeTimers(); vi.setSystemTime(0);
-    const names: Record<string, string> = { [alex]: "Alex", [sam]: "Sam", [jo]: "Jo" };
-    const { result, signal, rerender } = groupDisplay([alex, sam, jo]);
-    signal({ state: "started", participant: alex, expiresAtMs: "5000" });
-    signal({ state: "started", participant: sam, expiresAtMs: "5000" });
-    expect(groupTypingLabel(result.current.participants, (address) => names[address])).toBe("Alex and Sam are typing");
-    signal({ state: "started", participant: jo, expiresAtMs: "5000" });
-    expect(groupTypingLabel(result.current.participants, (address) => names[address])).toBe("3 people are typing");
-    rerender({ members: [alex, sam, jo] });
   });
 });

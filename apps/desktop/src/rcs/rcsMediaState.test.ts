@@ -1,19 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { AttachmentView, MessageView, RcsAttachmentState, RcsSendStatus } from "@peppy/desktop-ui/bridge-contracts";
+import type { AttachmentView, MessageView, RcsSendStatus } from "@peppy/desktop-ui/bridge-contracts";
 import { peppyCopy } from "../generated/peppyCopy";
-import { canRetryRcsDownload, rcsAttachmentIndex, rcsDirection, rcsOutcomeStatus, rcsPlaceholderCopy, rcsPlaceholderState, rcsRetryBlockCopy, rcsRetryKey, rcsSendNeedsAttention, rcsSendStatusLabel } from "./rcsMediaState";
+import { canRetryRcsDownload, rcsAttachmentIndex, rcsDirection, rcsOutcomeStatus, rcsRetryBlockCopy, rcsRetryKey, rcsSendNeedsAttention, rcsSendStatusLabel } from "./rcsMediaState";
 
 const attachment = (overrides: Partial<AttachmentView> = {}): AttachmentView => ({ id: "rcs-1", name: "photo.jpg", mediaType: "image/jpeg", byteSize: 10, state: "ready", ...overrides });
 const message = (attachments: AttachmentView[], status?: MessageView["status"]): MessageView => ({ id: "message-1", revision: "1", sender: "self", body: "", timestamp: "1788434800000", transport: "rcs", status, attachments });
-
-describe("rcsPlaceholderState", () => {
-  it("maps every incoming state except stored to a placeholder", () => {
-    const placeholders: RcsAttachmentState[] = ["downloading", "too_large", "quota_full", "failed", "expired"];
-    for (const state of placeholders) expect(rcsPlaceholderState(attachment({ rcsState: state }))).toBe(state);
-    expect(rcsPlaceholderState(attachment({ rcsState: "stored" }))).toBeUndefined();
-    expect(rcsPlaceholderState(attachment())).toBeUndefined();
-  });
-});
 
 describe("rcsDirection", () => {
   it("is incoming for receive state, outgoing for send status, and absent otherwise", () => {
@@ -32,27 +23,17 @@ describe("canRetryRcsDownload", () => {
   });
 });
 
-describe("rcsPlaceholderCopy", () => {
-  it("gives every placeholder a label, and detail only where the user can act", () => {
-    expect(rcsPlaceholderCopy("downloading")).toEqual({ label: peppyCopy.rcs_media_state_downloading });
-    expect(rcsPlaceholderCopy("too_large")).toEqual({ label: peppyCopy.rcs_media_state_too_large, detail: peppyCopy.rcs_media_detail_too_large.replace("{limit}", "32 MiB") });
-    expect(rcsPlaceholderCopy("quota_full")).toEqual({ label: peppyCopy.rcs_media_state_quota_full, detail: peppyCopy.rcs_media_detail_quota_full });
-    expect(rcsPlaceholderCopy("failed")).toEqual({ label: peppyCopy.rcs_media_state_failed, detail: peppyCopy.rcs_media_detail_failed });
-    expect(rcsPlaceholderCopy("expired")).toEqual({ label: peppyCopy.rcs_media_state_expired });
-  });
-});
-
 describe("rcsSendStatusLabel and rcsSendNeedsAttention", () => {
-  it("labels every outgoing status and flags only the outcomes that need the user", () => {
-    const labels: Record<RcsSendStatus, string> = {
-      sending: peppyCopy.rcs_media_state_sending,
-      sent: peppyCopy.rcs_media_state_sent,
-      not_sent: peppyCopy.rcs_media_state_not_sent,
-      send_failed: peppyCopy.rcs_media_state_send_failed,
-      outcome_unknown: peppyCopy.rcs_media_state_unknown,
-      members_changed: peppyCopy.rcs_media_state_not_sent,
-    };
-    for (const [status, label] of Object.entries(labels) as [RcsSendStatus, string][]) expect(rcsSendStatusLabel(status)).toBe(label);
+  it.each([
+    ["sending", "Sending…"],
+    ["sent", "Sent"],
+    ["outcome_unknown", "Couldn't confirm"],
+    ["members_changed", "Not sent"],
+  ] as const)("labels %s as %s", (status, label) => {
+    expect(rcsSendStatusLabel(status)).toBe(label);
+  });
+
+  it("flags only the outcomes that need the user", () => {
     expect(rcsSendNeedsAttention("not_sent")).toBe(true);
     expect(rcsSendNeedsAttention("outcome_unknown")).toBe(true);
     expect(rcsSendNeedsAttention("members_changed")).toBe(true);

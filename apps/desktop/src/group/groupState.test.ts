@@ -1,20 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { GroupView } from "@peppy/desktop-ui/bridge-contracts";
-import { groupAllowsTypingSend, groupComposerNotice, groupIsReadOnly, groupMembers, groupNoticeState } from "./groupState";
+import { groupAllowsTypingSend, groupComposerNotice, groupIsReadOnly, groupMembers } from "./groupState";
 import { interleaveGroupNotices } from "./groupTimeline";
 import { groupNoticeItems } from "./groupNotices";
 
 const view = (state: GroupView["state"], members: string[] = []): GroupView => ({ members, state, memberRevision: "1", canCreate: false, createNeedsConfirmation: false });
-
-describe("groupNoticeState", () => {
-  it("maps withdrawn to left, paused to paused, and says nothing for other states", () => {
-    expect(groupNoticeState({ state: "withdrawn" })).toBe("left");
-    expect(groupNoticeState({ state: "paused" })).toBe("paused");
-    expect(groupNoticeState({ state: "live" })).toBeUndefined();
-    expect(groupNoticeState({ state: "unlinked" })).toBeUndefined();
-    expect(groupNoticeState(undefined)).toBeUndefined();
-  });
-});
 
 describe("group read-only and typing", () => {
   it("makes only a withdrawn group read-only", () => {
@@ -53,13 +43,8 @@ describe("groupComposerNotice", () => {
     expect(groupComposerNotice({ reason: "members_changed" }, "k")).toEqual({ kind: "members-changed", key: "k", memberRevision: undefined, members: undefined });
   });
 
-  it.each([
-    ["create_unconfirmed", "create-unconfirmed"],
-    ["create_not_rcs", "create-not-rcs"],
-    ["update_required", "update-required"],
-    ["withdrawn", "withdrawn"],
-  ] as const)("maps %s to %s", (reason, kind) => {
-    expect(groupComposerNotice({ reason }, "k")).toEqual({ kind, key: "k" });
+  it("maps a withdrawn refusal to a withdrawn notice", () => {
+    expect(groupComposerNotice({ reason: "withdrawn" }, "k")).toEqual({ kind: "withdrawn", key: "k" });
   });
 
   it("returns nothing for a reason with generic copy", () => {

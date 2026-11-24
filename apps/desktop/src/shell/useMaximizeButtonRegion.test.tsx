@@ -1,4 +1,4 @@
-import { act, render } from "@testing-library/react";
+import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useMaximizeButtonRegion } from "./useMaximizeButtonRegion";
 
@@ -21,6 +21,7 @@ describe("useMaximizeButtonRegion", () => {
   const originalDevicePixelRatio = window.devicePixelRatio;
 
   afterEach(() => {
+    cleanup();
     vi.unstubAllGlobals();
     Object.defineProperty(window, "devicePixelRatio", { configurable: true, value: originalDevicePixelRatio });
   });

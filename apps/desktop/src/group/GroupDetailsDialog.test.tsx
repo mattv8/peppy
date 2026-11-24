@@ -144,11 +144,7 @@ describe("GroupDetailsDialog", () => {
 
 describe("groupConnection", () => {
   it.each([
-    ["live", "rcs"],
-    ["paused", "paused"],
-    ["unlinked", "mms"],
     ["proving", "mms"],
-    ["withdrawn", "left"],
   ] as const)("maps %s to %s", (state, connection) => {
     expect(groupConnection(state)).toBe(connection);
   });

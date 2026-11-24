@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DesktopSnapshot } from "../bridge/bridge";
 import { useRcsRoute } from "./useRcsRoute";
@@ -16,6 +16,7 @@ function snapshot(): DesktopSnapshot {
 describe("useRcsRoute", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(100); });
   afterEach(() => {
+    cleanup();
     vi.restoreAllMocks();
     vi.useRealTimers();
   });

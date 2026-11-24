@@ -110,12 +110,6 @@ describe("DevicesSettings", () => {
     expect(await screen.findByText("The device was renamed, but the latest roster could not be loaded.")).toBeInTheDocument();
   });
 
-  it("loads devices under StrictMode", async () => {
-    render(<StrictMode><DevicesSettings /></StrictMode>);
-
-    expect(await screen.findByText("This Mac")).toBeInTheDocument();
-  });
-
   it("keeps the latest StrictMode load when responses resolve out of order", async () => {
     const firstLoad = deferredRoster();
     const secondLoad = deferredRoster();

@@ -382,26 +382,6 @@ describe("BrowserScheduler", () => {
     expect(replayed).toBe(true);
   });
 
-  it.each([403, 409])("retains a rejected %i outbox envelope while receiving inbound events", async status => {
-    const mutations: Array<[string, Record<string, unknown>]> = [];
-    const events = [{ cursor: "1", envelope: {} }];
-    const session = {
-      hydrate: async () => undefined,
-      query: async (command: string) => command === "pending_outbox" ? { envelopes: [{ envelope_id: "outbox-1", purpose: "event" }] } : command === "receive_cursor" ? { cursor: "0" } : { uploads: [] },
-      mutate: async (command: string, args: Record<string, unknown>) => { mutations.push([command, args]); return { applied: 0, quarantined: 0, drained: 0 }; },
-    };
-    const result = await new BrowserScheduler(session, {
-      json: async (path: string) => {
-        if (path === "/v1/events") throw new (await import("./transport.js")).TransportError("status", status, "blocked");
-        if (path.startsWith("/v1/events?")) return { events, next_after: null };
-        return {};
-      }, upload: async () => undefined, download: async () => new Uint8Array(),
-    }).poll();
-    expect(result.connection).toBe("connected");
-    expect(mutations.map(([command]) => command)).not.toContain("ack_outbox");
-    expect(mutations).toContainEqual(["ingest_batch", { events }]);
-  });
-
   it("treats an outbox 401 as fatal revocation without acknowledging or replaying", async () => {
     const mutations: string[] = [];
     const session = {

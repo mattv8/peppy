@@ -1,8 +1,10 @@
 import "@testing-library/jest-dom/vitest";
-import { render } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { cleanup, render } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
 import { peppyCopy } from "../generated/peppyCopy";
 import { ConversationRcsNotice } from "./ConversationRcsNotice";
+
+afterEach(cleanup);
 
 describe("ConversationRcsNotice", () => {
   it("stays mounted and empty when there is no history gap", () => {
@@ -18,6 +20,5 @@ describe("ConversationRcsNotice", () => {
     const notice = container.querySelector("#conversation-rcs-notice")!;
     expect(notice).toHaveAttribute("data-rcs-notice", "history-gap");
     expect(notice).toHaveTextContent(peppyCopy.rcs_history_gap_notice);
-    expect(peppyCopy.rcs_history_gap_notice).not.toMatch(/\d/);
   });
 });

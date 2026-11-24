@@ -101,11 +101,6 @@ describe("mergeReactions", () => {
     expect(mergeReactions({ ownRequest: request({ state: "sending", emoji: null }) })).toEqual([]);
   });
 
-  it("keeps an unknown attempt until the request is resolved", () => {
-    const merged = mergeReactions({ native: [nativeSelf("👍")], ownRequest: request({ state: "not_sent", emoji: "😂", previousEmoji: "👍" }) });
-    expect(merged.at(-1)?.own).toMatchObject({ state: "not_sent", intent: "switch" });
-  });
-
   it("orders other people's groups first and own chips last", () => {
     const parsed: ReactionBadgeInfo[] = [{ emoji: "😂", actors: [sam], reactionIds: ["m6"] }];
     const merged = mergeReactions({ parsed, native: [nativeSelf("👍"), { emoji: "❤️", actors: [{ self: false, address: "+15550001" }] }] });

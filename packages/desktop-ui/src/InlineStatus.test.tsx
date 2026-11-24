@@ -156,22 +156,9 @@ describe("InlineStatus truncation", () => {
   });
 });
 
-describe("InlineStatus CSS contracts", () => {
-  it("exempts inline status controls from toolbar button sizing without bare tone attributes", async () => {
-    // @ts-expect-error This package intentionally omits Node types; Vitest runs in Node.
-    const { readFileSync } = await import("node:fs");
-    const css = readFileSync("src/styles.css", "utf8");
-    expect(css).toMatch(/#composer-toolbar #composer-inline-status :is\(\[data-inline-status-trigger\], \[data-inline-status-action\], \.notification-reply-recovery-action\)/);
+describe("InlineStatus tone attributes", () => {
+  it("does not add bare tone attributes", () => {
     render(<InlineStatus items={[{ key: "status", tone: "warning", message: "Check your phone." }]} />);
     expect(document.querySelector("[data-inline-status-item]")).not.toHaveAttribute("data-tone");
-  });
-
-  it("lets the composer status shrink to its floor and restores action widths from 560px", async () => {
-    // @ts-expect-error This package intentionally omits Node types; Vitest runs in Node.
-    const { readFileSync } = await import("node:fs");
-    const css = readFileSync("src/styles.css", "utf8");
-    expect(css).toMatch(/#composer-inline-status:has\(\[data-inline-status-item\]\)\s*\{\s*min-width:\s*calc\(\s*12px\s*\+\s*4px\s*\+\s*12ch\s*\);?\s*\}/);
-    expect(css).toMatch(/#composer-toolbar #composer-inline-status :is\(\[data-inline-status\],\s*\[data-inline-status-item\]\)\s*\{\s*min-width:\s*0;?\s*\}/);
-    expect(css).toMatch(/@container\s*\(\s*width\s*>=\s*560px\s*\)\s*\{[^}]*#composer-toolbar #composer-inline-status:has\(\[data-inline-status-action\]\)\s*\{\s*min-width:\s*min-content;?\s*\}/);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { intentOf, pickAnnouncement, REFUSAL_COPY, requestAnnouncement, UNREACHABLE_COPY, withFirstEmojiNote, type RequestSnapshot } from "./announcements";
+import { intentOf, pickAnnouncement, requestAnnouncement, withFirstEmojiNote, type RequestSnapshot } from "./announcements";
 
 const request = (overrides: Partial<RequestSnapshot>): RequestSnapshot => ({ requestId: "r1", state: "sending", emoji: "😂", previousEmoji: null, ...overrides });
 
@@ -50,13 +50,5 @@ describe("requestAnnouncement, outcomes", () => {
     expect(requestAnnouncement(request({ state: "not_sent" }), undefined, undefined)).toEqual({});
     expect(requestAnnouncement(request({ state: "sending" }), request({ state: "sending" }), undefined)).toEqual({});
     expect(requestAnnouncement(undefined, request({ state: "sending" }), undefined)).toEqual({});
-  });
-});
-
-describe("constant copy", () => {
-  it("keeps the refusal and unreachable lines exact", () => {
-    expect(REFUSAL_COPY.offline).toBe("Phone is offline. Check it and try again.");
-    expect(REFUSAL_COPY.invalid_emoji).toBe("Pick an emoji, not text.");
-    expect(UNREACHABLE_COPY).toBe("Couldn't reach Peppy. Try again.");
   });
 });

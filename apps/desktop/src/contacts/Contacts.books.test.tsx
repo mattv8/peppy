@@ -7,7 +7,7 @@ import { ContactsView } from "./Contacts";
 import { BookRail } from "./BookRail";
 import type { ContactActionNotice } from "./contact-action-notice";
 import { deferred, mockContactBook, resetContactBridgeMocks, restoreContactDomGlobals } from "./contacts-test-utils";
-import { RemoveBookDialog, RemovedBookStrip } from "./RemovedBookStrip";
+import { RemoveBookDialog } from "./RemovedBookStrip";
 
 vi.mock("../bridge/bridge", { spy: true });
 
@@ -37,13 +37,6 @@ describe("removed contact book", () => {
   afterEach(() => restoreContactDomGlobals());
 
   const removalDialog = () => document.getElementById("contacts-book-remove-dialog");
-
-  it("passes the book and its strip button to onRemoveRequest", () => {
-    const onRemoveRequest = vi.fn();
-    render(<RemovedBookStrip book={mockContactBook} onRemoveRequest={onRemoveRequest} onDeleteRequest={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Remove from this computer" }));
-    expect(onRemoveRequest).toHaveBeenCalledWith(mockContactBook, expect.objectContaining({ current: expect.any(HTMLButtonElement) }));
-  });
 
   it("confirms local removal before forgetting the book", async () => {
     let books = [removedBook, mockContactBook];

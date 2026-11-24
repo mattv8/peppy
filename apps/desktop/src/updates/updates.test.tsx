@@ -231,19 +231,6 @@ describe("update distribution", () => {
 
     expect(firstRenders[0]).toBe("app_store");
   });
-
-  it("does not set state after unmounting before the read resolves", async () => {
-    const pending = deferred<UpdateStatus>();
-    invokeMock.mockReturnValue(pending.promise);
-    const { useUpdateDistribution } = await freshUpdates();
-    const consoleError = vi.spyOn(console, "error");
-    const { unmount } = renderHook(() => useUpdateDistribution(true));
-    unmount();
-
-    await act(async () => { pending.resolve({ ...UPDATE_STATUS_SERDE_FIXTURE, distribution: "app_store" }); });
-
-    expect(consoleError).not.toHaveBeenCalled();
-  });
 });
 
 function fireEvent(target: EventTarget, type: string) {

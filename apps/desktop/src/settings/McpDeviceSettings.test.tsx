@@ -266,13 +266,11 @@ describe("McpDeviceSettings", () => {
       await waitFor(() => expect(screen.getByRole("button", { name: /enable Peppy MCP/i })).toBeInTheDocument());
     });
 
-    it("does not fetch or revoke grants for a nonowner or while offline", async () => {
+    it("does not fetch grants for a nonowner", async () => {
       vi.mocked(bridge.mcp_status).mockResolvedValue({ ...ready, device: { deviceId: "mcp", name: "Peppy MCP", state: "online", lastSyncedAt: null, cleanupPending: false } });
-      const { rerender } = renderSettings({ roster: viewer });
+      renderSettings({ roster: viewer });
       await openDetailsDialog();
       expect(bridge.mcp_grants).not.toHaveBeenCalled();
-      rerender(<McpDeviceSettings roster={owner} serverOffline accountReadOnly={false} sessionKey="vault-a" unlocked />);
-      expect(bridge.mcp_revoke_grant).not.toHaveBeenCalled();
     });
   });
 

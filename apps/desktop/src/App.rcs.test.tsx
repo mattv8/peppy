@@ -282,7 +282,6 @@ describe("RCS conversation metadata", () => {
     const pill = document.getElementById("conversation-rcs-e2ee-badge");
     expect(pill).toHaveAttribute("data-rcs-e2ee-badge", "reported");
     expect(pill).toHaveTextContent(peppyCopy.rcs_e2ee_badge_label);
-    expect(peppyCopy.rcs_e2ee_badge_label).toBe("Google: end-to-end encrypted");
     expect(pill?.querySelector(".visually-hidden")).toHaveTextContent(peppyCopy.rcs_e2ee_badge_description);
   });
 

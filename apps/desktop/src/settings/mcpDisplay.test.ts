@@ -9,7 +9,6 @@ describe("mcpErrorMessage", () => {
     ["mcp_operation_not_found", "This setup attempt expired or was replaced. Try enabling again."],
     ["mcp_device_not_enrolled", "Peppy MCP setup didn't finish. Try again."],
     ["mcp_worker_rejected", "Peppy MCP setup didn't finish. Try again."],
-    ["mcp_worker_rejected", "Peppy MCP setup didn't finish. Try again."],
     ["mcp_unavailable", "Peppy MCP isn't reachable right now. Try again in a moment."],
     ["owner_required", "Only an owner can enable Peppy MCP."],
     ["hosted-session-required", "Your Peppy Hosted sign-in has expired. Sign in again, then select Enable."],

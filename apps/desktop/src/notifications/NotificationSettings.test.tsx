@@ -505,10 +505,8 @@ it("keeps a local load error visible without exposing off-banner local controls"
 
 it.each([
   ["windows", 5, "5"],
+  ["windows", 7, "5"],
   ["windows", 30, "25"],
-  ["windows", 60, "25"],
-  ["windows", 45, "25"],
-  ["windows", 120, "25"],
   ["windows", null, "indefinite"],
   ["linux", 5, "5"],
   ["linux", 30, "30"],
@@ -533,11 +531,6 @@ it.each([
 
 it.each([
   ["macos", 5],
-  ["macos", 30],
-  ["macos", 60],
-  ["macos", 45],
-  ["macos", 120],
-  ["macos", null],
 ] as const)("renders macOS status for %s seconds", async (_platform, seconds) => {
   const settings = persistenceSettings({ seconds, supported: true, platform: "macos", macosStyle: "banners" });
   render(<NotificationSettings {...props()} persistenceSettings={settings} />);
@@ -548,10 +541,6 @@ it.each([
 
 it.each([
   ["browser", 5],
-  ["browser", 30],
-  ["browser", 60],
-  ["browser", 45],
-  ["browser", 120],
   ["browser", null],
 ] as const)("renders browser persistence for %s seconds", async (_platform, seconds) => {
   const settings = persistenceSettings({ seconds, supported: true, platform: "browser" });

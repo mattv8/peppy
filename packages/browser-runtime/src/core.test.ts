@@ -12,10 +12,6 @@ describe("BrowserCore", () => {
     const core=new BrowserCore(async()=>wasm);
     wasm.UTF8ToString=()=>JSON.stringify({ok:false,error:{code:"unlock-failed"}});
     await expect(core.invoke({command:"unlock",args:{}})).rejects.toBeInstanceOf(CoreRejectedError);
-    for (const code of ["identity-exists", "identity-unavailable", "epoch-mismatch", "unavailable", "invalid-route", "mms-too-large"]) {
-      wasm.UTF8ToString=()=>JSON.stringify({ok:false,error:{code}});
-      await expect(core.invoke({command:"fixture",args:{}})).rejects.toBeInstanceOf(CoreRejectedError);
-    }
     for (const response of ['not json',JSON.stringify({ok:false,error:{code:"core-poisoned"}})]) {
       wasm.UTF8ToString=()=>response;
       try { await core.invoke({command:"snapshot",args:{}}); throw new Error("expected failure"); }

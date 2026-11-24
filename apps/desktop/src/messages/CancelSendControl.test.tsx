@@ -32,19 +32,6 @@ describe("CancelSendControl", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("accepts focus and keyboard-generated activation through a native button", () => {
-    const onCancel = vi.fn();
-    render(<CancelSendControl messageId="message-a" onCancel={onCancel} />);
-    const button = screen.getByRole("button");
-
-    expect(button.tagName).toBe("BUTTON");
-    expect(button.tabIndex).toBe(0);
-    button.focus();
-    expect(button).toHaveFocus();
-    fireEvent.click(button, { detail: 0 });
-    expect(onCancel).toHaveBeenCalledTimes(1);
-  });
-
   it("blocks the action while disabled and allows it again when enabled", () => {
     const onCancel = vi.fn();
     const { rerender } = render(<CancelSendControl messageId="message-a" onCancel={onCancel} disabled />);

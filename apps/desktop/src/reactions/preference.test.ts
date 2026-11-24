@@ -1,8 +1,12 @@
-import { renderHook, act } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { renderHook, act, cleanup } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { persistShowReactions, REACTIONS_PREFERENCE_KEY, readShowReactions, useShowReactions } from "./preference";
 
 describe("reaction preference", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
   beforeEach(() => {
     const values = new Map<string, string>();
     vi.stubGlobal("localStorage", {

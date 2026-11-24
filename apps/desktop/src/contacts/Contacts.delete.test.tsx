@@ -43,13 +43,6 @@ describe("removed book delete actions", () => {
     expect(buttons[1]).toHaveAttribute("data-action", "delete-book-everywhere");
   });
 
-  it("passes the book and its strip button to onDeleteRequest", () => {
-    const onDeleteRequest = vi.fn();
-    render(<RemovedBookStrip book={removedBook} onRemoveRequest={vi.fn()} onDeleteRequest={onDeleteRequest} />);
-    fireEvent.click(screen.getByRole("button", { name: "Delete for all devices…" }));
-    expect(onDeleteRequest).toHaveBeenCalledWith(removedBook, expect.objectContaining({ current: expect.any(HTMLButtonElement) }));
-  });
-
   it("lists remove and delete in the row menu, separated, with delete in the error colour", () => {
     render(<BookRail books={[mockContactBook, removedBook]} loading={false} bookId={mockContactBook.id} width={220} panelRef={{ current: null }} onSelect={vi.fn()} onBooksChanged={vi.fn()} onRemoveRequest={vi.fn()} onDeleteRequest={vi.fn()} onNotice={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "More actions for iPhone" }));

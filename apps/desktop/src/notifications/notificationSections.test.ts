@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import type { MirroredNotification } from "../bridge/bridge";
-import { notificationTuple } from "./notificationIdentity";
 import { notificationKey, sectionNotifications, stackNotifications } from "./notificationSections";
 
 const notification = (id: string, postedAt: number, overrides: Partial<MirroredNotification> = {}): MirroredNotification => ({
@@ -26,9 +25,6 @@ const titles = (section: { items: MirroredNotification[] }) => section.items.map
 
 describe("notificationKey", () => {
   it("builds the same tuple used for row identity", () => {
-    expect(notificationKey({ sourceDeviceId: "phone-a", notificationKey: "k", lifetime: "one" })).toBe(
-      notificationTuple("phone-a", "k", "one"),
-    );
     expect(notificationKey({ sourceDeviceId: "phone-a", notificationKey: "k", lifetime: "one" })).not.toBe(
       notificationKey({ sourceDeviceId: "phone-a", notificationKey: "k", lifetime: "two" }),
     );

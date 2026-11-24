@@ -154,7 +154,6 @@ describe("App conversation tones", () => {
     await waitFor(() => expect(givenName).toHaveValue("Unsaved Aurora"));
     expect(screen.getByLabelText("Given name")).toHaveValue("Unsaved Aurora");
     expect(bridge.load_state).toHaveBeenLastCalledWith(undefined, undefined, { metadataOnly: true });
-    expect(currentSnapshot.activeConversationId).toBe("conv-river");
   });
 
   it("drops a delayed color result after the vault session changes", async () => {

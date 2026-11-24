@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DesktopBridge, TypingSignal } from "@peppy/desktop-ui/bridge-contracts";
 import { useTypingDisplay } from "./useTypingDisplay";
@@ -12,6 +12,7 @@ function display(overrides: { conversationId?: string; current?: boolean; local?
 }
 
 describe("useTypingDisplay", () => {
+  afterEach(cleanup);
   afterEach(() => vi.useRealTimers());
 
   it("keeps a refreshed signal visible beyond its first deadline and announces once", () => {

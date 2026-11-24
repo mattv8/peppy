@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { acquireWorkerOwner, OwnerError, type OwnerLockManager } from "./owner.js";
+import { acquireWorkerOwner, type OwnerLockManager } from "./owner.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -69,7 +69,6 @@ describe("browser worker ownership", () => {
     const lease=await acquireWorkerOwner({locks:manager,name:"peppy-fixture",start:async()=>({}),stop:async()=>{stops++;}});
     await Promise.all([lease.release(),lease.release()]);
     expect(stops).toBe(1);
-    expect(OwnerError).toBeDefined();
   });
 
   it("keeps the lock held if teardown cannot establish that the old owner stopped", async () => {

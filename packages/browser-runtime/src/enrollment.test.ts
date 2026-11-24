@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MCP_COMPLETE_REQUEST_TIMEOUT_MS } from "@peppy/generated/mcp";
 import { BrowserEnrollment, MCP_ENABLE_UNCONFIRMED_MESSAGE, type EnrollmentIdentity, type EnrollmentSession } from "./enrollment.js";
 import { CheckpointError } from "./checkpoint.js";
@@ -13,6 +13,8 @@ const challengeId = "00000000-0000-0000-0000-000000000004";
 const mcpVaultId = "550e8400-e29b-41d4-a716-446655440000";
 const authorizationId = `${"A".repeat(42)}E`;
 const authorizationIds = [..."AEIMQUYcgkosw048"].map(finalCharacter => `${"A".repeat(42)}${finalCharacter}`);
+
+afterEach(() => vi.useRealTimers());
 
 describe("MCP server origin", () => {
   it.each(["https://x/$(id)", "javascript:alert(1)", "https://u:p@x", "https://x/?q", "http://127.evil.example"])("rejects %s", async serverOrigin => {

@@ -1,6 +1,17 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HistorySearchAttemptInput, StartHistorySearchInput } from "@peppy/desktop-ui/bridge-contracts";
 import { BrowserBridge, parseVaultRequestSnapshot } from "./browser-bridge";
+
+const originalCreateObjectURL = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+const originalRevokeObjectURL = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+
+afterEach(() => {
+  vi.useRealTimers();
+  if (originalCreateObjectURL) Object.defineProperty(URL, "createObjectURL", originalCreateObjectURL);
+  else delete (URL as { createObjectURL?: typeof URL.createObjectURL }).createObjectURL;
+  if (originalRevokeObjectURL) Object.defineProperty(URL, "revokeObjectURL", originalRevokeObjectURL);
+  else delete (URL as { revokeObjectURL?: typeof URL.revokeObjectURL }).revokeObjectURL;
+});
 
 class TestPort {
   public onmessage: ((event: MessageEvent) => void) | null = null;
