@@ -382,6 +382,17 @@ describe("ContactsView", () => {
   });
 
   describe("creating contacts", () => {
+    it("disables Save for an organization-only contact", async () => {
+      const { container } = render(<ContactsView />);
+      fireEvent.click(await screen.findByLabelText("New contact"));
+      fireEvent.click(container.querySelector('[data-form-disclosure="organization"] > summary')!);
+      fireEvent.change(screen.getByLabelText("Organization"), { target: { value: "Northstar" } });
+      expect(screen.getByLabelText("Organization")).toHaveValue("Northstar");
+
+      // Pins current behaviour of review finding D-35; flip this assertion when the fix is authorized.
+      expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    });
+
     it("keeps empty optional contact fields collapsed until their disclosure is opened", async () => {
       const { container } = render(<ContactsView />);
 

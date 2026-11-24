@@ -413,6 +413,7 @@ describe("contact book rail collapse and resize", () => {
     })));
     render(<ContactsView />);
     await waitFor(() => expect(bridge.list_contact_books).toHaveBeenCalled());
+    await screen.findByRole("heading", { name: "Pixel 8" });
     expect(screen.queryByRole("separator", { name: "Resize contact books" })).not.toBeInTheDocument();
   });
 
@@ -422,6 +423,7 @@ describe("contact book rail collapse and resize", () => {
       Object.defineProperty(window, "innerWidth", { configurable: true, value: 400 });
       render(<ContactsView />);
       await waitFor(() => expect(bridge.list_contact_books).toHaveBeenCalled());
+      await waitFor(() => expect(document.getElementById("contacts-view")).toHaveAttribute("data-collapsed-reason", "space"));
       expect(document.getElementById("contacts-book-list")).not.toBeInTheDocument();
       expect(document.getElementById("contacts-view")).toHaveAttribute("data-collapsed-reason", "space");
       expect(storedLayout()).not.toHaveProperty("contactsBookCollapsed");

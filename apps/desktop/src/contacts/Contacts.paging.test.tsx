@@ -121,6 +121,7 @@ describe("ContactsView paging", () => {
     const { container } = render(<ContactsView />);
 
     await waitFor(() => expect(bridge.list_contacts_page).toHaveBeenCalled());
+    await waitFor(() => expect(document.getElementById("contacts-list")).toHaveAttribute("aria-busy", "true"));
     expect(container.querySelector("#contacts-empty-state")).toBeNull();
     expect(container).not.toHaveTextContent("No contacts in");
   });
