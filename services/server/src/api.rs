@@ -1828,49 +1828,14 @@ pub(super) async fn instance_revoke_device(
         .execute(&mut *tx)
         .await
         .map_err(|error| database_unavailable(&error, "instance_revoke_lock"))?;
-    let target = sqlx::query("SELECT role, revoked_at IS NULL active FROM devices WHERE vault_id=$1 AND device_id=$2 FOR UPDATE")
-        .bind(vault_id).bind(device_id).fetch_optional(&mut *tx).await
-        .map_err(|error| database_unavailable(&error, "instance_revoke_lookup"))?
-        .ok_or(ApiError(StatusCode::NOT_FOUND, "device_not_found"))?;
-    if !target.get::<bool, _>("active") {
-        return Err(ApiError(StatusCode::CONFLICT, "device_already_revoked"));
-    }
-    if target.get::<String, _>("role") == "owner" {
-        let owners: i64 = sqlx::query_scalar("SELECT count(*) FROM devices WHERE vault_id=$1 AND role='owner' AND revoked_at IS NULL")
-            .bind(vault_id).fetch_one(&mut *tx).await.map_err(|error| database_unavailable(&error, "instance_revoke_owner_count"))?;
-        if owners <= 1 {
-            return Err(ApiError(StatusCode::CONFLICT, "last_active_owner"));
-        }
-    }
-    sqlx::query("DELETE FROM device_cursors WHERE vault_id=$1 AND device_id=$2")
-        .bind(vault_id)
-        .bind(device_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| database_unavailable(&error, "revoke_device_cursor"))?;
-    sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
-        .bind(vault_id)
-        .bind(device_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| database_unavailable(&error, "instance_revoke_device"))?;
-    revoke_mcp_device(&mut tx, vault_id, device_id, state.mcp_worker.is_some())
-        .await
-        .map_err(|error| database_unavailable(&error, "instance_revoke_mcp_device"))?;
-    sqlx::query(
-        "UPDATE device_credentials SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2",
+    revoke_device_transaction(
+        &mut tx,
+        vault_id,
+        device_id,
+        state.mcp_worker.is_some(),
+        RevocationSource::Instance,
     )
-    .bind(vault_id)
-    .bind(device_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| database_unavailable(&error, "instance_revoke_credential"))?;
-    fence_revoked_device_work(&mut tx, vault_id, device_id)
-        .await
-        .map_err(|error| database_unavailable(&error, "instance_revoke_fence"))?;
-    revoke_wake_effects(&mut tx, vault_id, device_id)
-        .await
-        .map_err(|error| database_unavailable(&error, "instance_revoke_wake_effects"))?;
+    .await?;
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "instance_revoke_commit"))?;
@@ -1878,6 +1843,90 @@ pub(super) async fn instance_revoke_device(
     crate::presence::revoke_best_effort(&state.db, vault_id, device_id).await;
     let _ = state.presence_changed.send(vault_id);
     Ok(StatusCode::NO_CONTENT)
+}
+
+enum RevocationSource {
+    Device,
+    Instance,
+}
+
+async fn revoke_device_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    vault_id: Uuid,
+    device_id: Uuid,
+    has_worker: bool,
+    source: RevocationSource,
+) -> ApiResult<()> {
+    let (lookup_sql, lookup, owner_count, device, mcp_device, credential, fence, wake) =
+        match source {
+            RevocationSource::Instance => (
+                "SELECT role, revoked_at IS NULL active FROM devices WHERE vault_id=$1 AND device_id=$2 FOR UPDATE",
+                "instance_revoke_lookup",
+                "instance_revoke_owner_count",
+                "instance_revoke_device",
+                "instance_revoke_mcp_device",
+                "instance_revoke_credential",
+                "instance_revoke_fence",
+                "instance_revoke_wake_effects",
+            ),
+            RevocationSource::Device => (
+                "SELECT role,revoked_at IS NULL active FROM devices WHERE vault_id=$1 AND device_id=$2 FOR UPDATE",
+                "revoke_target_lookup",
+                "revoke_owner_count",
+                "revoke_device",
+                "revoke_mcp_device",
+                "revoke_credential",
+                "revoke_fence",
+                "revoke_wake_effects",
+            ),
+        };
+    let target = sqlx::query(lookup_sql)
+        .bind(vault_id)
+        .bind(device_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| database_unavailable(&error, lookup))?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "device_not_found"))?;
+    if !target.get::<bool, _>("active") {
+        return Err(ApiError(StatusCode::CONFLICT, "device_already_revoked"));
+    }
+    if target.get::<String, _>("role") == "owner" {
+        let owners: i64 = sqlx::query_scalar("SELECT count(*) FROM devices WHERE vault_id=$1 AND role='owner' AND revoked_at IS NULL")
+            .bind(vault_id).fetch_one(&mut **tx).await.map_err(|error| database_unavailable(&error, owner_count))?;
+        if owners <= 1 {
+            return Err(ApiError(StatusCode::CONFLICT, "last_active_owner"));
+        }
+    }
+    sqlx::query("DELETE FROM device_cursors WHERE vault_id=$1 AND device_id=$2")
+        .bind(vault_id)
+        .bind(device_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "revoke_device_cursor"))?;
+    sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
+        .bind(vault_id)
+        .bind(device_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| database_unavailable(&error, device))?;
+    revoke_mcp_device(tx, vault_id, device_id, has_worker)
+        .await
+        .map_err(|error| database_unavailable(&error, mcp_device))?;
+    sqlx::query(
+        "UPDATE device_credentials SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(vault_id)
+    .bind(device_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_unavailable(&error, credential))?;
+    fence_revoked_device_work(tx, vault_id, device_id)
+        .await
+        .map_err(|error| database_unavailable(&error, fence))?;
+    revoke_wake_effects(tx, vault_id, device_id)
+        .await
+        .map_err(|error| database_unavailable(&error, wake))?;
+    Ok(())
 }
 
 async fn revoke_wake_effects(
@@ -2466,45 +2515,14 @@ async fn revoke_device(
     if device_id != p.device && caller_role != "owner" {
         return Err(ApiError(StatusCode::FORBIDDEN, "owner_required"));
     }
-    let target = sqlx::query("SELECT role,revoked_at IS NULL active FROM devices WHERE vault_id=$1 AND device_id=$2 FOR UPDATE").bind(p.vault).bind(device_id).fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "revoke_target_lookup"))?.ok_or(ApiError(StatusCode::NOT_FOUND, "device_not_found"))?;
-    if !target.get::<bool, _>("active") {
-        return Err(ApiError(StatusCode::CONFLICT, "device_already_revoked"));
-    }
-    if target.get::<String, _>("role") == "owner" {
-        let owners: i64 = sqlx::query_scalar("SELECT count(*) FROM devices WHERE vault_id=$1 AND role='owner' AND revoked_at IS NULL").bind(p.vault).fetch_one(&mut *tx).await.map_err(|error| database_unavailable(&error, "revoke_owner_count"))?;
-        if owners <= 1 {
-            return Err(ApiError(StatusCode::CONFLICT, "last_active_owner"));
-        }
-    }
-    sqlx::query("DELETE FROM device_cursors WHERE vault_id=$1 AND device_id=$2")
-        .bind(p.vault)
-        .bind(device_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| database_unavailable(&error, "revoke_device_cursor"))?;
-    sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
-        .bind(p.vault)
-        .bind(device_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| database_unavailable(&error, "revoke_device"))?;
-    revoke_mcp_device(&mut tx, p.vault, device_id, s.mcp_worker.is_some())
-        .await
-        .map_err(|error| database_unavailable(&error, "revoke_mcp_device"))?;
-    sqlx::query(
-        "UPDATE device_credentials SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2",
+    revoke_device_transaction(
+        &mut tx,
+        p.vault,
+        device_id,
+        s.mcp_worker.is_some(),
+        RevocationSource::Device,
     )
-    .bind(p.vault)
-    .bind(device_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| database_unavailable(&error, "revoke_credential"))?;
-    fence_revoked_device_work(&mut tx, p.vault, device_id)
-        .await
-        .map_err(|error| database_unavailable(&error, "revoke_fence"))?;
-    revoke_wake_effects(&mut tx, p.vault, device_id)
-        .await
-        .map_err(|error| database_unavailable(&error, "revoke_wake_effects"))?;
+    .await?;
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "revoke_commit"))?;
