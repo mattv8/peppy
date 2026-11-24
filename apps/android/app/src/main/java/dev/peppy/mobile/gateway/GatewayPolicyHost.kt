@@ -45,6 +45,11 @@ class GatewayPolicyHost(private val context: Context) {
 
     fun setPhoneReadEnabled(value: Boolean) = update { it.phoneReadEnabled = value }
 
+    /** A missing core session is not equivalent to the setting being off. */
+    fun notificationMarkReadEnabledOrNull(): Boolean? = settings()?.notificationMarkReadEnabled
+
+    fun setNotificationMarkReadEnabled(value: Boolean) = update { it.notificationMarkReadEnabled = value }
+
     fun decision(notificationIsSilent: Boolean = false, smsAvailable: Boolean = hasReceiveSmsPermission()): NativeGatewayPolicyDecision? {
         val client = NativeGateway.open(appContext) ?: return null
         return try {
@@ -59,6 +64,8 @@ class GatewayPolicyHost(private val context: Context) {
                     Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
                         NotificationMirrorAccess.granted(appContext) &&
                         hasReadSmsPermission(),
+                    // Android 9 added the semantic mark-as-read action that the phone presses.
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && NotificationMirrorAccess.granted(appContext),
                 ),
             )
         } catch (_: MobileBindingsException) {

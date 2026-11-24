@@ -353,7 +353,7 @@ class PhoneReadIngestTest {
         arrayOf(NativeClientInterface::class.java),
     ) { _, method, _ ->
         when (method.name) {
-            "gatewayPolicyDecision" -> NativeGatewayPolicyDecision(false, true, captureMms, false, false, false, true)
+            "gatewayPolicyDecision" -> NativeGatewayPolicyDecision(false, true, captureMms, false, false, false, true, false)
             "toString" -> "phone-read-policy-client"
             else -> error("unexpected native policy call: ${method.name}")
         }

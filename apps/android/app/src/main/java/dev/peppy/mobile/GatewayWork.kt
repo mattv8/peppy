@@ -354,7 +354,7 @@ class GatewaySync(
     private val elapsedMs: () -> Long = { SystemClock.elapsedRealtime() },
 ) {
     private enum class GatewayPhase(val code: Long) {
-        RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), SEND_CANCELLATIONS(23), RETIRE_SWALLOWED(24), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE), MESSAGING_APP(22),
+        RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), SEND_CANCELLATIONS(23), RETIRE_SWALLOWED(24), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_MARK_READS(25), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE), MESSAGING_APP(22),
     }
     class PassResult(
         val more: Boolean,
@@ -464,6 +464,8 @@ class GatewaySync(
                 // Receive/apply precedes any OS effect and outbound upload. A disconnected listener
                 // or revoked access leaves the durable core effect pending rather than completing it.
                 phase(GatewayPhase.NOTIFICATION_DISMISSALS) { NotificationMirrorService.runPendingDismissals(); false }
+                // Mark-read follows dismissals and precedes phone reads; both are core-owned effects.
+                phase(GatewayPhase.NOTIFICATION_MARK_READS) { NotificationMirrorService.runPendingMarkReads(); false }
                 phase(GatewayPhase.NOTIFICATION_PHONE_READS) { NotificationMirrorService.runPhoneReads(); false }
                 // Synthetic records are core-only, so retire them without listener access.
                 phase(GatewayPhase.NOTIFICATION_TEST_DISMISSALS) { NotificationTestCapture.applyDismissals(client); false }
