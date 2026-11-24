@@ -522,7 +522,9 @@ fn sha256_hex(root: &Path, name: &str, bytes: &[u8]) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn encrypted_mms_survives_volume_restore_without_historical_carrier_effect() {
     eprintln!("phase=ER01 status=start");
-    let root = TempDir::new().unwrap();
+    let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    fs::create_dir_all(&target_dir).unwrap();
+    let root = TempDir::new_in(target_dir).unwrap();
     let mut source = ComposeFixture::create(root.path(), "source");
     let mut target = ComposeFixture::create(root.path(), "target");
     source.up_source();
