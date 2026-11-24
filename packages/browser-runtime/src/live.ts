@@ -30,12 +30,6 @@ export interface LiveCore {
   invoke(command: string, args: Record<string, unknown>): Promise<unknown>;
 }
 
-export type LiveTypingContext = {
-  trustedRoster: string[];
-  localGatewayDeviceId: string;
-  executor: "none" | "current_gateway";
-};
-
 export type TypingDisplayEvent = {
   event: "typing";
   peerDeviceId: string;
@@ -46,7 +40,7 @@ export type TypingDisplayEvent = {
   deadlineMono: string;
 };
 
-/** Core-only typing bridge. Callers supply trusted host context, never renderer input. */
+/** Core-only typing bridge. Rust derives the trusted context. */
 export class LiveTypingEngine {
   private generation: string | undefined;
   private incarnation = Symbol("disabled");
@@ -59,9 +53,9 @@ export class LiveTypingEngine {
     private readonly display: (event: TypingDisplayEvent) => void,
   ) {}
 
-  public async enable(context?: LiveTypingContext): Promise<void> {
+  public async enable(): Promise<void> {
     const incarnation = this.retire();
-    const value = record(await this.core.invoke("_worker_typing_enable", { ...context, clock: this.clock() }));
+    const value = record(await this.core.invoke("_worker_typing_enable", { clock: this.clock() }));
     if (incarnation !== this.incarnation) return;
     this.generation = decimal(value.generation);
   }

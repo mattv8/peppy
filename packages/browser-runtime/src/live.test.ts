@@ -200,7 +200,7 @@ describe("LiveTypingEngine", () => {
       .mockResolvedValueOnce({ generation: "8", frameJson: "sealed" });
     const transmit = vi.fn(() => true);
     const engine = new LiveTypingEngine({ invoke: mutate }, { transmit }, () => ({ wallMs: 1, monoMs: 1 }), vi.fn());
-    await engine.enable({ trustedRoster: ["a"], localGatewayDeviceId: "a", executor: "none" });
+    await engine.enable();
     await engine.setSharing(false);
     await expect(engine.send("conversation", "stopped")).resolves.toBe(false);
     expect(mutate.mock.calls[1]).toEqual(["_worker_typing_set_sharing", { sharing: false }]);
@@ -214,7 +214,7 @@ describe("LiveTypingEngine", () => {
       .mockResolvedValueOnce({ generation: "6", action: { kind: "display", peerDeviceId: "peer", conversationId: "conversation", state: "started", deadlineMono: "9" } })
       .mockResolvedValueOnce({ generation: "7", sessionUpdate: { peerDeviceId: "peer", replacedSessionToken: null, currentSessionToken: "1", validationRevision: "1" }, action: { kind: "display", peerDeviceId: "peer", sessionToken: "1", sequence: "1", conversationId: "conversation", state: "started", deadlineMono: "9" } });
     const engine = new LiveTypingEngine({ invoke: mutate }, { transmit: vi.fn(() => true) }, () => ({ wallMs: 1, monoMs: 1 }), display);
-    await engine.enable({ trustedRoster: ["a"], localGatewayDeviceId: "a", executor: "none" });
+    await engine.enable();
     await engine.receive("raw frame");
     await engine.receive("raw frame");
     expect(display).toHaveBeenCalledExactlyOnceWith({ event: "typing", peerDeviceId: "peer", conversationId: "conversation", state: "started", deadlineMono: "9" });
@@ -233,7 +233,7 @@ describe("LiveTypingEngine", () => {
       .mockResolvedValueOnce(action("1", "+15551230002"))
       .mockResolvedValueOnce(action("2", null));
     const engine = new LiveTypingEngine({ invoke: mutate }, { transmit: vi.fn(() => true) }, () => ({ wallMs: 1, monoMs: 1 }), display);
-    await engine.enable({ trustedRoster: ["a"], localGatewayDeviceId: "a", executor: "none" });
+    await engine.enable();
     await engine.receive("first");
     await engine.receive("second");
     await engine.receive("third");
@@ -255,7 +255,7 @@ describe("LiveTypingEngine", () => {
     const transmit = vi.fn(() => true);
     const engine = new LiveTypingEngine({ invoke: mutate }, { transmit }, () => ({ wallMs: 1, monoMs: 1 }), vi.fn());
 
-    const enabling = engine.enable({ trustedRoster: ["a"], localGatewayDeviceId: "a", executor: "none" });
+    const enabling = engine.enable();
     await settled();
     await engine.disable();
     pendingEnable.resolve({ generation: "7" });
@@ -275,7 +275,7 @@ describe("LiveTypingEngine", () => {
     });
     const transmit = vi.fn(() => true);
     const engine = new LiveTypingEngine({ invoke: mutate }, { transmit }, () => ({ wallMs: 1, monoMs: 1 }), vi.fn());
-    await engine.enable({ trustedRoster: ["a"], localGatewayDeviceId: "a", executor: "none" });
+    await engine.enable();
 
     const sending = engine.send("conversation", "started");
     await settled();
@@ -296,7 +296,7 @@ describe("LiveTypingEngine", () => {
     const display = vi.fn();
     const transmit = vi.fn(() => true);
     const engine = new LiveTypingEngine({ invoke: mutate }, { transmit }, () => ({ wallMs: 1, monoMs: 1 }), display);
-    await engine.enable({ trustedRoster: ["a"], localGatewayDeviceId: "a", executor: "none" });
+    await engine.enable();
 
     const receiving = engine.receive("raw frame");
     await settled();
@@ -322,7 +322,7 @@ describe("LiveTypingEngine", () => {
       .mockResolvedValueOnce({ generation: "7", sessionUpdate: { peerDeviceId: "peer", replacedSessionToken: "1", currentSessionToken: "2", validationRevision: "2" } });
     const display = vi.fn();
     const engine = new LiveTypingEngine({ invoke: mutate }, { transmit: vi.fn(() => true) }, () => ({ wallMs: 1, monoMs: 1 }), display);
-    await engine.enable({ trustedRoster: ["a"], localGatewayDeviceId: "a", executor: "none" });
+    await engine.enable();
     await engine.receive("install session 1");
 
     const delayed = engine.receive("session 1 action");
@@ -343,7 +343,7 @@ describe("LiveTypingEngine", () => {
       .mockResolvedValueOnce({ generation: "7", action: { kind: "display", peerDeviceId: "peer", sessionToken: "1", sequence: "103", conversationId: "conversation", state: "stopped", deadlineMono: "9" } });
     const display = vi.fn();
     const engine = new LiveTypingEngine({ invoke: mutate }, { transmit: vi.fn(() => true) }, () => ({ wallMs: 1, monoMs: 1 }), display);
-    await engine.enable({ trustedRoster: ["a"], localGatewayDeviceId: "a", executor: "none" });
+    await engine.enable();
     await engine.receive("install session");
 
     const delayed = engine.receive("start 102");
@@ -364,7 +364,7 @@ describe("LiveTypingEngine", () => {
       .mockImplementationOnce(() => pendingOpen.promise);
     const display = vi.fn();
     const engine = new LiveTypingEngine({ invoke: mutate }, { transmit: vi.fn(() => true) }, () => ({ wallMs: 1, monoMs }), display);
-    await engine.enable({ trustedRoster: ["a"], localGatewayDeviceId: "a", executor: "none" });
+    await engine.enable();
     await engine.receive("install session");
 
     const receiving = engine.receive("pending action");
@@ -387,7 +387,7 @@ describe("LiveTypingEngine", () => {
         action: { kind: "display", peerDeviceId: "peer", sessionToken: "1", sequence: "1", conversationId: "conversation", state: "started", deadlineMono: "9" },
       });
     const engine = new LiveTypingEngine({ invoke: mutate }, { transmit: vi.fn(() => true) }, () => ({ wallMs: 1, monoMs: 1 }), display);
-    await engine.enable({ trustedRoster: ["a"], localGatewayDeviceId: "a", executor: "none" });
+    await engine.enable();
     await engine.receive("newer session");
     await engine.receive("older session");
 
@@ -409,7 +409,7 @@ describe("LiveTypingEngine", () => {
         action: { kind: "display", peerDeviceId: "peer", sessionToken: "2", sequence: "1", conversationId: "conversation", state: "stopped", deadlineMono: "9" },
       });
     const engine = new LiveTypingEngine({ invoke: mutate }, { transmit: vi.fn(() => true) }, () => ({ wallMs: 1, monoMs: 1 }), display);
-    await engine.enable({ trustedRoster: ["a"], localGatewayDeviceId: "a", executor: "none" });
+    await engine.enable();
     await engine.receive("session 1");
     await engine.receive("session 2");
 
