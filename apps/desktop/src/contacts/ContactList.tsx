@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
 import { ContactAvatar, Loader2, Users, contactSeed, formatPhoneNumber } from "@peppy/desktop-ui";
 import type { ContactView } from "../bridge/bridge";
 import { editStateLabel } from "./contact-labels";
@@ -104,6 +104,45 @@ function ContactSkeleton() {
   );
 }
 
+const ContactRow = memo(function ContactRow({ contact, nameFormat, tabStop, selected, onSelect }: {
+  contact: ContactView;
+  nameFormat: ContactNameFormat;
+  tabStop: boolean;
+  selected: boolean;
+  onSelect(contact: ContactView): void;
+}) {
+  const name = formatContactName(contact, nameFormat);
+  const number = contact.phones[0]?.number;
+  const formattedNumber = number ? formatPhoneNumber(number) : "";
+  return (
+    <li data-contact-row={contact.id}>
+      <button
+        data-contact-id={contact.id}
+        className="contacts-row"
+        tabIndex={tabStop ? 0 : -1}
+        aria-label={[name, formattedNumber, contact.pendingEditState && editStateLabel(contact.pendingEditState)].filter(Boolean).join(", ")}
+        aria-current={selected ? "location" : undefined}
+        onClick={() => onSelect(contact)}
+      >
+        <ContactAvatar
+          seed={contactSeed(contact.phones, contact.id)}
+          name={contact.displayName}
+          photoDataUrl={contact.photoDataUrl}
+        />
+        <span className="contacts-row-copy">
+          <b>{name}</b>
+          <small>{formattedNumber}</small>
+        </span>
+        {contact.pendingEditState && (
+          <span className="contacts-row-state-badge" data-state={contact.pendingEditState}>
+            <span className="sr-only">{editStateLabel(contact.pendingEditState)}</span>
+          </span>
+        )}
+      </button>
+    </li>
+  );
+});
+
 /**
  * The contact rows of the list column: skeleton while the first page loads, infinite scroll through a sentinel,
  * a single tab stop with roving focus, and the polite announcer for loads the user triggers from the keyboard.
@@ -114,6 +153,9 @@ export function ContactList({
 }: ContactListProps) {
   const searchedBook = deviceLabel ?? deviceName ?? "this book";
   const listRef = useRef<HTMLUListElement>(null);
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
+  const selectContact = useCallback((contact: ContactView) => onSelectRef.current(contact), []);
   const sentinelRef = useRef<HTMLLIElement>(null);
   const pendingFocusIndex = useRef<number | undefined>(undefined);
   const wasLoading = useRef(loading);
@@ -203,36 +245,9 @@ export function ContactList({
         onKeyDown={handleKeyDown}
         onFocus={handleFocus}
       >
-        {contacts.map(contact => {
-          const name = formatContactName(contact, nameFormat);
-          return (
-            <li key={contact.id}>
-              <button
-                data-contact-id={contact.id}
-                className="contacts-row"
-                tabIndex={contact.id === tabStopId ? 0 : -1}
-                aria-label={[name, contact.phones[0]?.number && formatPhoneNumber(contact.phones[0].number), contact.pendingEditState && editStateLabel(contact.pendingEditState)].filter(Boolean).join(", ")}
-                aria-current={selectedId === contact.id ? "location" : undefined}
-                onClick={() => onSelect(contact)}
-              >
-                <ContactAvatar
-                  seed={contactSeed(contact.phones, contact.id)}
-                  name={contact.displayName}
-                  photoDataUrl={contact.photoDataUrl}
-                />
-                <span className="contacts-row-copy">
-                  <b>{name}</b>
-                  <small>{contact.phones[0]?.number ? formatPhoneNumber(contact.phones[0].number) : ""}</small>
-                </span>
-                {contact.pendingEditState && (
-                  <span className="contacts-row-state-badge" data-state={contact.pendingEditState}>
-                    <span className="sr-only">{editStateLabel(contact.pendingEditState)}</span>
-                  </span>
-                )}
-              </button>
-            </li>
-          );
-        })}
+        {contacts.map(contact => (
+          <ContactRow key={contact.id} contact={contact} nameFormat={nameFormat} tabStop={contact.id === tabStopId} selected={selectedId === contact.id} onSelect={selectContact} />
+        ))}
         {!loading && contacts.length === 0 && (loadFailed ? (
           <li id="contacts-empty-state" data-empty-reason="load-failed">
             <span>Couldn't load contacts.</span>

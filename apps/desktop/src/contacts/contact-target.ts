@@ -1,6 +1,5 @@
 import type { DesktopBridge, ContactSort, ContactView } from "../bridge/bridge";
 
-export const CONTACTS_PAGE_SIZE = 200;
 const MAX_TARGET_ROWS = 2_000;
 
 export type ContactTargetLookup = {

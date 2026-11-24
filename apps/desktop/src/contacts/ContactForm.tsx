@@ -1,7 +1,5 @@
-import { UPDATE_PAUSED_DESCRIPTION } from "@peppy/desktop-ui";
-import { UPDATE_ERROR } from "@peppy/desktop-ui";
 import { useEffect, useRef, useState } from "react";
-import { ContactAvatar, Plus, TonePicker, X, contactSeed, paletteIndex, seedKey } from "@peppy/desktop-ui";
+import { ContactAvatar, Plus, TonePicker, UPDATE_ERROR, UPDATE_PAUSED_DESCRIPTION, X, contactSeed, paletteIndex, seedKey } from "@peppy/desktop-ui";
 import {
   type ContactView,
   type ContactPhone,

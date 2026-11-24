@@ -58,7 +58,7 @@ export function NotificationFilterBar({
       </button>)}
     </div>}
     {waiting}
-    <div role="group" aria-label="Arrange by" className="notification-arrangement">
+    <div id="notification-arrangement" role="group" aria-label="Arrange by" className="notification-arrangement">
       <button type="button" title="Time" aria-pressed={arrangement === "time"} onClick={() => onArrangement("time")}><Clock size={14} aria-hidden /><span className="notification-toolbar-label">Time</span></button>
       <button type="button" title="App" aria-pressed={arrangement === "app"} onClick={() => onArrangement("app")}><Layers size={14} aria-hidden /><span className="notification-toolbar-label">App</span></button>
     </div>

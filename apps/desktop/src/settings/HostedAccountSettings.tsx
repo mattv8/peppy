@@ -14,7 +14,17 @@ function isCancelled(error: unknown): boolean {
 
 function ProviderButtons({ providers, busy, pendingProvider, onSignIn, signInButton }: { providers: SignInProvider[]; busy: boolean; pendingProvider: SignInProvider | null; onSignIn(provider: SignInProvider): void; signInButton: RefObject<HTMLButtonElement | null> }) {
   return <div id="hosted-account-sign-in-options" role="group" aria-label={peppyCopy.hosted_sign_in_group_label}>
-    {providers.map(provider => <button key={provider} ref={provider === "google" ? signInButton : undefined} id={`hosted-account-sign-in-${provider}`} className="secondary-button provider-button" type="button" data-provider={provider} disabled={busy} aria-busy={pendingProvider === provider || undefined} onClick={() => onSignIn(provider)}>{provider === "apple" ? peppyCopy.hosted_sign_in_apple : peppyCopy.hosted_sign_in_google}</button>)}
+    {providers.map(provider => <button
+      key={provider}
+      ref={provider === "google" ? signInButton : undefined}
+      id={`hosted-account-sign-in-${provider}`}
+      className="secondary-button provider-button"
+      type="button"
+      data-provider={provider}
+      disabled={busy}
+      aria-busy={pendingProvider === provider || undefined}
+      onClick={() => onSignIn(provider)}
+    >{provider === "apple" ? peppyCopy.hosted_sign_in_apple : peppyCopy.hosted_sign_in_google}</button>)}
     <p id="hosted-account-sign-in-status" role="status">{pendingProvider ? peppyCopy.hosted_sign_in_waiting : ""}</p>
   </div>;
 }
@@ -130,14 +140,31 @@ export function HostedAccountSettings({ sessionScopeId, onAccountDeleted, onDele
   return <div id="hosted-account-session" data-hosted-account-session className="hosted-account-session" aria-busy={loading || undefined}>
     <h3 id="hosted-account-session-status" className="visually-hidden" tabIndex={-1}>Account session</h3>
     {loading && account === null && <p id="hosted-account-loading" role="status" className="settings-note">Account loading…</p>}
-    {!loading && loadFailed && <><p id="hosted-account-error" role="alert" className="settings-error">Could not load account status.</p><button id="hosted-account-retry" type="button" className="secondary-button" onClick={() => void load()}>Retry</button></>}
-    {!loadFailed && account?.signedIn && <><div id="hosted-account-sign-out-row"><div className="hosted-account-row-copy">{account.accountLabel && <p id="hosted-account-label">{account.accountLabel}</p>}<p id="hosted-account-sign-out-scope" className="settings-note">Signing out ends this app’s account session. Your vault connection and saved data remain.</p></div><button id="hosted-account-sign-out" type="button" className="secondary-button" disabled={signingOut} aria-busy={signingOut || undefined} onClick={() => void signOut()}>Sign out of Peppy</button></div>{signOutError && <p id="hosted-account-sign-out-error" role="alert" className="settings-error">Sign-out was not completed. Try again.</p>}<AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} onManageStorage={bridge.hosted_open_billing} />
+    {!loading && loadFailed && <>
+      <p id="hosted-account-error" role="alert" className="settings-error">Could not load account status.</p>
+      <button id="hosted-account-retry" type="button" className="secondary-button" onClick={() => void load()}>Retry</button>
+    </>}
+    {!loadFailed && account?.signedIn && <>
+      <div id="hosted-account-sign-out-row">
+        <div className="hosted-account-row-copy">
+          {account.accountLabel && <p id="hosted-account-label">{account.accountLabel}</p>}
+          <p id="hosted-account-sign-out-scope" className="settings-note">Signing out ends this app’s account session. Your vault connection and saved data remain.</p>
+        </div>
+        <button id="hosted-account-sign-out" type="button" className="secondary-button" disabled={signingOut} aria-busy={signingOut || undefined} onClick={() => void signOut()}>Sign out of Peppy</button>
+      </div>
+      {signOutError && <p id="hosted-account-sign-out-error" role="alert" className="settings-error">Sign-out was not completed. Try again.</p>}
+      <AttachmentStorageSettingsHost sessionScopeId={sessionScopeId} onManageStorage={bridge.hosted_open_billing} />
       {phase === "none" && <FeedbackSettings browserHost={false} bridge={bridge} />}
       <div id="hosted-account-delete" data-account-delete data-deletion-phase={phase}><div className="hosted-account-row-copy">
         <p id="hosted-account-delete-announcer" className="visually-hidden" role="status">{announcement}</p>
         <h3 id="hosted-account-delete-title">{phase === "none" ? peppyCopy.settings_server_delete : phase === "scheduled" ? peppyCopy.account_delete_pending_title : peppyCopy.account_delete_processing_title}</h3>
         {phase === "none" ? <p>{peppyCopy.account_delete_section_body}</p> : <p id="hosted-account-delete-status" role="status" tabIndex={-1}>{phase === "processing" ? peppyCopy.account_delete_pending_status : formattedDeadline ? formatCopy(peppyCopy.account_delete_scheduled_status, formattedDeadline) : peppyCopy.account_delete_scheduled_status_nodate}</p>}
-        {phase === "scheduled" && <><p id="hosted-account-delete-readonly-note">{peppyCopy.account_delete_scheduled_readonly}</p>{billing?.provider === "stripe" && <p id="hosted-account-delete-subscription-note">{peppyCopy.account_delete_scheduled_stripe}</p>}{billing?.provider === "apple" && <p id="hosted-account-delete-subscription-note">{peppyCopy.account_delete_apple_billing}</p>}{billing?.provider === "google_play" && <p id="hosted-account-delete-subscription-note">{peppyCopy.account_delete_google_play_billing}</p>}</>}
+        {phase === "scheduled" && <>
+          <p id="hosted-account-delete-readonly-note">{peppyCopy.account_delete_scheduled_readonly}</p>
+          {billing?.provider === "stripe" && <p id="hosted-account-delete-subscription-note">{peppyCopy.account_delete_scheduled_stripe}</p>}
+          {billing?.provider === "apple" && <p id="hosted-account-delete-subscription-note">{peppyCopy.account_delete_apple_billing}</p>}
+          {billing?.provider === "google_play" && <p id="hosted-account-delete-subscription-note">{peppyCopy.account_delete_google_play_billing}</p>}
+        </>}
         {cancelError && <p id="hosted-account-delete-cancel-error" role="alert" className="settings-error">{cancelError}</p>}
       </div>{phase === "none" ? <button id="hosted-account-delete-open" ref={deleteButton} className="destructive-button" type="button" aria-haspopup="dialog" onClick={() => setDeleteOpen(true)}>{peppyCopy.settings_server_delete}</button> : phase === "scheduled" ? <button id="hosted-account-delete-cancel" className="secondary-button" type="button" aria-disabled={cancelBusy || undefined} aria-busy={cancelBusy || undefined} onClick={() => void cancelDeletion()}>{peppyCopy.account_delete_cancel_action}</button> : null}</div>
       {deleteOpen && <DeleteAccountDialog billing={billing ?? emptyBilling} opener={deleteButton} onDismiss={() => setDeleteOpen(false)} onDeleted={result => { setDeleteOpen(false); if (result.outcome === "pending") { setDeletion(result.cancellable === undefined ? null : { executeAfter: result.executeAfter ?? null, cancellable: result.cancellable }); setBilling(current => ({ ...(current ?? emptyBilling), deletionPending: true })); } onAccountDeleted?.(result); }} />}</>}

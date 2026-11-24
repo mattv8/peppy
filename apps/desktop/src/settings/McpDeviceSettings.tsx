@@ -379,6 +379,18 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
     setRevokeTarget(null);
   };
 
+  const removeRevokedGrant = (target: McpGrantView, generation: number, notice: () => string) => {
+    grantRequest.current += 1;
+    setLoadingGrants(false);
+    setGrants(currentGrants => currentGrants.filter(grant => grant.id !== target.id));
+    if (isCurrentDetails(generation)) setGrantNotice(notice());
+    if (isCurrentDetails(generation) && revokeTargetRef.current?.id === target.id) {
+      revokeTargetRef.current = null;
+      setRevokeTarget(null);
+      grantsHeading.current?.focus();
+    }
+  };
+
   const confirmRevoke = async () => {
     const target = revokeTargetRef.current;
     if (!target || revokeInFlight.current || !canManageGrants) return;
@@ -391,26 +403,10 @@ export function McpDeviceSettings({ roster, serverOffline, accountReadOnly, brow
     try {
       await bridge.mcp_revoke_grant(target.id);
       if (!isCurrentSession(session)) return;
-      grantRequest.current += 1;
-      setLoadingGrants(false);
-      setGrants(currentGrants => currentGrants.filter(grant => grant.id !== target.id));
-      if (isCurrentDetails(generation)) setGrantNotice(`Revoked ${target.clientName} (${grantShortId(target)}).`);
-      if (isCurrentDetails(generation) && revokeTargetRef.current?.id === target.id) {
-        revokeTargetRef.current = null;
-        setRevokeTarget(null);
-        grantsHeading.current?.focus();
-      }
+      removeRevokedGrant(target, generation, () => `Revoked ${target.clientName} (${grantShortId(target)}).`);
     } catch (reason) {
       if (mcpServerErrorCode(reason) === "mcp_grant_not_found" && isCurrentSession(session)) {
-        grantRequest.current += 1;
-        setLoadingGrants(false);
-        setGrants(currentGrants => currentGrants.filter(grant => grant.id !== target.id));
-        if (isCurrentDetails(generation)) setGrantNotice(`${target.clientName} (${grantShortId(target)}) was already revoked.`);
-        if (isCurrentDetails(generation) && revokeTargetRef.current?.id === target.id) {
-          revokeTargetRef.current = null;
-          setRevokeTarget(null);
-          grantsHeading.current?.focus();
-        }
+        removeRevokedGrant(target, generation, () => `${target.clientName} (${grantShortId(target)}) was already revoked.`);
         return;
       }
       if (isCurrentDetails(generation)) setGrantNotice("");

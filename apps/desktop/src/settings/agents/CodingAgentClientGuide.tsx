@@ -100,7 +100,14 @@ function troubleshooting(clientId: StandardClientId): ReactNode {
 }
 
 function ClaudeCodeConnection({ mcpUrl, config }: { mcpUrl: string; config: string }) {
-  return <><Steps listId="claude-code-initial"><li>Use the current CLI for user scope, or use the project <code>.mcp.json</code> alternative.</li></Steps><CopyableSnippet value={`claude mcp add --scope user --transport http peppy ${posixQuote(mcpUrl)}`} label="Copy Claude Code user-scope command" /><Steps listId="claude-code-continuation" start={2}><li>Open Claude Code, run <code>/mcp</code>, select <strong>peppy</strong>, and sign in.</li></Steps><Alternative summary="Project configuration alternative" disclosure="claude-code-project-config"><CopyableSnippet value={config} label="Copy Claude Code project configuration" /></Alternative></>;
+  return <>
+    <Steps listId="claude-code-initial"><li>Use the current CLI for user scope, or use the project <code>.mcp.json</code> alternative.</li></Steps>
+    <CopyableSnippet value={`claude mcp add --scope user --transport http peppy ${posixQuote(mcpUrl)}`} label="Copy Claude Code user-scope command" />
+    <Steps listId="claude-code-continuation" start={2}><li>Open Claude Code, run <code>/mcp</code>, select <strong>peppy</strong>, and sign in.</li></Steps>
+    <Alternative summary="Project configuration alternative" disclosure="claude-code-project-config">
+      <CopyableSnippet value={config} label="Copy Claude Code project configuration" />
+    </Alternative>
+  </>;
 }
 
 function CursorConnection({ mcpUrl, config, onOpenExternal }: { mcpUrl: string; config: string; onOpenExternal?: (url: string) => void }) {

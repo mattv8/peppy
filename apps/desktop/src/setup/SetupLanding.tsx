@@ -3,6 +3,7 @@ import QRCode from "qrcode";
 import { BillingElsewhereNotice, BusyIndicator, StorePlanOptions } from "@peppy/desktop-ui";
 import { bridge, discardComputerClaimant as discardNativeComputerClaimant, type BillingSummaryView, type ComputerClaimantView, type EnrollmentView, type HostedAccountView, type PurchaseOptions, type StoreProduct } from "../bridge/bridge";
 import { peppyCopy, type PeppyCopyKey } from "../generated/peppyCopy";
+import { PRIVACY_POLICY_URL } from "../settings/PrivacySettings";
 import "./setup-landing.css";
 
 type Mode = "hosted" | "self-hosted";
@@ -17,7 +18,7 @@ type EnrollmentOperation = { action: (isCurrent: () => boolean) => Promise<Enrol
 
 const copy = (key: PeppyCopyKey) => peppyCopy[key];
 const TERMS_OF_USE_URL = "https://peppy.pro/terms";
-const PRIVACY_POLICY_URL = "https://peppy.pro/privacy";
+const COMPUTER_TRANSIENT_ERRORS = ["offline", "network", "server-rejected", "server-response", "computer_transient"];
 const openExternal = async (url: string) => {
   if (!bridge.open_external_url) throw new Error("External links are unavailable.");
   await bridge.open_external_url(url);
@@ -60,7 +61,7 @@ const diagnosticErrorCodes = new Set<string>([
 const diagnosticErrorCode = (code: unknown): string => typeof code === "string" && diagnosticErrorCodes.has(code) ? code : "unavailable";
 const thrownErrorCode = (error: unknown): string => typeof error === "object" && error !== null && "code" in error ? diagnosticErrorCode(error.code) : "unavailable";
 const computerFailureMessage = (errorCode: string, finishing: boolean) => {
-  if (["offline", "network", "server-rejected", "server-response", "computer_transient"].includes(errorCode)) return copy(finishing ? "computer_finishing_retry_body" : "computer_approved_transient_body");
+  if (COMPUTER_TRANSIENT_ERRORS.includes(errorCode)) return copy(finishing ? "computer_finishing_retry_body" : "computer_approved_transient_body");
   if (errorCode === "identity-preserved") return copy("computer_error_identity_preserved");
   if (errorCode === "secure-store-unavailable") return copy("computer_error_secure_store");
   if (errorCode === "hosted-session-required") return copy("computer_error_hosted_session_required");
@@ -159,7 +160,23 @@ function PaywallControls({ options, summary, products, state, subscribeLabel, on
   if (summary.provider === "google_play") return <BillingElsewhereNotice variant="google_play" provider="google_play" copy={peppyCopy} onManageGooglePlay={bridge.open_play_subscriptions} />;
   if (summary.provider === "apple" && !options.appStore) return <BillingElsewhereNotice variant="apple" provider="apple" copy={peppyCopy} onManageAppStore={bridge.open_store_subscriptions} />;
   if (!options.appStore) return null;
-  return <><StorePlanOptions purchaseOptions={options} billingProvider={summary.provider} products={products} state={state} copy={peppyCopy} subscribeLabel={subscribeLabel} onPurchase={bridge.store_purchase} onPurchased={onRefresh} onRestore={async () => { await bridge.store_restore(); await onRefresh(); }} onRetry={() => void onRefresh()} onOpenTerms={() => void openLegal(TERMS_OF_USE_URL, peppyCopy.store_terms_open_failed)} onOpenPrivacy={() => void openLegal(PRIVACY_POLICY_URL, peppyCopy.store_privacy_open_failed)} />{legalError && <p id="hosted-paywall-legal-error" role="alert">{legalError}</p>}</>;
+  return <>
+    <StorePlanOptions
+      purchaseOptions={options}
+      billingProvider={summary.provider}
+      products={products}
+      state={state}
+      copy={peppyCopy}
+      subscribeLabel={subscribeLabel}
+      onPurchase={bridge.store_purchase}
+      onPurchased={onRefresh}
+      onRestore={async () => { await bridge.store_restore(); await onRefresh(); }}
+      onRetry={() => void onRefresh()}
+      onOpenTerms={() => void openLegal(TERMS_OF_USE_URL, peppyCopy.store_terms_open_failed)}
+      onOpenPrivacy={() => void openLegal(PRIVACY_POLICY_URL, peppyCopy.store_privacy_open_failed)}
+    />
+    {legalError && <p id="hosted-paywall-legal-error" role="alert">{legalError}</p>}
+  </>;
 }
 
 function DiscardComputerClaimant({ confirming, busy, onConfirming, onDiscard }: { confirming: boolean; busy: boolean; onConfirming(value: boolean): void; onDiscard(): Promise<void> }) {
@@ -513,7 +530,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       computerFinishFailures.current += 1;
       setComputerClaimantErrorCode(errorCode);
       setComputerClaimantError(computerFailureMessage(errorCode, failureStage === "computer_finishing"));
-      setComputerClaimantCanDiscard(computerFinishFailures.current >= 2 || !["offline", "network", "server-rejected", "server-response", "computer_transient"].includes(errorCode));
+      setComputerClaimantCanDiscard(computerFinishFailures.current >= 2 || !COMPUTER_TRANSIENT_ERRORS.includes(errorCode));
       computerFailureFocus.current = failureStage === "computer_finishing" ? "computer-finishing-retry-button" : "computer-finish-button";
     };
     const pendingId = beginPending("production_pairing_finishing");
@@ -1196,7 +1213,20 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     if (claimant.stage === "computer_waiting") return <Stage stage={claimant.stage}><Heading>{connectHeading}</Heading><p>{copy("computer_waiting_instructions")}</p>{qrState === "generating" && <BusyIndicator id="computer-qr-generating" label={copy("computer_qr_generating")} />}{qrState === "error" && <p id="computer-qr-error" role="alert">{copy("computer_qr_error")} <button className="secondary-button" onClick={() => setQrRetry(current => current + 1)}>{copy("computer_retry_cta")}</button></p>}{computerPollError && <p id="computer-status-error" role="alert">{copy("computer_status_error")} <button className="secondary-button" onClick={() => void retryComputerStatus()}>Retry</button></p>}{qr && <div id="computer-qr-hero"><img id="computer-qr-image" src={qr} alt="" aria-hidden="true" /><span className="visually-hidden" role="img" aria-label={copy("computer_qr_accessibility")} />{(claimant.expiresInSeconds ?? 0) > 0 && <span id="computer-countdown" role="timer" aria-live="off">{copy("computer_expires_in")} {claimant.expiresInSeconds}s</span>}</div>}<p className="setup-hint">{copy("computer_qr_hint")}</p>{hostKind === "browser" && <p id="computer-browser-restart-notice" className="setup-notice">{copy("computer_browser_phrase_hint")}</p>}<div className="enrollment-actions"><button id="computer-cancel-button" className="secondary-button" disabled={busy} onClick={() => void cancelComputerClaimant()}>{copy("computer_cancel_cta")}</button><button id="computer-use-phrase-button" className="secondary-button" disabled={busy} onClick={() => void useComputerPhraseInstead()}>{copy("computer_use_phrase_cta")}</button></div></Stage>;
     if (claimant.stage === "computer_approved") {
       const retry = claimant.errorCode === "computer_transient" || Boolean(computerClaimantError);
-      return <Stage stage={claimant.stage}><Heading>{copy("computer_approved_heading")}</Heading><p>{copy("computer_approved_body")}</p>{claimant.verificationCode && <div id="computer-verification" role="group" aria-labelledby="computer-verification-caption"><p id="computer-verification-caption" className="setup-hint">Verification code</p><output id="computer-verification-code" aria-label={`Verification code: ${claimant.verificationCode}`}>{claimant.verificationCode}</output></div>}{claimant.errorCode === "computer_transient" && <p id="computer-approved-transient" role="alert">{copy("computer_approved_transient_body")}</p>}{computerClaimantError && <p id="computer-confirm-error" role="alert">{computerClaimantError}</p>}<div className="enrollment-actions"><button id="computer-finish-button" className="primary-button" disabled={busy} onClick={() => void finishComputerClaimant()}>{copy(retry ? "computer_finishing_retry_cta" : "computer_finish_cta")}</button>{computerClaimantCanDiscard && <DiscardComputerClaimant confirming={computerDiscardConfirming} busy={busy} onConfirming={setComputerDiscardConfirming} onDiscard={discardComputerClaimant} />}</div></Stage>;
+      return <Stage stage={claimant.stage}>
+        <Heading>{copy("computer_approved_heading")}</Heading>
+        <p>{copy("computer_approved_body")}</p>
+        {claimant.verificationCode && <div id="computer-verification" role="group" aria-labelledby="computer-verification-caption">
+          <p id="computer-verification-caption" className="setup-hint">Verification code</p>
+          <output id="computer-verification-code" aria-label={`Verification code: ${claimant.verificationCode}`}>{claimant.verificationCode}</output>
+        </div>}
+        {claimant.errorCode === "computer_transient" && <p id="computer-approved-transient" role="alert">{copy("computer_approved_transient_body")}</p>}
+        {computerClaimantError && <p id="computer-confirm-error" role="alert">{computerClaimantError}</p>}
+        <div className="enrollment-actions">
+          <button id="computer-finish-button" className="primary-button" disabled={busy} onClick={() => void finishComputerClaimant()}>{copy(retry ? "computer_finishing_retry_cta" : "computer_finish_cta")}</button>
+          {computerClaimantCanDiscard && <DiscardComputerClaimant confirming={computerDiscardConfirming} busy={busy} onConfirming={setComputerDiscardConfirming} onDiscard={discardComputerClaimant} />}
+        </div>
+      </Stage>;
     }
     if (claimant.stage === "computer_finishing") return <Stage stage={claimant.stage}><Heading>{copy("computer_finishing_heading")}</Heading>{busy && <BusyIndicator id="computer-finishing-status" label={copy(pendingOperation?.label ?? "production_pairing_finishing")} />}{!busy && !computerClaimantError && <p>{copy("computer_finishing_retry_body")}</p>}{computerClaimantError && <p id="computer-finishing-error" role="alert">{computerClaimantError}</p>}<div className="enrollment-actions"><button id="computer-finishing-retry-button" className="primary-button" disabled={busy} onClick={() => void finishComputerClaimant()}>{copy("computer_finishing_retry_cta")}</button>{computerClaimantCanDiscard && <DiscardComputerClaimant confirming={computerDiscardConfirming} busy={busy} onConfirming={setComputerDiscardConfirming} onDiscard={discardComputerClaimant} />}</div></Stage>;
     if (claimant.stage === "computer_connected") return <Stage stage={claimant.stage}><Heading>{copy("computer_connected_heading")}</Heading><p role="status">{copy("computer_connected_body")}</p>{computerClaimantError && <><p id="computer-connected-error" role="alert">{computerClaimantError}</p><button id="computer-connected-retry-button" className="primary-button" disabled={busy} onClick={retryConnectedComputer}>{copy("computer_retry_cta")}</button></>}</Stage>;

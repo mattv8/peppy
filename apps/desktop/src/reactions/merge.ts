@@ -1,5 +1,6 @@
 import type { MessageReactionView, OwnReactionRequestView } from "@peppy/desktop-ui/bridge-contracts";
 import type { ReactionActor, ReactionBadgeInfo } from "./link";
+import { intentOf } from "./announcements";
 
 export type OwnChipState = "sent" | "sending" | "removing" | "not_sent" | "unknown";
 export type ReactionSource = "native" | "text";
@@ -65,11 +66,6 @@ function confirmedChip(self: Entry): MergedReactionBadge {
   return { emoji: self.emoji, actors: [self.actor], reactionIds: self.reactionIds, source: self.source, own: { state: "sent", source: self.source } };
 }
 
-function intentOf(emoji: string | null, previous: string | null): ReactionIntent {
-  if (!emoji) return "remove";
-  return previous && previous !== emoji ? "switch" : "add";
-}
-
 function chipState(request: OwnReactionRequestView): OwnChipState {
   if (request.state === "sending") return request.emoji ? "sending" : "removing";
   return request.state;
@@ -83,7 +79,7 @@ function attemptChip(request: OwnReactionRequestView, previous: string | null, s
     actors: [selfActor],
     reactionIds: [],
     source: "native",
-    own: { state: chipState(request), source: "native", requestId: request.requestId, intent: intentOf(request.emoji, previous), previousEmoji: previous },
+    own: { state: chipState(request), source: "native", requestId: request.requestId, intent: intentOf({ emoji: request.emoji, previousEmoji: previous }), previousEmoji: previous },
   };
 }
 

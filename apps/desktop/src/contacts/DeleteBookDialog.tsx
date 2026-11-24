@@ -68,7 +68,7 @@ export function DeleteBookDialog({ book, opener, disabledReason, onDismiss, onDe
       {busy ? "Deleting…" : "Delete for all devices"}
     </button>
   </>}>
-    <ul>
+    <ul id="contacts-book-delete-consequences">
       <li>Deletes the saved copy of {bookContactCountText(book.contactCount)} from every device in your vault.</li>
       <li>Devices that are offline remove it when they next connect.</li>
       <li>Names from this book stop showing in conversations on all your devices.</li>
