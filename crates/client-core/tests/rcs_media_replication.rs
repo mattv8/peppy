@@ -1272,6 +1272,7 @@ fn compacted_media_snapshot_retains_sparse_stored_descriptor_and_all_placeholder
         .unwrap();
     let parent = only_message(&gateway, conversation_id).payload;
     assert!(parent.rcs_capture);
+    assert_eq!(serde_json::to_value(&parent).unwrap()["rcs_capture"], true);
     let mut ordinary = parent.clone();
     ordinary.rcs_capture = false;
     let ordinary_json = serde_json::to_value(&ordinary).unwrap();

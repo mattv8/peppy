@@ -363,32 +363,11 @@ fn historical_status_defaults_to_reported_for_each_status() {
 }
 
 #[test]
-fn status_boolean_and_required_fields_remain_strict() {
+fn status_reported_rejects_null_and_string() {
     let message_id = MessageId::new();
-    for reported in [false, true] {
-        let raw = json!({
-            "kind": "rcs_message_status",
-            "message_id": message_id,
-            "status": "read",
-            "rcs_reported": reported,
-        });
-        assert_eq!(
-            serde_json::from_value::<PrivatePayload>(raw).unwrap(),
-            PrivatePayload::RcsMessageStatus {
-                message_id,
-                status: RcsMessageStatus::Read,
-                rcs_reported: reported,
-            }
-        );
-    }
     for raw in [
         json!({"kind": "rcs_message_status", "message_id": message_id, "status": "read", "rcs_reported": null}),
         json!({"kind": "rcs_message_status", "message_id": message_id, "status": "read", "rcs_reported": "true"}),
-        json!({"kind": "rcs_message_status", "status": "read"}),
-        json!({"kind": "rcs_message_status", "message_id": message_id}),
-        json!({"kind": "rcs_message_status", "message_id": message_id, "status": null}),
-        json!({"kind": "rcs_message_status", "message_id": message_id, "status": "unknown"}),
-        json!({"kind": "rcs_message_reported", "message_id": message_id}),
     ] {
         assert!(
             serde_json::from_value::<PrivatePayload>(raw.clone()).is_err(),

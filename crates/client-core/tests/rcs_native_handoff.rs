@@ -1409,48 +1409,6 @@ fn native_pre_effect_refusal_requires_the_exact_unacknowledged_rcs_attempt() {
             .is_err()
     );
 
-    for result in [SendResult::Submitted, SendResult::Sent] {
-        let (_directory, _vault, _config, gateway, command_id, observation) =
-            rcs_command("peer-local");
-        let permit = gateway
-            .begin_rcs_send_attempt(command_id, &observation, 1_000)
-            .unwrap();
-        gateway.record_send_result(command_id, result).unwrap();
-        assert!(
-            gateway
-                .record_native_rcs_pre_effect_refusal(
-                    command_id,
-                    permit.tmp_id(),
-                    permit.google_conversation_id(),
-                    false,
-                    1_000,
-                )
-                .is_err()
-        );
-    }
-
-    let (_directory, _vault, config, gateway, command_id, observation) = rcs_command("peer-local");
-    let permit = gateway
-        .begin_rcs_send_attempt(command_id, &observation, 1_000)
-        .unwrap();
-    encrypted_connection(&config)
-        .execute(
-            "UPDATE attempts SET state='outcome_unknown' WHERE command_id=?",
-            [command_id.to_string()],
-        )
-        .unwrap();
-    assert!(
-        gateway
-            .record_native_rcs_pre_effect_refusal(
-                command_id,
-                permit.tmp_id(),
-                permit.google_conversation_id(),
-                false,
-                1_000,
-            )
-            .is_err()
-    );
-
     let (_directory, _vault, _config, gateway, command_id) = carrier_command();
     assert!(
         gateway

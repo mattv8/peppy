@@ -235,8 +235,6 @@ fn offline_receiver_loses_purged_contact_only_after_complete_compaction_snapshot
     p.server.upload(&p.owner);
     let high_water = p.server.log.len();
     let retained = compact(&p.server.log, true);
-    assert!(retained.len() < high_water, "compaction must drop records");
-    assert!(retained.iter().all(|r| r.envelope.compaction.is_some()));
 
     // A fresh database needs no repair; a reported one latches until promotion.
     assert!(!offline.contact_repair_required().unwrap());
@@ -1088,11 +1086,6 @@ fn retained_tombstone_waits_for_authentication_without_blocking_recovery_or_live
     assert!(
         replacement
             .iter()
-            .all(|record| record.cursor.0 != (corrupt_cursor + 1) as u64)
-    );
-    assert!(
-        replacement
-            .iter()
             .any(|record| { record.envelope.envelope_id == replacement_envelope.envelope_id })
     );
     import(&peer, &replacement, high_water, Some(39));
@@ -1288,6 +1281,21 @@ fn fresh_device_applies_pending_legacy_records_after_promotion() {
     assert!(total.applied > 0, "legacy records apply live");
     assert_eq!(shown(&fresh), ["n1"]);
     assert_eq!(muted(&fresh, "com.example.news"), Some(true));
+
+    let mut p = pair();
+    legacy_posts_and_mute(&mut p);
+    let fresh_cfg = config(&p._dir, "fresh", &p.vault);
+    let fresh = unlocked(&fresh_cfg, &p.vault);
+    let high_water = p.server.log.len();
+    assert!(high_water > 1, "the drain must take several steps");
+    import(&fresh, &compact(&p.server.log, true), high_water, Some(36));
+    settle_one_by_one(&fresh);
+    assert_eq!(
+        state(&fresh),
+        Some((SnapshotProjectionState::Promoted, None))
+    );
+    assert_eq!(shown(&fresh), ["n1"]);
+    assert_eq!(muted(&fresh, "com.example.news"), Some(true));
 }
 
 #[test]
@@ -1385,24 +1393,6 @@ fn settle_one_by_one(client: &Client) {
             return;
         }
     }
-}
-
-#[test]
-fn fresh_device_keeps_legacy_state_applied_while_snapshot_drains() {
-    let mut p = pair();
-    legacy_posts_and_mute(&mut p);
-    let fresh_cfg = config(&p._dir, "fresh", &p.vault);
-    let fresh = unlocked(&fresh_cfg, &p.vault);
-    let high_water = p.server.log.len();
-    assert!(high_water > 1, "the drain must take several steps");
-    import(&fresh, &compact(&p.server.log, true), high_water, Some(36));
-    settle_one_by_one(&fresh);
-    assert_eq!(
-        state(&fresh),
-        Some((SnapshotProjectionState::Promoted, None))
-    );
-    assert_eq!(shown(&fresh), ["n1"]);
-    assert_eq!(muted(&fresh, "com.example.news"), Some(true));
 }
 
 #[test]

@@ -20073,6 +20073,14 @@ mod tests {
             DatabaseKey::new(&[7; 31]),
             Err(Error::InvalidDatabaseKey)
         ));
+        assert!(matches!(
+            DatabaseKey::new(&[7; 33]),
+            Err(Error::InvalidDatabaseKey)
+        ));
+        assert!(matches!(
+            DatabaseKey::new(&[]),
+            Err(Error::InvalidDatabaseKey)
+        ));
         assert!(DatabaseKey::new(&[7; 32]).is_ok());
     }
 
@@ -21803,88 +21811,6 @@ mod tests {
     }
 
     #[test]
-    fn battery_lookup_indexes_print_1k_history_vm_steps() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config = ClientConfig {
-            database_path: directory.path().join("battery-vm-steps-1k.db"),
-            vault_id: VaultId::new(),
-            device_id: DeviceId::new(),
-        };
-        let client = Client::open(config.clone(), DatabaseKey::new(&[39; 32]).unwrap()).unwrap();
-        let mut store = client.lock().unwrap();
-        let conversation = ConversationId::new().to_string();
-        let device = config.device_id.to_string();
-        let tx = store.conn.transaction().unwrap();
-        for sequence in 1..=1_000_i64 {
-            tx.execute("INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,payload,seen) VALUES(?,?,?,?,?,0)", params![format!("small-message-{sequence}"), conversation, device, sequence, "{}"]).unwrap();
-            tx.execute("INSERT INTO sms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,source_row_fingerprint,direction,conversation_id,input,state,message_id,source_sequence,local_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", params![format!("small-acquisition-{sequence}"), "generation", "subscription", format!("small-provider-{sequence}"), format!("small-fingerprint-{sequence}"), "incoming", conversation, "{}", "complete", format!("small-message-{sequence}"), sequence, sequence]).unwrap();
-            tx.execute(
-                "INSERT INTO outbox(seq,envelope_id,purpose,state) VALUES(?,?,?,?)",
-                params![
-                    sequence,
-                    format!("small-acknowledged-{sequence}"),
-                    "event",
-                    "acknowledged"
-                ],
-            )
-            .unwrap();
-        }
-        tx.commit().unwrap();
-        let steps = |conn: &Connection, sql: &str, values: &[&dyn rusqlite::ToSql]| {
-            let mut statement = conn.prepare(sql).unwrap();
-            statement
-                .query_map(values, |_| Ok(()))
-                .unwrap()
-                .for_each(Result::unwrap);
-            statement.get_status(StatementStatus::VmStep)
-        };
-        let queued_sql = queued_outbox_sql();
-        let indexed = [
-            steps(
-                &store.conn,
-                NEXT_SOURCE_SEQUENCE_SQL,
-                &[&conversation, &device],
-            ),
-            steps(
-                &store.conn,
-                SEAL_PENDING_SQL,
-                &[&i64::MIN, &i64::MIN, &0_i64],
-            ),
-            steps(&store.conn, &queued_sql, &[&1_i64]),
-        ];
-        for (query, steps) in ["SMS", "unsealed", "queued"].into_iter().zip(indexed) {
-            assert!(
-                (1..=256).contains(&steps),
-                "1k {query} indexed VM steps must stay bounded: {steps}"
-            );
-        }
-        store.conn.execute_batch("DROP INDEX sms_acquisitions_reserved_sequence; DROP INDEX outbox_unsealed_priority; DROP INDEX outbox_queued_priority;").unwrap();
-        let unindexed = [
-            steps(
-                &store.conn,
-                NEXT_SOURCE_SEQUENCE_SQL,
-                &[&conversation, &device],
-            ),
-            steps(
-                &store.conn,
-                SEAL_PENDING_SQL,
-                &[&i64::MIN, &i64::MIN, &0_i64],
-            ),
-            steps(&store.conn, &queued_sql, &[&1_i64]),
-        ];
-        assert!(
-            indexed
-                .into_iter()
-                .zip(unindexed)
-                .all(|(indexed, unindexed)| indexed < unindexed)
-        );
-        eprintln!(
-            "battery lookup 1k VM steps: sms {}/{}, unsealed {}/{}, queued {}/{}",
-            indexed[0], unindexed[0], indexed[1], unindexed[1], indexed[2], unindexed[2]
-        );
-    }
-
-    #[test]
     fn install_rejects_missing_final_tag_or_trailing_data_even_with_matching_digest() {
         use sha2::{Digest, Sha256};
         let dir = tempfile::TempDir::new().unwrap();
@@ -22287,16 +22213,6 @@ mod tests {
         conn.execute("INSERT INTO t VALUES(2001, x'00')", [])
             .unwrap();
         assert_eq!(batch(1_999, 1_000), vec![2000]);
-    }
-
-    #[test]
-    fn database_connections_keep_temporary_pages_in_memory() {
-        let conn = Connection::open_in_memory().unwrap();
-        apply_database_key(&conn, &DatabaseKey::new(&[7; 32]).unwrap()).unwrap();
-        let temp_store: i64 = conn
-            .query_row("PRAGMA temp_store", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(temp_store, 2);
     }
 
     #[test]

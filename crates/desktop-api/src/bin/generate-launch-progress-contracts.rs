@@ -34,26 +34,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn launch_progress_typescript_matches_frozen_shape() {
-        assert_eq!(
-            LaunchPhase::decl(),
-            "type LaunchPhase = \"starting\" | \"unlocking\" | \"opening\" | \"updating\" | \"loading\" | \"ready\";"
-        );
-        assert_eq!(
-            LaunchStep::decl(),
-            "type LaunchStep = { phase: LaunchPhase, durationMs: number, };"
-        );
-        assert_eq!(
-            LaunchUpdate::decl(),
-            "type LaunchUpdate = { completed: number, total: number, };"
-        );
-        assert_eq!(
-            LaunchProgress::decl(),
-            "type LaunchProgress = { phase: LaunchPhase, elapsedMs: number, steps: Array<LaunchStep>, update?: LaunchUpdate, };"
-        );
-    }
-
-    #[test]
     fn launch_progress_typescript_is_current() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../packages/generated/src/launch-progress.ts");

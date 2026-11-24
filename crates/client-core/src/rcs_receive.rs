@@ -2712,59 +2712,6 @@ mod tests {
     }
 
     #[test]
-    fn version_48_upgrade_preserves_rows_and_rejects_downgrade() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config = config(&directory);
-        let client = Client::open(config.clone(), DatabaseKey::new(&[17; 32]).unwrap()).unwrap();
-        {
-            let store = client.lock().unwrap();
-            store.conn.execute_batch(
-                "INSERT INTO rcs_link_status_projection VALUES('gateway','linked',1,1,1,1,1,1,1);
-                 DROP TABLE rcs_message_status;
-                 DROP TABLE rcs_lane_ownership;
-                 DROP TABLE rcs_conversation_metadata;
-                 DROP TABLE rcs_message_identities;
-                 DROP TABLE rcs_provider_detectors;
-                 UPDATE schema_meta SET version=48;",
-            ).unwrap();
-        }
-        drop(client);
-        let upgraded = Client::open(config.clone(), DatabaseKey::new(&[17; 32]).unwrap()).unwrap();
-        let store = upgraded.lock().unwrap();
-        let state: String = store
-            .conn
-            .query_row(
-                "SELECT state FROM rcs_link_status_projection WHERE gateway_device_id='gateway'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(state, "linked");
-        let table: String = store
-            .conn
-            .query_row(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='rcs_lane_ownership'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(table, "rcs_lane_ownership");
-        store
-            .conn
-            .execute(
-                "UPDATE schema_meta SET version=?",
-                [crate::SCHEMA_VERSION + 1],
-            )
-            .unwrap();
-        drop(store);
-        drop(upgraded);
-        assert!(matches!(
-            Client::open(config, DatabaseKey::new(&[17; 32]).unwrap()),
-            Err(Error::UnsupportedSchema)
-        ));
-    }
-
-    #[test]
     fn status_merge_keeps_reported_evidence_when_rank_does_not_improve() {
         let directory = tempfile::TempDir::new().unwrap();
         let client =

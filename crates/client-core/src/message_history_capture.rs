@@ -1354,6 +1354,7 @@ mod client_tests {
             &json!({"providerGeneration":ONE,"sms":true,"mms":false,"permission":true,"policy":true,"forceRepublish":true}).to_string(),
         ));
         let second = admit(&other, &phone);
+        set_page_lease(&phone, &first_token, now());
         assert_eq!(begin(&phone, ONE, "sms"), Value::Null);
         finish(&phone, ONE, &first_token, 0, true, None).unwrap();
         let second_token = token_of(&begin(&phone, ONE, "sms"));

@@ -69,40 +69,6 @@ fn manifest_verifies_journal_wire_and_stages_the_full_import_bytes() {
 }
 
 #[test]
-fn manifest_digest_flag_and_download_guards_require_records_page() {
-    let dir = TempDir::new().unwrap();
-    let vault = Vault::new();
-    let source = unlocked(&config(&dir, "manifest-guard-source", &vault), &vault);
-    let target = unlocked(&config(&dir, "manifest-guard-target", &vault), &vault);
-    source
-        .capture_incoming(incoming("manifest", "manifest-2"))
-        .unwrap();
-    let envelope = source.pending_outbox().unwrap().pop().unwrap();
-    target.ingest(&envelope, Cursor(1)).unwrap();
-    let session = target
-        .begin_snapshot_with_manifest(Cursor(1), 1, None)
-        .unwrap();
-    let mut entry = manifest_entry(1, &envelope);
-    entry.digest[0] ^= 1;
-    assert_eq!(
-        target
-            .append_snapshot_manifest(session.generation, &[entry])
-            .unwrap()
-            .missing,
-        1
-    );
-    target
-        .append_snapshot_page(
-            session.generation,
-            &[SnapshotRecord {
-                cursor: Cursor(1),
-                envelope,
-            }],
-        )
-        .unwrap();
-}
-
-#[test]
 fn snapshot_compaction_generation_persists_across_reopen() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();

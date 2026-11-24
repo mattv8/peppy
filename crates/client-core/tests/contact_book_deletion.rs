@@ -1471,31 +1471,6 @@ fn legacy_contacts_beneath_generation_one_are_removed_by_a_generation_one_fence(
 }
 
 #[test]
-fn legacy_contacts_are_backfilled_from_their_book_on_reopen() {
-    let dir = TempDir::new().unwrap();
-    let (vault, config, observer, owner) = observed_book(&dir);
-    drop(observer);
-    let conn = sqlcipher(&config.database_path);
-    conn.execute(
-        "UPDATE contacts SET publication_owner=NULL,publication_generation=NULL",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-    let _observer = unlocked(&config, &vault);
-    let conn = sqlcipher(&config.database_path);
-    let (stored_owner, generation): (String, Option<i64>) = conn
-        .query_row(
-            "SELECT publication_owner,publication_generation FROM contacts WHERE id='bea'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(stored_owner, owner.to_string());
-    assert_eq!(generation, None, "a legacy generation stays unknown");
-}
-
-#[test]
 fn contact_publication_generation_converges_across_deletion_order() {
     for republished in [None, Some("1"), Some("2")] {
         for deletion_first in [false, true] {

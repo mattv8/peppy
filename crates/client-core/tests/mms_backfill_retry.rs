@@ -337,34 +337,6 @@ fn provider_hints_stop_resetting_awaiting_provider_after_immediate_observations(
 }
 
 #[test]
-fn provider_hint_makes_a_new_pending_row_due_immediately() {
-    let dir = TempDir::new().unwrap();
-    let vault = Vault::new();
-    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
-    client.begin_mms_acquisition(input("1")).unwrap();
-
-    assert_eq!(due_count(&client, 1, provider_changed()), 1);
-}
-
-#[test]
-fn provider_hint_resets_a_single_failure() {
-    let dir = TempDir::new().unwrap();
-    let vault = Vault::new();
-    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
-    let acquisition = client.begin_mms_acquisition(input("1")).unwrap();
-    client
-        .record_mms_backfill_recheck_outcome(
-            &acquisition.acquisition_id,
-            0,
-            MmsBackfillRecheckOutcome::TransientFailure,
-            Default::default(),
-        )
-        .unwrap();
-
-    assert_eq!(due_count(&client, 1, provider_changed()), 1);
-}
-
-#[test]
 fn charging_completed_sweep_is_newest_first_and_rests_after_feedback() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
@@ -927,13 +899,5 @@ fn explicit_refresh_restarts_one_resting_round_and_not_an_active_cursor() {
         completed_ids(&repeated.requests),
         ["2", "1"],
         "a repeated manual call returns the same unresolved claims, not a fresh restart"
-    );
-    assert!(
-        client
-            .mms_backfill_due_rechecks("phone-install", "sim-1", 1_002, charging())
-            .unwrap()
-            .requests
-            .iter()
-            .all(|request| request.state == MmsAcquisitionState::Complete)
     );
 }

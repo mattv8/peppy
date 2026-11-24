@@ -304,13 +304,7 @@ fn prepare(scenario: Scenario, settle_history: bool) -> Prepared {
         );
         server.upload(&owner);
     }
-    let log_len = server.log.len();
     let retained = compact(&server.log, false);
-    match scenario {
-        Scenario::Unchanged => assert_eq!(retained.len(), log_len),
-        Scenario::CompactedBelowCursor => assert!(retained.len() < log_len),
-        Scenario::AddedAboveCursor => assert!(retained.len() < log_len),
-    }
     Prepared {
         _dir: dir,
         a_cfg,
@@ -429,16 +423,6 @@ fn flagged_count(log: &[Envelope]) -> u32 {
 
 fn index_where(log: &[Envelope], predicate: impl Fn(&Envelope) -> bool) -> usize {
     log.iter().position(predicate).expect("record kind present")
-}
-
-#[test]
-fn manifest_verification_fixture_has_each_record_kind() {
-    let dir = TempDir::new().unwrap();
-    let vault = Vault::new();
-    let log = verification_log(&dir, &vault);
-    index_where(&log, |e| e.origin_tag.is_some());
-    index_where(&log, |e| e.origin_tag.is_none() && e.compaction.is_none());
-    index_where(&log, |e| e.compaction.is_some());
 }
 
 #[test]

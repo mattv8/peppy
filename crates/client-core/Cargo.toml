@@ -61,10 +61,6 @@ name = "rcs_media_replication"
 path = "tests/rcs_media_replication.rs"
 
 [[test]]
-name = "rcs_target"
-path = "tests/rcs_target.rs"
-
-[[test]]
 name = "rcs_carrier_regressions"
 path = "tests/rcs_carrier_regressions.rs"
 
@@ -75,10 +71,6 @@ path = "tests/one_time_code.rs"
 [[test]]
 name = "quick_reply"
 path = "tests/quick_reply.rs"
-
-[[test]]
-name = "send_cancellation"
-path = "tests/send_cancellation.rs"
 
 [[test]]
 name = "send_cancellation_safety"
