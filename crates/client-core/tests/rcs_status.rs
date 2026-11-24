@@ -231,11 +231,15 @@ fn rcs_conversation_metadata_converges_out_of_order_without_provider_identifiers
             .unwrap()
     );
 
+    let plaintext = decrypted_outbox(&first, &vault);
+    assert_eq!(plaintext.len(), 3);
+    for payload in plaintext {
+        assert_rcs_private_payload(&payload);
+    }
     let mut envelopes = first.pending_outbox().unwrap();
     assert_eq!(envelopes.len(), 3);
     envelopes.reverse();
     for (index, envelope) in envelopes.iter().enumerate() {
-        assert!(!serde_json::to_string(envelope).unwrap().contains("google_"));
         assert!(matches!(
             second
                 .ingest(envelope, Cursor(u64::try_from(index + 1).unwrap()))
@@ -445,6 +449,11 @@ fn compacted_snapshot_restores_rcs_status_and_metadata_without_provider_identifi
     gateway
         .publish_rcs_conversation_metadata(conversation, owner.ownership_generation, Some(true))
         .unwrap();
+    let plaintext = decrypted_outbox(&gateway, &vault);
+    assert!(!plaintext.is_empty());
+    for payload in plaintext {
+        assert_rcs_private_payload(&payload);
+    }
     let mut server = Server::default();
     server.upload(&gateway);
     let records: Vec<SnapshotRecord> = server
@@ -457,11 +466,6 @@ fn compacted_snapshot_restores_rcs_status_and_metadata_without_provider_identifi
             envelope: envelope.clone(),
         })
         .collect();
-    assert!(records.iter().all(|record| {
-        !serde_json::to_string(&record.envelope)
-            .unwrap()
-            .contains("provider-")
-    }));
     let session = restored
         .begin_snapshot_with_compaction(
             Cursor(u64::try_from(server.log.len()).unwrap()),
@@ -2256,10 +2260,10 @@ fn unmatched_foreign_outgoing_is_inserted_once_without_a_command() {
         RcsReceiveOutcome::StatusApplied
     );
     assert_eq!(status_rank(&config, message_id), Some(2));
-    for envelope in client.pending_outbox().unwrap() {
-        let serialized = serde_json::to_string(&envelope).unwrap();
-        assert!(!serialized.contains("provider-message"));
-        assert!(!serialized.contains("provider-conversation"));
+    let plaintext = decrypted_outbox(&client, &vault);
+    assert!(!plaintext.is_empty());
+    for payload in plaintext {
+        assert_rcs_private_payload(&payload);
     }
 }
 

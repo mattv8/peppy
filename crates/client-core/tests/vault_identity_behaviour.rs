@@ -473,7 +473,10 @@ fn independently_built_schema_version_50_fixture_upgrades_to_56() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!((version, table.as_str()), (66, "vault_identity_state"));
+    assert_eq!(
+        (version, table.as_str()),
+        (current_schema_version(), "vault_identity_state")
+    );
 }
 
 #[test]

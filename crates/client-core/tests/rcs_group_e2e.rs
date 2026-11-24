@@ -473,6 +473,7 @@ fn a_create_pending_group_text_sends_over_rcs_once_the_created_group_goes_live()
         other => panic!("expected a create permit, got {other:?}"),
     };
     assert_eq!(permit.numbers, vec![ALEX.to_owned(), SAM.to_owned()]);
+    assert_eq!(permit.name.as_deref(), Some("Weekend"));
     assert_eq!(
         group
             .gateway

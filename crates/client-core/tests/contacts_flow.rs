@@ -48,6 +48,29 @@ fn capture(client: &Client, book: &Value, contacts: Vec<Value>) -> Value {
         &json!({"schema_version": 1, "book": book, "contacts": contacts}).to_string(),
     ))
 }
+fn assert_no_contact_sources(value: &Value) {
+    match value {
+        Value::Object(fields) => {
+            assert!(
+                !fields.contains_key("source"),
+                "source field leaked: {value}"
+            );
+            assert!(
+                !fields.contains_key("sources"),
+                "sources field leaked: {value}"
+            );
+            for child in fields.values() {
+                assert_no_contact_sources(child);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                assert_no_contact_sources(child);
+            }
+        }
+        _ => {}
+    }
+}
 fn view_raw(client: &Client) -> String {
     client
         .contact_book_view(&json!({"schema_version": 1, "book_id": BOOK, "limit": 200}).to_string())
@@ -204,6 +227,17 @@ fn capture_reaches_peer_sanitized_with_core_minted_revisions() {
         )
         .is_err());
 
+    let outgoing = decrypted_outbox(&p.owner, &p.vault);
+    assert!(!outgoing.is_empty());
+    for payload in outgoing {
+        assert_no_contact_sources(&payload);
+        let plain = payload.to_string();
+        assert!(
+            !plain.contains("native:"),
+            "source identifiers leaked: {plain}"
+        );
+        assert!(!plain.contains("provenance"), "provenance leaked: {plain}");
+    }
     p.deliver(true);
     let peer_view = view_raw(&p.peer);
     let peer_c1 = find(&p.peer, "c1").unwrap();
@@ -999,6 +1033,12 @@ fn owner_settings_read_and_update_stay_native_only() {
     assert_eq!(read["effective_remote_edits"], "auto");
     assert_eq!(read["policy_source"], "owner_settings");
 
+    let outgoing = decrypted_outbox(&p.owner, &p.vault);
+    assert!(!outgoing.is_empty());
+    for payload in outgoing {
+        assert_no_contact_sources(&payload);
+        assert!(!payload.to_string().contains("native:"));
+    }
     p.deliver(true);
     let books = p.peer.list_contact_books_json().unwrap();
     assert!(!books.contains("native:"), "{books}");

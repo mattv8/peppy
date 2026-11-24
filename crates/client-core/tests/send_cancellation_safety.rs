@@ -98,7 +98,7 @@ fn cancellation_before_admission_fences_the_original_across_duplicate_replay() {
 
     server.upload(&gateway);
     server.sync(&sender);
-    server.sync(&sender);
+    server.redeliver(&sender);
     assert_eq!(
         sender
             .message_send_cancellation(queued.message_id)

@@ -435,6 +435,11 @@ fn sealed_media_placeholders_replicate_to_a_second_client_without_download_autho
             .unwrap(),
         RcsReceiveOutcome::Inserted
     );
+    let plaintext = decrypted_outbox(&gateway, &vault);
+    assert_eq!(plaintext.len(), 5);
+    for payload in plaintext {
+        assert_rcs_private_payload(&payload);
+    }
     assert_eq!(
         server.upload(&gateway),
         5,
@@ -568,6 +573,9 @@ fn sealed_media_placeholders_replicate_to_a_second_client_without_download_autho
     locked_gateway
         .unlock(&vault.profile, &vault.header, PASSPHRASE)
         .unwrap();
+    let plaintext = decrypted_outbox(&locked_gateway, &vault);
+    assert_eq!(plaintext.len(), 1);
+    assert_rcs_private_payload(&plaintext[0]);
     assert_eq!(server.upload(&locked_gateway), 1);
     let conflict_report = server.sync(&reopened);
     assert_eq!(conflict_report.quarantined, 1, "{conflict_report:?}");
@@ -605,20 +613,6 @@ fn sealed_media_placeholders_replicate_to_a_second_client_without_download_autho
         downloading,
         "an authenticated state from a device other than the parent producer must not replace the slot"
     );
-
-    for envelope in &server.log {
-        let wire = serde_json::to_vec(envelope).unwrap();
-        assert!(
-            !wire
-                .windows(b"google-ref".len())
-                .any(|part| part == b"google-ref")
-        );
-        assert!(
-            !wire
-                .windows(b"file_key".len())
-                .any(|part| part == b"file_key")
-        );
-    }
 }
 
 #[test]

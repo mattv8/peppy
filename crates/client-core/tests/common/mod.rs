@@ -42,6 +42,167 @@ pub fn config(dir: &TempDir, name: &str, vault: &Vault) -> ClientConfig {
 pub fn open(config: &ClientConfig) -> Client {
     Client::open(config.clone(), DatabaseKey::new(&DB_KEY).unwrap()).unwrap()
 }
+pub fn current_schema_version() -> i64 {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "schema-version", &vault);
+    drop(open(&config));
+    let connection = rusqlite::Connection::open(&config.database_path).unwrap();
+    let key: String = DB_KEY.iter().map(|byte| format!("{byte:02x}")).collect();
+    connection
+        .execute_batch(&format!(
+            "PRAGMA key = \"x'{key}'\"; PRAGMA cipher_compatibility = 4;"
+        ))
+        .unwrap();
+    connection
+        .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+        .unwrap()
+}
+pub fn decrypted_outbox(client: &Client, vault: &Vault) -> Vec<serde_json::Value> {
+    use peppy_crypto::{EncryptedEnvelope, KeyPurpose, decrypt, derive_purpose_key};
+
+    let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
+    client
+        .pending_outbox()
+        .unwrap()
+        .iter()
+        .map(|envelope| {
+            let purpose = match envelope.purpose {
+                EnvelopePurpose::Event => KeyPurpose::Event,
+                EnvelopePurpose::Command => KeyPurpose::Command,
+            };
+            let key = derive_purpose_key(&root, &vault.profile, purpose).unwrap();
+            let (nonce, ciphertext) = envelope.ciphertext.split_at(24);
+            let encrypted = EncryptedEnvelope {
+                nonce: nonce.try_into().unwrap(),
+                ciphertext: ciphertext.to_vec(),
+            };
+            let plaintext = decrypt(&key, &envelope.aad_bytes().unwrap(), &encrypted)
+                .expect("pending outbox envelope must authenticate with the fixture vault");
+            serde_json::from_slice(&plaintext).unwrap()
+        })
+        .collect()
+}
+pub fn assert_rcs_private_payload(value: &serde_json::Value) {
+    fn keys(value: &serde_json::Value, required: &[&str], optional: &[&str]) {
+        let object = value.as_object().expect("expected a payload object");
+        let mut expected = required.to_vec();
+        expected.extend(
+            optional
+                .iter()
+                .copied()
+                .filter(|key| object.contains_key(*key)),
+        );
+        expected.sort_unstable();
+        let mut actual: Vec<_> = object.keys().map(String::as_str).collect();
+        actual.sort_unstable();
+        assert_eq!(actual, expected, "unexpected payload fields: {value}");
+    }
+    if let Some(compaction) = value.get("compaction") {
+        keys(compaction, &["key", "supersedes", "terminal"], &[]);
+        for reference in compaction["supersedes"].as_array().unwrap() {
+            keys(reference, &["producer_device_id", "producer_sequence"], &[]);
+        }
+    }
+    match value["kind"].as_str().unwrap() {
+        "message" => {
+            keys(
+                value,
+                &[
+                    "attachments",
+                    "body",
+                    "conversation_id",
+                    "direction",
+                    "imported",
+                    "kind",
+                    "message_id",
+                    "mms_context",
+                    "provider_message_id",
+                    "recipients",
+                    "sender_address",
+                    "sent_at_ms",
+                    "source_device_id",
+                    "source_sequence",
+                    "subject",
+                    "transport",
+                ],
+                &["rcs_capture", "ordered_at_ms"],
+            );
+            assert!(
+                value["provider_message_id"].is_null(),
+                "provider identifier leaked: {value}"
+            );
+            assert!(value["mms_context"].is_null());
+            assert!(value["attachments"].as_array().unwrap().is_empty());
+        }
+        "rcs_conversation_metadata" => keys(
+            value,
+            &[
+                "compaction",
+                "conversation_id",
+                "kind",
+                "logical_revision",
+                "rcs_history_gap",
+                "transport",
+                "writer_device_id",
+            ],
+            &["rcs_encryption"],
+        ),
+        "rcs_message_status" => keys(
+            value,
+            &["compaction", "kind", "message_id", "rcs_reported", "status"],
+            &[],
+        ),
+        "rcs_message_reported" => keys(
+            value,
+            &["compaction", "kind", "message_id", "rcs_reported"],
+            &[],
+        ),
+        "rcs_link_status" => {
+            keys(value, &["compaction", "kind", "status"], &[]);
+            keys(
+                &value["status"],
+                &[
+                    "availability",
+                    "capability_revision",
+                    "feature_bits",
+                    "gateway_device_id",
+                    "health",
+                    "observed_at_ms",
+                    "phone_responsive",
+                    "state",
+                ],
+                &["linked_since_ms"],
+            );
+        }
+        "rcs_media_state" => {
+            keys(
+                value,
+                &[
+                    "attachment_index",
+                    "kind",
+                    "message_id",
+                    "metadata",
+                    "state",
+                ],
+                &["compaction"],
+            );
+            keys(
+                &value["metadata"],
+                &["display_name", "media_type", "plaintext_bytes"],
+                &[],
+            );
+        }
+        kind => panic!("unexpected RCS payload kind: {kind}"),
+    }
+}
+pub fn assert_invalid_request<T>(result: Result<T, Error>) {
+    match result {
+        Err(Error::InvalidRequest(_)) => {}
+        Err(error) => panic!("expected InvalidRequest, got {error:?}"),
+        Ok(_) => panic!("expected InvalidRequest, got success"),
+    }
+}
 pub fn unlocked(config: &ClientConfig, vault: &Vault) -> Client {
     let client = open(config);
     client
@@ -119,6 +280,20 @@ impl Server {
         client
             .observe_replay_head(Cursor(self.log.len() as u64))
             .unwrap();
+        client.apply_pending(100).unwrap()
+    }
+    pub fn redeliver(&self, client: &Client) -> ApplyReport {
+        let cursor = client.receive_cursor().unwrap().0;
+        assert!(
+            cursor > 0,
+            "redelivery requires a previously delivered cursor"
+        );
+        for (index, envelope) in self.log.iter().enumerate().take(cursor as usize) {
+            assert_eq!(
+                client.ingest(envelope, Cursor(index as u64 + 1)).unwrap(),
+                IngestResult::Duplicate
+            );
+        }
         client.apply_pending(100).unwrap()
     }
 }
