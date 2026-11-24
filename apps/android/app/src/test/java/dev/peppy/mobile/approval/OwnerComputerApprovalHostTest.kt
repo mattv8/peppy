@@ -135,6 +135,23 @@ class OwnerComputerApprovalHostTest {
         assertTrue(transport.calls.none { it.startsWith("DELETE") })
     }
 
+    @Test fun `lost approval response followed by identical retry is approved`() = runBlocking {
+        // After the server commits but its response is lost, the first attempt reports offline without
+        // local approval. An identical retry receives the server's replayed 200 and must stay approved.
+        // Pins current behaviour of review finding D-08; flip this assertion when the fix is authorized.
+        val (host, client, transport) = host()
+        assertTrue(host.scan("qr") is OwnerComputerApprovalHost.Result.View)
+        transport.responses += null
+        transport.responses += EnrollmentHttpResponse(200, "approved")
+
+        assertEquals(OwnerComputerApprovalHost.Result.Failed("offline"), host.approve(true, SecretPrompt { "phrase".toCharArray() }))
+        assertEquals(OwnerComputerApprovalHost.Result.Approved(client.view), host.approve(true, SecretPrompt { "phrase".toCharArray() }))
+        assertEquals(listOf("/v1/enrollment/computers:request", "/v1/enrollment/computers/invite/approve:approval", "/v1/enrollment/computers/invite/approve:approval"), transport.posts)
+        assertEquals(OwnerComputerApprovalHost.Result.Approved(client.view), host.cancel())
+        assertEquals(0, client.cancelled)
+        assertTrue(transport.calls.none { it.startsWith("DELETE") })
+    }
+
     @Test fun `cancel before scanning swallows no-flow clear failure`() = runBlocking {
         val (host, client, transport) = host().also { it.second.cancelThrows = true; it.second.viewThrows = true }
 

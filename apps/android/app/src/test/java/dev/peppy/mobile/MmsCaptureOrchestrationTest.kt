@@ -192,6 +192,23 @@ class MmsCaptureOrchestrationTest {
         assertEquals(listOf(image.providerPartId.toString()), core.mappedProviderPartIds)
     }
 
+    @Test fun imageMmsRecordsThumbnailMetadata() {
+        val image = pngPart(11)
+        val core = FakeCore()
+        val provider = FakeProvider(
+            listOf(record(1).copy(parts = listOf(image))),
+            imageBytes = png(),
+            previewResult = MmsMediaPreviewResult(MmsMediaMetadata(20, 10), byteArrayOf(1), null),
+        )
+
+        val result = MmsCapture.run(plan(), core, provider, temp())
+
+        assertEquals(1, result.captured)
+        assertEquals(1, core.completed)
+        assertEquals(listOf("image/png", "image/jpeg"), core.preparedMediaTypes)
+        assertEquals(listOf(PartMetadataCall("acq-1", "11", 20, 10, null, "attachment-2")), core.metadataCalls)
+    }
+
     @Test fun smilDoesNotCountTowardTheBinaryAttachmentLimit() {
         val smil = MmsProviderPart(10, -1, "application/smil", null, null, "<smil/>", Uri.parse("content://mms/part/10"))
         val images = (11L..20L).map(::pngPart)
@@ -1308,6 +1325,8 @@ class MmsCaptureOrchestrationTest {
         }
     }
 
+    private data class PartMetadataCall(val id: String, val partId: String, val width: Int?, val height: Int?, val durationMs: Long?, val thumbnailId: String?)
+
     /**
      * Plans like `plan_mms_backfill_scans`: the first plan freezes the history baseline at the
      * observed maximum (unless [historyUpperBound] supplies an existing one) and starts live just
@@ -1345,6 +1364,7 @@ class MmsCaptureOrchestrationTest {
         var manualRecheckLimit: Int? = null
         val preparedMediaTypes = mutableListOf<String>()
         val mappedProviderPartIds = mutableListOf<String>()
+        val metadataCalls = mutableListOf<PartMetadataCall>()
         private val previewStates = initialPreviewStates.toMutableMap()
         private val acquisitions = mutableMapOf<String, NativeMmsAcquisition>()
         private var liveCursor = initialLiveCursor
@@ -1489,7 +1509,9 @@ class MmsCaptureOrchestrationTest {
         override fun mapPart(id: String, providerPartId: String, attachmentId: String) {
             mappedProviderPartIds += providerPartId
         }
-        override fun setPartMetadata(id: String, providerPartId: String, width: Int?, height: Int?, durationMs: Long?, thumbnailAttachmentId: String?) = Unit
+        override fun setPartMetadata(id: String, providerPartId: String, width: Int?, height: Int?, durationMs: Long?, thumbnailAttachmentId: String?) {
+            metadataCalls += PartMetadataCall(id, providerPartId, width, height, durationMs, thumbnailAttachmentId)
+        }
         override fun setPartPreviewState(id: String, providerPartId: String, state: NativeMmsPreviewState) {
             previewStates[providerPartId] = state
         }

@@ -99,6 +99,16 @@ class MmsProviderTest {
         assertTrue(page.records.single { it.id == 5L }.ready)
     }
 
+    @Test fun tenImagesAndSmilExceedProviderPartLimit() {
+        // Pins current behaviour of review finding D-38; flip this assertion when the fix is authorized.
+        provider.messages += message(1, 128)
+        provider.parts[1] = listOf(Part(1, mediaType = "application/smil")) +
+            (2L..11L).map { Part(it, mediaType = "image/png") }
+        val record = reader.read(1)!!
+        assertEquals("too_many_parts", record.error)
+        assertFalse(record.ready)
+    }
+
     @Test fun preservesOtherwiseCompleteNullDateAndOnlyExpiresPastNotifications() {
         provider.messages += message(1, 132, dateSeconds = null)
         provider.messages += message(2, 130, expirySeconds = 1)
@@ -305,7 +315,7 @@ class MmsProviderTest {
         val textOnly: Boolean = false,
         val read: Boolean = false,
     )
-    data class Part(val id: Long, val text: String? = null)
+    data class Part(val id: Long, val text: String? = null, val mediaType: String = "text/plain")
     /** Rejects unknown projection columns like real providers do when a column is absent from the schema. */
     class FakeMmsProvider : ContentProvider() {
         val messages = mutableListOf<Msg>(); val parts = mutableMapOf<Long, List<Part>>(); val addresses = mutableMapOf<Long, List<Pair<String, Int>>>()
@@ -351,7 +361,7 @@ class MmsProviderTest {
                 }.let { rows -> if (sortOrder?.contains("DESC") == true) rows.sortedByDescending { it.id } else rows.sortedBy { it.id } }
                     .map { mapOf("_id" to it.id) }
                 isAddress -> addresses[segments[0].toLong()].orEmpty().map { mapOf("address" to it.first, "type" to it.second) }
-                isPart -> parts[selectionArgs!!.single().toLong()].orEmpty().mapIndexed { i, p -> mapOf("_id" to p.id, "seq" to i, "ct" to "text/plain", "chset" to 106, "text" to p.text) }
+                isPart -> parts[selectionArgs!!.single().toLong()].orEmpty().mapIndexed { i, p -> mapOf("_id" to p.id, "seq" to i, "ct" to p.mediaType, "chset" to 106, "text" to p.text) }
                 else -> messages.find { it.id == segments.single().toLong() }?.let { listOf(messageRow(it)) }.orEmpty()
             }
             val columns = requested.toTypedArray()
