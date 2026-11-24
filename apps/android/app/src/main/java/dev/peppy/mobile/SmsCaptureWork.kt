@@ -168,6 +168,15 @@ data class SmsCaptureSummary(
     val scanObservations: Int = 0,
 )
 
+internal fun mergeSmsCaptureSummaries(left: SmsCaptureSummary, right: SmsCaptureSummary) = SmsCaptureSummary(
+    left.captured + right.captured, left.pending + right.pending, left.unavailable + right.unavailable,
+    left.paused + right.paused, left.more || right.more, left.providerError || right.providerError,
+    right.pendingRecheckCursor ?: left.pendingRecheckCursor, left.historyExhausted || right.historyExhausted,
+    left.coreError || right.coreError, left.processed + right.processed, left.rowsQueried + right.rowsQueried, left.advanced || right.advanced,
+    left.budgetExhausted || right.budgetExhausted,
+    left.scanObservations + right.scanObservations,
+)
+
 /** Host-owned binding from scheduled Android work to the generated core adapter. */
 internal fun interface SmsCaptureRunner {
     fun run(context: Context): SmsCaptureSummary
@@ -839,14 +848,7 @@ internal object SmsCapture {
         Outcome(providerDurable = true, coreError = true)
     }
 
-    private fun merge(left: SmsCaptureSummary, right: SmsCaptureSummary) = SmsCaptureSummary(
-        left.captured + right.captured, left.pending + right.pending, left.unavailable + right.unavailable,
-        left.paused + right.paused, left.more || right.more, left.providerError || right.providerError,
-        right.pendingRecheckCursor ?: left.pendingRecheckCursor, left.historyExhausted || right.historyExhausted,
-        left.coreError || right.coreError, left.processed + right.processed, left.rowsQueried + right.rowsQueried, left.advanced || right.advanced,
-        left.budgetExhausted || right.budgetExhausted,
-        left.scanObservations + right.scanObservations,
-    )
+    private fun merge(left: SmsCaptureSummary, right: SmsCaptureSummary) = mergeSmsCaptureSummaries(left, right)
 
     private data class Outcome(val providerDurable: Boolean, val captured: Int = 0, val pending: Int = 0, val unavailable: Int = 0, val paused: Int = 0, val providerError: Boolean = false, val coreError: Boolean = false) {
         fun summary() = SmsCaptureSummary(captured, pending, unavailable, paused, providerError = providerError, coreError = coreError)

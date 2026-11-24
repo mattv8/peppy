@@ -425,8 +425,7 @@ internal class AndroidContactsProvider(context: Context) {
                 is PhotoOp.Remove -> PhotoOutcome.WRITTEN
                 null -> PhotoOutcome.NOT_REQUESTED
             }
-            if (batch.isEmpty() && photoOutcome == PhotoOutcome.UNKNOWN) WriteResult.OutcomeUnknown
-            else WriteResult.Applied(rawContactId, photoOutcome)
+            WriteResult.Applied(rawContactId, photoOutcome)
         } catch (_: SecurityException) {
             WriteResult.PermissionDenied
         } catch (_: Exception) {

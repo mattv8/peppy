@@ -124,7 +124,7 @@ internal class RcsMediaReceiveCoordinator(
         val result = MmsMediaTransfer(
             client = client,
             http = http,
-            cacheDirectory = files.rootForTest(),
+            cacheDirectory = files.rootDirectory(),
             pendingUploads = { client.pendingUploads().filter { it.attachmentId == attachmentId } },
             pendingDownloads = { emptyList() },
         ).run(limit = 1)

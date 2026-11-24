@@ -10,14 +10,13 @@ internal fun restrictedMessageAccessVisible(): Boolean = true
 internal fun RestrictedNotAllowedAccessControls(
     context: Context,
     @Suppress("UNUSED_PARAMETER") refresh: Int,
-    onOpenGoogleMessagesLink: () -> Unit,
 ) {
     RestrictedMessageAccessStatus(RestrictedMessageAccess.NOT_ALLOWED)
-    RestrictedAccessAction(context, onOpenGoogleMessagesLink)
+    RestrictedAccessAction(context)
 }
 
 @Composable
-internal fun RestrictedAccessAction(context: Context, onOpenGoogleMessagesLink: () -> Unit) =
+internal fun RestrictedAccessAction(context: Context) =
     RestrictedAccessCommand(context)
 
 internal fun restrictedMessageAccessHelpResId(): Int = R.string.peppy_mms_restricted_help

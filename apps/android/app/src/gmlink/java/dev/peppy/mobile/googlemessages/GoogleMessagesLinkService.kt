@@ -985,7 +985,6 @@ class GoogleMessagesLinkService : Service() {
         private const val MAX_PAIRING_WAIT_MS = 30_000L + 30_000L + 300_000L + 30_000L
         private val STOP_CODES = setOf("link_closed", "unlink_in_progress", "pair_cancelled", "run_refused")
         private val ATTENTION_STATES = setOf("needs_relink", "signed_out")
-        private val PRE_START_STATUS = LinkStatus(0, "unknown", false, false, false, 0, "")
         @Volatile private var active: GoogleMessagesLinkService? = null
         @Volatile private var serviceGeneration = 0L
         private val activeLock = Any()

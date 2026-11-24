@@ -67,7 +67,7 @@ internal class RcsMediaPrivateFiles(context: Context) {
         } ?: 0
     }
 
-    internal fun rootForTest(): File = canonicalRoot
+    internal fun rootDirectory(): File = canonicalRoot
 
     private fun restrictToOwner(file: File) {
         check(file.setReadable(false, false) && file.setWritable(false, false) && file.setExecutable(false, false))
