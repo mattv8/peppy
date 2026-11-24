@@ -1,6 +1,8 @@
 package dev.peppy.mobile.notifications
 
+import android.content.Context
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.LocalActivity
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -10,27 +12,33 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertTextEquals
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
-import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.core.app.ApplicationProvider
 import dev.peppy.mobile.ObservedNotificationApp
 import dev.peppy.mobile.R
 import dev.peppy.mobile.approval.actions
+import dev.peppy.mobile.testing.ComposeTestActivityRule
 import kotlinx.coroutines.CompletableDeferred
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 
-@RunWith(AndroidJUnit4::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class NotificationAppFiltersScreenTest {
-    @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
+    private val compose = createComposeRule()
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
+    private lateinit var activity: ComponentActivity
 
     private class Actions(initial: NotificationAppFilterLoadResult) : NotificationAppFilterActions {
         var result = initial
@@ -67,7 +75,7 @@ class NotificationAppFiltersScreenTest {
 
     private val chat = ObservedNotificationApp("dev.chat", "Chat")
     private val mail = ObservedNotificationApp("dev.mail", "Mail")
-    private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
+    private val context get() = ApplicationProvider.getApplicationContext<Context>()
 
     @Test fun searchMatchesLabelAndPackageAndShowsNoMatchFeedback() {
         val actions = Actions(NotificationAppFilterLoadResult.Ready(listOf(chat, mail), setOf("dev.mail")))
@@ -160,7 +168,7 @@ class NotificationAppFiltersScreenTest {
         show(actions) { backs += 1 }
 
         compose.onNodeWithTag("app-filters-back").performClick()
-        compose.activity.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        compose.runOnIdle { activity.onBackPressedDispatcher.onBackPressed() }
         compose.waitForIdle()
         assertEquals(2, backs)
     }
@@ -200,6 +208,9 @@ class NotificationAppFiltersScreenTest {
     }
 
     private fun show(actions: NotificationAppFilterActions, onBack: () -> Unit = {}) {
-        compose.setContent { NotificationAppFiltersScreen(onBack = onBack, actions = actions) }
+        compose.setContent {
+            activity = requireNotNull(LocalActivity.current) as ComponentActivity
+            NotificationAppFiltersScreen(onBack = onBack, actions = actions)
+        }
     }
 }

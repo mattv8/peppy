@@ -3,11 +3,17 @@ package dev.peppy.mobile.ui
 import android.content.Context
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.test.core.app.ApplicationProvider
@@ -74,23 +80,31 @@ class SettingToggleRowInfoTest {
 
     @Test fun infoButtonInTrailingOpensDialogWithoutTogglingTheSwitch() {
         var toggled = false
+        var siblingEnabled by mutableStateOf(false)
         compose.setContent {
             MaterialTheme {
-                SettingToggleRow(
-                    title = "Wait for Wi-Fi",
-                    checked = false,
-                    enabled = true,
-                    onCheckedChange = { toggled = true },
-                    tag = "wifi",
-                    titleTrailing = {
-                        InfoButton(topic = "Wait for Wi-Fi", title = "Wait for Wi-Fi", body = "Waits for Wi-Fi.", tag = "info-x")
-                    },
-                )
+                Column {
+                    SettingToggleRow(
+                        title = "Wait for Wi-Fi",
+                        checked = false,
+                        enabled = true,
+                        onCheckedChange = { toggled = true },
+                        tag = "wifi",
+                        titleTrailing = {
+                            InfoButton(topic = "Wait for Wi-Fi", title = "Wait for Wi-Fi", body = "Waits for Wi-Fi.", tag = "info-x")
+                        },
+                    )
+                    Switch(checked = siblingEnabled, onCheckedChange = { siblingEnabled = it })
+                }
             }
         }
         compose.onNodeWithTag("info-x").assertHasClickAction()
         compose.onNodeWithTag("info-x").performClick()
-        compose.onNodeWithTag("info-x-dialog").fetchSemanticsNode()
-        compose.runOnIdle { assertFalse(toggled) }
+        compose.onNodeWithTag("info-x-dialog").assertIsDisplayed()
+        compose.onNodeWithText("Waits for Wi-Fi.").assertIsDisplayed()
+        compose.runOnIdle { assertFalse(toggled); assertFalse(siblingEnabled) }
+        compose.onNodeWithTag("info-x-dismiss").performClick()
+        compose.onNodeWithTag("info-x-dialog").assertDoesNotExist()
+        compose.runOnIdle { assertFalse(toggled); assertFalse(siblingEnabled) }
     }
 }

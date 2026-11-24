@@ -1,12 +1,14 @@
 package dev.peppy.mobile
 
-import androidx.activity.ComponentActivity
+import android.content.Context
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsOff
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.test.core.app.ApplicationProvider
+import dev.peppy.mobile.testing.ComposeTestActivityRule
 import dev.peppy.mobile.ui.SettingToggleRow
 import dev.peppy.mobile.ui.theme.PeppyTheme
 import org.junit.Assert.*
@@ -14,10 +16,17 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class SettingToggleRowAccessibilityTest {
-    @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
+    private val compose = createComposeRule()
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
 
     @Test fun settingsActionHasALabelAndDoesNotInventAnOsStateChange() {
         var requests = 0
@@ -58,7 +67,7 @@ class SettingToggleRowAccessibilityTest {
         }
         val subtitle = compose.onNodeWithTag("wrapped-setting-subtitle", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
         val control = compose.onNodeWithTag("wrapped-setting-switch", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
-        val minimumGap = 15f * compose.activity.resources.displayMetrics.density
+        val minimumGap = 15f * ApplicationProvider.getApplicationContext<Context>().resources.displayMetrics.density
         assertTrue("Wrapped text must not touch the switch", control.left - subtitle.right >= minimumGap)
     }
 }

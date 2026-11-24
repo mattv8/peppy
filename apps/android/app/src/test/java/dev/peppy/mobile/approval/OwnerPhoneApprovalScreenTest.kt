@@ -1,5 +1,6 @@
 package dev.peppy.mobile.approval
 
+import android.content.Context
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
@@ -12,19 +13,27 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
-import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.core.app.ApplicationProvider
 import dev.peppy.mobile.R
 import dev.peppy.mobile.security.RevealOutcome
 import dev.peppy.mobile.security.SecureWindow
+import dev.peppy.mobile.testing.ComposeTestActivityRule
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class OwnerPhoneApprovalScreenTest {
-    @get:Rule val compose = createComposeRule()
+    private val compose = createComposeRule()
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
 
     private class Actions(
         private val initial: OwnerPhoneApprovalHost.Result = verifyResult(),
@@ -82,7 +91,7 @@ class OwnerPhoneApprovalScreenTest {
             "qr",
         )
 
-        fun string(id: Int): String = InstrumentationRegistry.getInstrumentation().targetContext.getString(id)
+        fun string(id: Int): String = ApplicationProvider.getApplicationContext<Context>().getString(id)
 
         val noReveal: suspend () -> RevealOutcome = { RevealOutcome.Cancelled }
     }

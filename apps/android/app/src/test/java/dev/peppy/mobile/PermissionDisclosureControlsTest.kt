@@ -1,27 +1,33 @@
 package dev.peppy.mobile
 
-import androidx.activity.ComponentActivity
+import android.content.Context
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.Density
-import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.core.app.ApplicationProvider
+import dev.peppy.mobile.testing.ComposeTestActivityRule
 import dev.peppy.mobile.ui.ConsentSheet
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 
-@RunWith(AndroidJUnit4::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class PermissionDisclosureControlsTest {
-    @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
+    private val compose = createComposeRule()
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
 
     @Test
     fun consentSheetDoesNotRequestUntilAgreeAtNormalFont() {
@@ -42,7 +48,7 @@ class PermissionDisclosureControlsTest {
             CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale)) {
                 dev.peppy.mobile.ui.ConsentSheet(
                     title = "Allow SMS sync?",
-                    body = compose.activity.getString(R.string.peppy_permissions_sms_disclosure),
+                    body = ApplicationProvider.getApplicationContext<Context>().getString(R.string.peppy_permissions_sms_disclosure),
                     tag = "sms-consent-sheet",
                     onDismiss = { dismisses += 1 },
                     onConfirm = { confirms += 1 },

@@ -1,6 +1,7 @@
 import os
 import pathlib
 import pty
+import re
 import select
 import signal
 import shutil
@@ -135,7 +136,7 @@ class AndroidHelperTests(unittest.TestCase):
             sdk = temp / "sdk"
             (sdk / "platform-tools").mkdir(parents=True)
             adb = sdk / "platform-tools" / "adb"
-            adb.write_text("#!/bin/sh\ncase \"$*\" in *devices*) echo 'emulator-5554 device' ;; *getprop*) echo x86_64 ;; *instrument*) echo 'OK (0 tests)' ;; esac\n")
+            adb.write_text("#!/bin/sh\ncase \"$*\" in *devices*) echo 'emulator-5554 device' ;; *getprop*) echo x86_64 ;; *instrument*) printf 'OK (0 tests)\\nINSTRUMENTATION_CODE: -1\\n' ;; esac\n")
             adb.chmod(0o755)
             artifacts = temp / "artifacts"; artifacts.mkdir()
             (artifacts / "app-debug.apk").touch(); (artifacts / "app-debug-androidTest.apk").touch()
@@ -154,6 +155,87 @@ class AndroidHelperTests(unittest.TestCase):
             (artifacts / "app-debug.apk").touch(); (artifacts / "app-debug-androidTest.apk").touch()
             result = self.run_helper("smoke", env={"ANDROID_SDK_ROOT": str(sdk), "PEPPY_ANDROID_ARTIFACTS": str(artifacts)})
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_smoke_checks_raw_statuses_and_reports_exclusions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            sdk = root / "sdk"
+            (sdk / "platform-tools").mkdir(parents=True)
+            adb = sdk / "platform-tools" / "adb"
+            adb.write_text(
+                "#!/bin/sh\n"
+                "echo \"$*\" >> \"$ADB_LOG\"\n"
+                "case \"$*\" in *devices*) echo 'emulator-5554 device' ;; "
+                "*getprop*) echo x86_64 ;; *instrument*) "
+                "case \"$*\" in *'notClass '*SystemBlocklistAccessTest#writeSmsAppOpAllowsBlocklistReadAndConfirmedUnblock*) ;; "
+                "*) printf 'INSTRUMENTATION_STATUS: class=excluded.Test\\nINSTRUMENTATION_STATUS: test=excluded\\nINSTRUMENTATION_STATUS_CODE: -4\\n' ;; esac; "
+                "printf '%s\\n' \"$INSTRUMENT_OUTPUT\" ;; esac\n"
+            )
+            adb.chmod(0o755)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            (artifacts / "app-debug.apk").touch()
+            (artifacts / "app-debug-androidTest.apk").touch()
+            log = root / "adb.log"
+            environment = {
+                "ANDROID_SDK_ROOT": str(sdk), "PEPPY_ANDROID_ARTIFACTS": str(artifacts),
+                "ADB_LOG": str(log),
+            }
+            passed = "INSTRUMENTATION_STATUS: class=example.Test\nINSTRUMENTATION_STATUS: test=works\nINSTRUMENTATION_STATUS_CODE: 0\nOK (1 test)\nINSTRUMENTATION_CODE: -1"
+            for code in (0, -3, -4):
+                with self.subTest(code=code):
+                    output = passed if code == 0 else passed.replace("STATUS_CODE: 0", f"STATUS_CODE: {code}")
+                    result = self.run_helper("smoke", env=environment | {"INSTRUMENT_OUTPUT": output})
+                    self.assertEqual(result.returncode == 0, code == 0, result.stderr)
+                    if code:
+                        self.assertIn("example.Test#works", result.stderr)
+                    self.assertIn("excludes dev.peppy.mobile.messagingapp.SystemBlocklistAccessTest#writeSmsAppOpAllowsBlocklistReadAndConfirmedUnblock", result.stdout)
+            self.assertIn("-e notClass dev.peppy.mobile.MirroringPermissionFlowTest#", log.read_text())
+            self.assertIn("dev.peppy.mobile.messagingapp.SystemBlocklistAccessTest#writeSmsAppOpAllowsBlocklistReadAndConfirmedUnblock", log.read_text())
+            result = self.run_helper("smoke", env=environment | {"INSTRUMENT_OUTPUT": passed + "\nFAILURES!!!"})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("instrumentation smoke failed", result.stderr)
+
+    def test_smoke_exclusions_name_existing_device_test_methods(self):
+        script = (ROOT / "infra/dev/android.sh").read_text()
+        exclusion_list = script.split("local -a excluded_tests=(", 1)[1].split("\n    )", 1)[0]
+        entries = exclusion_list.strip().splitlines()
+        self.assertTrue(entries, "no smoke exclusions found")
+        source_root = ROOT / "apps/android/app/src/androidTest/java"
+        for entry in entries:
+            match = re.fullmatch(r"\s*'(dev\.peppy\.mobile\.[\w.]+)#(\w+)\|[^']+'\s*", entry)
+            self.assertIsNotNone(match, f"invalid smoke exclusion: {entry}")
+            class_name, method = match.groups()
+            with self.subTest(test=f"{class_name}#{method}"):
+                source = source_root / (class_name.replace(".", "/") + ".kt")
+                self.assertTrue(source.is_file(), f"missing test class: {source}")
+                self.assertRegex(source.read_text(), rf"\bfun\s+{re.escape(method)}\s*\(")
+
+    def test_smoke_stops_before_instrumentation_when_revoke_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            sdk = root / "sdk"
+            (sdk / "platform-tools").mkdir(parents=True)
+            adb = sdk / "platform-tools" / "adb"
+            adb.write_text(
+                "#!/bin/sh\n"
+                "echo \"$*\" >> \"$ADB_LOG\"\n"
+                "case \"$*\" in *devices*) echo 'emulator-5554 device' ;; "
+                "*getprop*) echo x86_64 ;; *'pm revoke'*) exit 1 ;; esac\n"
+            )
+            adb.chmod(0o755)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            (artifacts / "app-debug.apk").touch()
+            (artifacts / "app-debug-androidTest.apk").touch()
+            log = root / "adb.log"
+            result = self.run_helper("smoke", env={
+                "ANDROID_SDK_ROOT": str(sdk), "PEPPY_ANDROID_ARTIFACTS": str(artifacts),
+                "ADB_LOG": str(log),
+            })
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("could not revoke READ_SMS for instrumentation smoke", result.stderr)
+            self.assertNotIn("am instrument", log.read_text())
 
     def test_wsl_health_uses_windows_powershell_not_linux_curl(self):
         with tempfile.TemporaryDirectory() as temp:
