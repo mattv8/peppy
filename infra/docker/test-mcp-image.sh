@@ -33,7 +33,7 @@ docker run --rm --network none --read-only --cap-drop ALL \
     test -s /etc/ssl/certs/ca-certificates.crt
     test -x /usr/local/bin/peppy-mcp
     command -v ldd >/dev/null
-    ! ldd /usr/local/bin/peppy-mcp | grep "not found"
+    if ldd /usr/local/bin/peppy-mcp | grep "not found"; then exit 1; fi
   '
 
 # Match the Compose initializer without starting API, database, or user services.
@@ -79,7 +79,7 @@ docker exec "$name" /bin/sh -ec '
   test "$(stat -c %u:%a /run/peppy-mcp)" = 10001:700
   test "$(stat -c %u:%a /var/lib/peppy-mcp)" = 10001:700
   test "$(stat -c %s /var/lib/peppy-mcp/storage-key)" = 32
-  ! cmp -s /run/peppy-mcp/control-token /var/lib/peppy-mcp/storage-key
+  if cmp -s /run/peppy-mcp/control-token /var/lib/peppy-mcp/storage-key; then exit 1; fi
   sha256sum /run/peppy-mcp/control-token /var/lib/peppy-mcp/storage-key > /verification/secret-digests
   chmod 0600 /verification/secret-digests
 '

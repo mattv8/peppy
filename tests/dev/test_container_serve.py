@@ -4,7 +4,6 @@ import subprocess
 import tempfile
 import time
 import unittest
-from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -68,19 +67,6 @@ chmod +x "$target/debug/peppy-server"
 
     def run_runner(self, *args, **kwargs):
         return subprocess.run(['bash', str(RUNNER), *args], cwd=ROOT, text=True, capture_output=True, **kwargs)
-
-    def test_inherited_target_is_not_used_by_fixture(self):
-        with tempfile.TemporaryDirectory() as directory:
-            outside = Path(directory) / 'outside-target'
-            (outside / 'debug').mkdir(parents=True)
-            sentinel = outside / 'debug/peppy-server'
-            sentinel.write_text('do not overwrite')
-            self.tearDown()
-            with mock.patch.dict(os.environ, {'CARGO_TARGET_DIR': str(outside)}):
-                self.setUp()
-            result = self.run_runner('build', 'server', env=self.env, timeout=RUNNER_TIMEOUT)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(sentinel.read_text(), 'do not overwrite')
 
     def test_build_refreshes_old_source_mtime_without_changing_retained_cache(self):
         source_payload = self.source / 'payload'

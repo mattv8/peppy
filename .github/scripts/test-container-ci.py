@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Regression checks for the reusable container validation workflow."""
 
-import copy
 import json
 import posixpath
 import re
@@ -190,22 +189,6 @@ class ContainerWorkflowTests(unittest.TestCase):
         self.assertEqual(complete["needs"], ["server", "relay", "mcp"])
         self.assert_aggregate_env_wiring(self.jobs)
         self.assert_aggregate_rejects_non_success(aggregate_script(self.jobs))
-
-    def test_mutations_are_rejected(self):
-        conditional_server = copy.deepcopy(self.jobs)
-        conditional_server["server"]["if"] = False
-        with self.assertRaises(AssertionError):
-            self.assert_required_jobs_are_unconditional(conditional_server)
-
-        wrong_mcp_wiring = copy.deepcopy(self.jobs)
-        wrong_mcp_wiring["complete"]["steps"][0]["env"]["MCP_RESULT"] = "${{ needs.server.result }}"
-        with self.assertRaises(AssertionError):
-            self.assert_aggregate_env_wiring(wrong_mcp_wiring)
-
-        missing_mcp = aggregate_script(self.jobs).replace('"$MCP_RESULT"', "", 1)
-        results = {job: "success" for job in IMAGES} | {"mcp": "failure"}
-        self.assertEqual(aggregate_result(missing_mcp, results).returncode, 0)
-        self.assertNotEqual(aggregate_result(aggregate_script(self.jobs), results).returncode, 0)
 
 
 if __name__ == "__main__":

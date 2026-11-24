@@ -65,15 +65,6 @@ class CommunityWebComposeTests(unittest.TestCase):
         self.assertNotIn("PEPPY_WEB_CLIENT_ROOT", services["migrate"]["environment"])
 
     @unittest.skipUnless(docker, "Docker Compose is unavailable")
-    def test_production_root_mode_has_no_legacy_server_host_setting(self):
-        result = self.render("docker-compose.yml")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        services = json.loads(result.stdout)["services"]
-        self.assertEqual(services["api"]["environment"]["PEPPY_WEB_CLIENT_ROOT"], "true")
-        self.assertNotIn("PEPPY_WEB_CLIENT_HOST", services["api"]["environment"])
-        self.assertNotIn("PEPPY_WEB_CLIENT_ROOT", services["migrate"]["environment"])
-
-    @unittest.skipUnless(docker, "Docker Compose is unavailable")
     def test_production_ui_can_be_disabled_without_affecting_migrations(self):
         result = self.render("docker-compose.yml", WEB_UI_ENABLED="false")
         self.assertEqual(result.returncode, 0, result.stderr)

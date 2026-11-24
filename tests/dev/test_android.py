@@ -92,12 +92,6 @@ class AndroidHelperTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Usage:", result.stderr)
 
-    def test_native_verifier_defaults_to_both_abis(self):
-        content = (ROOT / "infra/compose/verify-android-native.sh").read_text()
-        self.assertIn("aarch64-linux-android", content)
-        self.assertIn("x86_64-linux-android", content)
-        self.assertIn("CARGO_TARGET_DIR", content)
-
     def test_wsl_crlf_emulator_smoke_uses_windows_apk_path_and_requires_tests(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp)

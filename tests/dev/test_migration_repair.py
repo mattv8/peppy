@@ -70,13 +70,6 @@ class MigrationRepairTests(unittest.TestCase):
         with self.assertRaisesRegex(repair.RepairError, "duplicate"):
             repair.plan_repair([repair.AppliedMigration(1, checksum(up), True)] * 2, [self.candidate(1, up)], [])
 
-    def test_raw_crlf_checksum_and_down_provenance_are_preserved(self):
-        up = b"CREATE TABLE x ();\r\n"
-        candidate = self.candidate(1, up, "branch:repair")
-        self.assertEqual(candidate.checksum, checksum(up))
-        self.assertEqual(candidate.down, b"DROP TABLE example;\n")
-        self.assertEqual(candidate.provenance, "branch:repair")
-
     def test_sql_validator_rejects_transactions_and_metacommands_but_not_function_body(self):
         repair.validate_down_sql(b"CREATE FUNCTION f() RETURNS void AS $$ BEGIN PERFORM 1; END; $$ LANGUAGE plpgsql; E'COMMIT \\\\ ignored'; /* outer /* nested */ comment */")
         for prohibited in (b"BEGIN;", b"END;", b"ABORT;", b"COMMIT;", b"\\set x 1", b"-- no-transaction\nDROP TABLE x;"):

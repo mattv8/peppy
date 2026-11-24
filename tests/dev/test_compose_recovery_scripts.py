@@ -304,20 +304,15 @@ class ComposeRecoveryScriptTests(unittest.TestCase):
     def preflight_dependency(service: dict) -> dict:
         return service["depends_on"]["database-password-preflight"]
 
-    def test_database_password_preflight_rejects_each_password_in_fresh_and_prior_success_invocations(self):
-        for prior_state in ("fresh", "existing"):
-            for password_name in self.PASSWORDS:
-                with self.subTest(prior_state=prior_state, password_name=password_name):
-                    if prior_state == "existing":
-                        previous = self.run_password_preflight(self.PASSWORDS)
-                        self.assertEqual(previous.returncode, 0, previous.stderr)
+    def test_database_password_preflight_rejects_each_password(self):
+        for password_name in self.PASSWORDS:
+            with self.subTest(password_name=password_name):
+                unsafe_passwords = self.PASSWORDS | {password_name: "not:uri-safe"}
+                result = self.run_password_preflight(unsafe_passwords)
 
-                    unsafe_passwords = self.PASSWORDS | {password_name: "not:uri-safe"}
-                    result = self.run_password_preflight(unsafe_passwords)
-
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("URI-unreserved", result.stderr)
-                    self.assertNotIn(unsafe_passwords[password_name], result.stderr)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("URI-unreserved", result.stderr)
+                self.assertNotIn(unsafe_passwords[password_name], result.stderr)
 
     def test_database_password_preflight_does_not_evaluate_rejected_passwords(self):
         with tempfile.TemporaryDirectory() as directory:

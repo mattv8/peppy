@@ -664,7 +664,7 @@ test -f "$root/pkg/Peppy.Info.plist"
 /usr/bin/plutil -extract ITSAppUsesNonExemptEncryption raw -o - "$root/pkg/Peppy.Info.plist" | grep -Fqx false
 /usr/bin/plutil -extract LSMinimumSystemVersion raw -o - "$root/pkg/Peppy.Info.plist" | grep -Fqx 13.0
 /usr/bin/plutil -extract CFBundleSupportedPlatforms.0 raw -o - "$root/pkg/Peppy.Info.plist" | grep -Fqx MacOSX
-if grep -Fq 'repair|' "$log" || grep -Fq '^xcrun|' "$log" || grep -Fq 'notarytool' "$log"; then
+if grep -Fq 'repair|' "$log" || grep -Eq '^xcrun\|(notarytool|stapler)' "$log" || grep -Fq 'notarytool' "$log"; then
   printf 'App Store packaging must not repair DMGs or notarize artifacts\n' >&2
   exit 1
 fi

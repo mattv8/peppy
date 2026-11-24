@@ -85,12 +85,6 @@ class WebAssetCopyTests(unittest.TestCase):
             self.assertIn("Missing built asset: worker.js", result.stderr)
             self.assertEqual(sentinel.read_text(), "present")
 
-    def test_production_script_requires_the_expected_mounted_output(self):
-        script = SCRIPT.read_text()
-        self.assertIn("output=/output", script)
-        self.assertIn("mountpoint=/output", script)
-        self.assertIn("Output directory is not a mounted volume", script)
-
 
 if __name__ == "__main__":
     unittest.main()

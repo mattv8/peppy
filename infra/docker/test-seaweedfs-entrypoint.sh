@@ -33,6 +33,7 @@ mkdir "$state" "$data"
 
 cat >"$stub" <<'SH'
 #!/bin/sh
+set -eu
 test "$(cat /root/.seaweedfs/.peppy-s3-sse-kek)" = "$WEED_S3_SSE_KEK"
 test "$1" = seaweedfs-test-command
 test "$2" = retained-argument
