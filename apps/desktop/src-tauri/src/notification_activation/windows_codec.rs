@@ -4,6 +4,7 @@ pub(super) enum ActivationAction {
     Copy,
     Reveal,
     Reply,
+    MarkRead,
 }
 
 pub(super) fn parse_action(argument: Option<&str>) -> Option<ActivationAction> {
@@ -12,6 +13,7 @@ pub(super) fn parse_action(argument: Option<&str>) -> Option<ActivationAction> {
         Some("copy-code") => Some(ActivationAction::Copy),
         Some("reveal") => Some(ActivationAction::Reveal),
         Some("reply") => Some(ActivationAction::Reply),
+        Some("mark-read") => Some(ActivationAction::MarkRead),
         Some(_) | None => None,
     }
 }
@@ -60,6 +62,10 @@ mod tests {
         );
         assert_eq!(parse_action(Some("reveal")), Some(ActivationAction::Reveal));
         assert_eq!(parse_action(Some("reply")), Some(ActivationAction::Reply));
+        assert_eq!(
+            parse_action(Some("mark-read")),
+            Some(ActivationAction::MarkRead)
+        );
         assert_eq!(parse_action(Some("dismiss")), None);
     }
 

@@ -1,6 +1,6 @@
 use super::{
     recovery_store::{RecoveryItem, RecoveryReservation, RecoveryState},
-    Destination, PopupAction, PopupActions, PostError,
+    BannerPresentation, Destination, MarkReadTarget, PopupAction, PopupActions, PostError,
 };
 use crate::{
     error::{BridgeError, BridgeResult},
@@ -35,6 +35,9 @@ struct ReplyCapability {
     conversation_id: String,
     selection: Option<ReplySelection>,
     copy_target: Option<OneTimeCodeTarget>,
+    /// Kept so the Show message replacement offers Mark as read too.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    mark_read: Option<MarkReadTarget>,
     reservation: Arc<RecoveryReservation>,
     policy_cancel: tokio_util::sync::CancellationToken,
     generation_cancel: tokio_util::sync::CancellationToken,
@@ -174,21 +177,15 @@ fn require_unlocked(state: &AppState) -> BridgeResult<()> {
 
 /// Posts an ordinary banner unless this exact message can safely carry a native reply capability.
 /// The notification drain owns candidate acknowledgement; this function never changes read state.
-pub(crate) struct BannerPresentation {
-    pub destination: Destination,
-    pub title: String,
-    pub body: String,
-    pub icon: Option<crate::notification_icon::Icon>,
-    pub copy: Option<OneTimeCodeTarget>,
-}
-
 pub(crate) fn post_candidate(
     app: &tauri::AppHandle,
     session: &crate::session::Session,
     candidate: Option<&BannerCandidate>,
     banner: BannerPresentation,
 ) -> Result<(), PostError> {
-    let actions = candidate.and_then(|candidate| actions_for_candidate(app, session, candidate));
+    let actions = candidate.and_then(|candidate| {
+        actions_for_candidate(app, session, candidate, banner.mark_read.clone())
+    });
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     if let Some((popup_id, cancel, presentation, actions)) = actions {
         return submit_popup(
@@ -204,21 +201,14 @@ pub(crate) fn post_candidate(
             },
         );
     }
-    super::post(
-        app,
-        session,
-        banner.destination,
-        banner.title,
-        banner.body,
-        banner.icon,
-        banner.copy,
-    )
+    super::post(app, session, banner)
 }
 
 fn actions_for_candidate(
     app: &tauri::AppHandle,
     session: &crate::session::Session,
     candidate: &BannerCandidate,
+    mark_read: Option<MarkReadTarget>,
 ) -> Option<(
     String,
     tokio_util::sync::CancellationToken,
@@ -285,6 +275,7 @@ fn actions_for_candidate(
             .map(|_| OneTimeCodeTarget::Message {
                 message_id: candidate.id.clone(),
             }),
+        mark_read,
         reservation,
         policy_cancel,
         generation_cancel,
@@ -431,6 +422,8 @@ fn reveal_message(capability: Arc<ReplyCapability>) {
                             body,
                             icon: Some(crate::notification_icon::Icon::Message),
                             copy: replacement_capability.copy_target.clone(),
+                            mark_read: replacement_capability.mark_read.clone(),
+                            dismiss: None,
                         },
                         actions: popup_actions(replacement_capability.clone(), false),
                     },
@@ -751,11 +744,11 @@ async fn finish_rejected_reply(
         super::post(
             &app,
             &session,
-            Destination::Conversation { conversation_id },
-            "Peppy".into(),
-            rejected_reply_message(outcome).into(),
-            None,
-            None,
+            BannerPresentation::plain(
+                Destination::Conversation { conversation_id },
+                "Peppy".into(),
+                rejected_reply_message(outcome).into(),
+            ),
         )
     })
     .await;
@@ -1127,6 +1120,8 @@ fn submit_popup(
         body,
         icon,
         copy,
+        mark_read,
+        dismiss,
     } = banner;
     let state = app.state::<AppState>();
     // The owner owns presentation generations; its replacement API must retain this logical ID
@@ -1147,6 +1142,8 @@ fn submit_popup(
         body,
         icon,
         copy,
+        mark_read,
+        dismiss,
         popup_actions: Some(actions),
     };
     let expected = presentation.lock().unwrap().clone();

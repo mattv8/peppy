@@ -635,6 +635,16 @@ it("retries a replacement icon after an icon load fails and ignores a hidden fil
   expect(document.querySelector<HTMLImageElement>(".notif-app-icon")?.src).toContain("replacement");
 });
 
+it("explains banner actions only where the desktop host supports them", () => {
+  const { unmount } = render(<NotificationSettings {...props()} quickReplySettings={quickReplySettings()} />);
+  fireEvent.click(screen.getByRole("button", { name: "About banner choices" }));
+  expect(screen.getByText(/text message banners have a Mark as read button/)).toHaveAttribute("id", "notification-banner-actions-note");
+  unmount();
+  render(<NotificationSettings {...props()} />);
+  fireEvent.click(screen.getByRole("button", { name: "About banner choices" }));
+  expect(document.getElementById("notification-banner-actions-note")).toBeNull();
+});
+
 it("opens the moved banner and app help", () => {
   render(<NotificationSettings {...props()} />);
   fireEvent.click(screen.getByRole("button", { name: "About banner choices" }));

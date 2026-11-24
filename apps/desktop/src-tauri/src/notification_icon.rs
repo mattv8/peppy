@@ -286,6 +286,9 @@ mod tests {
             source_name: Some("Calendar".into()),
             app_icon_png_base64: Some(encoded),
             one_time_code: None,
+            content_sequence: None,
+            dismissible: false,
+            mark_read_supported: false,
         };
         let full = NotificationPreferences::default();
         assert!(matches!(

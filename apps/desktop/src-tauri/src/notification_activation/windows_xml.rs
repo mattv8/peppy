@@ -64,6 +64,16 @@ pub(crate) fn toast_xml_with_icons(
     } else {
         String::new()
     };
+    let mark_read = if actions.mark_read {
+        action(
+            "Mark as read",
+            "mark-read",
+            "foreground",
+            icons.as_ref().map(|icons| icons.mark_read.as_ref()),
+        )
+    } else {
+        String::new()
+    };
     let reply = if actions.reply {
         format!(
             "<input id=\"reply\" type=\"text\" placeHolderContent=\"Type a reply\"/>{}",
@@ -78,11 +88,11 @@ pub(crate) fn toast_xml_with_icons(
     } else {
         String::new()
     };
-    let actions = if dismiss.is_empty() && copy.is_empty() && reveal.is_empty() && reply.is_empty()
-    {
+    let buttons = format!("{dismiss}{copy}{reveal}{mark_read}{reply}");
+    let actions = if buttons.is_empty() {
         String::new()
     } else {
-        format!("<actions>{dismiss}{copy}{reveal}{reply}</actions>")
+        format!("<actions>{buttons}</actions>")
     };
     format!(
         "<toast{attributes}><visual><binding template=\"ToastGeneric\">{icon}<text>{}</text><text>{}</text></binding></visual>{audio}{actions}</toast>",
@@ -96,6 +106,7 @@ pub(crate) struct ActionIconUris<'a> {
     pub send: std::borrow::Cow<'a, str>,
     pub copy: std::borrow::Cow<'a, str>,
     pub dismiss: std::borrow::Cow<'a, str>,
+    pub mark_read: std::borrow::Cow<'a, str>,
 }
 
 impl ActionIconUris<'_> {
@@ -105,6 +116,7 @@ impl ActionIconUris<'_> {
             self.send.as_ref(),
             self.copy.as_ref(),
             self.dismiss.as_ref(),
+            self.mark_read.as_ref(),
         ]
         .iter()
         .all(|uri| uri.starts_with("file:"))
@@ -283,6 +295,8 @@ mod tests {
                     copy: true,
                     reveal: false,
                     reply: true,
+                    mark_read: false,
+                    report_dismiss: false,
                 },
             );
             assert_eq!(xml.matches("<actions>").count(), 1);
@@ -304,6 +318,7 @@ mod tests {
             send: "file:///send.png".into(),
             copy: "file:///copy.png".into(),
             dismiss: "file:///dismiss.png".into(),
+            mark_read: "file:///mark-read.png".into(),
         };
         let xml = toast_xml_with_icons(
             "",
@@ -315,10 +330,12 @@ mod tests {
                 copy: true,
                 reveal: true,
                 reply: true,
+                mark_read: true,
+                report_dismiss: false,
             },
             Some(icons),
         );
-        for uri in ["show", "send", "copy", "dismiss"] {
+        for uri in ["show", "send", "copy", "dismiss", "mark-read"] {
             assert!(xml.contains(&format!("imageUri=\"file:///{uri}.png\"")));
         }
         let plain = toast_xml_with_icons(
@@ -332,14 +349,70 @@ mod tests {
                 ..ActionAvailability::default()
             },
             Some(ActionIconUris {
-                show: "not-a-file".into(),
+                show: "file:///show.png".into(),
                 send: "file:///send.png".into(),
                 copy: "file:///copy.png".into(),
                 dismiss: "file:///dismiss.png".into(),
+                mark_read: "not-a-file".into(),
             }),
         );
         assert!(!plain.contains("imageUri="));
         assert!(plain.contains("content=\"Show message\""));
+    }
+
+    #[test]
+    fn mark_read_follows_copy_and_show_and_precedes_the_reply_input() {
+        let position = |xml: &str, needle: &str| xml.find(needle).unwrap();
+        let with_reply = toast_xml(
+            "",
+            "",
+            None,
+            "",
+            NotificationPersistence { seconds: None },
+            ActionAvailability {
+                copy: true,
+                reply: true,
+                mark_read: true,
+                ..ActionAvailability::default()
+            },
+        );
+        assert_eq!(with_reply.matches("<actions>").count(), 1);
+        assert!(
+            position(&with_reply, "arguments=\"dismiss\"") < position(&with_reply, "copy-code")
+        );
+        assert!(position(&with_reply, "copy-code") < position(&with_reply, "mark-read"));
+        assert!(position(&with_reply, "mark-read") < position(&with_reply, "<input id=\"reply\""));
+        assert!(with_reply.contains(
+            "<action content=\"Mark as read\" arguments=\"mark-read\" activationType=\"foreground\"/>"
+        ));
+        let with_show = toast_xml(
+            "",
+            "",
+            None,
+            "",
+            NotificationPersistence { seconds: Some(5) },
+            ActionAvailability {
+                reveal: true,
+                mark_read: true,
+                ..ActionAvailability::default()
+            },
+        );
+        assert!(position(&with_show, "arguments=\"reveal\"") < position(&with_show, "mark-read"));
+        let alone = toast_xml(
+            "",
+            "",
+            None,
+            "",
+            NotificationPersistence { seconds: Some(5) },
+            ActionAvailability {
+                mark_read: true,
+                ..ActionAvailability::default()
+            },
+        );
+        assert_eq!(
+            alone,
+            "<toast duration=\"short\"><visual><binding template=\"ToastGeneric\"><text></text><text></text></binding></visual><actions><action content=\"Mark as read\" arguments=\"mark-read\" activationType=\"foreground\"/></actions></toast>"
+        );
     }
 
     #[test]

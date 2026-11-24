@@ -1,6 +1,6 @@
 //! Running-process notification activation. OS callbacks retain identifiers only.
 use crate::{error::BridgeResult, session::Session, AppState};
-use peppy_client_core::OneTimeCodeTarget;
+use peppy_client_core::{MessageId, NotificationTarget, OneTimeCodeTarget, SourceSequence};
 use peppy_desktop_api::{
     NotificationActivation, NotificationActivationDestination as Destination,
     NotificationActivationTarget,
@@ -35,6 +35,62 @@ pub(crate) enum PopupAction {
     Copy,
     Reveal,
     Reply(String),
+}
+
+/// What a popup's Mark as read acts on. The OS carries only the action id; targets stay here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub(crate) enum MarkReadTarget {
+    /// This message and every earlier unread message in its conversation.
+    Message { message_id: MessageId },
+    /// The mirrored notification, at the content version the banner showed.
+    Notification {
+        target: NotificationTarget,
+        content_sequence: SourceSequence,
+    },
+}
+
+/// A mirrored banner the user closed: dismissed on its phone only if still at this version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub(crate) struct DismissTarget {
+    pub target: NotificationTarget,
+    pub content_sequence: SourceSequence,
+}
+
+/// A popup action that changes vault state without navigating or showing a window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub(crate) enum PopupEffect {
+    Copy(OneTimeCodeTarget),
+    MarkRead(MarkReadTarget),
+    Dismiss(DismissTarget),
+}
+
+/// One native banner. Effect targets never reach the OS; only allowlisted action ids do.
+pub(crate) struct BannerPresentation {
+    pub destination: Destination,
+    pub title: String,
+    pub body: String,
+    pub icon: Option<crate::notification_icon::Icon>,
+    pub copy: Option<OneTimeCodeTarget>,
+    pub mark_read: Option<MarkReadTarget>,
+    pub dismiss: Option<DismissTarget>,
+}
+
+impl BannerPresentation {
+    /// A banner with no copy, mark-read or phone-dismiss effect.
+    pub(crate) fn plain(destination: Destination, title: String, body: String) -> Self {
+        Self {
+            destination,
+            title,
+            body,
+            icon: None,
+            copy: None,
+            mark_read: None,
+            dismiss: None,
+        }
+    }
 }
 
 /// Host-owned capability retained by the owner until terminal retirement.
@@ -126,27 +182,20 @@ pub fn install(app: &tauri::AppHandle) {
     }
 }
 
-pub fn post(
+pub(crate) fn post(
     app: &tauri::AppHandle,
     session: &Session,
-    destination: Destination,
-    title: String,
-    body: String,
-    icon: Option<crate::notification_icon::Icon>,
-    copy: Option<OneTimeCodeTarget>,
+    banner: BannerPresentation,
 ) -> Result<(), PostError> {
     post_with_activation(
         app,
         Some(NotificationActivation {
             request_id: uuid::Uuid::new_v4().simple().to_string(),
             session_generation: session.generation.clone(),
-            destination,
+            destination: banner.destination.clone(),
         }),
         session.cancel.clone(),
-        title,
-        body,
-        icon,
-        copy,
+        banner,
     )
 }
 
@@ -162,10 +211,7 @@ fn post_ordinary_test(app: &tauri::AppHandle, title: &str, body: &str) -> Result
         app,
         None,
         tokio_util::sync::CancellationToken::new(),
-        title.to_owned(),
-        body.to_owned(),
-        None,
-        None,
+        BannerPresentation::plain(Destination::Main, title.to_owned(), body.to_owned()),
     )
     .map_err(|_| ())
 }
@@ -174,11 +220,17 @@ fn post_with_activation(
     app: &tauri::AppHandle,
     activation: Option<NotificationActivation>,
     cancel: tokio_util::sync::CancellationToken,
-    title: String,
-    body: String,
-    icon: Option<crate::notification_icon::Icon>,
-    copy: Option<OneTimeCodeTarget>,
+    banner: BannerPresentation,
 ) -> Result<(), PostError> {
+    let BannerPresentation {
+        title,
+        body,
+        icon,
+        copy,
+        mark_read,
+        dismiss,
+        ..
+    } = banner;
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let state = app.state::<AppState>();
@@ -192,6 +244,8 @@ fn post_with_activation(
                 body,
                 icon,
                 copy,
+                mark_read,
+                dismiss,
                 popup_actions: None,
             });
             // OS completion can wake state listeners, and shutdown takes this
@@ -214,6 +268,8 @@ fn post_with_activation(
         let _ = (activation, copy);
         None
     };
+    // The fallback adapters have no mark-read or dismissal callbacks.
+    let _ = (mark_read, dismiss);
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = cancel;
     fallback::post(app, &title, &body, icon, fallback_copy).map_err(|_| PostError::Failed)
@@ -249,12 +305,70 @@ fn copy_from_popup_in(
     target: &OneTimeCodeTarget,
     write: impl FnOnce(&str) -> Result<(), ()>,
 ) {
-    let Some(session) =
-        session.filter(|session| current(Some(session), generation) && unlocked(state, session))
-    else {
+    let Some(session) = popup_session(state, session, generation) else {
         return;
     };
     let _ = crate::one_time_code::copy_and_mark_with(session, target, None, write);
+}
+
+/// The popup effect gate shared by Copy, Mark as read and phone dismissal: the posting
+/// generation must still be current, not cancelled or revoked, and the app unlocked.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn popup_session<'a>(
+    state: &AppState,
+    session: Option<&'a Session>,
+    generation: &str,
+) -> Option<&'a Session> {
+    session.filter(|session| current(Some(session), generation) && unlocked(state, session))
+}
+
+/// Runs a popup's Mark as read or phone dismissal. Like Copy, it holds the session guard
+/// through the core write so retirement cannot slip in between the check and the effect.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn state_effect_from_popup(app: &tauri::AppHandle, generation: &str, effect: &PopupEffect) {
+    let state = app.state::<AppState>();
+    let Ok(_operation) = crate::admit_update_operation(&state) else {
+        return;
+    };
+    let session = tauri::async_runtime::block_on(state.session.lock());
+    if let Some(session) = popup_session(&state, session.as_deref(), generation) {
+        if apply_state_effect(session, effect).is_err() {
+            eprintln!("peppy: notification popup action was not applied");
+        }
+    }
+}
+
+/// Applies Mark as read or phone dismissal to an admitted session. Copy has its own path.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+fn apply_state_effect(session: &Session, effect: &PopupEffect) -> BridgeResult<()> {
+    match effect {
+        PopupEffect::Copy(_) => Ok(()),
+        PopupEffect::MarkRead(MarkReadTarget::Message { message_id }) => {
+            session.mark_read_through(*message_id).map(|_| ())
+        }
+        PopupEffect::MarkRead(MarkReadTarget::Notification {
+            target,
+            content_sequence,
+        }) => {
+            session
+                .client
+                .request_notification_mark_read(target.clone(), *content_sequence)
+                .map_err(crate::error::core_error)?;
+            session.notify();
+            Ok(())
+        }
+        PopupEffect::Dismiss(DismissTarget {
+            target,
+            content_sequence,
+        }) => {
+            session
+                .client
+                .dismiss_notification_if_unchanged(target.clone(), *content_sequence)
+                .map_err(crate::error::core_error)?;
+            session.notify();
+            Ok(())
+        }
+    }
 }
 
 /// Owner-thread admission for an activation: its cancellation and session generation must
@@ -377,7 +491,7 @@ fn activate(
     activation: NotificationActivation,
     cancel: &tokio_util::sync::CancellationToken,
     sequence: u64,
-    copy: Option<OneTimeCodeTarget>,
+    effect: Option<PopupEffect>,
 ) {
     let state = app.state::<AppState>();
     // Lock order is session -> pending, also used by both IPC commands.
@@ -385,15 +499,18 @@ fn activate(
     if !activation_admitted(session.as_deref(), cancel, &activation.session_generation) {
         return;
     }
-    if let Some(target) = copy {
+    if let Some(effect) = effect {
         // Hand the clipboard and Client work to a blocking thread; the owner thread only
-        // checks generation and cancellation. A copy never publishes a navigation click.
+        // checks generation and cancellation. An effect never publishes a navigation click.
         drop(session);
         let app = app.clone();
         let generation = activation.session_generation;
-        drop(tauri::async_runtime::spawn_blocking(move || {
-            copy_from_popup(&app, &generation, &target)
-        }));
+        drop(tauri::async_runtime::spawn_blocking(
+            move || match &effect {
+                PopupEffect::Copy(target) => copy_from_popup(&app, &generation, target),
+                _ => state_effect_from_popup(&app, &generation, &effect),
+            },
+        ));
         return;
     }
     if !state
@@ -657,6 +774,57 @@ mod tests {
     }
 
     #[test]
+    fn popup_mark_read_applies_only_through_a_current_unlocked_session() {
+        use peppy_client_core::IncomingSms;
+        use std::sync::Arc;
+
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = crate::tests::open(&fixture, &fixture.binding, &[]);
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, crate::tests::PHRASE)
+            .unwrap();
+        let capture = |body: &str, provider: &str| {
+            session
+                .client
+                .capture_incoming(IncomingSms {
+                    conversation_id: None,
+                    sender_address: "+15555550402".into(),
+                    body: body.into(),
+                    provider_message_id: Some(provider.into()),
+                    imported: false,
+                })
+                .unwrap()
+        };
+        capture("earlier", "popup-mark-1");
+        let target = capture("banner", "popup-mark-2");
+        capture("later", "popup-mark-3");
+        let unread = || session.client.unread_count(target.conversation_id).unwrap();
+        let state = AppState::new(
+            fixture.dir.path().to_owned(),
+            Arc::new(crate::secure_store::MemoryStore::default()),
+            crate::tests::noop(),
+        );
+        let generation = session.generation.clone();
+
+        state.app_locked.store(true, Ordering::Release);
+        assert!(popup_session(&state, Some(&session), &generation).is_none());
+        state.app_locked.store(false, Ordering::Release);
+        assert!(popup_session(&state, Some(&session), "stale-generation").is_none());
+        assert_eq!(unread(), 3);
+
+        let current = popup_session(&state, Some(&session), &generation).unwrap();
+        apply_state_effect(
+            current,
+            &PopupEffect::MarkRead(MarkReadTarget::Message {
+                message_id: target.message_id,
+            }),
+        )
+        .unwrap();
+        assert_eq!(unread(), 1, "the later message stays unread");
+    }
+
+    #[test]
     fn notification_mapping_preserves_source_tuple_and_never_guesses_from_body() {
         let mut candidate = peppy_client_core::BannerCandidate {
             id: "banner".into(),
@@ -673,6 +841,9 @@ mod tests {
             source_name: None,
             app_icon_png_base64: None,
             one_time_code: None,
+            content_sequence: None,
+            dismissible: false,
+            mark_read_supported: false,
         };
         assert_eq!(
             destination(&candidate),

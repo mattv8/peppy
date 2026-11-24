@@ -20,14 +20,11 @@ use tauri::Emitter;
 
 type Signals = Arc<Mutex<HashMap<String, Signal>>>;
 const UN_ERROR_CODE_NOTIFICATIONS_NOT_ALLOWED: isize = 1;
-/// Registered once in `prepare`; posts opt in by category, and the action id is the only payload.
-const COPY_CATEGORY: &str = "peppy.one-time-code";
+// Registered once in `prepare`; posts opt in by category, and the action id is the only payload.
 const COPY_ACTION: &str = "copy-code";
 const REVEAL_ACTION: &str = "reveal";
 const REPLY_ACTION: &str = "reply";
-const REVEAL_CATEGORY: &str = "peppy.quick-reveal";
-const REPLY_CATEGORY: &str = "peppy.quick-reply";
-const COPY_REPLY_CATEGORY: &str = "peppy.quick-copy-reply";
+const MARK_READ_ACTION: &str = "mark-read";
 
 fn notification_content(
     title: &str,
@@ -109,6 +106,11 @@ define_class!(
                     signal.copy();
                 } else if response
                     .actionIdentifier()
+                    .isEqualToString(&NSString::from_str(MARK_READ_ACTION))
+                {
+                    signal.mark_read();
+                } else if response
+                    .actionIdentifier()
                     .isEqualToString(&NSString::from_str(REVEAL_ACTION))
                 {
                     signal.reveal();
@@ -127,7 +129,8 @@ define_class!(
                         .actionIdentifier()
                         .isEqualToString(UNNotificationDismissActionIdentifier)
                 } {
-                    signal.retire();
+                    // Reported only for categories with CustomDismissAction: the user closed it.
+                    signal.dismiss();
                 }
             }
             completion.call(());
@@ -164,58 +167,118 @@ pub fn prepare() -> Option<Signals> {
     Some(signals)
 }
 
-/// The Copy action is a background action (no foreground option), so it never brings Peppy forward.
+/// The action that shares a banner with Copy and Mark as read: none, Show message, or Reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    None,
+    Reveal,
+    Reply,
+}
+
+/// Every action combination a post can request. `None` with no report means no category.
+fn combinations() -> impl Iterator<Item = ActionAvailability> {
+    [false, true].into_iter().flat_map(|copy| {
+        [Phase::None, Phase::Reveal, Phase::Reply]
+            .into_iter()
+            .flat_map(move |phase| {
+                [false, true].into_iter().flat_map(move |mark_read| {
+                    [false, true]
+                        .into_iter()
+                        .map(move |report_dismiss| ActionAvailability {
+                            copy,
+                            reveal: phase == Phase::Reveal,
+                            reply: phase == Phase::Reply,
+                            mark_read,
+                            report_dismiss,
+                        })
+                })
+            })
+    })
+}
+
+fn phase(actions: ActionAvailability) -> Phase {
+    if actions.reveal {
+        Phase::Reveal
+    } else if actions.reply {
+        Phase::Reply
+    } else {
+        Phase::None
+    }
+}
+
+/// Copy, Mark as read and Show message are background actions (no foreground option), so they
+/// never bring Peppy forward. Categories that report dismissal let a closed mirrored banner
+/// clear the phone; message banners never request it.
 fn register_categories(center: &UNUserNotificationCenter) {
-    let copy_action = action(COPY_ACTION, "Copy code", "doc.on.doc");
-    let actions = NSArray::from_retained_slice(std::slice::from_ref(&copy_action));
     let intents: Retained<NSArray<NSString>> = NSArray::new();
-    let copy_category =
-        UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
-            &NSString::from_str(COPY_CATEGORY),
-            &actions,
-            &intents,
-            UNNotificationCategoryOptionNone,
-        );
-    let reveal = category(
-        REVEAL_CATEGORY,
-        vec![action(REVEAL_ACTION, "Show message", "chevron.down")],
-        &intents,
-    );
-    let reply = category(REPLY_CATEGORY, vec![reply_action().into_super()], &intents);
-    let copy_reply = category(
-        COPY_REPLY_CATEGORY,
-        vec![copy_action, reply_action().into_super()],
-        &intents,
-    );
-    center.setNotificationCategories(&NSSet::from_retained_slice(&[
-        copy_category,
-        reveal,
-        reply,
-        copy_reply,
-    ]));
+    let categories: Vec<_> = combinations()
+        .filter_map(|actions| {
+            let identifier = category_for(actions)?;
+            Some(category(
+                &identifier,
+                category_actions(actions),
+                &intents,
+                actions.report_dismiss,
+            ))
+        })
+        .collect();
+    center.setNotificationCategories(&NSSet::from_retained_slice(&categories));
+}
+
+/// Banner order: Copy code, then Show message or Reply, then Mark as read.
+fn category_actions(actions: ActionAvailability) -> Vec<Retained<UNNotificationAction>> {
+    let mut list = Vec::new();
+    if actions.copy {
+        list.push(action(COPY_ACTION, "Copy code", "doc.on.doc"));
+    }
+    match phase(actions) {
+        Phase::Reveal => list.push(action(REVEAL_ACTION, "Show message", "chevron.down")),
+        Phase::Reply => list.push(reply_action().into_super()),
+        Phase::None => {}
+    }
+    if actions.mark_read {
+        list.push(mark_read_action());
+    }
+    list
 }
 
 fn category(
     identifier: &str,
     actions: Vec<Retained<UNNotificationAction>>,
     intents: &NSArray<NSString>,
+    report_dismiss: bool,
 ) -> Retained<UNNotificationCategory> {
     let actions = NSArray::from_retained_slice(&actions);
     UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
         &NSString::from_str(identifier),
         &actions,
         intents,
-        UNNotificationCategoryOptionNone,
+        if report_dismiss {
+            UNNotificationCategoryOptions::CustomDismissAction
+        } else {
+            UNNotificationCategoryOptionNone
+        },
     )
 }
 
-fn category_for(actions: ActionAvailability) -> Option<&'static str> {
-    match (actions.copy, actions.reveal, actions.reply) {
-        (_, true, false) => Some(REVEAL_CATEGORY),
-        (true, false, true) => Some(COPY_REPLY_CATEGORY),
-        (false, false, true) => Some(REPLY_CATEGORY),
-        _ => None,
+/// One identifier per combination: copy, phase (n/v/r), mark read, dismissal report.
+fn category_for(actions: ActionAvailability) -> Option<String> {
+    let phase = phase(actions);
+    if !actions.copy && phase == Phase::None && !actions.mark_read && !actions.report_dismiss {
+        return None;
     }
+    let bit = |value: bool| if value { '1' } else { '0' };
+    let phase = match phase {
+        Phase::None => 'n',
+        Phase::Reveal => 'v',
+        Phase::Reply => 'r',
+    };
+    Some(format!(
+        "peppy.actions.{}{phase}{}{}",
+        bit(actions.copy),
+        bit(actions.mark_read),
+        bit(actions.report_dismiss)
+    ))
 }
 
 fn action(identifier: &str, title: &str, symbol: &str) -> Retained<UNNotificationAction> {
@@ -234,6 +297,29 @@ fn action(identifier: &str, title: &str, symbol: &str) -> Retained<UNNotificatio
             &identifier,
             &title,
             UNNotificationActionOptionNone,
+        )
+    }
+}
+
+/// Mark as read needs an unlocked Mac, like Reply: it changes what the vault shows as read.
+fn mark_read_action() -> Retained<UNNotificationAction> {
+    let identifier = NSString::from_str(MARK_READ_ACTION);
+    let title = NSString::from_str("Mark as read");
+    if macos12_or_later() {
+        let icon = UNNotificationActionIcon::iconWithSystemImageName(&NSString::from_str(
+            "checkmark.circle",
+        ));
+        UNNotificationAction::actionWithIdentifier_title_options_icon(
+            &identifier,
+            &title,
+            UNNotificationActionOptions::AuthenticationRequired,
+            Some(&icon),
+        )
+    } else {
+        UNNotificationAction::actionWithIdentifier_title_options(
+            &identifier,
+            &title,
+            UNNotificationActionOptions::AuthenticationRequired,
         )
     }
 }
@@ -334,9 +420,7 @@ impl Backend {
                 content_icon(icon).and_then(|icon| notification_icon::materialize(&self.app, icon));
             let content = notification_content(title, body, sound, icon.as_ref());
             if let Some(category) = category_for(actions) {
-                content.setCategoryIdentifier(&NSString::from_str(category));
-            } else if actions.copy {
-                content.setCategoryIdentifier(&NSString::from_str(COPY_CATEGORY));
+                content.setCategoryIdentifier(&NSString::from_str(&category));
             }
             // The original request identifies the callback generation. A reused
             // logical id alone cannot distinguish a delayed old response.
@@ -537,30 +621,63 @@ mod tests {
     }
 
     #[test]
-    fn notification_macos_enhanced_categories_match_action_phase_and_copy() {
+    fn notification_macos_categories_cover_every_action_combination_once() {
+        let identifiers: Vec<String> = combinations().filter_map(category_for).collect();
+        assert_eq!(identifiers.len(), 23);
+        let unique: std::collections::BTreeSet<_> = identifiers.iter().collect();
+        assert_eq!(unique.len(), identifiers.len());
+        assert_eq!(category_for(ActionAvailability::default()), None);
         assert_eq!(
-            category_for(ActionAvailability {
-                reveal: true,
-                ..Default::default()
-            }),
-            Some(REVEAL_CATEGORY)
+            category_for(ActionAvailability::from(true)).as_deref(),
+            Some("peppy.actions.1n00"),
+            "copy alone gets its own category"
         );
         assert_eq!(
             category_for(ActionAvailability {
-                reply: true,
+                report_dismiss: true,
                 ..Default::default()
-            }),
-            Some(REPLY_CATEGORY)
+            })
+            .as_deref(),
+            Some("peppy.actions.0n01"),
+            "a mirrored banner without actions still reports dismissal"
         );
+    }
+
+    #[test]
+    fn notification_macos_actions_keep_order_and_report_dismiss_only_when_asked() {
+        let identifiers = |actions| {
+            category_actions(actions)
+                .iter()
+                .map(|action| action.identifier().to_string())
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            category_for(ActionAvailability {
+            identifiers(ActionAvailability {
                 copy: true,
                 reply: true,
+                mark_read: true,
                 ..Default::default()
             }),
-            Some(COPY_REPLY_CATEGORY)
+            [COPY_ACTION, REPLY_ACTION, MARK_READ_ACTION]
         );
-        assert_eq!(category_for(ActionAvailability::from(true)), None);
+        assert_eq!(
+            identifiers(ActionAvailability {
+                reveal: true,
+                mark_read: true,
+                ..Default::default()
+            }),
+            [REVEAL_ACTION, MARK_READ_ACTION]
+        );
+        let intents: Retained<NSArray<NSString>> = NSArray::new();
+        for report_dismiss in [false, true] {
+            let category = category("peppy.test", Vec::new(), &intents, report_dismiss);
+            assert_eq!(
+                category
+                    .options()
+                    .contains(UNNotificationCategoryOptions::CustomDismissAction),
+                report_dismiss
+            );
+        }
     }
 
     #[test]
