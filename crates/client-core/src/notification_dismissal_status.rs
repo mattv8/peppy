@@ -53,7 +53,8 @@ pub(crate) fn apply_status(
         "INSERT INTO notification_dismissal_statuses(device_id,blocked_reason,observed_at_ms,key_epoch,producer_sequence) \
          VALUES(?,?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET \
          blocked_reason=excluded.blocked_reason,observed_at_ms=excluded.observed_at_ms, \
-         key_epoch=excluded.key_epoch,producer_sequence=excluded.producer_sequence \
+         key_epoch=excluded.key_epoch, \
+         producer_sequence=excluded.producer_sequence \
          WHERE excluded.key_epoch > notification_dismissal_statuses.key_epoch \
          OR (excluded.key_epoch = notification_dismissal_statuses.key_epoch \
          AND excluded.producer_sequence > notification_dismissal_statuses.producer_sequence)",
