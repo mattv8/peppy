@@ -122,10 +122,10 @@ fn go_record_with_reaction_facts_still_ingests_the_message() {
 }
 
 #[test]
+#[ignore = "requires the Go-exported fixture; run in the Android contract lane"]
 fn go_exported_receive_record_ingests_through_mobile_boundary() {
-    let Ok(path) = std::env::var("PEPPY_RCS_GO_RECEIVE_RECORD_PATH") else {
-        return;
-    };
+    let path = std::env::var("PEPPY_RCS_GO_RECEIVE_RECORD_PATH")
+        .expect("PEPPY_RCS_GO_RECEIVE_RECORD_PATH must be set to a valid fixture path");
     let record = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read Go receive record fixture {path:?}: {error}"));
     let projection: serde_json::Value = serde_json::from_str(&record)
@@ -153,10 +153,10 @@ fn go_exported_receive_record_ingests_through_mobile_boundary() {
 }
 
 #[test]
+#[ignore = "requires the Go-exported fixture; run in the Android contract lane"]
 fn go_exported_media_receive_records_ingest_through_mobile_boundary() {
-    let Ok(path) = std::env::var("PEPPY_RCS_GO_MEDIA_RECEIVE_RECORDS_PATH") else {
-        return;
-    };
+    let path = std::env::var("PEPPY_RCS_GO_MEDIA_RECEIVE_RECORDS_PATH")
+        .expect("PEPPY_RCS_GO_MEDIA_RECEIVE_RECORDS_PATH must be set to a valid fixture path");
     let records: Vec<serde_json::Value> = serde_json::from_slice(
         &std::fs::read(&path)
             .unwrap_or_else(|error| panic!("read Go media receive fixture {path:?}: {error}")),

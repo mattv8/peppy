@@ -271,6 +271,7 @@ env "${gate_env[@]}" GITHUB_STEP_SUMMARY="$summary" REUSE_REUSED=false REUSE_REA
 expect_output "$summary" 'Full validation (not verified)'
 
 echo 'CI script tests passed'
+bash "$SCRIPT_DIR/test-run-selected-tests.sh"
 bash "$SCRIPT_DIR/test-run-with-jvm-watchdog.sh"
 bash "$SCRIPT_DIR/test-install-apt-packages.sh"
 bash "$SCRIPT_DIR/test-hosted-production-handoff.sh"

@@ -133,7 +133,7 @@ Run the Rust-native verifier described below before Gradle if the packaged Rust 
 The native RCS contract job in `.github/workflows/test-android.yml` checks the Go-to-Rust boundary for groups as well as one-to-one chats. It runs these steps in order:
 
 - Go exports one-to-one observation and receive fixtures, plus group receive records (`TestNativeRcsExport`). The job fails if any export file is empty.
-- Rust ingests the group receive records into a live group (`go_exported_group_receive_records_ingest_into_a_live_group`).
+- Rust ingests the group receive records into a live group (`go_exported_group_receive_records_ingest_into_a_live_group`). The three `go_exported_*` Rust tests are `#[ignore]` by default; the job runs them with `--ignored`, and each fails when its fixture path variable (`PEPPY_RCS_GO_RECEIVE_RECORD_PATH`, `PEPPY_RCS_GO_MEDIA_RECEIVE_RECORDS_PATH`, `PEPPY_RCS_GO_GROUP_RECEIVE_RECORDS_PATH`) is unset.
 - Rust verifies and classifies the Go observations (`actual_go_observations_verify_classify_and_begin`), then Go checks the Rust commit fixture (`TestNativeRcsContractRustFixture`).
 - The live-ticket tests run one-to-one and group tickets against real Rust facts and commit. A group ticket whose roster changed must refuse before dispatch (`same_live_go_group_ticket_refuses_a_changed_roster_before_dispatch`).
 

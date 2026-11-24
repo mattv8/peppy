@@ -97,7 +97,7 @@ fail!('desktop-updater Rust cache must be restore-only') unless updater_cache['s
 updater_cargo_runs = updater.fetch('steps').map { |step| step['run'] }.compact.select { |run| run.include?('cargo ') }
 fail!('desktop-updater must run cargo check before cargo test covering the library, binaries and updates:: tests') unless updater_cargo_runs == [
   'cargo check --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml',
-  'cargo test --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --bins updates::'
+  'bash .github/scripts/run-selected-tests.sh prefix updates:: -- cargo test --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --bins updates::'
 ]
 fail!('desktop Rust cache must save only from production') unless desktop_cache['save-if'] == "${{ github.ref == 'refs/heads/production' }}"
 full_scope = scope_output(options[:scope], { 'FILTER_FORCE_FULL' => 'true' })

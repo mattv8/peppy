@@ -645,7 +645,8 @@ jobs:
           save-if: false
           cache-on-failure: true
       - run: cargo check --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml
-      - run: 'cargo test --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --bins updates::'
+      - run: 'bash .github/scripts/run-selected-tests.sh prefix updates:: -- cargo test --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --bins updates::'
+        shell: bash
 
   google-messages-go:
     needs: changes
