@@ -1576,18 +1576,18 @@ fn route_context(
     {
         return Ok(None);
     }
-    Ok(Some(crate::ValidatedCarrierRouteContext::new(
-        context.sim_id.clone(),
-        context.link_generation,
-        context.session_generation,
-        context.context_revision,
-        context.go_runtime_id,
-        context.go_run_generation,
-        context.go_stream_epoch,
-        context.identity_region,
-        context.canonicalizer_revision,
-        Some(route.own_identity),
-    )))
+    Ok(Some(crate::ValidatedCarrierRouteContext {
+        subscription_id: context.sim_id.clone(),
+        link_generation: context.link_generation,
+        session_generation: context.session_generation,
+        context_revision: context.context_revision,
+        go_runtime_id: context.go_runtime_id,
+        go_run_generation: context.go_run_generation,
+        go_stream_epoch: context.go_stream_epoch,
+        identity_region: context.identity_region,
+        canonicalizer_revision: context.canonicalizer_revision,
+        confirmed_own_identity: Some(route.own_identity),
+    }))
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]

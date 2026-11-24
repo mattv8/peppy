@@ -109,8 +109,6 @@ pub(crate) struct LedgerRow {
 pub(crate) struct PlannedAttachment {
     pub(crate) attachment_index: u32,
     pub(crate) attachment_id: AttachmentId,
-    /// The command's text on index 0 only (addendum A1); empty for every later index.
-    pub(crate) content: String,
     pub(crate) tmp_id: String,
 }
 
@@ -131,7 +129,7 @@ pub(crate) struct OutcomeReport {
     pub(crate) publish_current: bool,
 }
 
-/// Plans one ledger row per attachment in index order. Text rides on index 0 only.
+/// Plans one ledger row per attachment in index order.
 pub(crate) fn plan_expansion(
     text: &str,
     attachments: &[AttachmentId],
@@ -147,11 +145,6 @@ pub(crate) fn plan_expansion(
         plan.push(PlannedAttachment {
             attachment_index: u32::try_from(position).map_err(|_| Error::Database)?,
             attachment_id: *attachment_id,
-            content: if position == 0 {
-                text.to_owned()
-            } else {
-                String::new()
-            },
             tmp_id: uuid::Uuid::new_v4().to_string(),
         });
     }
@@ -1083,32 +1076,55 @@ pub(crate) fn receive_view(
     conn.query_row(
         "SELECT r.media_type,r.display_name,r.plaintext_bytes,r.state,r.attachment_id FROM rcs_media_receive r WHERE r.message_id=? AND r.attachment_index=? AND r.media_type IS NOT NULL AND r.display_name IS NOT NULL AND r.plaintext_bytes IS NOT NULL",
         params![message_id.to_string(), i64::from(attachment_index)],
-        |row| {
-            let state: String = row.get(3)?;
-            let state = match state.as_str() {
-                "downloading" => RcsMediaSyncState::Downloading,
-                "stored" => RcsMediaSyncState::Stored,
-                "too_large" => RcsMediaSyncState::TooLarge,
-                "quota_full" => RcsMediaSyncState::QuotaFull,
-                "failed" => RcsMediaSyncState::Failed,
-                "expired" => RcsMediaSyncState::Expired,
-                _ => return Err(rusqlite::Error::InvalidQuery),
-            };
-            let attachment_id = row.get::<_, Option<String>>(4)?
-                .map(|value| value.parse().map_err(|_| rusqlite::Error::InvalidQuery))
-                .transpose()?;
-            Ok(RcsMediaReceiveView {
-                message_id,
-                attachment_index,
-                placeholder_id: format!("{message_id}:{attachment_index}"),
-                media_type: row.get(0)?,
-                display_name: row.get(1)?,
-                plaintext_bytes: u64::try_from(row.get::<_, i64>(2)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
-                state,
-                attachment_id,
-            })
-        },
+        |row| decode_receive_view(row, message_id, attachment_index),
     ).optional().map_err(Into::into)
+}
+
+fn decode_receive_view(
+    row: &rusqlite::Row<'_>,
+    message_id: MessageId,
+    attachment_index: u32,
+) -> rusqlite::Result<RcsMediaReceiveView> {
+    let state: String = row.get(3)?;
+    let state = match state.as_str() {
+        "downloading" => RcsMediaSyncState::Downloading,
+        "stored" => RcsMediaSyncState::Stored,
+        "too_large" => RcsMediaSyncState::TooLarge,
+        "quota_full" => RcsMediaSyncState::QuotaFull,
+        "failed" => RcsMediaSyncState::Failed,
+        "expired" => RcsMediaSyncState::Expired,
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    let attachment_id = row
+        .get::<_, Option<String>>(4)?
+        .map(|value| value.parse().map_err(|_| rusqlite::Error::InvalidQuery))
+        .transpose()?;
+    Ok(RcsMediaReceiveView {
+        message_id,
+        attachment_index,
+        placeholder_id: format!("{message_id}:{attachment_index}"),
+        media_type: row.get(0)?,
+        display_name: row.get(1)?,
+        plaintext_bytes: u64::try_from(row.get::<_, i64>(2)?)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        state,
+        attachment_id,
+    })
+}
+
+pub(crate) fn receive_views(
+    conn: &Connection,
+    message_id: MessageId,
+) -> Result<Vec<RcsMediaReceiveView>, Error> {
+    let mut statement = conn.prepare(
+        "SELECT r.media_type,r.display_name,r.plaintext_bytes,r.state,r.attachment_id,r.attachment_index FROM rcs_media_receive r WHERE r.message_id=? AND r.attachment_index>=0 AND r.attachment_index<=? AND r.attachment_index=CAST(r.attachment_index AS INTEGER) AND r.media_type IS NOT NULL AND r.display_name IS NOT NULL AND r.plaintext_bytes IS NOT NULL ORDER BY r.attachment_index ASC",
+    )?;
+    let rows = statement.query_map(
+        params![message_id.to_string(), MAX_RCS_MEDIA_ATTACHMENTS as i64],
+        |row| decode_receive_view(row, message_id, row.get(5)?),
+    )?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 fn receive_metadata(
@@ -2319,7 +2335,7 @@ mod tests {
     }
 
     #[test]
-    fn expansion_puts_text_on_index_zero_only_and_gives_each_index_a_tmp_id() {
+    fn expansion_gives_each_index_a_tmp_id() {
         let attachments = [
             AttachmentId::new(),
             AttachmentId::new(),
@@ -2330,8 +2346,6 @@ mod tests {
             plan.iter().map(|p| p.attachment_index).collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
-        assert_eq!(plan[0].content, "caption");
-        assert!(plan[1..].iter().all(|p| p.content.is_empty()));
         let tmp_ids: std::collections::BTreeSet<_> = plan.iter().map(|p| &p.tmp_id).collect();
         assert_eq!(tmp_ids.len(), 3);
     }
@@ -2339,7 +2353,7 @@ mod tests {
     #[test]
     fn expansion_allows_media_only_and_refuses_empty_oversized_and_long_text() {
         let one = [AttachmentId::new()];
-        assert_eq!(plan_expansion("", &one).unwrap()[0].content, "");
+        assert!(plan_expansion("", &one).is_ok());
         assert!(plan_expansion("x", &[]).is_err());
         let too_many: Vec<_> = (0..=MAX_RCS_MEDIA_ATTACHMENTS)
             .map(|_| AttachmentId::new())

@@ -14734,7 +14734,7 @@ fn enqueue_without_sealing(
     // this same state (same revision/content) and each supersedes up to 128 frontier records,
     // so no older state is left unreferenced when this one later expires.
     if plan.is_some() {
-        while frontier_len(conn, identity.as_deref())? > 1 {
+        while frontier_has_multiple(conn, identity.as_deref())? {
             let checkpoint = metadata(true)?;
             let (checkpoint_id, checkpoint_sequence) = insert_outbox(
                 conn,
@@ -15078,6 +15078,17 @@ fn frontier_len(conn: &Connection, identity: Option<&str>) -> Result<i64, Error>
     };
     Ok(conn.query_row(
         "SELECT COUNT(*) FROM compaction_frontier WHERE identity=?",
+        [identity],
+        |r| r.get(0),
+    )?)
+}
+
+fn frontier_has_multiple(conn: &Connection, identity: Option<&str>) -> Result<bool, Error> {
+    let Some(identity) = identity else {
+        return Ok(false);
+    };
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM compaction_frontier WHERE identity=? LIMIT 1 OFFSET 1)",
         [identity],
         |r| r.get(0),
     )?)
@@ -16655,13 +16666,15 @@ fn rcs_media_route_eligible(
     expected_member_revision: Option<u64>,
 ) -> Result<bool, Error> {
     if rcs_mapping::has_live_mapping(conn, message.record.conversation_id)? {
-        return require_exact_rcs_recipient(
+        if require_exact_rcs_recipient(
             message,
             &rcs_mapping::get(conn, message.record.conversation_id)?.ok_or(Error::Database)?,
         )
-        .is_ok()
-        .then_some(true)
-        .ok_or(Error::InvalidRequest("RCS recipient is not proven"));
+        .is_err()
+        {
+            return Err(Error::InvalidRequest("RCS recipient is not proven"));
+        }
+        return Ok(true);
     }
     let Some(group) = rcs_group::group_mapping(conn, message.record.conversation_id)? else {
         return Ok(false);
@@ -25048,5 +25061,15 @@ mod snapshot_query_plan_tests {
                 "{name} scans snapshot_records: {steps:?}"
             );
         }
+    }
+}
+
+impl Client {
+    pub fn rcs_media_receive_views(
+        &self,
+        message_id: MessageId,
+    ) -> Result<Vec<RcsMediaReceiveView>, Error> {
+        let store = self.lock()?;
+        rcs_media::receive_views(&store.conn, message_id)
     }
 }
