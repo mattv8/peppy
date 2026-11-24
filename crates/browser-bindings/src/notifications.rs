@@ -4,8 +4,7 @@ use peppy_client_core::NotificationTarget;
 pub(super) fn handles(command: &str) -> bool {
     matches!(
         command,
-        "dismiss_notification"
-            | "dismiss_all_notifications"
+        "dismiss_notifications"
             | "set_app_muted"
             | "mark_notifications_seen"
             | "set_notification_preferences"
@@ -23,18 +22,18 @@ impl BrowserCore {
         args: Value,
     ) -> Result<Value, Failure> {
         match command {
-            "dismiss_notification" => {
+            "dismiss_notifications" => {
                 #[derive(Deserialize)]
                 struct Input {
-                    target: NotificationTarget,
+                    targets: Vec<NotificationTarget>,
                 }
                 let input: Input = serde_json::from_value(args).map_err(|_| invalid())?;
-                self.client()?
-                    .dismiss_notification(input.target)
-                    .map_err(core)?;
-            }
-            "dismiss_all_notifications" => {
-                self.client()?.dismiss_all_notifications().map_err(core)?;
+                return serde_json::to_value(
+                    self.client()?
+                        .dismiss_notifications(input.targets)
+                        .map_err(core)?,
+                )
+                .map_err(|_| invalid());
             }
             "set_app_muted" => {
                 #[derive(Deserialize)]
@@ -192,7 +191,6 @@ mod tests {
     fn notification_actions_use_core_lifetime_and_dismissibility() {
         let (_directory, mut core) = fixture();
         let first = capture(&core, "first", true);
-        let permanent = capture(&core, "permanent", false);
         call(
             &mut core,
             "mark_notifications_seen",
@@ -207,38 +205,69 @@ mod tests {
                 .unwrap()
                 .seen
         );
-        call(
+    }
+
+    #[test]
+    fn dismiss_notifications_reports_outcomes() {
+        let (_directory, mut core) = fixture();
+        let first = capture(&core, "first", true);
+        let permanent = capture(&core, "permanent", false);
+
+        let results = call(
             &mut core,
-            "dismiss_notification",
-            json!({"target":first.clone()}),
+            "dismiss_notifications",
+            json!({"targets":[first.clone(), permanent.clone(), first.clone()]}),
+        );
+        assert_eq!(
+            results,
+            json!([
+                {"target": first, "outcome": "recorded"},
+                {"target": permanent, "outcome": "notDismissible"},
+                {"target": first, "outcome": "alreadyRecorded"},
+            ])
         );
         let outbox = core.client().unwrap().pending_outbox().unwrap().len();
-        call(&mut core, "dismiss_notification", json!({"target":first}));
+
+        call(
+            &mut core,
+            "dismiss_notifications",
+            json!({"targets":[first]}),
+        );
         assert_eq!(
             core.client().unwrap().pending_outbox().unwrap().len(),
             outbox
         );
-        call(&mut core, "dismiss_all_notifications", json!({}));
-        assert!(
-            core.client()
-                .unwrap()
-                .notification_snapshot()
-                .unwrap()
-                .notifications
-                .iter()
-                .any(|entry| entry.target == permanent && !entry.dismissal_pending)
-        );
     }
 
     #[test]
-    fn dismiss_all_uses_the_core_hundred_notification_cap() {
+    fn dismiss_notifications_caps_one_hundred_targets() {
         let (_directory, mut core) = fixture();
-        for index in 0..101 {
-            capture(&core, &format!("notice-{index}"), true);
-        }
+        let targets: Vec<NotificationTarget> = (0..101)
+            .map(|index| capture(&core, &format!("notice-{index}"), true))
+            .collect();
 
-        call(&mut core, "dismiss_all_notifications", json!({}));
+        let rejected = core.dispatch(
+            &json!({"command":"dismiss_notifications","args":{"targets":targets}}).to_string(),
+        );
+        let rejected: Value = serde_json::from_str(&rejected).unwrap();
+        assert_eq!(rejected["ok"], false, "{rejected}");
+        let pending = core
+            .client()
+            .unwrap()
+            .notification_snapshot()
+            .unwrap()
+            .notifications
+            .into_iter()
+            .filter(|notification| notification.dismissal_pending)
+            .count();
+        assert_eq!(pending, 0);
 
+        let accepted = call(
+            &mut core,
+            "dismiss_notifications",
+            json!({"targets":&targets[..100]}),
+        );
+        assert_eq!(accepted.as_array().unwrap().len(), 100);
         let pending = core
             .client()
             .unwrap()

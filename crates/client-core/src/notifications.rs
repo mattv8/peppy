@@ -401,45 +401,111 @@ impl Client {
         dismiss_in_tx(&tx, &ctx, &target)?;
         Ok(tx.commit()?)
     }
-    pub fn dismiss_all_notifications(&self) -> Result<(), Error> {
+    /// Records up to `MAX_NOTIFICATION_DISMISS_TARGETS` dismissals in one transaction and reports
+    /// each target's outcome in input order. Nothing is recorded when any target is malformed.
+    pub fn dismiss_notifications(
+        &self,
+        targets: Vec<NotificationTarget>,
+    ) -> Result<Vec<NotificationDismissResult>, Error> {
+        if targets.len() > MAX_NOTIFICATION_DISMISS_TARGETS {
+            return Err(Error::InvalidRequest("too many notification targets"));
+        }
+        if targets.iter().any(|target| !valid_target(target)) {
+            return Err(Error::InvalidRequest("notification target"));
+        }
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut g = self.lock()?;
         let (conn, ctx) = g.parts();
         if !unlocked(&ctx) {
             return Err(Error::KeysUnavailable);
         }
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let targets = tx.prepare("SELECT n.source_device_id,n.notification_key,n.lifetime FROM notifications n WHERE n.removed=0 AND n.dismissible=1 AND NOT EXISTS(SELECT 1 FROM notification_dismissals d WHERE d.source_device_id=n.source_device_id AND d.notification_key=n.notification_key AND d.lifetime=n.lifetime) AND NOT EXISTS(SELECT 1 FROM app_filters f WHERE f.source_device_id=n.source_device_id AND f.package_name=n.package_name AND f.muted=1) ORDER BY n.posted_at DESC,n.source_device_id,n.notification_key,n.lifetime LIMIT 100")?.query_map([], |r| Ok(NotificationTarget { source_device_id: r.get(0)?, notification_key: r.get(1)?, lifetime: r.get(2)? }))?.collect::<Result<Vec<_>, _>>()?;
-        for target in &targets {
-            dismiss_in_tx(&tx, &ctx, target)?;
+        let mut results = Vec::with_capacity(targets.len());
+        for target in targets {
+            let outcome = record_dismissal(&tx, &ctx, &target, true)?;
+            results.push(NotificationDismissResult { target, outcome });
         }
-        Ok(tx.commit()?)
+        seal_all_pending(&tx, &ctx)?;
+        tx.commit()?;
+        Ok(results)
     }
 }
 
+/// Classifies one dismissal in precedence order and records it when it is new. The caller seals.
+fn record_dismissal(
+    c: &Connection,
+    ctx: &Ctx<'_>,
+    target: &NotificationTarget,
+    check_mute: bool,
+) -> Result<NotificationDismissOutcome, Error> {
+    let outcome = dismissal_outcome(c, target, check_mute)?;
+    if outcome == NotificationDismissOutcome::Recorded {
+        enqueue_without_sealing(
+            c,
+            ctx,
+            EnvelopePurpose::Event,
+            None,
+            None,
+            &PrivatePayload::NotificationDismiss {
+                target: target.clone(),
+            },
+        )?;
+        apply_dismiss(c, target, false, ctx.active_epoch.unwrap())?;
+    }
+    Ok(outcome)
+}
+
+fn dismissal_outcome(
+    c: &Connection,
+    target: &NotificationTarget,
+    check_mute: bool,
+) -> Result<NotificationDismissOutcome, Error> {
+    // A stale UI action cannot target a repost, so a missing live row is `Gone`, even when muted.
+    let state: Option<(bool, bool)> = c
+        .query_row(
+            "SELECT n.dismissible,EXISTS(SELECT 1 FROM app_filters f WHERE f.source_device_id=n.source_device_id AND f.package_name=n.package_name AND f.muted=1) FROM notifications n WHERE n.source_device_id=? AND n.notification_key=? AND n.lifetime=? AND n.removed=0",
+            params![target.source_device_id, target.notification_key, target.lifetime],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((dismissible, muted)) = state else {
+        return Ok(NotificationDismissOutcome::Gone);
+    };
+    if check_mute && muted {
+        Ok(NotificationDismissOutcome::Muted)
+    } else if !dismissible {
+        Ok(NotificationDismissOutcome::NotDismissible)
+    } else if has_dismissal(c, target)? {
+        Ok(NotificationDismissOutcome::AlreadyRecorded)
+    } else {
+        Ok(NotificationDismissOutcome::Recorded)
+    }
+}
+
+/// Single-target dismissal: refuses a non-dismissible row and treats stale or repeated targets as
+/// success. It does not consult app mute state.
 fn dismiss_in_tx(c: &Connection, ctx: &Ctx<'_>, target: &NotificationTarget) -> Result<(), Error> {
-    let clearable: Option<bool> = c.query_row(
-            "SELECT dismissible FROM notifications WHERE source_device_id=? AND notification_key=? AND lifetime=? AND removed=0",
-            params![target.source_device_id,target.notification_key,target.lifetime], |r| r.get(0),
-        ).optional()?;
-    match clearable {
-        Some(false) => return Err(Error::InvalidRequest("notification cannot be dismissed")),
-        None => return Ok(()), // stale UI action cannot target a repost
-        Some(true) => {}
+    match record_dismissal(c, ctx, target, false)? {
+        NotificationDismissOutcome::NotDismissible => {
+            Err(Error::InvalidRequest("notification cannot be dismissed"))
+        }
+        NotificationDismissOutcome::Recorded => {
+            seal_pending(c, ctx, MAX_SEAL_BATCH)?;
+            Ok(())
+        }
+        NotificationDismissOutcome::AlreadyRecorded
+        | NotificationDismissOutcome::Gone
+        | NotificationDismissOutcome::Muted => Ok(()),
     }
-    if has_dismissal(c, target)? {
-        return Ok(());
-    }
-    enqueue(
-        c,
-        ctx,
-        EnvelopePurpose::Event,
-        None,
-        None,
-        &PrivatePayload::NotificationDismiss {
-            target: target.clone(),
-        },
-    )?;
-    apply_dismiss(c, target, false, ctx.active_epoch.unwrap())
+}
+
+/// Seals in `MAX_SEAL_BATCH` steps until a step seals fewer rows, so this call's dismissals are
+/// sealed even when older unsealed rows are ordered ahead of them.
+fn seal_all_pending(c: &Connection, ctx: &Ctx<'_>) -> Result<(), Error> {
+    while seal_pending(c, ctx, MAX_SEAL_BATCH)? == MAX_SEAL_BATCH {}
+    Ok(())
 }
 
 impl Client {

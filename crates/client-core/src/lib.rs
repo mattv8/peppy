@@ -885,6 +885,22 @@ pub struct NotificationTarget {
     pub notification_key: String,
     pub lifetime: String,
 }
+pub const MAX_NOTIFICATION_DISMISS_TARGETS: usize = 100;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NotificationDismissOutcome {
+    Recorded,
+    AlreadyRecorded,
+    NotDismissible,
+    Gone,
+    Muted,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationDismissResult {
+    pub target: NotificationTarget,
+    pub outcome: NotificationDismissOutcome,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationCapture {

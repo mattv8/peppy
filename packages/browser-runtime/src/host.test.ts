@@ -1299,6 +1299,22 @@ describe("browser host RPC", () => {
     ]);
   });
 
+  it("routes batch notification dismissal through the checkpointed mutation allowlist", async () => {
+    const session = new FakeSession();
+    const targets = [{ sourceDeviceId: "phone-1", notificationKey: "key-1", lifetime: "lifetime-1" }];
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "dismiss_notifications", args: { targets } }))
+      .resolves.toMatchObject({ ok: true });
+    await expect(dispatchBrowserRpc(session, { id: 2, command: "dismiss_notification", args: { target: targets[0] } }))
+      .resolves.toMatchObject({ ok: false });
+    await expect(dispatchBrowserRpc(session, { id: 3, command: "dismiss_all_notifications", args: {} }))
+      .resolves.toMatchObject({ ok: false });
+
+    expect(session.calls).toEqual([
+      { command: "dismiss_notifications", args: { targets }, mutation: true },
+    ]);
+  });
+
   it("rejects malformed reaction arguments without touching the session", async () => {
     const session = new FakeSession();
 
@@ -2102,6 +2118,17 @@ describe("browser host RPC", () => {
       id: 1,
       ok: false,
       error: { code: "draft-moved", message: "Browser operation failed.", conversationId: "conversation-2", currentRevision: "2", draftId: "draft-2" },
+    });
+  });
+
+  it("keeps the retryable update-in-progress code for notification dismissals", async () => {
+    const session = new FakeSession();
+    session.mutate = async () => { throw new CoreRejectedError("update-in-progress"); };
+    const targets = [{ sourceDeviceId: "phone-1", notificationKey: "key-1", lifetime: "lifetime-1" }];
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "dismiss_notifications", args: { targets } })).resolves.toEqual({
+      id: 1,
+      ok: false,
+      error: { code: "update-in-progress", message: "Browser operation failed." },
     });
   });
 

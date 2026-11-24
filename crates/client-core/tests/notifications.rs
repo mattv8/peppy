@@ -312,15 +312,26 @@ fn snapshots_use_phone_time_and_deterministic_identity_ties() {
     );
 }
 
+fn first_target(client: &Client) -> NotificationTarget {
+    client
+        .notification_snapshot()
+        .unwrap()
+        .notifications
+        .first()
+        .unwrap()
+        .target
+        .clone()
+}
+
 #[test]
-fn bulk_dismiss_excludes_muted_non_dismissible_and_pending_rows() {
+fn bulk_dismiss_reports_each_target_outcome() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
-    let phone_cfg = config(&dir, "bulk-phone", &vault);
-    let desktop = unlocked(&config(&dir, "bulk-desktop", &vault), &vault);
+    let phone_cfg = config(&dir, "outcome-phone", &vault);
+    let desktop = unlocked(&config(&dir, "outcome-desktop", &vault), &vault);
     let phone = unlocked(&phone_cfg, &vault);
     let mut server = Server::default();
-    for key in ["eligible", "fixed", "muted"] {
+    for key in ["eligible", "fixed", "muted", "dismissed"] {
         let mut item = capture(key, key, key);
         if key == "fixed" {
             item.dismissible = false;
@@ -332,6 +343,18 @@ fn bulk_dismiss_excludes_muted_non_dismissible_and_pending_rows() {
     }
     server.upload(&phone);
     server.sync(&desktop);
+    let snapshot = desktop.notification_snapshot().unwrap();
+    let target_of = |key: &str| {
+        snapshot
+            .notifications
+            .iter()
+            .find(|item| item.target.notification_key == key)
+            .unwrap()
+            .target
+            .clone()
+    };
+    // Read before muting: the snapshot omits muted apps.
+    let muted = target_of("muted");
     desktop
         .set_app_muted(
             &phone_cfg.device_id.to_string(),
@@ -340,93 +363,219 @@ fn bulk_dismiss_excludes_muted_non_dismissible_and_pending_rows() {
             true,
         )
         .unwrap();
-    desktop.dismiss_all_notifications().unwrap();
+    desktop
+        .dismiss_notification(target_of("dismissed"))
+        .unwrap();
+    let missing = NotificationTarget {
+        notification_key: "missing".into(),
+        ..target_of("eligible")
+    };
+    let eligible = target_of("eligible");
+    let input = vec![
+        eligible.clone(),
+        target_of("fixed"),
+        muted.clone(),
+        target_of("dismissed"),
+        missing,
+        eligible,
+    ];
+    let outcomes = [
+        NotificationDismissOutcome::Recorded,
+        NotificationDismissOutcome::NotDismissible,
+        NotificationDismissOutcome::Muted,
+        NotificationDismissOutcome::AlreadyRecorded,
+        NotificationDismissOutcome::Gone,
+        NotificationDismissOutcome::AlreadyRecorded,
+    ];
+    let results = desktop.dismiss_notifications(input.clone()).unwrap();
+    assert_eq!(
+        results,
+        input
+            .into_iter()
+            .zip(outcomes)
+            .map(|(target, outcome)| NotificationDismissResult { target, outcome })
+            .collect::<Vec<_>>()
+    );
+    let snapshot = desktop.notification_snapshot().unwrap();
     assert!(
-        desktop
-            .notification_snapshot()
-            .unwrap()
+        snapshot
+            .notifications
+            .iter()
+            .any(|item| item.target.notification_key == "eligible" && item.dismissal_pending)
+    );
+    assert!(
+        snapshot
             .notifications
             .iter()
             .any(|item| item.target.notification_key == "fixed" && !item.dismissal_pending)
     );
     assert!(
         desktop
-            .notification_snapshot()
+            .dismiss_notifications(Vec::new())
             .unwrap()
-            .notifications
-            .iter()
-            .any(|item| item.target.notification_key == "eligible" && item.dismissal_pending)
-    );
-    desktop
-        .set_app_muted(
-            &phone_cfg.device_id.to_string(),
-            "com.example.muted",
-            "Mail",
-            false,
-        )
-        .unwrap();
-    assert!(
-        desktop
-            .notification_snapshot()
-            .unwrap()
-            .notifications
-            .iter()
-            .any(|item| item.target.notification_key == "muted" && !item.dismissal_pending)
+            .is_empty()
     );
 }
 
 #[test]
-fn bulk_dismiss_skips_pending_and_caps_the_newest_hundred() {
+fn bulk_dismiss_rejects_more_than_one_hundred_targets() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
-    let cfg = config(&dir, "bulk-cap", &vault);
+    let cfg = config(&dir, "bulk-limit", &vault);
     let client = unlocked(&cfg, &vault);
-    for index in 0..102 {
-        let mut item = capture(&format!("key-{index:03}"), "instance", "body");
-        item.posted_at = index;
-        client.capture_notification(item).unwrap();
+    client
+        .capture_notification(capture("eligible", "instance", "body"))
+        .unwrap();
+    let target = first_target(&client);
+    let too_many = vec![target.clone(); MAX_NOTIFICATION_DISMISS_TARGETS + 1];
+    assert!(matches!(
+        client.dismiss_notifications(too_many),
+        Err(Error::InvalidRequest("too many notification targets"))
+    ));
+    assert!(
+        client
+            .notification_snapshot()
+            .unwrap()
+            .notifications
+            .iter()
+            .all(|item| !item.dismissal_pending)
+    );
+    let at_limit = vec![target; MAX_NOTIFICATION_DISMISS_TARGETS];
+    assert_eq!(
+        client.dismiss_notifications(at_limit).unwrap().len(),
+        MAX_NOTIFICATION_DISMISS_TARGETS
+    );
+}
+
+#[test]
+fn bulk_dismiss_rejects_malformed_targets_without_recording_any() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "bulk-malformed", &vault);
+    let client = unlocked(&cfg, &vault);
+    client
+        .capture_notification(capture("eligible", "instance", "body"))
+        .unwrap();
+    let valid = first_target(&client);
+    let malformed = [
+        NotificationTarget {
+            source_device_id: "not-a-device".into(),
+            ..valid.clone()
+        },
+        NotificationTarget {
+            notification_key: String::new(),
+            ..valid.clone()
+        },
+        NotificationTarget {
+            lifetime: "not-a-lifetime".into(),
+            ..valid.clone()
+        },
+    ];
+    for bad in malformed {
+        assert!(matches!(
+            client.dismiss_notifications(vec![valid.clone(), bad]),
+            Err(Error::InvalidRequest("notification target"))
+        ));
     }
-    let oldest = client
+    assert!(
+        client
+            .notification_snapshot()
+            .unwrap()
+            .notifications
+            .iter()
+            .all(|item| !item.dismissal_pending)
+    );
+}
+
+#[test]
+fn bulk_dismiss_requires_unlocked_keys() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "bulk-locked", &vault);
+    let client = unlocked(&cfg, &vault);
+    client
+        .capture_notification(capture("eligible", "instance", "body"))
+        .unwrap();
+    let target = first_target(&client);
+    drop(client);
+    assert!(matches!(
+        open(&cfg).dismiss_notifications(vec![target]),
+        Err(Error::KeysUnavailable)
+    ));
+}
+
+#[test]
+fn bulk_dismiss_seals_every_recorded_envelope() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "bulk-seal", &vault);
+    let client = unlocked(&cfg, &vault);
+    for index in 0..100 {
+        client
+            .capture_notification(capture(&format!("key-{index:03}"), "instance", "body"))
+            .unwrap();
+    }
+    let targets: Vec<_> = client
         .notification_snapshot()
         .unwrap()
         .notifications
-        .pop()
-        .unwrap();
-    client.dismiss_notification(oldest.target).unwrap();
-    client.dismiss_all_notifications().unwrap();
-    let snapshot = client.notification_snapshot().unwrap();
-    let pending: std::collections::BTreeSet<_> = snapshot
-        .notifications
-        .iter()
-        .filter(|item| item.dismissal_pending)
-        .map(|item| item.target.notification_key.as_str())
+        .into_iter()
+        .map(|item| item.target)
         .collect();
-    let expected: std::collections::BTreeSet<_> = (0..=101)
-        .filter(|index| *index != 1)
-        .map(|index| format!("key-{index:03}"))
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        pending,
-        expected.iter().map(String::as_str).collect(),
-        "the previous pending oldest row remains, then bulk selects keys 002 through 101"
-    );
-    assert!(
-        snapshot
-            .notifications
-            .iter()
-            .any(|item| { item.target.notification_key == "key-000" && item.dismissal_pending })
-    );
-    assert!(
-        snapshot
-            .notifications
-            .iter()
-            .any(|item| { item.target.notification_key == "key-001" && !item.dismissal_pending })
-    );
     drop(client);
-    assert!(matches!(
-        open(&cfg).dismiss_all_notifications(),
-        Err(Error::KeysUnavailable)
-    ));
+    // A locked SMS capture leaves a sealing backlog that is ordered ahead of the dismissals.
+    let locked = open(&cfg);
+    for index in 0..(2 * MAX_SEAL_BATCH + 10) {
+        locked
+            .capture_incoming(incoming(&format!("locked {index}"), &format!("p{index}")))
+            .unwrap();
+    }
+    drop(locked);
+    let client = unlocked(&cfg, &vault);
+    let results = client.dismiss_notifications(targets).unwrap();
+    assert_eq!(results.len(), 100);
+    assert!(
+        results
+            .iter()
+            .all(|result| result.outcome == NotificationDismissOutcome::Recorded)
+    );
+    assert_eq!(
+        client.seal_pending_batch(MAX_SEAL_BATCH).unwrap(),
+        0,
+        "every recorded dismissal must already be sealed"
+    );
+}
+
+#[test]
+fn bulk_dismiss_is_idempotent_for_repeated_targets() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "bulk-idempotent", &vault);
+    let client = unlocked(&cfg, &vault);
+    client
+        .capture_notification(capture("eligible", "instance", "body"))
+        .unwrap();
+    let target = first_target(&client);
+    let first = client
+        .dismiss_notifications(vec![target.clone(), target.clone()])
+        .unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|result| result.outcome)
+            .collect::<Vec<_>>(),
+        vec![
+            NotificationDismissOutcome::Recorded,
+            NotificationDismissOutcome::AlreadyRecorded,
+        ]
+    );
+    let outbox_after_first = client.pending_outbox().unwrap().len();
+    let second = client.dismiss_notifications(vec![target]).unwrap();
+    assert_eq!(
+        second[0].outcome,
+        NotificationDismissOutcome::AlreadyRecorded
+    );
+    assert_eq!(client.pending_outbox().unwrap().len(), outbox_after_first);
 }
 
 #[test]
