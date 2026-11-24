@@ -357,6 +357,85 @@ async fn wait_for_database_lock(pool: &PgPool) {
 }
 
 #[tokio::test]
+async fn authorization_rejects_redirect_near_misses_and_pkce_methods() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app().await;
+    let client_id = register(app.clone()).await;
+    let verifier = "a-valid-pkce-verifier-that-is-long-enough-to-satisfy-rfc7636";
+    for redirect in [
+        "https://client.example/callback/",
+        "https://client.example:444/callback",
+        "HTTPS://client.example/callback",
+        "https://CLIENT.example/callback",
+        "https://client.example/callback/extra",
+        "https://client.example/callback?extra=1",
+        "http://client.example/callback",
+    ] {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query
+            .append_pair("response_type", "code")
+            .append_pair("client_id", &client_id)
+            .append_pair("redirect_uri", redirect)
+            .append_pair("state", "x")
+            .append_pair("scope", "conversations:read")
+            .append_pair("resource", "http://localhost:3000/mcp")
+            .append_pair("code_challenge", &challenge(verifier))
+            .append_pair("code_challenge_method", "S256");
+        let response = request(
+            app.clone(),
+            Method::GET,
+            &format!("/oauth/authorize?{}", query.finish()),
+            Body::empty(),
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{redirect}");
+        assert_eq!(
+            json(response).await,
+            json!({"code": if redirect.starts_with("http://") { "invalid_redirect_uri" } else { "invalid_authorization_request" }}),
+            "{redirect}"
+        );
+    }
+    for method in [Some("plain"), None, Some("unsupported")] {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query
+            .append_pair("response_type", "code")
+            .append_pair("client_id", &client_id)
+            .append_pair("redirect_uri", "https://client.example/callback")
+            .append_pair("state", "x")
+            .append_pair("scope", "conversations:read")
+            .append_pair("resource", "http://localhost:3000/mcp")
+            .append_pair("code_challenge", &challenge(verifier));
+        if let Some(method) = method {
+            query.append_pair("code_challenge_method", method);
+        }
+        let response = request(
+            app.clone(),
+            Method::GET,
+            &format!("/oauth/authorize?{}", query.finish()),
+            Body::empty(),
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{method:?}");
+        if method.is_some() {
+            assert_eq!(
+                json(response).await,
+                json!({"code":"invalid_authorization_request"})
+            );
+        } else {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                &body[..],
+                b"Failed to deserialize query string: missing field `code_challenge_method`"
+            );
+        }
+    }
+    drop(app);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn oauth_http_lifecycle_enforces_pkce_owner_scope_rotation_and_revocation() {
     let fixture = Fixture::new().await;
     let app = fixture.app().await;

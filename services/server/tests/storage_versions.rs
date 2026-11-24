@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use aws_credential_types::Credentials;
 use aws_sigv4::{
@@ -10,7 +10,7 @@ use aws_sigv4::{
 };
 use peppy_server::{
     config::{Config, S3Config},
-    storage::Storage,
+    storage::{Storage, StorageError, StorageUnavailableReason},
 };
 use reqwest::{
     Client, Method, Response,
@@ -18,6 +18,32 @@ use reqwest::{
 };
 use url::Url;
 use uuid::Uuid;
+
+#[tokio::test]
+async fn truncated_version_listing_root_is_an_empty_page() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new().fallback(|| async { "<ListVersionsResult>" });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = S3Config {
+        endpoint: Url::parse(&format!("http://{address}")).unwrap(),
+        bucket: "test-bucket".into(),
+        access_key: "test-access".into(),
+        secret_key: "test-secret".into(),
+        signing_region: "test-region".into(),
+        precreated_bucket: true,
+        readiness_timeout: Duration::from_secs(1),
+    };
+    // Pins current behaviour of review finding D-18; flip this assertion when the fix is authorized.
+    assert!(
+        Storage::new(&config)
+            .list_versions("key")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    server.abort();
+}
 
 #[tokio::test]
 async fn seaweedfs_fixture_supports_versioned_purge() {
@@ -34,13 +60,13 @@ async fn seaweedfs_fixture_supports_versioned_purge() {
     let default_versions = default_storage.list_versions(&default_key).await;
     // SeaweedFS 4.48 has returned a non-ListVersionsResult reply for `?versions` on
     // an unversioned bucket. That malformed-listing result must not be interpreted as no versions.
-    println!(
-        "SeaweedFS default bucket: is_versioned={}, list_versions={default_versions:?}",
-        default_storage.is_versioned(),
-    );
     assert!(!default_storage.is_versioned());
-    if let Err(error) = default_versions {
-        println!("SeaweedFS unversioned version listing rejected: {error}");
+    match default_versions {
+        Ok(versions) => assert!(versions.is_empty()),
+        Err(error) => assert_eq!(
+            error,
+            StorageError::Unavailable(StorageUnavailableReason::VersionListingMalformed)
+        ),
     }
 
     let bucket = format!("peppy-versioned-{}", Uuid::new_v4().simple());
@@ -88,11 +114,6 @@ async fn seaweedfs_fixture_supports_versioned_purge() {
             panic!("versioned bucket initialization failed: {error}");
         }
     };
-    println!(
-        "SeaweedFS versioned bucket: is_versioned={}",
-        storage.is_versioned()
-    );
-
     let key = format!("private/test/{}", Uuid::new_v4().simple());
     let test_result: Result<(), String> = async {
         if !storage.is_versioned() {
@@ -149,12 +170,11 @@ async fn seaweedfs_fixture_supports_versioned_purge() {
     }
     .await;
 
-    if let Err(error) = storage.purge(&key).await {
-        eprintln!("best-effort versioned object cleanup failed: {error}");
-    }
+    let cleanup_result = storage.purge(&key).await;
     delete_bucket(default_s3, &bucket_url).await;
 
     test_result.unwrap();
+    cleanup_result.unwrap();
 }
 
 fn bucket_url(endpoint: &Url, bucket: &str) -> Url {
@@ -226,11 +246,11 @@ async fn signed_request(
 async fn delete_bucket(config: &S3Config, url: &Url) {
     match signed_request(config, Method::DELETE, url, "", &[]).await {
         Ok(response) if response.status().is_success() || response.status().as_u16() == 404 => {}
-        Ok(response) => eprintln!(
-            "best-effort versioned bucket cleanup failed: {} {}",
+        Ok(response) => panic!(
+            "versioned bucket cleanup failed: {} {}",
             response.status(),
             response.text().await.unwrap_or_default(),
         ),
-        Err(error) => eprintln!("best-effort versioned bucket cleanup request failed: {error}"),
+        Err(error) => panic!("versioned bucket cleanup request failed: {error}"),
     }
 }

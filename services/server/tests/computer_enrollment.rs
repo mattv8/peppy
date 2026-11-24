@@ -540,6 +540,9 @@ async fn real_enrollment_clients_complete_computer_admission() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    let role: String = sqlx::query_scalar("SELECT d.role FROM devices d JOIN computer_enrollments e ON e.vault_id=d.vault_id AND e.recipient_device_id=d.device_id WHERE e.id=$1")
+        .bind(Uuid::parse_str(id).unwrap()).fetch_one(&pool).await.unwrap();
+    assert_eq!(role, "device");
     let identity = claimant
         .finish_computer_admission(complete.to_string())
         .unwrap();
@@ -593,7 +596,7 @@ async fn computer_qr_flow_is_bearer_bound_immutable_and_idempotent() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(retry["server_nonce"], created["server_nonce"]);
     let claim_body = serde_json::json!({"claim_token":URL_SAFE_NO_PAD.encode(claim)});
-    let (next, status, _) = call(
+    let (next, status, body) = call(
         app,
         Request::post(format!("/v1/enrollment/computers/{id}/status"))
             .header("content-type", "application/json")
@@ -605,6 +608,11 @@ async fn computer_qr_flow_is_bearer_bound_immutable_and_idempotent() {
     .await;
     app = next;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // Pins current behaviour of review finding D-16; flip this assertion when the fix is authorized.
+    assert_eq!(
+        body,
+        serde_json::json!({"error": "computer_enrollment_unauthorized"})
+    );
     let mut waiting = serde_json::Value::Null;
     for _ in 0..15 {
         let (next, status, response) = call(
