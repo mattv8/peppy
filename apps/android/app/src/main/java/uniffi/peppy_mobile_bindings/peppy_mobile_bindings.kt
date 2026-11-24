@@ -1113,6 +1113,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_message_history_capture_source(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_notification_dismissal_status(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_reaction_capability(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_send_cancellation_capability(
@@ -1749,6 +1751,8 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_message_history_capture_source(`ptr`: Long,`facts`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_notification_dismissal_status(`ptr`: Long,`platform`: RustBuffer.ByValue,`facts`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_reaction_capability(`ptr`: Long,`supported`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_send_cancellation_capability(`ptr`: Long,`supported`: Byte,uniffi_out_err: UniffiRustCallStatus, 
@@ -3029,6 +3033,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_message_history_capture_source() and 0xFFFF) != 6609) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_notification_dismissal_status() and 0xFFFF) != 44116) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_reaction_capability() and 0xFFFF) != 30354) {
@@ -4423,6 +4430,12 @@ public interface NativeClientInterface {
      * them to the protocol's decimal control generation.
      */
     fun `publishMessageHistoryCaptureSource`(`facts`: NativeMessageHistorySourceFacts): kotlin.String
+    
+    /**
+     * Publishes this phone's notification dismissal availability when it changed or a computer
+     * has new dismissals to hear about. Android only; returns whether a status event was queued.
+     */
+    fun `publishNotificationDismissalStatus`(`platform`: NativeGatewayPlatform, `facts`: NativeGatewayHostFacts, `nowMs`: kotlin.Long): kotlin.Boolean
     
     fun `publishReactionCapability`(`supported`: kotlin.Boolean)
     
@@ -7133,6 +7146,27 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterTypeNativeMessageHistorySourceFacts.lower(`facts`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Publishes this phone's notification dismissal availability when it changed or a computer
+     * has new dismissals to hear about. Android only; returns whether a status event was queued.
+     */
+    @Throws(MobileBindingsException::class)override fun `publishNotificationDismissalStatus`(`platform`: NativeGatewayPlatform, `facts`: NativeGatewayHostFacts, `nowMs`: kotlin.Long): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_notification_dismissal_status(
+        it,
+        
+        FfiConverterTypeNativeGatewayPlatform.lower(`platform`),
+        FfiConverterTypeNativeGatewayHostFacts.lower(`facts`),
+        FfiConverterLong.lower(`nowMs`),_status)
 }
     }
     )

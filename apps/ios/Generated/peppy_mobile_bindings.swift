@@ -1065,6 +1065,12 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func publishMessageHistoryCaptureSource(facts: NativeMessageHistorySourceFacts) throws  -> String
     
+    /**
+     * Publishes this phone's notification dismissal availability when it changed or a computer
+     * has new dismissals to hear about. Android only; returns whether a status event was queued.
+     */
+    func publishNotificationDismissalStatus(platform: NativeGatewayPlatform, facts: NativeGatewayHostFacts, nowMs: Int64) throws  -> Bool
+    
     func publishReactionCapability(supported: Bool) throws 
     
     func publishSendCancellationCapability(supported: Bool) throws 
@@ -3007,6 +3013,22 @@ open func publishMessageHistoryCaptureSource(facts: NativeMessageHistorySourceFa
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_message_history_capture_source(
             self.uniffiCloneHandle(),
         FfiConverterTypeNativeMessageHistorySourceFacts_lower(facts),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Publishes this phone's notification dismissal availability when it changed or a computer
+     * has new dismissals to hear about. Android only; returns whether a status event was queued.
+     */
+open func publishNotificationDismissalStatus(platform: NativeGatewayPlatform, facts: NativeGatewayHostFacts, nowMs: Int64)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_publish_notification_dismissal_status(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeNativeGatewayPlatform_lower(platform),
+        FfiConverterTypeNativeGatewayHostFacts_lower(facts),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
     )
 })
 }
@@ -21715,6 +21737,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_message_history_capture_source() != 6609) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_notification_dismissal_status() != 44116) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_publish_reaction_capability() != 30354) {
