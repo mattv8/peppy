@@ -1,0 +1,682 @@
+[
+  {
+    "command": "account_access",
+    "args": []
+  },
+  {
+    "command": "ack_notification_activation",
+    "args": ["requestId", "sessionGeneration"]
+  },
+  {
+    "command": "ack_notification_reply_restore",
+    "args": ["input"]
+  },
+  {
+    "command": "acknowledge_draft_notice",
+    "args": ["draftId"]
+  },
+  {
+    "command": "acknowledge_lifecycle",
+    "args": ["id", "ok"]
+  },
+  {
+    "command": "advance_search_index",
+    "args": ["input"]
+  },
+  {
+    "command": "attachment_retention_state",
+    "args": ["attachmentId"]
+  },
+  {
+    "command": "attachment_retention_status",
+    "args": []
+  },
+  {
+    "command": "billing_summary",
+    "args": []
+  },
+  {
+    "command": "cancel_history_search",
+    "args": ["input"]
+  },
+  {
+    "command": "cancel_send",
+    "args": ["messageId"]
+  },
+  {
+    "command": "check_for_updates",
+    "args": []
+  },
+  {
+    "command": "claim_notification_reply_restore",
+    "args": ["input"]
+  },
+  {
+    "command": "clear_contact_name_pin",
+    "args": ["address", "sourceDeviceId"]
+  },
+  {
+    "command": "clear_diagnostics_log",
+    "args": []
+  },
+  {
+    "command": "close_composer",
+    "args": []
+  },
+  {
+    "command": "close_head_panel",
+    "args": []
+  },
+  {
+    "command": "close_media",
+    "args": ["id", "url"]
+  },
+  {
+    "command": "configure_server",
+    "args": ["origin"]
+  },
+  {
+    "command": "copy_attachment_image",
+    "args": ["id"]
+  },
+  {
+    "command": "copy_one_time_code",
+    "args": ["target"]
+  },
+  {
+    "command": "defer_update",
+    "args": []
+  },
+  {
+    "command": "delete_contact_book",
+    "args": ["bookId"]
+  },
+  {
+    "command": "discard_draft",
+    "args": ["input"]
+  },
+  {
+    "command": "discard_notification_reply",
+    "args": ["input"]
+  },
+  {
+    "command": "dismiss_notifications",
+    "args": ["targets"]
+  },
+  {
+    "command": "dismiss_reaction_request",
+    "args": ["requestId"]
+  },
+  {
+    "command": "enrollment_add_phone",
+    "args": ["method"]
+  },
+  {
+    "command": "enrollment_approve",
+    "args": []
+  },
+  {
+    "command": "enrollment_begin_computer_claimant",
+    "args": []
+  },
+  {
+    "command": "enrollment_begin_vault_request",
+    "args": ["input"]
+  },
+  {
+    "command": "enrollment_cancel",
+    "args": []
+  },
+  {
+    "command": "enrollment_cancel_computer_claimant",
+    "args": []
+  },
+  {
+    "command": "enrollment_cancel_phone",
+    "args": []
+  },
+  {
+    "command": "enrollment_computer_claimant_status",
+    "args": []
+  },
+  {
+    "command": "enrollment_confirm_computer_claimant",
+    "args": []
+  },
+  {
+    "command": "enrollment_connect_shared_secret",
+    "args": ["input"]
+  },
+  {
+    "command": "enrollment_create_owner",
+    "args": ["input"]
+  },
+  {
+    "command": "enrollment_create_vault",
+    "args": ["input"]
+  },
+  {
+    "command": "enrollment_discard_computer_claimant",
+    "args": []
+  },
+  {
+    "command": "enrollment_discover",
+    "args": ["origin"]
+  },
+  {
+    "command": "enrollment_rotate_phone",
+    "args": ["method"]
+  },
+  {
+    "command": "enrollment_sign_in",
+    "args": ["input"]
+  },
+  {
+    "command": "enrollment_sign_out",
+    "args": []
+  },
+  {
+    "command": "enrollment_start_over",
+    "args": []
+  },
+  {
+    "command": "enrollment_status",
+    "args": []
+  },
+  {
+    "command": "enrollment_vault_request_status",
+    "args": []
+  },
+  {
+    "command": "export_diagnostics_log",
+    "args": []
+  },
+  {
+    "command": "forget_contact_book",
+    "args": ["bookId"]
+  },
+  {
+    "command": "get_app_lock_status",
+    "args": []
+  },
+  {
+    "command": "get_contact_sync_request",
+    "args": ["bookId"]
+  },
+  {
+    "command": "get_diagnostics_state",
+    "args": []
+  },
+  {
+    "command": "get_history_search",
+    "args": []
+  },
+  {
+    "command": "get_notification_persistence",
+    "args": []
+  },
+  {
+    "command": "get_notification_quick_reply",
+    "args": []
+  },
+  {
+    "command": "get_notification_sound",
+    "args": []
+  },
+  {
+    "command": "hide_head",
+    "args": ["conversationId"]
+  },
+  {
+    "command": "hosted_account",
+    "args": []
+  },
+  {
+    "command": "hosted_cancel_account_deletion",
+    "args": []
+  },
+  {
+    "command": "hosted_delete_account",
+    "args": []
+  },
+  {
+    "command": "hosted_deletion_status",
+    "args": []
+  },
+  {
+    "command": "hosted_open_billing",
+    "args": []
+  },
+  {
+    "command": "hosted_origin_url",
+    "args": []
+  },
+  {
+    "command": "hosted_provision",
+    "args": []
+  },
+  {
+    "command": "hosted_session_renew",
+    "args": []
+  },
+  {
+    "command": "hosted_sign_in",
+    "args": ["provider"]
+  },
+  {
+    "command": "hosted_sign_out",
+    "args": []
+  },
+  {
+    "command": "hydrate_media_preview",
+    "args": ["id", "messageId"]
+  },
+  {
+    "command": "launch_progress",
+    "args": []
+  },
+  {
+    "command": "list_contact_books",
+    "args": []
+  },
+  {
+    "command": "list_contact_edits",
+    "args": ["bookId"]
+  },
+  {
+    "command": "list_contact_name_candidates",
+    "args": ["address", "sourceDeviceId"]
+  },
+  {
+    "command": "list_contacts",
+    "args": ["bookId", "offset", "query", "sort"]
+  },
+  {
+    "command": "list_contacts_page",
+    "args": ["bookId", "request"]
+  },
+  {
+    "command": "list_devices",
+    "args": []
+  },
+  {
+    "command": "list_restorable_contacts",
+    "args": ["bookId"]
+  },
+  {
+    "command": "load_history",
+    "args": ["beforeMessageId", "conversationId"]
+  },
+  {
+    "command": "load_media",
+    "args": ["id"]
+  },
+  {
+    "command": "load_message_window",
+    "args": ["input"]
+  },
+  {
+    "command": "load_state",
+    "args": ["conversationId", "historyFromMessageId", "metadataOnly"]
+  },
+  {
+    "command": "mark_all_read",
+    "args": []
+  },
+  {
+    "command": "mark_notifications_seen",
+    "args": ["targets"]
+  },
+  {
+    "command": "mark_seen",
+    "args": ["visibleMessageIds"]
+  },
+  {
+    "command": "mcp_approve_authorization",
+    "args": ["id", "scopes"]
+  },
+  {
+    "command": "mcp_authorization",
+    "args": ["id"]
+  },
+  {
+    "command": "mcp_deny_authorization",
+    "args": ["id"]
+  },
+  {
+    "command": "mcp_enable",
+    "args": []
+  },
+  {
+    "command": "mcp_grants",
+    "args": []
+  },
+  {
+    "command": "mcp_revoke_grant",
+    "args": ["id"]
+  },
+  {
+    "command": "mcp_status",
+    "args": []
+  },
+  {
+    "command": "media_page",
+    "args": ["conversationId", "cursor", "limit"]
+  },
+  {
+    "command": "media_page_around",
+    "args": ["attachmentId", "conversationId", "limit", "messageId"]
+  },
+  {
+    "command": "media_page_newer",
+    "args": ["conversationId", "cursor", "limit"]
+  },
+  {
+    "command": "media_sync_request",
+    "args": ["attachmentIds"]
+  },
+  {
+    "command": "notification_reply_recoveries",
+    "args": ["conversationId"]
+  },
+  {
+    "command": "open_composer",
+    "args": ["conversationId"]
+  },
+  {
+    "command": "open_emoji_picker",
+    "args": []
+  },
+  {
+    "command": "open_external_url",
+    "args": ["url"]
+  },
+  {
+    "command": "open_login_items",
+    "args": []
+  },
+  {
+    "command": "open_mcp_oauth_redirect",
+    "args": ["url"]
+  },
+  {
+    "command": "open_media",
+    "args": ["id"]
+  },
+  {
+    "command": "open_media_viewer",
+    "args": ["attachmentId", "conversationId", "messageId"]
+  },
+  {
+    "command": "open_notification_settings",
+    "args": []
+  },
+  {
+    "command": "open_play_subscriptions",
+    "args": []
+  },
+  {
+    "command": "open_store_subscriptions",
+    "args": []
+  },
+  {
+    "command": "peek_notification_activation",
+    "args": []
+  },
+  {
+    "command": "pick_attachments",
+    "args": []
+  },
+  {
+    "command": "pick_contact_photo",
+    "args": []
+  },
+  {
+    "command": "popout_conversation",
+    "args": ["conversationId"]
+  },
+  {
+    "command": "prepare_pasted_attachment",
+    "args": []
+  },
+  {
+    "command": "publish_attachment",
+    "args": ["id"]
+  },
+  {
+    "command": "purchase_options",
+    "args": []
+  },
+  {
+    "command": "react_to_message",
+    "args": ["emoji", "messageId"]
+  },
+  {
+    "command": "release_notification_reply_restore",
+    "args": ["input"]
+  },
+  {
+    "command": "rename_device",
+    "args": ["deviceId", "name"]
+  },
+  {
+    "command": "report_update_activity",
+    "args": ["active"]
+  },
+  {
+    "command": "request_attachment_download",
+    "args": ["id"]
+  },
+  {
+    "command": "request_contact_repair",
+    "args": []
+  },
+  {
+    "command": "request_contact_sync",
+    "args": ["bookId"]
+  },
+  {
+    "command": "request_notification_permission",
+    "args": []
+  },
+  {
+    "command": "request_sender_unblock",
+    "args": ["conversationId"]
+  },
+  {
+    "command": "resolve_draft_conflict",
+    "args": ["draftId", "keepBranchId"]
+  },
+  {
+    "command": "restart_for_update",
+    "args": []
+  },
+  {
+    "command": "restore_contact",
+    "args": ["bookId", "contactId"]
+  },
+  {
+    "command": "retry_app_lock_check",
+    "args": []
+  },
+  {
+    "command": "retry_attachment",
+    "args": ["id"]
+  },
+  {
+    "command": "retry_rcs_media_download",
+    "args": ["attachmentIndex", "messageId"]
+  },
+  {
+    "command": "reveal_vault_secret",
+    "args": []
+  },
+  {
+    "command": "revoke_device",
+    "args": ["deviceId"]
+  },
+  {
+    "command": "save_attachment",
+    "args": ["id"]
+  },
+  {
+    "command": "save_draft",
+    "args": ["input"]
+  },
+  {
+    "command": "search_contact_recipients",
+    "args": ["query", "sourceDeviceId"]
+  },
+  {
+    "command": "search_local",
+    "args": ["input"]
+  },
+  {
+    "command": "send_again",
+    "args": ["input"]
+  },
+  {
+    "command": "send_draft",
+    "args": ["input"]
+  },
+  {
+    "command": "send_typing",
+    "args": ["conversationId", "state"]
+  },
+  {
+    "command": "set_app_lock",
+    "args": ["enabled"]
+  },
+  {
+    "command": "set_app_muted",
+    "args": ["appName", "muted", "packageName", "sourceDeviceId"]
+  },
+  {
+    "command": "set_automatic_updates",
+    "args": ["enabled"]
+  },
+  {
+    "command": "set_contact_book_lookup",
+    "args": ["bookId", "enabled"]
+  },
+  {
+    "command": "set_contact_name_pin",
+    "args": ["address", "bookId", "contactId", "sourceDeviceId"]
+  },
+  {
+    "command": "set_conversation_folder",
+    "args": ["conversationId", "folder"]
+  },
+  {
+    "command": "set_conversation_pinned",
+    "args": ["conversationId", "pinned"]
+  },
+  {
+    "command": "set_conversation_tone",
+    "args": ["paletteIndex", "seed"]
+  },
+  {
+    "command": "set_diagnostics_enabled",
+    "args": ["enabled"]
+  },
+  {
+    "command": "set_maximize_button_region",
+    "args": ["region"]
+  },
+  {
+    "command": "set_notification_context",
+    "args": ["conversationId", "view"]
+  },
+  {
+    "command": "set_notification_persistence",
+    "args": ["value"]
+  },
+  {
+    "command": "set_notification_preferences",
+    "args": ["preferences"]
+  },
+  {
+    "command": "set_notification_quick_reply",
+    "args": ["enabled"]
+  },
+  {
+    "command": "set_notification_sound",
+    "args": ["enabled"]
+  },
+  {
+    "command": "set_open_in_background",
+    "args": ["enabled"]
+  },
+  {
+    "command": "set_start_at_login",
+    "args": ["enabled"]
+  },
+  {
+    "command": "set_typing_sharing",
+    "args": ["enabled"]
+  },
+  {
+    "command": "start_history_search",
+    "args": ["input"]
+  },
+  {
+    "command": "startup_status",
+    "args": []
+  },
+  {
+    "command": "store_products",
+    "args": []
+  },
+  {
+    "command": "store_purchase",
+    "args": ["productId"]
+  },
+  {
+    "command": "store_restore",
+    "args": []
+  },
+  {
+    "command": "submit_contact_edit",
+    "args": ["input"]
+  },
+  {
+    "command": "unlock_app",
+    "args": []
+  },
+  {
+    "command": "unlock_sync",
+    "args": []
+  },
+  {
+    "command": "update_status",
+    "args": []
+  },
+  {
+    "command": "webhook_create",
+    "args": ["input"]
+  },
+  {
+    "command": "webhook_delete",
+    "args": ["id"]
+  },
+  {
+    "command": "webhook_reveal_secret",
+    "args": ["id"]
+  },
+  {
+    "command": "webhook_rotate_secret",
+    "args": ["id"]
+  },
+  {
+    "command": "webhook_test",
+    "args": ["id"]
+  },
+  {
+    "command": "webhook_update",
+    "args": ["id", "input"]
+  },
+  {
+    "command": "webhooks_list",
+    "args": []
+  }
+]
