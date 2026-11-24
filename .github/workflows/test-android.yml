@@ -98,6 +98,9 @@ jobs:
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
           infra/compose/verify-android-native.sh
+      - name: Run Google Messages sideload unit tests
+        working-directory: apps/android
+        run: ../../.github/scripts/run-with-jvm-watchdog.sh 300 1080 -- ./gradlew --console=plain --dependency-verification=strict :app:testSideloadUnitTest -PpeppyGoogleMessagesLink=true
       - name: Verify native RCS cross-language contract
         env:
           PEPPY_RCS_GO_OBSERVATION_PATH: ${{ runner.temp }}/rcs-go-observations.json
@@ -325,9 +328,9 @@ jobs:
       - name: Compile release with Google Messages link
         working-directory: apps/android
         run: ./gradlew --console=plain --dependency-verification=strict --info --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:compileReleaseKotlin -PpeppyDistribution=play -PpeppyGoogleMessagesLink=true
-      - name: Verify release SMS diagnostics policy
+      - name: Verify release unit-test policies
         working-directory: apps/android
-        run: ./gradlew --console=plain --dependency-verification=strict --info :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest
+        run: ./gradlew --console=plain --dependency-verification=strict --info :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest --tests dev.peppy.mobile.mms.RestrictedAccessActionReleaseTest
       - name: Report release test timing
         if: ${{ always() }}
         run: python3 .github/scripts/ci-timing-report.py junit --title "Android release tests" apps/android/app/build/test-results/testReleaseUnitTest || echo "::warning::Timing report failed"

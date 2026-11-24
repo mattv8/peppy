@@ -3,9 +3,7 @@
 set -u
 
 repo=$(cd "$(dirname "$0")/../.." && pwd -P)
-scratch_root="$repo/.opencode/sessions/messaging-foundation"
-mkdir -p "$scratch_root"
-fixture=$(mktemp -d "$scratch_root/recovery-hardening.XXXXXX")
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/recovery-hardening.XXXXXX") || exit 1
 suffix=$(openssl rand -hex 4)
 source_project="recoveryhardening${suffix}"
 compose=(docker compose --project-name "$source_project" --project-directory "$fixture" --env-file "$fixture/.env" -f "$fixture/docker-compose.yml")
