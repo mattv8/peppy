@@ -1529,6 +1529,132 @@ mod tests {
         }
     }
 
+    #[test]
+    fn claimant_rejects_tampered_approval_and_retains_pending_state() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use peppy_hosted_api::computer_enrollment::{
+            ApproveComputerEnrollmentRequest, ComputerEnrollmentCreated, ComputerEnrollmentStatus,
+        };
+
+        let origin = "https://enroll.example";
+        let phrase = "correct horse battery staple";
+        let vault_id = uuid::Uuid::new_v4();
+        let owner_device = uuid::Uuid::new_v4();
+        let profile = KeyProfile::new(vault_id, 3).unwrap();
+        let key = peppy_crypto::derive_root_key(phrase, &profile).unwrap();
+        let header = peppy_crypto::create_vault_check_header(&key, profile.clone()).unwrap();
+        let mut client =
+            EnrollmentClient::new(origin.into(), ClientKind::Desktop, DEVICE_NAME.into()).unwrap();
+        let qr = client.begin_computer_claimant().unwrap();
+        let before = client.computer_status_request().unwrap();
+        let mut owner = EnrollmentClient::for_existing_owner(
+            origin.into(),
+            ClientKind::Desktop,
+            "Owner".into(),
+            profile.clone(),
+            header.clone(),
+        )
+        .unwrap();
+        owner.configure_computer_owner_device(owner_device).unwrap();
+        owner.scan_computer_qr(qr.clone()).unwrap();
+        owner
+            .accept_computer_created(
+                serde_json::to_string(&ComputerEnrollmentCreated {
+                    server_nonce: URL_SAFE_NO_PAD.encode([7; 32]),
+                    expires_in_seconds: 60,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let owner_client = peppy_client_core::Client::open(
+            peppy_client_core::ClientConfig {
+                database_path: root.path().join("owner.sqlcipher"),
+                vault_id: peppy_client_core::VaultId(vault_id),
+                device_id: peppy_client_core::DeviceId(owner_device),
+            },
+            peppy_client_core::DatabaseKey::new(&[31; 32]).unwrap(),
+        )
+        .unwrap();
+        owner_client.unlock(&profile, &header, phrase).unwrap();
+        let approval: ApproveComputerEnrollmentRequest = serde_json::from_str(
+            &owner
+                .approve_computer_enrollment_with_client(true, &owner_client)
+                .unwrap(),
+        )
+        .unwrap();
+        let status = ComputerEnrollmentStatus {
+            state: EnrollmentState::Approved,
+            expires_in_seconds: 60,
+            transcript: Some(approval.transcript),
+            encrypted_key_package: Some(approval.encrypted_key_package),
+            transfer_nonce: Some(approval.transfer_nonce),
+            owner_proof: Some(approval.owner_proof),
+        };
+        let original = serde_json::to_value(status).unwrap();
+        let mut active = claimant("waiting");
+        active.qr_payload = qr.clone();
+        let (_root, state) = state_with_claimant(Some(active));
+        state.enrollment.lock().unwrap().client = Some(client);
+        for (field, value) in [
+            (
+                "/owner_proof",
+                serde_json::json!(URL_SAFE_NO_PAD.encode([8; 32])),
+            ),
+            (
+                "/transcript/owner_transfer_public_key",
+                serde_json::json!(URL_SAFE_NO_PAD.encode([8; 32])),
+            ),
+            ("/transcript/granted_role", serde_json::json!("owner")),
+            (
+                "/transfer_nonce",
+                serde_json::json!(URL_SAFE_NO_PAD.encode([8; 24])),
+            ),
+            (
+                "/encrypted_key_package",
+                serde_json::json!(URL_SAFE_NO_PAD.encode([8; 32])),
+            ),
+        ] {
+            let mut tampered = original.clone();
+            *tampered.pointer_mut(field).unwrap() = value;
+            let error = update_view_from_status(&state, Some(tampered.to_string()))
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "enrollment", "{field}");
+            let mut controller = state.enrollment.lock().unwrap();
+            let client = controller.client.as_mut().unwrap();
+            let error = client
+                .confirm_computer_enrollment(tampered.to_string())
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "invalid hosted-client request",
+                "{field}"
+            );
+            assert_eq!(client.computer_status_request().unwrap(), before, "{field}");
+            let pending = controller.computer_claimant.as_ref().unwrap();
+            assert_eq!(pending.view.stage, "waiting_owner", "{field}");
+            assert_eq!(pending.qr_payload, qr, "{field}");
+            assert!(pending.confirm_request.is_none(), "{field}");
+            assert!(pending.prepared_identity.is_none(), "{field}");
+        }
+        assert_eq!(
+            update_view_from_status(&state, Some(original.to_string()))
+                .unwrap()
+                .state,
+            "approved"
+        );
+        state
+            .enrollment
+            .lock()
+            .unwrap()
+            .client
+            .as_mut()
+            .unwrap()
+            .confirm_computer_enrollment(original.to_string())
+            .unwrap();
+    }
+
     /// Real QR, owner-proof and encrypted handoff exchange; only the transport is omitted.
     fn pending_admission_fixture(
         store: Arc<dyn SecretStore>,
