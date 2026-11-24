@@ -1,0 +1,5 @@
+{
+  "session_token": "example-session-token",
+  "csrf_token": null,
+  "expires_in_seconds": 43200
+}

@@ -1465,6 +1465,134 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    fn native_golden(name: &str, actual: &str) {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/contracts/fixtures/server")
+            .join(name);
+        if std::env::var_os("UPDATE_GOLDENS").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, actual).unwrap();
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!("{}: {error}; regenerate with UPDATE_GOLDENS=1 cargo test -p peppy-server native_sync_response_goldens", path.display())
+        });
+        let actual: Value = serde_json::from_str(actual).unwrap();
+        let expected: Value = serde_json::from_str(&expected).unwrap();
+        assert_eq!(
+            actual,
+            expected,
+            "{} differs; regenerate with UPDATE_GOLDENS=1 cargo test -p peppy-server native_sync_response_goldens",
+            path.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_sync_response_goldens() {
+        let record = || CursorRecord {
+            cursor: 1,
+            envelope: RawValue::from_string(
+                json!({
+                    "protocol_version": 1,
+                    "envelope_id": "22222222-2222-4222-8222-222222222222",
+                    "command_id": null,
+                    "vault_id": "11111111-1111-4111-8111-111111111111",
+                    "producer_device_id": "33333333-3333-4333-8333-333333333333",
+                    "producer_sequence": "1",
+                    "key_epoch": 1,
+                    "crypto_suite": 1,
+                    "profile_fingerprint": "00".repeat(32),
+                    "purpose": "event",
+                    "route": null,
+                    "ciphertext": "AA==",
+                })
+                .to_string(),
+            )
+            .unwrap(),
+        };
+        let samples = [
+            (
+                "events.200.json",
+                serde_json::to_value(EventsPage {
+                    high_water_cursor: "1".into(),
+                    replay_floor_cursor: "0".into(),
+                    next_after: None,
+                    events: vec![record()],
+                })
+                .unwrap(),
+            ),
+            (
+                "snapshot-records.200.json",
+                serde_json::to_value(SnapshotPage {
+                    high_water_cursor: "1".into(),
+                    compaction_generation: "1".into(),
+                    next_after: None,
+                    records: vec![record()],
+                })
+                .unwrap(),
+            ),
+            (
+                "events-more.200.json",
+                serde_json::to_value(EventsPage {
+                    high_water_cursor: "2".into(),
+                    replay_floor_cursor: "0".into(),
+                    next_after: Some("1".into()),
+                    events: vec![record()],
+                })
+                .unwrap(),
+            ),
+            (
+                "snapshot-records-more.200.json",
+                serde_json::to_value(SnapshotPage {
+                    high_water_cursor: "2".into(),
+                    compaction_generation: "1".into(),
+                    next_after: Some("1".into()),
+                    records: vec![record()],
+                })
+                .unwrap(),
+            ),
+            (
+                "snapshot-manifest.200.json",
+                serde_json::to_value(SnapshotManifestPage {
+                    high_water_cursor: "1".into(),
+                    compaction_generation: "1".into(),
+                    next_after: None,
+                    entries: vec![SnapshotManifestEntry {
+                        cursor: "1".into(),
+                        digest: "00".repeat(32),
+                        flags: 0,
+                    }],
+                })
+                .unwrap(),
+            ),
+        ];
+        for (name, value) in samples {
+            native_golden(
+                name,
+                &(serde_json::to_string_pretty(&value).unwrap() + "\n"),
+            );
+        }
+        let response = Resync {
+            reason: ResyncReason::CursorExpired,
+            high_water: 10,
+            replay_floor: 5,
+        }
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        native_golden("events.409.json", std::str::from_utf8(&body).unwrap());
+        let response = ApiError(StatusCode::FORBIDDEN, "owner_required").into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        native_golden(
+            "owner-required.403.json",
+            std::str::from_utf8(&body).unwrap(),
+        );
+    }
+
     fn roots(cursors: &[i64]) -> Vec<ExpiredRoot> {
         cursors
             .iter()
