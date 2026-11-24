@@ -737,6 +737,7 @@ it("hides the quick-reply preview consequence when the adapter reports unsupport
   render(<NotificationSettings {...props()} quickReplySettings={settings} />);
 
   await waitFor(() => expect(settings.load).toHaveBeenCalled());
+  expect(await screen.findByText("Sender and message.")).toBeVisible();
   expect(screen.queryByRole("switch", { name: "Quick reply in notifications" })).not.toBeInTheDocument();
   expect(screen.getByText("Sender and message.")).toBeVisible();
 });
