@@ -56,5 +56,29 @@ export function DeleteAccountDialog({ billing, opener, onDismiss, onDeleted }: {
       setManagementFailed(true);
     }
   };
-  return <Modal id="account-delete-dialog" title={peppyCopy.settings_server_delete_title} opener={opener} busy={busy} onDismiss={onDismiss} actions={<><button id="account-delete-cancel" className="secondary-button" type="button" disabled={busy} onClick={onDismiss}>{peppyCopy.cancel}</button><button ref={submit} id="account-delete-submit" className="destructive-button" type="button" disabled={!confirmed || busy} aria-describedby="account-delete-warning" onClick={() => void removeAccount()}>{peppyCopy.settings_server_delete}</button></>}><div id="account-delete-body"><p id="account-delete-warning">{peppyCopy.account_delete_dialog_body}</p>{currentBilling.provider === "stripe" && <p id="account-delete-stripe-billing">{peppyCopy.account_delete_stripe_billing}</p>}{currentBilling.provider === "apple" && <div id="account-delete-apple-notice" data-provider="apple"><p>{peppyCopy.account_delete_apple_billing}</p><button id="account-delete-apple-manage" className="secondary-button" type="button" onClick={() => void openSubscriptionManagement()}>{peppyCopy.store_manage_cta}</button>{managementFailed && <p id="account-delete-management-error" role="alert">{peppyCopy.store_manage_failed}</p>}</div>}{currentBilling.provider === "google_play" && <div id="account-delete-google-play-notice" data-provider="google_play"><p>{peppyCopy.account_delete_google_play_billing}</p><button id="account-delete-google-play-manage" className="secondary-button" type="button" onClick={() => void openGooglePlayManagement()}>{peppyCopy.google_play_manage_cta}</button>{managementFailed && <p id="account-delete-management-error" role="alert">{peppyCopy.google_play_manage_failed}</p>}</div>}<label className="settings-check"><input id="account-delete-confirm" type="checkbox" checked={confirmed} disabled={busy} onChange={event => setConfirmed(event.target.checked)} /><span>{peppyCopy.account_delete_confirm_label}</span></label><p id="account-delete-working" role="status">{busy ? peppyCopy.account_delete_working : ""}</p><p id="account-delete-error" role="alert">{failed ? failureMessage : ""}</p></div></Modal>;
+  return <Modal id="account-delete-dialog" title={peppyCopy.settings_server_delete_title} opener={opener} busy={busy} onDismiss={onDismiss} actions={<>
+    <button id="account-delete-cancel" className="secondary-button" type="button" disabled={busy} onClick={onDismiss}>{peppyCopy.cancel}</button>
+    <button ref={submit} id="account-delete-submit" className="destructive-button" type="button" disabled={!confirmed || busy} aria-describedby="account-delete-warning" onClick={() => void removeAccount()}>{peppyCopy.settings_server_delete}</button>
+  </>}>
+    <div id="account-delete-body">
+      <p id="account-delete-warning">{peppyCopy.account_delete_dialog_body}</p>
+      {currentBilling.provider === "stripe" && <p id="account-delete-stripe-billing">{peppyCopy.account_delete_stripe_billing}</p>}
+      {currentBilling.provider === "apple" && <div id="account-delete-apple-notice" data-provider="apple">
+        <p>{peppyCopy.account_delete_apple_billing}</p>
+        <button id="account-delete-apple-manage" className="secondary-button" type="button" onClick={() => void openSubscriptionManagement()}>{peppyCopy.store_manage_cta}</button>
+        {managementFailed && <p id="account-delete-management-error" role="alert">{peppyCopy.store_manage_failed}</p>}
+      </div>}
+      {currentBilling.provider === "google_play" && <div id="account-delete-google-play-notice" data-provider="google_play">
+        <p>{peppyCopy.account_delete_google_play_billing}</p>
+        <button id="account-delete-google-play-manage" className="secondary-button" type="button" onClick={() => void openGooglePlayManagement()}>{peppyCopy.google_play_manage_cta}</button>
+        {managementFailed && <p id="account-delete-management-error" role="alert">{peppyCopy.google_play_manage_failed}</p>}
+      </div>}
+      <label className="settings-check">
+        <input id="account-delete-confirm" type="checkbox" checked={confirmed} disabled={busy} onChange={event => setConfirmed(event.target.checked)} />
+        <span>{peppyCopy.account_delete_confirm_label}</span>
+      </label>
+      <p id="account-delete-working" role="status">{busy ? peppyCopy.account_delete_working : ""}</p>
+      <p id="account-delete-error" role="alert">{failed ? failureMessage : ""}</p>
+    </div>
+  </Modal>;
 }

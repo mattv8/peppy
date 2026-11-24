@@ -286,21 +286,16 @@ export function cancellationDisplayState(authoritative: CancellationState | unde
   return authoritative && authoritative !== "none" ? authoritative : local;
 }
 type DraftNoticeState = { key: string; event: DraftNoticeEvent | "stale-send" | "send-failed" | "loading"; sequence: number; detail?: string; persistent?: boolean };
-type PinFocusRestoreIntent = {
-  conversationId: string;
+type FocusIntent = {
   origin: HTMLElement;
   userMovedFocus: boolean;
   dispose(): void;
 };
-type CancellationFocusIntent = {
-  origin: HTMLElement;
-  userMovedFocus: boolean;
-  dispose(): void;
-};
+type PinFocusRestoreIntent = FocusIntent & { conversationId: string };
 
-function watchCancellationFocus(origin: HTMLElement | null): CancellationFocusIntent | undefined {
+function watchFocusIntent(origin: HTMLElement | null): FocusIntent | undefined {
   if (!origin) return;
-  const intent: CancellationFocusIntent = {
+  const intent: FocusIntent = {
     origin,
     userMovedFocus: false,
     dispose: () => {
@@ -948,7 +943,7 @@ function PendingSendRow({ pending, message, attachmentViews, onOpenExternal }: {
         {pending.content.attachmentIds.map((id) => {
           const attachment = attachmentViews[id];
           return (
-            <div key={id} className="file-card">
+            <div key={id} className="file-card" data-pending-attachment-id={id}>
               {attachment?.mediaType.startsWith("image/") ? <Image size={16} aria-hidden /> : <FileText size={16} aria-hidden />}
               <span><bdi>{attachment?.name ?? "Attachment"}</bdi></span>
               {attachment && <small>{fileSize(attachment.byteSize)}</small>}
@@ -980,7 +975,6 @@ function MessageList({
   suppressHistoryAnnouncements,
   historyExhausted,
   onStartConversation,
-  noSelectionFeedback,
   onOpenMedia,
   requestOriginal,
   checkOriginal,
@@ -1046,7 +1040,6 @@ function MessageList({
   suppressHistoryAnnouncements: boolean;
   historyExhausted: boolean;
   onStartConversation?: () => void;
-  noSelectionFeedback?: ReactNode;
   onOpenMedia(item: { attachment: AttachmentView; message: MessageView }): void;
   requestOriginal(id: string): Promise<{ state: "ready"; url: string } | { state: "pending" }>;
   checkOriginal(id: string): Promise<{ state: "ready"; url: string } | { state: "pending" }>;
@@ -1227,7 +1220,7 @@ function MessageList({
   const [localCancellationStates, setLocalCancellationStates] = useState<ReadonlyMap<string, LocalCancellationState>>(new Map());
   const cancellingMessageIdsRef = useRef(new Set<string>());
   const cancellationRequestIds = useRef(new Map<string, number>());
-  const cancellationFocusIntents = useRef(new Map<string, CancellationFocusIntent>());
+  const cancellationFocusIntents = useRef(new Map<string, FocusIntent>());
   const cancellationViewGeneration = useRef(0);
   const cancellationStates = useRef(new Map<string, CancellationState | undefined>());
   useEffect(() => {
@@ -1253,7 +1246,7 @@ function MessageList({
   const requestSendCancellation = async (message: MessageView) => {
     if (!bridge.cancel_send || cancellingMessageIdsRef.current.has(message.id)) return;
     const sequence = takeSendCancellationSequence?.() ?? 0;
-    const focusIntent = watchCancellationFocus(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    const focusIntent = watchFocusIntent(document.activeElement instanceof HTMLElement ? document.activeElement : null);
     const requestId = (cancellationRequestIds.current.get(message.id) ?? 0) + 1;
     const viewGeneration = cancellationViewGeneration.current;
     cancellationRequestIds.current.set(message.id, requestId);
@@ -1360,7 +1353,6 @@ function MessageList({
               <p>Select a conversation or start a new message</p>
             )}
           </div>
-          {noSelectionFeedback && <div id="no-selection-feedback">{noSelectionFeedback}</div>}
         </div>
       </div>
     );
@@ -1972,7 +1964,7 @@ function SettingsView({
             {sections.map((section) => <option key={section.id} value={section.id}>{section.label}</option>)}
           </select>
         </label>
-        <div className="settings-category-links">
+        <div id="settings-category-links" className="settings-category-links">
           {sections.map((section) => (
             <a key={section.id} href={`#${sectionElementId(section.id)}`} aria-current={activeSection === section.id ? "location" : undefined} onClick={(event) => { event.preventDefault(); selectSection(section.id); }}>
               {section.label}
@@ -2074,7 +2066,7 @@ function SettingsView({
         <fieldset id="settings-navigation-position" className="settings-option-cards" aria-describedby="settings-navigation-position-hint">
           <legend>Navigation position</legend>
           <p id="settings-navigation-position-hint" className="settings-field-hint">Choose where the navigation buttons appear.</p>
-          <div className="settings-option-card-list">
+          <div id="settings-navigation-position-options" className="settings-option-card-list">
             <label data-option="side-rail">
               <input
                 type="radio"
@@ -2100,7 +2092,7 @@ function SettingsView({
         {!browserHost && <fieldset id="settings-popout-mode" className="settings-option-cards" aria-describedby="settings-popout-mode-hint">
           <legend>Pop-out button opens</legend>
           <p id="settings-popout-mode-hint" className="settings-field-hint">Applies to the pop-out button in the conversation header and in the conversation list.</p>
-          <div className="settings-option-card-list">
+          <div id="settings-popout-mode-options" className="settings-option-card-list">
             <label data-option="chat-bubble">
               <input
                 type="radio"
@@ -2141,7 +2133,7 @@ function SettingsView({
         </div>
         <fieldset id="settings-attachment-layout" className="settings-option-cards">
           <legend>Attached image layout</legend>
-          <div className="settings-option-card-list">
+          <div id="settings-attachment-layout-options" className="settings-option-card-list">
             <label data-option="preview-tiles">
               <input type="radio" name="attachment-layout" value="tiles" checked={attachmentLayout === "tiles"} onChange={() => onAttachmentLayout("tiles")} />
               <span>Preview tiles</span>
@@ -5197,25 +5189,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     const origin = document.activeElement;
     if (origin instanceof HTMLElement && origin.dataset.pinConversationId === conversationId) {
       pinFocusRestoreRef.current?.dispose();
-      function watchFocus(event: FocusEvent) {
-        if (event.target instanceof HTMLElement && event.target !== document.body && event.target !== intent.origin)
-          intent.userMovedFocus = true;
-      }
-      function watchPointer(event: PointerEvent) {
-        if (!(event.target instanceof Node) || !intent.origin.contains(event.target)) intent.userMovedFocus = true;
-      }
-      const intent: PinFocusRestoreIntent = {
-        conversationId,
-        origin,
-        userMovedFocus: false,
-        dispose: () => {
-          document.removeEventListener("focusin", watchFocus);
-          document.removeEventListener("pointerdown", watchPointer);
-        },
-      };
-      document.addEventListener("focusin", watchFocus);
-      document.addEventListener("pointerdown", watchPointer);
-      pinFocusRestoreRef.current = intent;
+      const intent = watchFocusIntent(origin);
+      if (intent) pinFocusRestoreRef.current = Object.assign(intent, { conversationId });
     }
     setPendingPinId(conversationId);
     try {
@@ -6133,7 +6108,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       });
     });
   };
-  const noSelectionFeedback = undefined;
   const composer = (
             <section
       id="composer-area"
@@ -6333,7 +6307,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       suppressHistoryAnnouncements={suppressHistoryAnnouncements}
       historyExhausted={historyExhausted}
       onStartConversation={!composerConversation && !slotKey ? () => void startNewMessage() : undefined}
-      noSelectionFeedback={!composerConversation && !slotKey ? noSelectionFeedback : undefined}
       onOpenMedia={(item) => void openGalleryItem({ attachment: item.attachment, message: item.message })}
       requestOriginal={requestOriginal}
       checkOriginal={checkOriginal}
@@ -6725,7 +6698,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
                   : participantsLine && participantsLine !== title && <small data-conversation-participants>{participantsLine}</small>}
               </div>
             </div>
-            <div className="header-actions" hidden={revoked}>
+            <div id="conversation-header-actions" className="header-actions" hidden={revoked}>
               {isGroup && active?.group && !headPanel && <button
                 id="header-group-details"
                 ref={groupDetailsButtonRef}

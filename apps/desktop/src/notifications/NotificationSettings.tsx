@@ -363,7 +363,7 @@ export function NotificationSettings({ notifications, filters, sources, preferen
         </>}
         {hasDesktopBanners && persistenceSettings && persistenceSupported && persistence && persistencePlatform === "windows" && <>
           <div id="notification-persistence-row" className="settings-control-row" data-persistence-platform={persistencePlatform} data-persistence-mode={persistenceMode}>
-            <fieldset className="settings-option-cards" disabled={locked} aria-labelledby="notification-persistence-label" aria-describedby={persistenceDescribedBy}>
+            <fieldset id="notification-persistence-options" className="settings-option-cards" disabled={locked} aria-labelledby="notification-persistence-label" aria-describedby={persistenceDescribedBy}>
               <legend id="notification-persistence-label">Banner duration</legend>
               <div className="settings-option-card-list">
                 {[["5", "Short", "About 5 seconds"], ["25", "Long", "About 25 seconds"], ["indefinite", "Until dismissed", "Stays until you dismiss it."]].map(([value, label, description]) => <label key={value} className="settings-option-card">

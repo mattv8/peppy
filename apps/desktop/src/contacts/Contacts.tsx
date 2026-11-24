@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { Check, Clock, ListFilter, ResizeHandle, RotateCw, UPDATE_CONTACTS_NOTE, UPDATE_ERROR, UPDATE_PAUSED_DESCRIPTION, UserPlus, X, contactSeed, seedKey } from "@peppy/desktop-ui";
+import { Check, Clock, ListFilter, ResizeHandle, RotateCw, UPDATE_CONTACTS_NOTE, UPDATE_ERROR, UPDATE_PAUSED_DESCRIPTION, UserPlus, X, contactSeed } from "@peppy/desktop-ui";
 import { bridge, type ContactBookView, type ContactScanStatus, type ContactSort, type ContactSyncStatus, type ContactView, type RestorableContact } from "../bridge/bridge";
 import { errorCode, errorText } from "../bridge/bridgeErrors";
 import { ContactForm, type ContactEditDraft } from "./ContactForm";
@@ -26,9 +26,6 @@ import { RestorePanel } from "./RestorePanel";
 import { DELETE_LOCKED_REASON, DELETE_OFFLINE_REASON, DELETE_SYNCING_REASON } from "./book-delete-copy";
 import { defaultLookupFailure, type LookupFailure } from "./useBookLookup";
 import "./contacts.css";
-
-/** Core returns at most this many contacts per page (search runs before paging). */
-export { CONTACTS_PAGE_SIZE } from "./contact-target";
 
 /** The two-sentence replaced-book notice stays up longer than the default 4 s. */
 const REPLACED_NOTICE_HOLD_MS = 8000;
@@ -59,6 +56,28 @@ export type ContactTarget =
   | { kind: "create"; phone: string; requestId: number };
 
 type CreateContactEditing = "create" | { createPrefill: { phone: string }; requestId: number };
+
+const scalarPatchFields = ["givenName", "familyName", "nickname", "organization", "title", "notes"] as const;
+const structuredPatchFields = ["phones", "emails", "addresses", "birthday"] as const;
+const createPatchFields = ["givenName", "familyName", "nickname", "organization", "title", "phones", "emails", "addresses", "birthday", "notes"] as const;
+
+function buildContactPatches(draft: ContactEditDraft, current?: ContactView): unknown[] {
+  if (!current) return createPatchFields.map(field => ({ field, value: draft[field] }));
+  const patches: unknown[] = [];
+  for (const field of scalarPatchFields) {
+    if ((current[field] ?? "") !== (draft[field] ?? "")) {
+      patches.push({ field, value: draft[field], expectedOld: current[field] });
+    }
+  }
+  for (const field of structuredPatchFields) {
+    const oldValue = field === "birthday" ? current[field] ?? {} : current[field];
+    const newValue = field === "birthday" ? draft[field] ?? {} : draft[field];
+    if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) {
+      patches.push({ field, value: draft[field], expectedOld: current[field] });
+    }
+  }
+  return patches;
+}
 
 function isCreateEditing(editing: ContactView | null | CreateContactEditing): editing is CreateContactEditing {
   return editing === "create" || (editing !== null && "createPrefill" in editing);
@@ -413,62 +432,7 @@ export function ContactsView({ books: initialBooks = [], sync, serverConnected =
       const isCreate = isCreateEditing(editing);
       const current = isCreate ? undefined : editing;
 
-      // Build patches from draft changes
-      const patches: unknown[] = [];
-
-      if (current) {
-        // Update case: build patches for changed fields
-        if ((current.givenName ?? "") !== (draft.givenName ?? "")) {
-          patches.push({ field: "givenName", value: draft.givenName, expectedOld: current.givenName });
-        }
-        if ((current.familyName ?? "") !== (draft.familyName ?? "")) {
-          patches.push({ field: "familyName", value: draft.familyName, expectedOld: current.familyName });
-        }
-        if ((current.nickname ?? "") !== (draft.nickname ?? "")) {
-          patches.push({ field: "nickname", value: draft.nickname, expectedOld: current.nickname });
-        }
-        if ((current.organization ?? "") !== (draft.organization ?? "")) {
-          patches.push({ field: "organization", value: draft.organization, expectedOld: current.organization });
-        }
-        if ((current.title ?? "") !== (draft.title ?? "")) {
-          patches.push({ field: "title", value: draft.title, expectedOld: current.title });
-        }
-        if ((current.notes ?? "") !== (draft.notes ?? "")) {
-          patches.push({ field: "notes", value: draft.notes, expectedOld: current.notes });
-        }
-
-        // Phone comparison
-        if (JSON.stringify(current.phones) !== JSON.stringify(draft.phones)) {
-          patches.push({ field: "phones", value: draft.phones, expectedOld: current.phones });
-        }
-
-        // Email comparison
-        if (JSON.stringify(current.emails) !== JSON.stringify(draft.emails)) {
-          patches.push({ field: "emails", value: draft.emails, expectedOld: current.emails });
-        }
-
-        // Address comparison
-        if (JSON.stringify(current.addresses) !== JSON.stringify(draft.addresses)) {
-          patches.push({ field: "addresses", value: draft.addresses, expectedOld: current.addresses });
-        }
-
-        // Birthday comparison
-        if (JSON.stringify(current.birthday ?? {}) !== JSON.stringify(draft.birthday ?? {})) {
-          patches.push({ field: "birthday", value: draft.birthday, expectedOld: current.birthday });
-        }
-      } else {
-        // Create case: include all fields
-        patches.push({ field: "givenName", value: draft.givenName });
-        patches.push({ field: "familyName", value: draft.familyName });
-        patches.push({ field: "nickname", value: draft.nickname });
-        patches.push({ field: "organization", value: draft.organization });
-        patches.push({ field: "title", value: draft.title });
-        patches.push({ field: "phones", value: draft.phones });
-        patches.push({ field: "emails", value: draft.emails });
-        patches.push({ field: "addresses", value: draft.addresses });
-        patches.push({ field: "birthday", value: draft.birthday });
-        patches.push({ field: "notes", value: draft.notes });
-      }
+      const patches = buildContactPatches(draft, current);
 
       const photoKind = draft.photoKind;
       const photoRequest =

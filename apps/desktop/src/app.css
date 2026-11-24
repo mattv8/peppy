@@ -667,14 +667,6 @@ mark { background: var(--peppy-warning-surface); color: var(--peppy-text-primary
 }
 #no-selection-state p { margin: 0; }
 #new-conversation-cta { display: inline-flex; align-items: center; gap: 6px; }
-#no-selection-feedback {
-  max-height: min(40%, 240px);
-  display: grid;
-  gap: 8px;
-  padding: 8px 12px;
-  overflow-y: auto;
-  text-align: left;
-}
 .message-row {
   display: flex;
   flex-direction: column;

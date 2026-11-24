@@ -4,14 +4,9 @@ import type { AppFilter, MirroredNotification, NotificationTarget } from "../bri
 import type { OneTimeCodeTarget } from "@peppy/desktop-ui/bridge-contracts";
 import { OneTimeCodeButton } from "../one-time-code/OneTimeCodeButton";
 import { notificationMuteKey, notificationTuple } from "./notificationIdentity";
-import { highlightSegments, notificationSearchTerms } from "./notificationSearch";
+import { highlightSegments, notificationSearchTerms, type NotificationLabels } from "./notificationSearch";
 import { localFailureText, refusedRowStatus, TRY_AGAIN_LABEL, tryAgainLabel, waitingRowStatus } from "./notificationDismissCopy";
-
-export type NotificationLabels = {
-  appName(notification: MirroredNotification): string;
-  sourceName(notification: MirroredNotification): string;
-  title(notification: MirroredNotification): string;
-};
+export type { NotificationLabels } from "./notificationSearch";
 
 /** Status shown under a row's text. Omitted for an ordinary dismissible row. */
 export type NotificationRowStatus =

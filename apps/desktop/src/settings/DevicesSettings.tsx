@@ -164,7 +164,13 @@ export function DevicesSettings({ serverOffline = false, accountReadOnly = false
 
   return <section id="settings-devices" className="settings-card" data-settings-section="devices" aria-labelledby="settings-devices-title" aria-busy={loading}>
     <h2 id="settings-devices-title" ref={titleHeading} tabIndex={-1}>Devices</h2>
-    {onAddDevice ? <div id="devices-intro-row"><div data-devices-intro-copy><p>{DEVICES_DESCRIPTION}</p>{addDeviceNote && <span id="devices-add-device-note" className="settings-note">{addDeviceNote}</span>}</div><button id="devices-add-device" type="button" className="secondary-button" disabled={Boolean(addDeviceNote)} aria-describedby={addDeviceNote ? "devices-add-device-note" : undefined} onClick={onAddDevice}><Plus size={14} strokeWidth={1.75} aria-hidden />Add new device</button></div> : <p>{DEVICES_DESCRIPTION}</p>}
+    {onAddDevice ? <div id="devices-intro-row">
+      <div data-devices-intro-copy>
+        <p>{DEVICES_DESCRIPTION}</p>
+        {addDeviceNote && <span id="devices-add-device-note" className="settings-note">{addDeviceNote}</span>}
+      </div>
+      <button id="devices-add-device" type="button" className="secondary-button" disabled={Boolean(addDeviceNote)} aria-describedby={addDeviceNote ? "devices-add-device-note" : undefined} onClick={onAddDevice}><Plus size={14} strokeWidth={1.75} aria-hidden />Add new device</button>
+    </div> : <p>{DEVICES_DESCRIPTION}</p>}
     {offline && <p id="devices-offline-notice" data-devices-offline-notice role="status" className="settings-note">{roster ? "Server offline. Showing the last loaded list; removing devices is unavailable." : "Server offline. The device list will load when the server is back."}</p>}
     {error && <p id="devices-error" role="alert" className="settings-error" data-devices-remove-error={error === OFFLINE_REMOVE_ERROR || undefined}>{error}</p>}
     {accountPaused && roster && <p id="devices-read-only-caption" data-devices-read-only-caption className="settings-note">{peppyCopy.devices_read_only_caption}</p>}
@@ -172,10 +178,36 @@ export function DevicesSettings({ serverOffline = false, accountReadOnly = false
     {!loading && (!roster || offline || loadFailed) && <button id="devices-retry" className="secondary-button" type="button" onClick={() => void load()}>Retry loading devices</button>}
     {roster && <div aria-hidden={target || renameTarget ? "true" : undefined} inert={target || renameTarget ? true : undefined}>
       {!rows(false).length && !rows(true).length && <p id="devices-empty">No devices enrolled.</p>}
-      <ul id="devices-active-list" aria-label="Active devices">{rows(false).filter(device => device.id !== mcpDeviceId).map(row)}<McpDeviceSettings roster={roster} serverOffline={offline} accountReadOnly={accountReadOnly} browserHost={browserHost} sessionKey={sessionKey} unlocked={unlocked} refreshToken={mcpRefreshToken} onDeviceId={setMcpDeviceId} onMutation={async () => { await load(); setMcpRefreshToken(token => token + 1); }} onRename={openRename} onRemove={(device, opener) => { invoker.current = opener; setTarget(device); }} /></ul>
-      {rows(true).length > 0 && <details id="devices-removed" className="settings-disclosure"><summary>Previously removed</summary><ul id="devices-removed-list" aria-label="Previously removed devices">{rows(true).map(row)}</ul></details>}
+      <ul id="devices-active-list" aria-label="Active devices">
+        {rows(false).filter(device => device.id !== mcpDeviceId).map(row)}
+        <McpDeviceSettings
+          roster={roster}
+          serverOffline={offline}
+          accountReadOnly={accountReadOnly}
+          browserHost={browserHost}
+          sessionKey={sessionKey}
+          unlocked={unlocked}
+          refreshToken={mcpRefreshToken}
+          onDeviceId={setMcpDeviceId}
+          onMutation={async () => { await load(); setMcpRefreshToken(token => token + 1); }}
+          onRename={openRename}
+          onRemove={(device, opener) => { invoker.current = opener; setTarget(device); }}
+        />
+      </ul>
+      {rows(true).length > 0 && <details id="devices-removed" className="settings-disclosure">
+        <summary>Previously removed</summary>
+        <ul id="devices-removed-list" aria-label="Previously removed devices">{rows(true).map(row)}</ul>
+      </details>}
     </div>}
-    {target && <Modal id="device-revoke-dialog" title={`Remove ${deviceName(target)}?`} busy={pending} onDismiss={close} opener={invoker} focusFallback={titleHeading} actions={<><button type="button" className="secondary-button" disabled={pending} onClick={close}>Cancel</button><button type="button" className="primary-button" disabled={pending} aria-busy={pending || undefined} onClick={() => void remove()}>Remove device</button></>}>{mcpDeviceId === target.id ? <p>Removing Peppy MCP fences its grants and device access, stops its runtime, and starts managed cleanup. Cleanup is reported separately; external copies cannot be erased. Re-enable it to approve a new server client.</p> : <><p>Server access is revoked. Local data and secrets are not erased. Reconnecting requires enrollment.</p>{target.role === "gateway" && <p>{peppyCopy.devices_remove_gateway_note}</p>}</>}</Modal>}
+    {target && <Modal id="device-revoke-dialog" title={`Remove ${deviceName(target)}?`} busy={pending} onDismiss={close} opener={invoker} focusFallback={titleHeading} actions={<>
+      <button type="button" className="secondary-button" disabled={pending} onClick={close}>Cancel</button>
+      <button type="button" className="primary-button" disabled={pending} aria-busy={pending || undefined} onClick={() => void remove()}>Remove device</button>
+    </>}>
+      {mcpDeviceId === target.id ? <p>Removing Peppy MCP fences its grants and device access, stops its runtime, and starts managed cleanup. Cleanup is reported separately; external copies cannot be erased. Re-enable it to approve a new server client.</p> : <>
+        <p>Server access is revoked. Local data and secrets are not erased. Reconnecting requires enrollment.</p>
+        {target.role === "gateway" && <p>{peppyCopy.devices_remove_gateway_note}</p>}
+      </>}
+    </Modal>}
     {renameTarget && <DeviceRenameDialog device={renameTarget} displayName={renameTarget.id === mcpDeviceId ? renameTarget.name.trim() || "Peppy MCP" : deviceName(renameTarget)} offline={offline} opener={invoker} focusFallback={titleHeading} onClose={() => setRenameTarget(null)} onOffline={() => setOfflineFromFailure(true)} onFinished={async message => { setMcpRefreshToken(token => token + 1); const loaded = await load(); setError(message ?? (loaded ? "" : "The device was renamed, but the latest roster could not be loaded.")); }} />}
   </section>;
 }
