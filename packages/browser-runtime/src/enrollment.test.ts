@@ -2060,7 +2060,8 @@ describe("BrowserEnrollment", () => {
       const path = pathOf(input);
       if (path === "/hosted/v1/enrollment/config") return json(instanceInfo(true, "hosted"));
       if (path === "/hosted/v1/web/app-session") return json({ signed_in: true, csrf_token: "restored-csrf" });
-      if (path.includes("/revoke")) return json({ vault_id: vaultId, devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 });
+      if (path.includes("/revoke")) return new Response(null, { status: 204 });
+      if (path === "/v1/instance/management") return json({ vault_id: vaultId, devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 });
       throw new Error(`unexpected ${path}`);
     });
     const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
@@ -2069,7 +2070,7 @@ describe("BrowserEnrollment", () => {
     await enrollment.revokeDevice(deviceId);
 
     expect(fetcher.mock.calls.some(([input]) => pathOf(input) === "/hosted/v1/web/app-account")).toBe(false);
-    expect(fetcher.mock.calls.at(-1)?.[1]).toMatchObject({ headers: { "X-Peppy-CSRF": "restored-csrf" } });
+    expect(fetcher.mock.calls.find(([input]) => pathOf(input).includes("/revoke"))?.[1]).toMatchObject({ headers: { "X-Peppy-CSRF": "restored-csrf" } });
     expect(session.phase).toBe(phase);
   });
 
@@ -2082,7 +2083,8 @@ describe("BrowserEnrollment", () => {
       if (path === "/hosted/v1/enrollment/config") return json(instanceInfo(true, "hosted"));
       if (path === "/hosted/v1/web/app-session") return json(appSessions.shift());
       if (path === "/hosted/v1/web/app-account") return json({ classification: "existing", vault_id: vaultId });
-      if (path.includes("/revoke")) return json({ vault_id: vaultId, devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 });
+      if (path.includes("/revoke")) return new Response(null, { status: 204 });
+      if (path === "/v1/instance/management") return json({ vault_id: vaultId, devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 });
       throw new Error(`unexpected ${path}`);
     });
     const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
@@ -2091,7 +2093,7 @@ describe("BrowserEnrollment", () => {
     await expect(enrollment.discover()).resolves.toMatchObject({ stage: "signin" });
     await enrollment.revokeDevice(deviceId);
 
-    expect(fetcher.mock.calls.at(-1)?.[1]?.headers).toEqual({ "Peppy-Attachment-Retention-Protocol": "1" });
+    expect(fetcher.mock.calls.find(([input]) => pathOf(input).includes("/revoke"))?.[1]?.headers).toEqual({ "Peppy-Attachment-Retention-Protocol": "1" });
   });
 
   it("returns hosted signin when the account session expires before the protected account request", async () => {
@@ -2102,7 +2104,8 @@ describe("BrowserEnrollment", () => {
       if (path === "/hosted/v1/enrollment/config") return json(instanceInfo(true, "hosted"));
       if (path === "/hosted/v1/web/app-session") return json({ signed_in: true, csrf_token: "restored-csrf" });
       if (path === "/hosted/v1/web/app-account") return json({ error: "unauthenticated" }, { status: 401 });
-      if (path.includes("/revoke")) return json({ vault_id: vaultId, devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 });
+      if (path.includes("/revoke")) return new Response(null, { status: 204 });
+      if (path === "/v1/instance/management") return json({ vault_id: vaultId, devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 });
       throw new Error(`unexpected ${path}`);
     });
     const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
@@ -2110,7 +2113,78 @@ describe("BrowserEnrollment", () => {
     await expect(enrollment.discover()).resolves.toMatchObject({ mode: "hosted", stage: "signin" });
     await enrollment.revokeDevice(deviceId);
 
-    expect(fetcher.mock.calls.at(-1)?.[1]?.headers).toEqual({ "Peppy-Attachment-Retention-Protocol": "1" });
+    expect(fetcher.mock.calls.find(([input]) => pathOf(input).includes("/revoke"))?.[1]?.headers).toEqual({ "Peppy-Attachment-Retention-Protocol": "1" });
+  });
+
+  // Regression for review exception E3.
+  it("refreshes management after a successful 204 revoke", async () => {
+    const paths: string[] = [];
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      paths.push(path);
+      if (path.endsWith("/revoke")) return new Response(null, { status: 204 });
+      if (path === "/v1/instance/management") return json({ vault_id: vaultId, devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment({ invoke: vi.fn(async () => ({})) }, new TestSession(), origin, fetcher);
+    await expect(enrollment.revokeDevice(deviceId)).resolves.toMatchObject({ vault_id: vaultId, devices: [] });
+    expect(paths).toEqual([`/v1/instance/devices/${deviceId}/revoke`, "/v1/instance/management"]);
+  });
+
+  // Regression for review exception E3.
+  it("reports a refresh failure after a successful revoke", async () => {
+    const fetcher = vi.fn<typeof fetch>(async input => pathOf(input).endsWith("/revoke")
+      ? new Response(null, { status: 204 })
+      : new Response(null, { status: 500 }));
+    const enrollment = new BrowserEnrollment({ invoke: vi.fn(async () => ({})) }, new TestSession(), origin, fetcher);
+    await expect(enrollment.revokeDevice(deviceId)).rejects.toEqual({ code: "revoke-refresh-failed" });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  // Regression for review exception E3.
+  it("reports a network failure during the refresh after a successful revoke", async () => {
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      if (pathOf(input).endsWith("/revoke")) return new Response(null, { status: 204 });
+      throw new TypeError("network");
+    });
+    const enrollment = new BrowserEnrollment({ invoke: vi.fn(async () => ({})) }, new TestSession(), origin, fetcher);
+    await expect(enrollment.revokeDevice(deviceId)).rejects.toEqual({ code: "revoke-refresh-failed" });
+    expect(fetcher.mock.calls.map(([input]) => pathOf(input))).toEqual([`/v1/instance/devices/${deviceId}/revoke`, "/v1/instance/management"]);
+  });
+
+  // Regression for review exception E3.
+  it.each([401, 403])("reports a refresh failure when the GET returns %s", async status => {
+    const fetcher = vi.fn<typeof fetch>(async input => pathOf(input).endsWith("/revoke")
+      ? new Response(null, { status: 204 })
+      : new Response(null, { status }));
+    const enrollment = new BrowserEnrollment({ invoke: vi.fn(async () => ({})) }, new TestSession(), origin, fetcher);
+    await expect(enrollment.revokeDevice(deviceId)).rejects.toEqual({ code: "revoke-refresh-failed" });
+    expect(fetcher.mock.calls.map(([input]) => pathOf(input))).toEqual([`/v1/instance/devices/${deviceId}/revoke`, "/v1/instance/management"]);
+  });
+
+  // Regression for review exception E3.
+  it("propagates a POST network failure without refreshing", async () => {
+    const failure = new TypeError("network");
+    const fetcher = vi.fn<typeof fetch>(async () => { throw failure; });
+    const enrollment = new BrowserEnrollment({ invoke: vi.fn(async () => ({})) }, new TestSession(), origin, fetcher);
+    await expect(enrollment.revokeDevice(deviceId)).rejects.toBe(failure);
+    expect(fetcher.mock.calls.map(([input]) => pathOf(input))).toEqual([`/v1/instance/devices/${deviceId}/revoke`]);
+  });
+
+  // Regression for review exception E3.
+  it.each([401, 403])("preserves the POST authorization error for status %s", async status => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(null, { status }));
+    const enrollment = new BrowserEnrollment({ invoke: vi.fn(async () => ({})) }, new TestSession(), origin, fetcher);
+    await expect(enrollment.revokeDevice(deviceId)).rejects.toEqual({ code: `http-${status}` });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  // Regression for review exception E3.
+  it("propagates other POST failures without refreshing", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(null, { status: 500 }));
+    const enrollment = new BrowserEnrollment({ invoke: vi.fn(async () => ({})) }, new TestSession(), origin, fetcher);
+    await expect(enrollment.revokeDevice(deviceId)).rejects.toThrow("http-500");
+    expect(fetcher).toHaveBeenCalledOnce();
   });
 
   it("uses the mode-specific CSRF header and bounds streamed JSON before parsing", async () => {
@@ -2121,14 +2195,15 @@ describe("BrowserEnrollment", () => {
       const path = pathOf(input);
       if (path === "/hosted/v1/enrollment/config") return json(instanceInfo(true, "hosted"));
       if (path === "/hosted/v1/web/app-session") return json({ signed_in: false });
-      if (path.includes("/revoke")) return json({ vault_id: vaultId, devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 });
+      if (path.includes("/revoke")) return new Response(null, { status: 204 });
+      if (path === "/v1/instance/management") return json({ vault_id: vaultId, devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 });
       throw new Error(`unexpected ${path}`);
     });
     const hosted = new BrowserEnrollment(core, session, origin, hostedFetcher);
     await hosted.discover();
     hosted.setHostedCsrf("hosted-csrf");
     await hosted.revokeDevice(deviceId);
-    expect(hostedFetcher.mock.calls.at(-1)?.[1]).toMatchObject({ headers: { "X-Peppy-CSRF": "hosted-csrf" } });
+    expect(hostedFetcher.mock.calls.find(([input]) => pathOf(input).includes("/revoke"))?.[1]).toMatchObject({ headers: { "X-Peppy-CSRF": "hosted-csrf" } });
 
     const boundedFetcher = vi.fn<typeof fetch>(async input => pathOf(input) === "/hosted/v1/enrollment/config" ? new Response(oversized, { headers: { "content-length": String(65 * 1024) } }) : json(instanceInfo(true)));
     const bounded = new BrowserEnrollment(core, session, origin, boundedFetcher);

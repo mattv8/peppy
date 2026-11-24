@@ -53,6 +53,7 @@ describe("InstanceManagement", () => {
     expect((screen.getByLabelText("Username") as HTMLInputElement).value).toBe("sasha");
   });
 
+  // Regression for review exception E3.
   it("keeps the displayed roster when revocation fails", async () => {
     render(<InstanceManagement bridge={bridge({ enrollment_revoke_device: vi.fn(async () => { throw new Error("network"); }) })} />);
     expect(await screen.findByText("Owner laptop")).toBeTruthy();
@@ -120,6 +121,7 @@ describe("InstanceManagement", () => {
     expect(screen.getAllByRole("alert")).toHaveLength(1);
   });
 
+  // Regression for review exception E3.
   it("moves focus to the Devices heading after a successful revoke", async () => {
     const revoked = { ...management, devices: management.devices.map((device) => ({ ...device, revoked: true })) };
     render(<InstanceManagement bridge={bridge({ enrollment_revoke_device: vi.fn(async () => revoked) })} />);
@@ -128,6 +130,18 @@ describe("InstanceManagement", () => {
     const devicesHeading = screen.getByRole("heading", { name: "Devices" });
     await waitFor(() => expect(document.activeElement).toBe(devicesHeading));
     expect(screen.queryByRole("dialog", { name: "Revoke device?" })).toBeNull();
+    expect(screen.getByText("Revoked")).toBeTruthy();
+  });
+
+  // Regression for review exception E3.
+  it("closes the dialog and reports a failed refresh after revocation", async () => {
+    render(<InstanceManagement bridge={bridge({ enrollment_revoke_device: vi.fn(async () => { throw { code: "revoke-refresh-failed" }; }) })} />);
+    const revokeButton = await screen.findByRole("button", { name: "Revoke" });
+    fireEvent.click(revokeButton);
+    fireEvent.click(screen.getByRole("button", { name: "Revoke device" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("The device was revoked, but Peppy could not refresh the device list.");
+    expect(screen.queryByRole("dialog", { name: "Revoke device?" })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(revokeButton));
   });
 
   it("closes revoke on Escape without calling revoke", async () => {
