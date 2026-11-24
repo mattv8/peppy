@@ -13,7 +13,6 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [features]
 default = ["self-update"]
 self-update = ["dep:tauri-plugin-updater", "dep:zbus"]
-retained-stack-smoke = []
 dev-local-tls = []
 
 [build-dependencies]
