@@ -1156,7 +1156,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires disposable PostgreSQL via TEST_DATABASE_URL; run with --include-ignored"]
     async fn cleanup_removes_retired_rows_past_grace_and_keeps_live_or_recent_approvals() {
         let pool = cleanup_pool().await;
         let seed = seed_owner(&pool).await;
@@ -1182,7 +1181,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires disposable PostgreSQL via TEST_DATABASE_URL; run with --include-ignored"]
     async fn cleanup_deletes_at_most_one_batch_per_call() {
         let pool = cleanup_pool().await;
         let seed = seed_owner(&pool).await;

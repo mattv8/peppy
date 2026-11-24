@@ -711,6 +711,36 @@ async fn size_hash_and_missing_object_failures_are_typed() {
 }
 
 #[tokio::test]
+async fn vault_response_identifies_the_owner_credential() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let vault: Value = server
+        .auth(Client::new().get(format!("{}/v1/vault", server.base_url)))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        vault["device_id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap(),
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT device_id FROM device_credentials WHERE token_digest=$1"
+        )
+        .bind(Sha256::digest(server.owner_token.as_bytes()).as_slice())
+        .fetch_one(&server.pool)
+        .await
+        .unwrap()
+    );
+    assert_eq!(vault["role"], "owner");
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn client_attachment_ids_are_idempotent_and_public_copies_are_separate_and_revocable() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
@@ -781,30 +811,6 @@ async fn client_attachment_ids_are_idempotent_and_public_copies_are_separate_and
         Client::new().get(public_url).send().await.unwrap().status(),
         StatusCode::NOT_FOUND
     );
-
-    let vault: Value = server
-        .auth(Client::new().get(format!("{}/v1/vault", server.base_url)))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        vault["device_id"]
-            .as_str()
-            .unwrap()
-            .parse::<Uuid>()
-            .unwrap(),
-        sqlx::query_scalar::<_, Uuid>(
-            "SELECT device_id FROM device_credentials WHERE token_digest=$1"
-        )
-        .bind(Sha256::digest(server.owner_token.as_bytes()).as_slice())
-        .fetch_one(&server.pool)
-        .await
-        .unwrap()
-    );
-    assert_eq!(vault["role"], "owner");
     server.shutdown().await;
 }
 

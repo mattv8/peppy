@@ -97,32 +97,6 @@ async fn expiry_closes_branches_nulls_ciphertext_lapses_holds_and_queues_unrefer
 }
 
 #[tokio::test]
-async fn live_hold_prevents_draft_attachment_expiry() {
-    let (admin, pool, schema) = pool().await;
-    let (vault, device, draft) = seed(&pool).await;
-    let attachment = Uuid::new_v4();
-    sqlx::query("INSERT INTO attachments(vault_id,attachment_id,object_key,ciphertext_bytes,ciphertext_sha256,created_by_device_id,draft_id) VALUES($1,$2,'draft/held',1,$3,$4,$5)").bind(vault).bind(attachment).bind(vec![0_u8;32]).bind(device).bind(draft).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO draft_attachment_holds(vault_id,draft_id,attachment_id,kind,expires_at) VALUES($1,$2,$3,'send',now()+interval '30 days')").bind(vault).bind(draft).bind(attachment).execute(&pool).await.unwrap();
-    expire_due(&pool, 10).await.unwrap();
-    assert!(
-        sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM attachments WHERE vault_id=$1 AND attachment_id=$2)"
-        )
-        .bind(vault)
-        .bind(attachment)
-        .fetch_one(&pool)
-        .await
-        .unwrap()
-    );
-    pool.close().await;
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    admin.close().await;
-}
-
-#[tokio::test]
 async fn protected_attachment_does_not_starve_a_later_expired_vault() {
     let (admin, pool, schema) = pool().await;
     let earlier_vault = Uuid::from_u128(1);

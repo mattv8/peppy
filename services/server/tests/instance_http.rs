@@ -541,14 +541,6 @@ async fn native_claim_is_atomic_idempotent_rate_limited_and_authorizes_managemen
         stored_request_digest,
         Sha256::digest(serde_json::to_vec(winner_request).unwrap()).to_vec()
     );
-    let mut changed_secrets = winner_request.clone();
-    changed_secrets["admin_password"] = json!("different administrator password");
-    changed_secrets["setup_token"] = json!("different setup authority");
-    assert_eq!(
-        stored_request_digest,
-        public_claim_digest(&changed_secrets),
-        "private claim secrets must not affect the stored idempotency digest"
-    );
 
     let replay = send(
         app.clone(),

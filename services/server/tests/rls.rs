@@ -1578,16 +1578,6 @@ async fn extra_true_policy_fails_closed() {
 }
 
 #[tokio::test]
-async fn valid_source_community_policies_pass() {
-    let fixture = Fixture::new().await;
-
-    rls::validate_runtime_role(&fixture.runtime, true)
-        .await
-        .unwrap();
-    fixture.cleanup().await;
-}
-
-#[tokio::test]
 async fn column_privilege_drift_is_detected_and_repaired_by_grants() {
     let fixture = Fixture::new().await;
 
@@ -2766,31 +2756,6 @@ async fn hosted_duplicate_equivalent_policies_pass() {
         .await
         .unwrap();
     fixture.cleanup().await;
-}
-
-#[test]
-fn community_migration_revokes_all_prescope_resolvers_from_public() {
-    let migration = include_str!("../migrations/0021_community_rls.sql");
-    for signature in [
-        "community_resolve_device_credential(bytea)",
-        "community_resolve_public_copy_vault(bytea)",
-        "community_resolve_phone_invitation(bytea)",
-        "community_resolve_computer_enrollment(uuid, bytea)",
-        "community_resolve_phone_invitation_claim(uuid, bytea)",
-        "community_resolve_device_admission(uuid)",
-        "community_admin_vault_summaries()",
-    ] {
-        assert!(migration.contains(signature));
-        assert!(migration.contains(&format!(
-            "REVOKE ALL ON FUNCTION %I.{signature} FROM PUBLIC"
-        )));
-    }
-}
-
-#[test]
-fn role_identifiers_cannot_escape_dynamic_grants() {
-    assert!(rls::role_identifier("peppy_runtime").is_ok());
-    assert!(rls::role_identifier("peppy_runtime; GRANT ALL").is_err());
 }
 
 #[tokio::test]

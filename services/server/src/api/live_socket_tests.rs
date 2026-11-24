@@ -1007,10 +1007,10 @@ async fn authenticated_live_socket_receives_strict_hello_as_first_frame() {
 async fn recipient_drops_frame_that_expires_while_ticket_revalidation_is_blocked() {
     let policy_gate = LiveTicketTestGate::new(1);
     let policy = Arc::new(GatedPolicy::new(policy_gate.clone()));
-    let now = live_now_ms();
-    let clock_ms = Arc::new(std::sync::atomic::AtomicU64::new(now));
+    let clock_ms = Arc::new(std::sync::atomic::AtomicU64::new(live_now_ms()));
     let hooks = LiveTicketTestHooks {
         clock_ms: Some(clock_ms.clone()),
+        recheck_interval: Some(Duration::from_secs(20)),
         ..LiveTicketTestHooks::default()
     };
     let mut options = LiveTestOptions::new(FakeLiveBackend::immediate(), true);
@@ -1026,6 +1026,8 @@ async fn recipient_drops_frame_that_expires_while_ticket_revalidation_is_blocked
     expect_strict_hello(&mut recipient).await;
     let mut sender = server.connect_peer().await;
     expect_strict_hello(&mut sender).await;
+    let now = live_now_ms();
+    clock_ms.store(now, Ordering::SeqCst);
     policy.arm();
 
     let expires_at_ms = now + 1_000;
