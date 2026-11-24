@@ -468,6 +468,44 @@ mod tests {
     use crate::compose::find_route;
 
     #[test]
+    fn mms_limit_sources_match_generated_gateway_union() {
+        use ts_rs::TS;
+
+        let declaration = GatewayView::decl();
+        let union = declaration
+            .split_once("mmsLimitSource?: ")
+            .unwrap()
+            .1
+            .split_once(',')
+            .unwrap()
+            .0;
+        let members: Vec<_> = union
+            .split('|')
+            .map(|member| member.trim().trim_matches('"'))
+            .collect();
+        let carrier: SimReport = serde_json::from_value(serde_json::json!({
+            "subscription_id": "sim", "sms": "available", "mms": "available",
+            "mms_max_bytes": 1024, "mms_limit_source": "carrier"
+        }))
+        .unwrap();
+        let fallback: SimReport = serde_json::from_value(serde_json::json!({
+            "subscription_id": "sim", "sms": "available", "mms": "available"
+        }))
+        .unwrap();
+        let sources = [
+            mms_limits(&carrier).2.unwrap(),
+            mms_limits(&fallback).2.unwrap(),
+        ];
+        assert_ne!(sources[0], sources[1]);
+        assert_eq!(members.len(), sources.len());
+        for source in &sources {
+            assert!(
+                members.contains(&source.as_str()),
+                "{source} not in {union}"
+            );
+        }
+    }
+    #[test]
     fn gateway_names_follow_device_names_and_sim_count() {
         let id = "12345678-1234-1234-1234-123456789abc";
         let views = |name: serde_json::Value, sims: serde_json::Value, simulated: bool| {

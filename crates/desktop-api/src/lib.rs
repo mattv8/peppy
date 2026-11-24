@@ -231,7 +231,7 @@ pub struct Desktop {
     pub background: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayView {
     pub id: String,
@@ -248,24 +248,31 @@ pub struct GatewayView {
     #[serde(default)]
     pub setting_up: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
     pub last_seen_age_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub presence: Option<GatewayPresence>,
     #[serde(default)]
     pub wake_route: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub mms_content_version: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
     pub mms_max_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "\"carrier\" | \"fallback\"")]
     pub mms_limit_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
     pub mms_max_recipients: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub capability_note: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayAvailability {
     #[default]
@@ -282,19 +289,104 @@ pub enum GatewayAvailability {
     UnsupportedPlatform,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub struct GatewayPresence {
     pub state: GatewayPresenceState,
+    #[ts(type = "number | null")]
     pub last_seen_age_seconds: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayPresenceState {
     Connected,
     Seen,
     Never,
+}
+
+#[cfg(test)]
+mod gateway_wire_tests {
+    use super::*;
+
+    #[test]
+    fn gateway_json_is_unchanged() {
+        let minimal = GatewayView {
+            id: "id".into(),
+            name: "name".into(),
+            sim_id: "sim".into(),
+            online: false,
+            simulated: false,
+            supports_sms: false,
+            supports_mms: false,
+            availability: GatewayAvailability::Unknown,
+            setting_up: false,
+            last_seen_age_seconds: None,
+            presence: None,
+            wake_route: false,
+            mms_content_version: None,
+            mms_max_bytes: None,
+            mms_limit_source: None,
+            mms_max_recipients: None,
+            capability_note: None,
+        };
+        let full = GatewayView {
+            id: "id".into(),
+            name: "name".into(),
+            sim_id: "sim".into(),
+            online: true,
+            simulated: true,
+            supports_sms: true,
+            supports_mms: true,
+            availability: GatewayAvailability::Connected,
+            setting_up: true,
+            last_seen_age_seconds: Some(12),
+            presence: Some(GatewayPresence {
+                state: GatewayPresenceState::Seen,
+                last_seen_age_seconds: Some(13),
+            }),
+            wake_route: true,
+            mms_content_version: Some(2),
+            mms_max_bytes: Some(1024),
+            mms_limit_source: Some("carrier".into()),
+            mms_max_recipients: Some(5),
+            capability_note: Some("note".into()),
+        };
+        let cases = [
+            (
+                minimal,
+                r#"{"id":"id","name":"name","simId":"sim","online":false,"simulated":false,"supportsSms":false,"supportsMms":false,"availability":"unknown","settingUp":false,"wakeRoute":false}"#,
+            ),
+            (
+                full,
+                r#"{"id":"id","name":"name","simId":"sim","online":true,"simulated":true,"supportsSms":true,"supportsMms":true,"availability":"connected","settingUp":true,"lastSeenAgeSeconds":12,"presence":{"state":"seen","last_seen_age_seconds":13},"wakeRoute":true,"mmsContentVersion":2,"mmsMaxBytes":1024,"mmsLimitSource":"carrier","mmsMaxRecipients":5,"capabilityNote":"note"}"#,
+            ),
+        ];
+        for (view, json) in cases {
+            assert_eq!(serde_json::to_string(&view).unwrap(), json);
+            assert_eq!(serde_json::from_str::<GatewayView>(json).unwrap(), view);
+        }
+    }
+
+    #[test]
+    fn legacy_gateway_defaults_presence_fields() {
+        let json = r#"{"id":"id","name":"name","simId":"sim","online":false,"simulated":false,"supportsSms":false,"supportsMms":false}"#;
+        let view: GatewayView = serde_json::from_str(json).unwrap();
+        assert_eq!(view.availability, GatewayAvailability::Unknown);
+        assert!(!view.setting_up);
+        assert!(!view.wake_route);
+    }
+
+    #[test]
+    fn gateway_presence_missing_age_serializes_as_null() {
+        let view = GatewayPresence {
+            state: GatewayPresenceState::Never,
+            last_seen_age_seconds: None,
+        };
+        let json = r#"{"state":"never","last_seen_age_seconds":null}"#;
+        assert_eq!(serde_json::to_string(&view).unwrap(), json);
+        assert_eq!(serde_json::from_str::<GatewayPresence>(json).unwrap(), view);
+    }
 }
 
 #[derive(Serialize)]

@@ -8,7 +8,7 @@ function snapshot(): DesktopSnapshot {
     mode: "native",
     connection: { state: "connected" },
     encryption: { state: "unlocked" },
-    gateways: [{ id: "gateway-a", name: "Gateway", simId: "sim-a", online: true, simulated: false, supportsSms: true, supportsMms: true }],
+    gateways: [{ id: "gateway-a", name: "Gateway", simId: "sim-a", online: true, simulated: false, supportsSms: true, supportsMms: true, availability: "unknown", settingUp: false, wakeRoute: false }],
     conversations: [{ id: "conversation-a", name: "Conversation", preview: "", unread: 0, messages: [], participants: ["recipient"] }],
     head: { enabled: false, capability: "unsupported" },
     pendingCount: 0,

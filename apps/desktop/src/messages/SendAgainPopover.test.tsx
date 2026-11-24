@@ -30,6 +30,8 @@ const phone = (overrides: Partial<GatewayView> = {}): GatewayView => ({
   supportsMms: true,
   mmsContentVersion: 4,
   availability: "connected",
+  settingUp: false,
+  wakeRoute: false,
   ...overrides,
 });
 
