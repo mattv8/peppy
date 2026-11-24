@@ -2870,14 +2870,8 @@ async fn send_draft_for_window(
                 let session = session.clone();
                 let conversation_id = input.conversation_id.clone();
                 blocking(move || {
-                    let (gateways, known) = session.gateways();
-                    compose::send_draft_accepted(
-                        &session.client,
-                        &input,
-                        known.then_some(gateways.as_slice()),
-                        remote.command_id,
-                    )
-                    .map_err(session::compose_error)
+                    compose::send_draft_accepted(&session.client, &input, remote.command_id)
+                        .map_err(session::compose_error)
                 })
                 .await
                 .map(|sent| {

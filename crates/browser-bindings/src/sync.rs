@@ -425,11 +425,8 @@ impl BrowserCore {
                     .parse()
                     .map_err(|_| invalid())?;
                 let client = self.client()?;
-                let gateways = self
-                    .gateways_known
-                    .then(|| self.context.gateways.as_deref().unwrap_or(&[]));
                 serde_json::to_value(
-                    compose::send_draft_accepted(client, &input, gateways, command_id)
+                    compose::send_draft_accepted(client, &input, command_id)
                         .map_err(compose_failure)?,
                 )
                 .map_err(|_| core(peppy_client_core::Error::Database))
