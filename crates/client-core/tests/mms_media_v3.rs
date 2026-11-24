@@ -1,7 +1,7 @@
 //! v3 MMS media lifecycle regressions: thumbnails are private derivatives, never visible parts.
 
 use crate::common::*;
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, fs, path::Path, sync::mpsc, thread, time::Duration};
 use tempfile::TempDir;
 
 fn input(id: &str) -> MmsAcquisitionInput {
@@ -124,6 +124,105 @@ fn thumbnail_link_is_retained_idempotent_and_gates_sealing_across_reopen() {
         .mark_attachment_uploaded(thumbnail, &uuid::Uuid::new_v4().to_string())
         .unwrap();
     assert_eq!(reopened.pending_outbox().unwrap().len(), 1);
+}
+
+// Regression for review exception E1.
+#[test]
+fn changing_width_with_same_thumbnail_does_not_deadlock() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let acquisition = client.begin_mms_acquisition(input("width-change")).unwrap();
+    let original = prepare(&client, &dir, "original.png", b"original image");
+    let thumbnail = prepare(&client, &dir, "thumbnail.png", b"thumbnail image");
+    client
+        .set_mms_acquisition_part(&acquisition.acquisition_id, "original", original)
+        .unwrap();
+    client
+        .set_mms_acquisition_part_metadata(
+            &acquisition.acquisition_id,
+            "original",
+            Some(480),
+            Some(320),
+            None,
+            Some(thumbnail),
+        )
+        .unwrap();
+    let pending = client.mms_pending_media_bytes().unwrap();
+    let worker = client.clone();
+    let id = acquisition.acquisition_id.clone();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        sender
+            .send(worker.set_mms_acquisition_part_metadata(
+                &id,
+                "original",
+                Some(481),
+                Some(320),
+                None,
+                Some(thumbnail),
+            ))
+            .unwrap();
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(20))
+        .expect("metadata update timed out")
+        .unwrap();
+    assert_eq!(client.mms_pending_media_bytes().unwrap(), pending);
+    assert!(!client.discard_unreferenced_attachment(thumbnail).unwrap());
+}
+
+// Regression for review exception E1.
+#[test]
+fn replacing_thumbnail_discards_old_attachment_without_deadlock() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let acquisition = client
+        .begin_mms_acquisition(input("thumbnail-replacement"))
+        .unwrap();
+    let original = prepare(&client, &dir, "original.png", b"original image");
+    let old = prepare(&client, &dir, "old.png", b"old thumbnail is longer");
+    let new = prepare(&client, &dir, "new.png", b"new");
+    client
+        .set_mms_acquisition_part(&acquisition.acquisition_id, "original", original)
+        .unwrap();
+    client
+        .set_mms_acquisition_part_metadata(
+            &acquisition.acquisition_id,
+            "original",
+            Some(480),
+            Some(320),
+            None,
+            Some(old),
+        )
+        .unwrap();
+    let pending = client.mms_pending_media_bytes().unwrap();
+    let worker = client.clone();
+    let id = acquisition.acquisition_id.clone();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        sender
+            .send(worker.set_mms_acquisition_part_metadata(
+                &id,
+                "original",
+                Some(480),
+                Some(320),
+                None,
+                Some(new),
+            ))
+            .unwrap();
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(20))
+        .expect("metadata update timed out")
+        .unwrap();
+    assert_eq!(
+        client.mms_pending_media_bytes().unwrap(),
+        pending - b"old thumbnail is longer".len() as u64 + b"new".len() as u64
+    );
+    assert!(client.native_cipher_file(old).is_err());
+    assert!(!client.discard_unreferenced_attachment(new).unwrap());
 }
 
 #[test]
