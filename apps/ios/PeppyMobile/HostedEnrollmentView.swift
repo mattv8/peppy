@@ -18,14 +18,11 @@ struct HostedEnrollmentView: View {
     
     @State private var client: HostedAccountClient?
     @State private var phase: EnrollmentPhase = .loading
-    @State private var account: NativeHostedAccount?
     @State private var provisioning: NativeHostedProvisioning?
     
     // Transient secrets: never saved, logged or shared
     @State private var generatedPassphrase = ""
-    @State private var customPassphrase = ""
     @State private var confirmationPassphrase = ""
-    @State private var provisioningPassphrase = ""
     @State private var acknowledgement = false
     @State private var revealPassphrase = false
     /// A pending secret from an interrupted prepare is stored for this account; it must be reused.
@@ -237,7 +234,6 @@ struct HostedEnrollmentView: View {
             
             Button {
                 generatedPassphrase = generateHostedPassphrase()
-                customPassphrase = ""
                 acknowledgement = false
                 localError = nil
                 passphrasePasswordSaveState.reset()
@@ -341,7 +337,6 @@ struct HostedEnrollmentView: View {
                     .accessibilityIdentifier("enrollment-provisioning-error")
                 
                 Button {
-                    provisioningPassphrase = ""
                     confirmationPassphrase = ""
                     launchTask { await refreshAccount() }
                 } label: {
@@ -459,7 +454,6 @@ struct HostedEnrollmentView: View {
             let gen = uiGeneration
             let acct = try await client.account()
             guard gen == uiGeneration else { return }
-            self.account = acct
             let pending = try await client.pendingProvisioning()
             guard gen == uiGeneration else { return }
             self.provisioning = pending
@@ -514,7 +508,7 @@ struct HostedEnrollmentView: View {
                 throw GoogleHostedSignIn.Error.unavailable
             }
             
-            self.account = try await googleSignIn.signIn(client: client, presenting: viewController)
+            _ = try await googleSignIn.signIn(client: client, presenting: viewController)
             guard gen == uiGeneration else { return }
             
             phase = .checking
@@ -560,7 +554,6 @@ struct HostedEnrollmentView: View {
         }
         localError = nil
         confirmationPassphrase = ""
-        provisioningPassphrase = phrase
         phase = .provisioning
         launchTask { await provisionVault(passphrase: phrase) }
     }
@@ -593,7 +586,6 @@ struct HostedEnrollmentView: View {
             guard gen == uiGeneration else { return }
             self.error = err
             if err == .wrongPassphrase {
-                provisioningPassphrase = ""
                 confirmationPassphrase = ""
                 localError = "passphrase_mismatch"
                 phase = .confirm
@@ -628,7 +620,6 @@ struct HostedEnrollmentView: View {
         do {
             try await client?.signOut()
             clearSecrets()
-            account = nil
             provisioning = nil
             error = nil
             phase = .signIn
@@ -649,9 +640,7 @@ struct HostedEnrollmentView: View {
     
     private func clearSecrets() {
         generatedPassphrase = ""
-        customPassphrase = ""
         confirmationPassphrase = ""
-        provisioningPassphrase = ""
         acknowledgement = false
         revealPassphrase = false
         pendingSecretProtected = false
