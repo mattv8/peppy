@@ -47,7 +47,7 @@ mutate.call('frontend-overwrite', workflow_change: ->(text) { text.sub("        
 mutate.call('skipped-required-frontend', workflow_change: ->(text) { text.sub("    if: needs.changes.outputs.desktop == 'true'", '    if: false') })
 mutate.call('missing-posix-installer', workflow_change: ->(text) { text.gsub('bash .github/scripts/install-cargo-nextest.sh', 'bash missing-cargo-nextest.sh') })
 mutate.call('missing-windows-installer-test', workflow_change: ->(text) { text.sub('install-cargo-nextest.Tests.ps1', 'missing-cargo-nextest.Tests.ps1') })
-updater_test_step = "      - run: 'cargo test --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --bins updates::'\n"
+updater_test_step = "      - run: 'bash .github/scripts/run-selected-tests.sh prefix updates:: -- cargo test --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --bins updates::'\n        shell: bash\n"
 mutate.call('updater-cache-saves', workflow_change: ->(text) { text.sub("save-if: false\n          cache-on-failure: true\n      - run: cargo check --locked --no-default-features", "save-if: true\n          cache-on-failure: true\n      - run: cargo check --locked --no-default-features") })
 mutate.call('missing-updater-check', workflow_change: ->(text) { text.sub("      - run: cargo check --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml\n", '') })
 mutate.call('updater-without-bins', workflow_change: ->(text) { text.sub(updater_test_step, updater_test_step.sub(' --bins', '')) })

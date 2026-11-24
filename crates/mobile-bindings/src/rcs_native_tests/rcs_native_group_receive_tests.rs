@@ -9,10 +9,10 @@ const NOW: i64 = 1_000;
 /// a visible sender is attributed, an unknown sender is stored unattributed and pauses the group,
 /// and a self-sent record is stored once.
 #[test]
+#[ignore = "requires the Go-exported fixture; run in the Android contract lane"]
 fn go_exported_group_receive_records_ingest_into_a_live_group() {
-    let Ok(path) = std::env::var("PEPPY_RCS_GO_GROUP_RECEIVE_RECORDS_PATH") else {
-        return;
-    };
+    let path = std::env::var("PEPPY_RCS_GO_GROUP_RECEIVE_RECORDS_PATH")
+        .expect("PEPPY_RCS_GO_GROUP_RECEIVE_RECORDS_PATH must be set to a valid fixture path");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read Go group receive records {path:?}: {error}"));
     let projections: Vec<Value> = serde_json::from_str(&text)
