@@ -1279,7 +1279,7 @@ impl Client {
     ) -> Result<Option<RcsReceiveContext>, Error> {
         let mut store = self.lock()?;
         let device_id = store.config.device_id;
-        receive_context_in_transaction(&mut store.conn, device_id, google_conversation_id, || {})
+        receive_context_in_transaction(&mut store.conn, device_id, google_conversation_id)
     }
 
     pub fn rcs_link_owned_conversations(&self) -> Result<Vec<RcsReceiveContext>, Error> {
@@ -1895,7 +1895,6 @@ fn receive_context_in_transaction(
     conn: &mut Connection,
     device_id: DeviceId,
     google_conversation_id: &str,
-    after_authority_read: impl FnOnce(),
 ) -> Result<Option<RcsReceiveContext>, Error> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
     if !unique_current_gateway(&tx, device_id)? {
@@ -1907,7 +1906,6 @@ fn receive_context_in_transaction(
     if lifecycle.state != crate::RcsCapabilityState::Linked {
         return Err(Error::InvalidRequest("local RCS gateway is unavailable"));
     }
-    after_authority_read();
     let row = match lane_by_google(&tx, LANE_BY_GOOGLE_ONE_TO_ONE, google_conversation_id)? {
         Some(row) => Some(row),
         None => lane_by_google(&tx, LANE_BY_GOOGLE_GROUP, google_conversation_id)?,
@@ -2752,7 +2750,9 @@ mod tests {
 #[cfg(test)]
 mod receive_context_snapshot_tests {
     use super::*;
-    use std::sync::{Arc, Barrier};
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     #[test]
     fn receive_context_uses_one_snapshot_across_authority_and_mapping_reads() {
@@ -2765,7 +2765,8 @@ mod receive_context_snapshot_tests {
                 "CREATE TABLE metadata(k TEXT PRIMARY KEY,v TEXT NOT NULL);
                  CREATE TABLE rcs_link_status_projection(gateway_device_id TEXT PRIMARY KEY,state TEXT NOT NULL,availability INTEGER NOT NULL,health INTEGER NOT NULL,phone_responsive INTEGER NOT NULL,observed_at_ms INTEGER NOT NULL);
                  CREATE TABLE rcs_lane_ownership(conversation_id TEXT PRIMARY KEY,owner TEXT NOT NULL,ownership_generation INTEGER NOT NULL,history_token TEXT);
-                 CREATE TABLE rcs_conversation_mappings(peppy_conversation_id TEXT PRIMARY KEY,google_conversation_id TEXT NOT NULL,mapping_revision INTEGER NOT NULL,invalidated_at_ms INTEGER);",
+                 CREATE TABLE rcs_conversation_mappings(peppy_conversation_id TEXT PRIMARY KEY,google_conversation_id TEXT NOT NULL,mapping_revision INTEGER NOT NULL,invalidated_at_ms INTEGER);
+                 CREATE TABLE rcs_group_mapping(conversation_id TEXT PRIMARY KEY,google_conversation_id TEXT NOT NULL,state TEXT NOT NULL);",
             )
             .unwrap();
         let device_id = DeviceId::new();
@@ -2835,12 +2836,36 @@ mod receive_context_snapshot_tests {
             )
             .unwrap();
 
-        let barrier = Arc::new(Barrier::new(2));
-        let writer_barrier = barrier.clone();
+        let wait = Duration::from_secs(10);
+        let (paused_tx, paused_rx) = mpsc::channel::<()>();
+        let (resume_tx, resume_rx) = mpsc::channel::<()>();
+        let mut paused = false;
+        // Pause the reader at its first read of the lane table: the authority
+        // reads have already run inside the deferred transaction, so the read
+        // snapshot is pinned there, and the lane read is not yet executed.
+        reader.authorizer(Some(move |context: AuthContext<'_>| {
+            let lane_read = matches!(
+                context.action,
+                AuthAction::Read {
+                    table_name: "rcs_lane_ownership",
+                    ..
+                }
+            );
+            if lane_read && !paused {
+                paused = true;
+                let _ = paused_tx.send(());
+                if resume_rx.recv_timeout(wait).is_err() {
+                    return Authorization::Deny;
+                }
+            }
+            Authorization::Allow
+        }));
         let writer_path = path.clone();
         let writer = std::thread::spawn(move || {
             let writer = Connection::open(writer_path).unwrap();
-            writer_barrier.wait();
+            paused_rx
+                .recv_timeout(wait)
+                .expect("reader should pause before the lane read");
             writer
                 .execute(
                     "UPDATE rcs_conversation_mappings SET invalidated_at_ms=?",
@@ -2865,20 +2890,13 @@ mod receive_context_snapshot_tests {
                     .to_string()],
                 )
                 .unwrap();
-            writer_barrier.wait();
+            resume_tx.send(()).unwrap();
         });
-        let read_barrier = barrier.clone();
-        let context = receive_context_in_transaction(
-            &mut reader,
-            device_id,
-            "google-conversation",
-            move || {
-                read_barrier.wait();
-                read_barrier.wait();
-            },
-        )
-        .unwrap()
-        .unwrap();
+        let context = receive_context_in_transaction(&mut reader, device_id, "google-conversation")
+            .unwrap()
+            .expect(
+                "receive context must be read from one snapshot taken before the writer committed",
+            );
         writer.join().unwrap();
 
         assert_eq!(context.conversation_id, conversation_id);

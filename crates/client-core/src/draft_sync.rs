@@ -13,16 +13,37 @@ use peppy_crypto::{FileKey, decrypt, encrypt};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-#[cfg(debug_assertions)]
-use std::sync::{Arc, Mutex};
+#[cfg(feature = "test-support")]
+use std::sync::{Arc, Mutex, PoisonError};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub type ResurrectionTestHook = Arc<dyn Fn(DraftId) + Send + Sync>;
-#[cfg(debug_assertions)]
-static RESURRECTION_TEST_HOOK: Mutex<Option<ResurrectionTestHook>> = Mutex::new(None);
+/// Hooks keyed by the draft they pause, so a hook installed by one test client
+/// never fires for another client's draft in the same process.
+#[cfg(feature = "test-support")]
+static RESURRECTION_TEST_HOOKS: Mutex<Vec<(DraftId, ResurrectionTestHook)>> =
+    Mutex::new(Vec::new());
+
+/// Removes the hook installed for one draft when dropped, including on unwind.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[must_use]
+pub struct ResurrectionTestHookGuard {
+    draft_id: DraftId,
+}
+
+#[cfg(feature = "test-support")]
+impl Drop for ResurrectionTestHookGuard {
+    fn drop(&mut self) {
+        let mut hooks = RESURRECTION_TEST_HOOKS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        hooks.retain(|(draft_id, _)| *draft_id != self.draft_id);
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct SendIntentSnapshot {
@@ -1985,12 +2006,20 @@ enum ResurrectionCommit {
 }
 
 impl Client {
+    /// Installs `hook` for `draft_id` only; it is removed when the guard drops.
     #[doc(hidden)]
-    #[cfg(debug_assertions)]
-    pub fn set_resurrection_test_hook(&self, hook: Option<ResurrectionTestHook>) {
-        *RESURRECTION_TEST_HOOK
+    #[cfg(feature = "test-support")]
+    pub fn install_resurrection_test_hook(
+        &self,
+        draft_id: DraftId,
+        hook: ResurrectionTestHook,
+    ) -> ResurrectionTestHookGuard {
+        let mut hooks = RESURRECTION_TEST_HOOKS
             .lock()
-            .expect("resurrection test hook") = hook;
+            .unwrap_or_else(PoisonError::into_inner);
+        hooks.retain(|(installed, _)| *installed != draft_id);
+        hooks.push((draft_id, hook));
+        ResurrectionTestHookGuard { draft_id }
     }
 
     fn resurrect_expired_draft(&self, draft_id: DraftId) -> Result<(), Error> {
@@ -2037,13 +2066,18 @@ impl Client {
                     }
                 }
             }
-            #[cfg(debug_assertions)]
-            if let Some(hook) = RESURRECTION_TEST_HOOK
-                .lock()
-                .expect("resurrection test hook")
-                .clone()
+            #[cfg(feature = "test-support")]
             {
-                hook(draft_id);
+                // Clone under the lock, then release it before running the hook.
+                let hook = RESURRECTION_TEST_HOOKS
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .iter()
+                    .find(|(installed, _)| *installed == draft_id)
+                    .map(|(_, hook)| Arc::clone(hook));
+                if let Some(hook) = hook {
+                    hook(draft_id);
+                }
             }
             let result = (|| {
                 let mut store = self.lock()?;

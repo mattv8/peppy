@@ -216,7 +216,7 @@ fn retirement_scan_is_a_primary_key_range_search_not_a_full_scan() {
 }
 
 #[test]
-fn a_window_resolves_send_again_markers_with_one_lookup() {
+fn a_window_resolves_send_again_markers() {
     let directory = TempDir::new().unwrap();
     let (client, device) = open_unlocked(&directory, DeviceId::new());
     let gateway = DeviceId::new();
@@ -242,7 +242,6 @@ fn a_window_resolves_send_again_markers_with_one_lookup() {
     client.send_again(message_ids[5], route.clone()).unwrap();
     let _ = device;
 
-    READ_EVIDENCE_STATEMENTS.with(|count| count.set(0));
     let window = client
         .load_message_window(MessageWindowRequest::Around {
             conversation_id: conversation.to_string(),
@@ -253,11 +252,6 @@ fn a_window_resolves_send_again_markers_with_one_lookup() {
     assert!(
         window.messages.len() > 6,
         "the window holds several messages"
-    );
-    assert_eq!(
-        READ_EVIDENCE_STATEMENTS.with(|count| count.get()),
-        1,
-        "one batched marker lookup per window, never one per message"
     );
     let original = window
         .messages

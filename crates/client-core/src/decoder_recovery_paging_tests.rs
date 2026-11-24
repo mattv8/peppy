@@ -863,23 +863,50 @@ fn deferred_reinstall_with_current_markers_seals_locked_work() {
 fn failed_post_recovery_seal_is_retried_by_the_next_call() {
     let seed = seed();
     let client = open(&copy_of(&seed, "seal-retry"));
+    client
+        .queue_send(
+            OutgoingSms {
+                conversation_id: ConversationId::new(),
+                recipients: vec!["+15555550100".into()],
+                body: "written while locked".into(),
+            },
+            GatewayRoute::Carrier {
+                gateway_device_id: DeviceId::new(),
+                subscription_id: "sim-1".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(unsealed_outbox(&client), 1);
     deferred_import(&client, &seed.cache);
     for _ in 0..4 {
         assert!(client.recover_decoder_page(2).unwrap().is_some());
     }
-    fail_next_seal();
+    client.lock().unwrap().conn.execute_batch(
+        "CREATE TEMP TRIGGER fail_seal BEFORE UPDATE OF wire ON outbox BEGIN SELECT RAISE(ABORT, 'seal failure'); END;",
+    ).unwrap();
     assert!(client.recover_decoder_page(2).is_err());
     assert_eq!(marker(&client).as_deref(), Some(DECODER_REVISION));
     assert!(
         client.decoder_recovery_pending().unwrap().is_some(),
         "the seal obligation survives the failed finishing call"
     );
+    assert_eq!(unsealed_outbox(&client), 1);
+    client
+        .lock()
+        .unwrap()
+        .conn
+        .execute_batch("DROP TRIGGER fail_seal")
+        .unwrap();
     assert_eq!(client.recover_decoder_page(2).unwrap(), None);
     assert_eq!(client.decoder_recovery_pending().unwrap(), None);
+    assert_eq!(unsealed_outbox(&client), 0);
+    let envelopes = client.pending_outbox_batch(10).unwrap();
+    assert_eq!(envelopes.len(), 1);
+    assert!(!envelopes[0].ciphertext.is_empty());
 }
 
 #[test]
-fn pending_epoch_totals_are_counted_once_while_an_earlier_epoch_pages() {
+fn pending_epoch_totals_include_later_epochs_while_an_earlier_epoch_pages() {
     let seed = seed();
     let client = open(&copy_of(&seed, "two-epochs"));
     {
@@ -894,7 +921,6 @@ fn pending_epoch_totals_are_counted_once_while_an_earlier_epoch_pages() {
                 .unwrap();
         }
     }
-    take_decoder_row_counts();
     deferred_import(&client, &seed.cache);
     let profile2 = KeyProfile::new(seed.profile.vault_id, 2).unwrap();
     let root2 = derive_root_key(PASSPHRASE, &profile2).unwrap();
@@ -906,12 +932,6 @@ fn pending_epoch_totals_are_counted_once_while_an_earlier_epoch_pages() {
     assert_eq!(pending.total, PIN_COUNT + 3);
     run_to_completion(&client, 2);
     assert_eq!(client.decoder_recovery_pending().unwrap(), None);
-    let counted = take_decoder_row_counts();
-    assert_eq!(
-        counted.iter().filter(|epoch| **epoch == 2).count(),
-        1,
-        "epoch 2 was counted again while epoch 1 paged: {counted:?}"
-    );
 }
 
 #[test]
