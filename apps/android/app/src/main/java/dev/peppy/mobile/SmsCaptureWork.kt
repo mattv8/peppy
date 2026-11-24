@@ -9,6 +9,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import androidx.work.WorkInfo
 import androidx.work.WorkerParameters
 import dev.peppy.mobile.diagnostics.SyncDiagnosticReason
 import dev.peppy.mobile.diagnostics.SyncDiagnosticStage
@@ -29,10 +30,12 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 
 enum class SmsAcquisitionState { PENDING, UNAVAILABLE, COMPLETE, PAUSED }
@@ -179,6 +182,7 @@ object SmsCaptureWork {
 
     @Volatile internal var runner: SmsCaptureRunner? = null
     private val executionMutex = Mutex()
+    private val waitingOneTimeRuns = java.util.concurrent.atomic.AtomicInteger(0)
     /** A hint that arrived while a pass may already be past the provider rows it changed. */
     private val hintCount = java.util.concurrent.atomic.AtomicInteger(0)
 
@@ -204,7 +208,23 @@ object SmsCaptureWork {
     internal fun enqueueContinuation(context: Context) =
         schedule(context, ExistingWorkPolicy.APPEND_OR_REPLACE, SmsCaptureRequestSource.CONTINUATION)
 
-    internal suspend fun <T> serialized(block: suspend () -> T): T = executionMutex.withLock { block() }
+    internal fun hasWaitingOneTimeRun() = waitingOneTimeRuns.get() > 0
+
+    internal suspend fun <T> serialized(oneTime: Boolean = false, block: suspend () -> T): T {
+        var waiting = oneTime
+        if (waiting) waitingOneTimeRuns.incrementAndGet()
+        try {
+            return executionMutex.withLock {
+                if (waiting) {
+                    waitingOneTimeRuns.decrementAndGet()
+                    waiting = false
+                }
+                block()
+            }
+        } finally {
+            if (waiting) waitingOneTimeRuns.decrementAndGet()
+        }
+    }
 
     fun ensurePeriodic(context: Context) {
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(
@@ -316,7 +336,8 @@ private data class CaptureDiagnosticRequest(val traceId: Long, val session: Long
 class SmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val job = currentCoroutineContext()[kotlinx.coroutines.Job]
-        SmsCaptureWork.serialized {
+        val periodic = isPeriodic()
+        SmsCaptureWork.serialized(oneTime = !periodic) {
             val consumedHints = SmsCaptureWork.takeHintCount()
             val diagnostic = if (SyncDiagnostics.enabled) captureDiagnosticInput() else null
             val traceId = diagnostic?.traceId ?: if (SyncDiagnostics.enabled) SyncDiagnostics.newTraceId() else 0L
@@ -380,8 +401,11 @@ class SmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWo
                     outcome = WORK_OUTCOME_RETRY
                     return@serialized Result.retry()
                 }
-                // One bounded follow-up covers every hint that arrived during this pass.
-                if (summary.more || SmsCaptureWork.takeHint()) {
+                // Reuse the hint's one-time pass only if it has not scanned yet; otherwise append.
+                val followUp = summary.more || if (periodic) {
+                    SmsCaptureWork.hasPendingHint() && !hasUnscannedOneTimeWork() && SmsCaptureWork.takeHint()
+                } else SmsCaptureWork.takeHint()
+                if (followUp) {
                     if (diagnostic != null) {
                         SyncDiagnostics.withTrace(traceId) {
                             SyncDiagnostics.record(
@@ -402,6 +426,28 @@ class SmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWo
                     SyncDiagnostics.record(SyncTraceEvent.CAPTURE_END, SyncTraceField.SUCCESS to if (succeeded) 1 else 0, SyncTraceField.OUTCOME to outcome)
                 }
             }
+        }
+    }
+
+    private suspend fun isPeriodic(): Boolean = try {
+        WorkManager.getInstance(applicationContext).getWorkInfoByIdFlow(id).first()?.periodicityInfo != null
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        false
+    }
+
+    private suspend fun hasUnscannedOneTimeWork(): Boolean {
+        if (SmsCaptureWork.hasWaitingOneTimeRun()) return true
+        return try {
+            withTimeoutOrNull(5_000L) {
+                WorkManager.getInstance(applicationContext).getWorkInfosForUniqueWorkFlow(SmsCaptureWork.NAME)
+                    .first().any { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.BLOCKED }
+            } ?: false
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            false
         }
     }
 }

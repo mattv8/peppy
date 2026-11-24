@@ -29,28 +29,38 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34])
 class GatewaySyncWorkerTest : GatewayTestBase() {
     @Test fun lockedVaultWithoutNativeSessionQueuesSmsCaptureFromHint() {
-        WorkManagerTestInitHelper.initializeTestWorkManager(
-            context,
-            Configuration.Builder().setExecutor(SynchronousExecutor()).build(),
-        )
-        assertEquals(ImportResult.IMPORTED, enroll())
-        assertNull(NativeGateway.session(context))
-        grant(Manifest.permission.READ_SMS)
-        val readSmsGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) ==
-            PackageManager.PERMISSION_GRANTED
-        assertTrue("READ_SMS grant did not take effect", readSmsGranted)
-        GatewayWork.captureHintPending(context)
+        val previousRunner = SmsCaptureWork.runner
+        SmsCaptureWork.runner = null
+        try {
+            WorkManagerTestInitHelper.initializeTestWorkManager(
+                context,
+                Configuration.Builder().setExecutor(SynchronousExecutor()).build(),
+            )
+            assertEquals(ImportResult.IMPORTED, enroll())
+            assertNull(NativeGateway.session(context))
+            grant(Manifest.permission.READ_SMS)
+            val readSmsGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) ==
+                PackageManager.PERMISSION_GRANTED
+            assertTrue("READ_SMS grant did not take effect", readSmsGranted)
+            GatewayWork.captureHintPending(context)
 
-        val result = TestListenableWorkerBuilder<GatewaySyncWorker>(context)
-            .build()
-            .startWork()
-            .get(5, TimeUnit.SECONDS)
+            val result = TestListenableWorkerBuilder<GatewaySyncWorker>(context)
+                .build()
+                .startWork()
+                .get(5, TimeUnit.SECONDS)
 
-        assertEquals(ListenableWorker.Result.success(), result)
-        val queued = WorkManager.getInstance(context).getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get(5, TimeUnit.SECONDS)
-        val schedulingState = "readSmsGranted=$readSmsGranted queued=${queued.map { "${it.id}:${it.state}" }}"
-        assertEquals(schedulingState, 1, queued.size)
-        assertEquals(schedulingState, WorkInfo.State.ENQUEUED, queued.single().state)
+            assertEquals(ListenableWorker.Result.success(), result)
+            val queued = WorkManager.getInstance(context).getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get(5, TimeUnit.SECONDS)
+            val schedulingState = "readSmsGranted=$readSmsGranted queued=${queued.map { "${it.id}:${it.state}" }}"
+            assertEquals(schedulingState, 1, queued.size)
+            assertEquals(schedulingState, WorkInfo.State.ENQUEUED, queued.single().state)
+        } finally {
+            try {
+                WorkManager.getInstance(context).cancelAllWork().result.get(60, TimeUnit.SECONDS)
+            } finally {
+                SmsCaptureWork.runner = previousRunner
+            }
+        }
     }
 
     @Test fun periodicPassWithoutCaptureHintDoesNotQueueCaptureAndEnsuresPeriodicWork() {
