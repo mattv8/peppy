@@ -3219,10 +3219,9 @@ async fn react_to_message(
         .map_err(|_| BridgeError::new("invalid-message", "The message ID is invalid."))?;
     let conversation = reaction_conversation_scope(&window, &state, &session)?;
     let submit_session = session.clone();
-    let result = blocking(move || {
-        react_to_message_scoped(&submit_session, message_id, emoji, conversation)
-    })
-    .await?;
+    let result =
+        blocking(move || react_to_message_scoped(&submit_session, message_id, emoji, conversation))
+            .await?;
     if result.accepted {
         session.request_work();
     }

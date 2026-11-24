@@ -520,7 +520,9 @@ pub async fn refresh_gateways(session: &Arc<Session>) -> BridgeResult<()> {
         } else {
             let qualifying_ids: std::collections::HashSet<_> = gateway_views(
                 &devices,
-                &CapabilitiesResponse { capabilities: Vec::new() },
+                &CapabilitiesResponse {
+                    capabilities: Vec::new(),
+                },
             )
             .into_iter()
             .map(|view| view.id)
@@ -3216,8 +3218,7 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                                 pending = Some(next);
                                 break;
                             };
-                            let Ok(next_frame) =
-                                serde_json::from_str::<Frame>(next_text.as_str())
+                            let Ok(next_frame) = serde_json::from_str::<Frame>(next_text.as_str())
                             else {
                                 pending = Some(Some(Ok(Message::Text(next_text))));
                                 break;
@@ -3851,14 +3852,21 @@ mod first_snapshot_tests {
     async fn first_snapshot_served_returns_immediately() {
         let session = session();
         session.mark_first_snapshot_served();
-        tokio::time::timeout(Duration::from_millis(100), session.first_snapshot_or_timeout()).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            session.first_snapshot_or_timeout(),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn first_snapshot_timeout_returns_without_a_window() {
         let session = session();
         let start = tokio::time::Instant::now();
-        tokio::time::timeout(Duration::from_secs(12), session.first_snapshot_or_timeout()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(12), session.first_snapshot_or_timeout())
+            .await
+            .unwrap();
         assert!(start.elapsed() >= Duration::from_secs(10));
     }
 
@@ -3958,38 +3966,20 @@ mod transport_status_tests {
 
         cancel.cancel();
         assert_eq!(
-            deferred_frame_control(
-                &cancel,
-                &repair_wake,
-                &replay_wake,
-                &mut liveness,
-                None,
-            ),
+            deferred_frame_control(&cancel, &repair_wake, &replay_wake, &mut liveness, None,),
             DeferredFrameControl::Cancelled
         );
 
         let cancel = tokio_util::sync::CancellationToken::new();
         repair_wake.notify_one();
         assert_eq!(
-            deferred_frame_control(
-                &cancel,
-                &repair_wake,
-                &replay_wake,
-                &mut liveness,
-                None,
-            ),
+            deferred_frame_control(&cancel, &repair_wake, &replay_wake, &mut liveness, None,),
             DeferredFrameControl::Resync
         );
 
         replay_wake.notify_one();
         assert_eq!(
-            deferred_frame_control(
-                &cancel,
-                &repair_wake,
-                &replay_wake,
-                &mut liveness,
-                None,
-            ),
+            deferred_frame_control(&cancel, &repair_wake, &replay_wake, &mut liveness, None,),
             DeferredFrameControl::Resync
         );
     }
@@ -4020,7 +4010,10 @@ mod transport_status_tests {
 
         replay_until_caught_up(&session).await.unwrap();
 
-        assert_eq!(requests.load(Ordering::SeqCst), MAX_REPLAY_PAGES_PER_ROUND + 1);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            MAX_REPLAY_PAGES_PER_ROUND + 1
+        );
         assert_eq!(
             session.client.receive_cursor().unwrap(),
             Cursor((MAX_REPLAY_PAGES_PER_ROUND * 100 + 1) as u64)
@@ -4046,7 +4039,10 @@ mod transport_status_tests {
         let fixture = fixture_at(&origin);
         let session = Arc::new(open(&fixture, &fixture.binding, &[]));
         for cursor in 1..=100 {
-            session.client.ingest_raw(br#""event""#, Cursor(cursor)).unwrap();
+            session
+                .client
+                .ingest_raw(br#""event""#, Cursor(cursor))
+                .unwrap();
         }
 
         replay_until_caught_up(&session).await.unwrap();

@@ -713,16 +713,13 @@ mod tests {
     #[test]
     fn website_billing_guard_refuses_only_when_website_purchasing_is_off() {
         assert!(require_website_billing(purchase_options_for(Distribution::Direct, None)).is_ok());
-        assert!(require_website_billing(purchase_options_for(
-            Distribution::AppStore,
-            Some("USA")
-        ))
-        .is_ok());
-        let error = require_website_billing(purchase_options_for(
-            Distribution::AppStore,
-            Some("CAN"),
-        ))
-        .unwrap_err();
+        assert!(
+            require_website_billing(purchase_options_for(Distribution::AppStore, Some("USA")))
+                .is_ok()
+        );
+        let error =
+            require_website_billing(purchase_options_for(Distribution::AppStore, Some("CAN")))
+                .unwrap_err();
         assert_eq!(error.code, "unsupported");
     }
 

@@ -4530,7 +4530,11 @@ mod owner_retry_tests {
         let store = MemoryStore::default();
         let controller = pending_owner_controller(&store);
         let epoch = controller.lock().unwrap().operation_epoch;
-        let checkpoint = store.get(&owner_checkpoint_key(ORIGIN)).unwrap().unwrap().to_vec();
+        let checkpoint = store
+            .get(&owner_checkpoint_key(ORIGIN))
+            .unwrap()
+            .unwrap()
+            .to_vec();
         let (first, second) = {
             let mut guard = controller.lock().unwrap();
             guard.owner_claim_in_flight += 2;
@@ -4550,7 +4554,11 @@ mod owner_retry_tests {
         assert_eq!(controller.lock().unwrap().owner_claim_in_flight, 1);
         assert_eq!(controller.lock().unwrap().operation_epoch, epoch);
         assert_eq!(
-            store.get(&owner_checkpoint_key(ORIGIN)).unwrap().unwrap().to_vec(),
+            store
+                .get(&owner_checkpoint_key(ORIGIN))
+                .unwrap()
+                .unwrap()
+                .to_vec(),
             checkpoint
         );
 
