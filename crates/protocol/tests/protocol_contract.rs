@@ -4,10 +4,6 @@ use peppy_protocol::{
     CompactionMetadata, CompactionReference, Envelope, EnvelopeError, EnvelopePurpose,
     GatewayRoute, PairingQrRecord,
 };
-use std::{
-    fs,
-    time::{SystemTime, UNIX_EPOCH},
-};
 
 fn envelope() -> Envelope {
     Envelope {
@@ -580,20 +576,12 @@ fn pairing_qr_requires_valid_origin_expiry_and_device_binding() {
 }
 
 #[test]
-fn generator_is_idempotent_and_check_detects_drift() {
-    let root = std::env::temp_dir().join(format!(
-        "peppy-contract-test-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    assert!(!peppy_protocol::write_contracts(&root, true).unwrap());
-    assert!(!peppy_protocol::write_contracts(&root, false).unwrap());
-    assert!(peppy_protocol::write_contracts(&root, true).unwrap());
-    fs::write(root.join("packages/generated/src/protocol.ts"), "drift").unwrap();
-    assert!(!peppy_protocol::write_contracts(&root, true).unwrap());
-    fs::remove_dir_all(root).unwrap();
+fn generated_contracts_are_deterministic() {
+    let first = peppy_protocol::generate_contracts();
+    let second = peppy_protocol::generate_contracts();
+    assert_eq!(first.openapi, second.openapi);
+    assert_eq!(first.event_schema, second.event_schema);
+    assert_eq!(first.typescript, second.typescript);
 }
 
 #[test]

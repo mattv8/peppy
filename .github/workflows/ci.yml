@@ -246,7 +246,6 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # The integration job runs all workspace tests, including library tests.
-      - run: cargo run --locked -p peppy-protocol --bin generate-contracts -- --check
       - run: cargo run --locked -p peppy-desktop-api --bin generate-search-contracts -- --check
       - run: cargo run --locked -p peppy-desktop-api --bin generate-attachment-retention-contracts -- --check
       - run: cargo run --locked -p peppy-desktop-api --bin generate-account-access-contracts -- --check

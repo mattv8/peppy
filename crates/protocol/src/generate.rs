@@ -6,7 +6,7 @@ use crate::{
 };
 use schemars::schema_for;
 use serde_json::{Map, Value, json};
-use std::{collections::BTreeMap, fs, io, path::Path};
+use std::collections::BTreeMap;
 
 pub struct GeneratedContracts {
     pub openapi: String,
@@ -310,35 +310,4 @@ fn ts_property_name(value: &str) -> String {
 }
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).expect("schema JSON serializes") + "\n"
-}
-
-pub fn write_contracts(root: &Path, check: bool) -> io::Result<bool> {
-    let generated = generate_contracts();
-    let outputs = [
-        (
-            root.join("packages/contracts/openapi.json"),
-            generated.openapi,
-        ),
-        (
-            root.join("tests/fixtures/protocol/event.schema.json"),
-            generated.event_schema,
-        ),
-        (
-            root.join("packages/generated/src/protocol.ts"),
-            generated.typescript,
-        ),
-    ];
-    let mut matches = true;
-    for (path, contents) in outputs {
-        if fs::read_to_string(&path).ok().as_deref() != Some(contents.as_str()) {
-            matches = false;
-            if !check {
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(path, contents)?;
-            }
-        }
-    }
-    Ok(matches)
 }

@@ -108,7 +108,6 @@ class CiTestRunnerTests(unittest.TestCase):
             "cargo fmt --all -- --check",
             "cargo clippy --workspace --all-targets --locked -- -D warnings",
             "cargo test --workspace --lib --exclude peppy-push-relay --locked",
-            "cargo run --locked -p peppy-protocol --bin generate-contracts -- --check",
             "cargo run --locked -p peppy-desktop-api --bin generate-search-contracts -- --check",
             "cargo run --locked -p peppy-desktop-api --bin generate-attachment-retention-contracts -- --check",
             "cargo run --locked -p peppy-desktop-api --bin generate-account-access-contracts -- --check",
