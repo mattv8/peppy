@@ -58,7 +58,6 @@ class NativeGatewayRetirementTest : GatewayTestBase() {
 
     @After
     fun resetRetirementFixtures() {
-        NativeGateway.persistenceDecisionHook = null
         NativeGateway.relayArchiveHook = null
         RelayWakeRuntime.beforeApplyCurrentRelayRuntimeHook = null
         relayWakeWorkerEnrollmentInputFactory = null
@@ -99,14 +98,16 @@ class NativeGatewayRetirementTest : GatewayTestBase() {
         enrollAndUnlock()
         val decisionEntered = CountDownLatch(1)
         val releaseDecision = CountDownLatch(1)
-        val firstHook = AtomicBoolean(true)
-        NativeGateway.persistenceDecisionHook = {
-            if (firstHook.getAndSet(false)) {
+        val firstDbKeyRead = AtomicBoolean(true)
+        val original = NativeGateway.secretBox
+        // The durable key read is the first secret read of the persistence commit, under the owner lock,
+        // like SQLCipher open under that lock.
+        NativeGateway.secretBox = InterceptingSecretBox(original) { purpose ->
+            if (purpose == "db-key.v1" && firstDbKeyRead.getAndSet(false)) {
                 decisionEntered.countDown()
                 check(releaseDecision.await(5, TimeUnit.SECONDS))
             }
         }
-        // The decision hook runs while the owner lock is held, like SQLCipher open under that lock.
         val persistThread = Thread { NativeGateway.persistVerified(context, parsed(), vaultMaterial()) }
         val registration = AtomicReference<() -> Unit>()
         val registrar = Thread { registration.set(NativeGateway.addRetirementListener {}) }
@@ -123,6 +124,7 @@ class NativeGatewayRetirementTest : GatewayTestBase() {
             releaseDecision.countDown()
             persistThread.join(5_000)
             registrar.join(5_000)
+            NativeGateway.secretBox = original
         }
     }
 
@@ -450,9 +452,10 @@ class NativeGatewayRetirementTest : GatewayTestBase() {
         val currentLease = checkNotNull(NativeGateway.acquireRcsSendLease(context, "current-ticket") {})
         val decisionEntered = CountDownLatch(1)
         val releaseDecision = CountDownLatch(1)
-        val firstHook = AtomicBoolean(true)
-        NativeGateway.persistenceDecisionHook = {
-            if (firstHook.getAndSet(false)) {
+        val firstDbKeyRead = AtomicBoolean(true)
+        val original = NativeGateway.secretBox
+        NativeGateway.secretBox = InterceptingSecretBox(original) { purpose ->
+            if (purpose == "db-key.v1" && firstDbKeyRead.getAndSet(false)) {
                 decisionEntered.countDown()
                 check(releaseDecision.await(5, TimeUnit.SECONDS))
             }
@@ -489,10 +492,10 @@ class NativeGatewayRetirementTest : GatewayTestBase() {
             )
             assertEquals("successor lease remains registered at the current generation", 1, successorRevocations.get())
         } finally {
-            NativeGateway.persistenceDecisionHook = null
             releaseDecision.countDown()
             if (unchangedThread.isAlive) unchangedThread.join(5_000)
             if (rotationThread.isAlive) rotationThread.join(5_000)
+            NativeGateway.secretBox = original
             currentLease.close()
         }
     }

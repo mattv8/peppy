@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import dev.peppy.mobile.GatewayScheduler
 import dev.peppy.mobile.security.AesGcmSecretBox
+import dev.peppy.mobile.security.SecretBox
 import dev.peppy.mobile.security.CredentialParser
 import dev.peppy.mobile.security.VaultMaterial
 import java.io.File
@@ -50,6 +51,23 @@ fun nextTestRecipient(): String = "+1555%07d".format(testRecipientSequence.incre
 class TestKeyHolder {
     var key: SecretKey? = null
     val box = AesGcmSecretBox { create -> key ?: if (create) KeyGenerator.getInstance("AES").apply { init(256) }.generateKey().also { key = it } else null }
+}
+
+/**
+ * Runs [beforeOpen] on every read before delegating. Install it as [NativeGateway.secretBox] to
+ * pause a read inside a native critical section, or throw from it to fail that read. Callers must
+ * restore the previous box.
+ */
+class InterceptingSecretBox(
+    private val delegate: SecretBox,
+    private val beforeOpen: (purpose: String) -> Unit,
+) : SecretBox {
+    override fun seal(purpose: String, plaintext: ByteArray): String = delegate.seal(purpose, plaintext)
+
+    override fun open(purpose: String, sealed: String): ByteArray? {
+        beforeOpen(purpose)
+        return delegate.open(purpose, sealed)
+    }
 }
 
 /**

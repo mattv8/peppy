@@ -6,6 +6,7 @@ import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.WorkManagerTestInitHelper
 import dev.peppy.mobile.gateway.GatewayStateStore
 import dev.peppy.mobile.gateway.GatewayTestBase
+import dev.peppy.mobile.gateway.InterceptingSecretBox
 import dev.peppy.mobile.gateway.ImportResult
 import dev.peppy.mobile.gateway.NativeGateway
 import dev.peppy.mobile.gateway.RecoveryReason
@@ -21,6 +22,7 @@ import dev.peppy.mobile.telephony.SimRoutes
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
@@ -110,16 +112,23 @@ class SecureImportTest : GatewayTestBase() {
     fun interruptedAnchorInstallCannotRestorePreviouslyCachedKeys() {
         enrollAndUnlock()
         assertTrue(secure().contains("key-cache.v1"))
-        NativeGateway.persistenceDecisionHook = {
-            assertEquals("aa".repeat(32), secure().getString("epoch-anchor-fingerprint.v1", null))
-            assertNull(NativeGateway.open(context)) // retirement still fences public admission
-            throw IllegalStateException("injected interruption after preference commit")
+        val interrupted = AtomicBoolean(false)
+        val original = NativeGateway.secretBox
+        // Fails the post-commit key read in openUnchecked: the anchor pin is already durable there.
+        NativeGateway.secretBox = InterceptingSecretBox(original) { purpose ->
+            if (purpose == "db-key.v1" && secure().contains("epoch-anchor-fingerprint.v1")) {
+                assertEquals("aa".repeat(32), secure().getString("epoch-anchor-fingerprint.v1", null))
+                assertNull(NativeGateway.open(context)) // retirement still fences public admission
+                interrupted.set(true)
+                throw IllegalStateException("injected interruption after preference commit")
+            }
         }
         try {
             assertEquals(ImportResult.STORAGE_ERROR, NativeGateway.persistVerified(context, parsedV2(1, "aa".repeat(32)), vaultMaterial()))
         } finally {
-            NativeGateway.persistenceDecisionHook = null
+            NativeGateway.secretBox = original
         }
+        assertTrue("the interruption must fire at the post-commit read", interrupted.get())
         NativeGateway.closeForTest()
         val opened = checkNotNull(NativeGateway.open(context))
         assertFalse(NativeGateway.status(context).sharedKeysReady)

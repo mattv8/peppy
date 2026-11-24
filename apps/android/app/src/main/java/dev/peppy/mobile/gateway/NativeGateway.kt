@@ -169,7 +169,6 @@ object NativeGateway {
     /** Lock-free so listeners can register from main-thread lifecycle callbacks while the owner lock is held. */
     private val retirementListeners = CopyOnWriteArraySet<() -> Unit>()
     private var retirement: Retirement? = null
-    @VisibleForTesting internal var persistenceDecisionHook: (() -> Unit)? = null
     @VisibleForTesting internal var relayArchiveHook: (() -> Unit)? = null
 
     private enum class RetirementState { REVOKING, REVOCATION_FAILED, COMMIT_FAILED }
@@ -711,7 +710,6 @@ object NativeGateway {
                     wouldChangeGeneration(context, credential, material) ->
                         RetirementDecision(token = checkNotNull(reserveRetirement()))
                     else -> {
-                        persistenceDecisionHook?.invoke()
                         RetirementDecision(result = persistVerifiedLocked(context, credential, material, beforeCommit, null))
                     }
                 }
@@ -843,7 +841,6 @@ object NativeGateway {
             // The durable pin is already committed and the old owner retired. Never call public
             // open here: this transaction still owns the retirement fence.
             try {
-                persistenceDecisionHook?.invoke()
                 if (openUnchecked(context, retirementToken) == null) return ImportResult.STORAGE_ERROR
             } catch (_: Exception) {
                 return ImportResult.STORAGE_ERROR
