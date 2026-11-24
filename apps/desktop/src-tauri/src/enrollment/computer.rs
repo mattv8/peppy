@@ -713,14 +713,6 @@ fn computer_claimant_allowed(state: &AppState, origin: &str) -> BridgeResult<boo
         || active_database_key_is_unavailable(state, origin)?)
 }
 
-#[cfg(test)]
-fn config_has_saved_identity(config: &crate::credentials::HostConfig, origin: &str) -> bool {
-    config
-        .bindings
-        .iter()
-        .any(|known| known.binding.origin == origin)
-}
-
 fn claimant_cancellation_allowed(claimant: &ClaimantState) -> bool {
     claimant.view.stage == "error"
         || (claimant.confirm_request.is_none() && claimant.view.state != "approved")
@@ -2830,15 +2822,43 @@ mod tests {
 
     #[test]
     fn saved_locked_identity_blocks_new_claimant_without_touching_secure_storage() {
-        let binding = crate::credentials::Binding {
-            origin: "https://enroll.example".into(),
-            vault_id: uuid::Uuid::new_v4().to_string(),
-            device_id: uuid::Uuid::new_v4().to_string(),
-        };
-        let mut config = crate::credentials::HostConfig::default();
-        config.remember(&binding);
-        assert!(config_has_saved_identity(&config, "https://enroll.example"));
-        assert!(!config_has_saved_identity(&config, "https://other.example"));
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::secure_store::MemoryStore::default());
+        let state = AppState::new(
+            root.path().to_path_buf(),
+            store.clone(),
+            crate::tests::noop(),
+        );
+        let saved = binding("https://enroll.example");
+        let credential = crate::credentials::tests::credential_json(
+            &saved.origin,
+            &saved.vault_id,
+            &saved.device_id,
+            crate::credentials::tests::TOKEN,
+        );
+        std::fs::create_dir_all(saved.data_dir(root.path())).unwrap();
+        std::fs::write(saved.database_path(root.path()), b"saved database").unwrap();
+        store.set(&saved.credential_account(), &credential).unwrap();
+        store.set(&saved.db_key_account(), &[7; 32]).unwrap();
+        state
+            .update_config(|config| {
+                config.select_origin(&saved.origin);
+                config.remember(&saved);
+                config.active = Some(saved.clone());
+            })
+            .unwrap();
+
+        let secrets_before = store.0.lock().unwrap().clone();
+        let database_before = std::fs::read(saved.database_path(root.path())).unwrap();
+
+        assert!(!computer_claimant_allowed(&state, &saved.origin).unwrap());
+        assert!(computer_claimant_allowed(&state, "https://other.example").unwrap());
+        let secrets_after = store.0.lock().unwrap().clone();
+        assert_eq!(secrets_after, secrets_before);
+        assert_eq!(
+            std::fs::read(saved.database_path(root.path())).unwrap(),
+            database_before
+        );
     }
 
     #[test]
