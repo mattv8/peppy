@@ -123,20 +123,16 @@ async fn show_secret_dialog(
     app: &AppHandle,
     secret: &str,
     feedback: Option<&str>,
-    title: &str,
-    instructions: &str,
-    buttons: MessageDialogButtons,
-    action: fn(MessageDialogResult) -> SecretDialogAction,
 ) -> BridgeResult<SecretDialogAction> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    let message = secret_message(instructions, secret, feedback);
+    let message = secret_message(VAULT_SECRET_INSTRUCTIONS, secret, feedback);
     app.dialog()
         .message(message.as_str())
-        .title(title)
+        .title(VAULT_SECRET_TITLE)
         .kind(MessageDialogKind::Info)
-        .buttons(buttons)
+        .buttons(vault_secret_buttons())
         .show_with_result(move |result| {
-            let _ = sender.send(action(result));
+            let _ = sender.send(vault_secret_action(result));
         });
     receiver.await.map_err(|_| dialog_error())
 }
@@ -148,16 +144,7 @@ pub async fn show_vault_secret(app: &AppHandle, secret: Zeroizing<String>) -> Br
     let mut clipboard = NativeSecretClipboard;
     let mut feedback = None;
     loop {
-        let action = show_secret_dialog(
-            app,
-            secret.as_str(),
-            feedback,
-            VAULT_SECRET_TITLE,
-            VAULT_SECRET_INSTRUCTIONS,
-            vault_secret_buttons(),
-            vault_secret_action,
-        )
-        .await?;
+        let action = show_secret_dialog(app, secret.as_str(), feedback).await?;
         match handle_secret_dialog_action(&mut clipboard, secret.as_str(), action) {
             SecretDialogStep::Finish => return Ok(()),
             SecretDialogStep::ShowFeedback(next_feedback) => feedback = Some(next_feedback),

@@ -676,6 +676,36 @@ fn drain_with_candidate_delivery(
     if session.catching_up()? {
         return Ok(false);
     }
+    let flush_pending = |acknowledge: Vec<String>| -> BridgeResult<()> {
+        if !acknowledge.is_empty() {
+            session
+                .client
+                .ack_banner_candidates(acknowledge)
+                .map_err(crate::error::core_error)?;
+        }
+        Ok(())
+    };
+    let post_error = |error, acknowledge| -> BridgeResult<bool> {
+        flush_pending(acknowledge)?;
+        match error {
+            crate::notification_activation::PostError::AwaitingAuthorization => {
+                session.set_status(|status| {
+                    if status.work_error == Some("notification-post") {
+                        status.work_error = None;
+                    }
+                });
+                Ok(false)
+            }
+            crate::notification_activation::PostError::Failed => {
+                session.set_status(|status| status.work_error = Some("notification-post"));
+                Err(BridgeError::new(
+                    "notification-post",
+                    "Could not post a native notification.",
+                ))
+            }
+            crate::notification_activation::PostError::NotAllowed => unreachable!(),
+        }
+    };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
@@ -704,12 +734,7 @@ fn drain_with_candidate_delivery(
             let (preferences, _) = match effective_delivery_policy(session, settings, &app_locked) {
                 Ok(policy) => policy,
                 Err(error) => {
-                    if !acknowledge.is_empty() {
-                        session
-                            .client
-                            .ack_banner_candidates(acknowledge)
-                            .map_err(crate::error::core_error)?;
-                    }
+                    flush_pending(acknowledge)?;
                     return Err(error);
                 }
             };
@@ -729,12 +754,7 @@ fn drain_with_candidate_delivery(
                     match effective_delivery_policy(session, settings, &app_locked) {
                         Ok(policy) => policy,
                         Err(error) => {
-                            if !acknowledge.is_empty() {
-                                session
-                                    .client
-                                    .ack_banner_candidates(acknowledge)
-                                    .map_err(crate::error::core_error)?;
-                            }
+                            flush_pending(acknowledge)?;
                             return Err(error);
                         }
                     };
@@ -776,34 +796,9 @@ fn drain_with_candidate_delivery(
                     Ok(()) | Err(crate::notification_activation::PostError::NotAllowed) => {
                         acknowledge.push(candidate.id);
                     }
-                    Err(crate::notification_activation::PostError::AwaitingAuthorization) => {
-                        if !acknowledge.is_empty() {
-                            session
-                                .client
-                                .ack_banner_candidates(acknowledge)
-                                .map_err(crate::error::core_error)?;
-                        }
-                        session.set_status(|status| {
-                            if status.work_error == Some("notification-post") {
-                                status.work_error = None;
-                            }
-                        });
-                        // Candidates are ordered, and every later candidate needs the same OS
-                        // authorization. Hold this and the remaining queue until it resolves.
-                        return Ok(false);
-                    }
-                    Err(crate::notification_activation::PostError::Failed) => {
-                        if !acknowledge.is_empty() {
-                            session
-                                .client
-                                .ack_banner_candidates(acknowledge)
-                                .map_err(crate::error::core_error)?;
-                        }
-                        session.set_status(|status| status.work_error = Some("notification-post"));
-                        return Err(BridgeError::new(
-                            "notification-post",
-                            "Could not post a native notification.",
-                        ));
+                    Err(error) => {
+                        // Hold this and the remaining ordered candidates on a post error.
+                        return post_error(error, acknowledge);
                     }
                 }
             }
@@ -812,12 +807,7 @@ fn drain_with_candidate_delivery(
             let (preferences, _) = match effective_delivery_policy(session, settings, &app_locked) {
                 Ok(policy) => policy,
                 Err(error) => {
-                    if !acknowledge.is_empty() {
-                        session
-                            .client
-                            .ack_banner_candidates(acknowledge)
-                            .map_err(crate::error::core_error)?;
-                    }
+                    flush_pending(acknowledge)?;
                     return Err(error);
                 }
             };
@@ -840,33 +830,7 @@ fn drain_with_candidate_delivery(
                     ),
                 ) {
                     Ok(()) | Err(crate::notification_activation::PostError::NotAllowed) => {}
-                    Err(crate::notification_activation::PostError::AwaitingAuthorization) => {
-                        if !acknowledge.is_empty() {
-                            session
-                                .client
-                                .ack_banner_candidates(acknowledge)
-                                .map_err(crate::error::core_error)?;
-                        }
-                        session.set_status(|status| {
-                            if status.work_error == Some("notification-post") {
-                                status.work_error = None;
-                            }
-                        });
-                        return Ok(false);
-                    }
-                    Err(crate::notification_activation::PostError::Failed) => {
-                        if !acknowledge.is_empty() {
-                            session
-                                .client
-                                .ack_banner_candidates(acknowledge)
-                                .map_err(crate::error::core_error)?;
-                        }
-                        session.set_status(|status| status.work_error = Some("notification-post"));
-                        return Err(BridgeError::new(
-                            "notification-post",
-                            "Could not post a native notification.",
-                        ));
-                    }
+                    Err(error) => return post_error(error, acknowledge),
                 }
                 acknowledge.extend(summary_ids);
             }
