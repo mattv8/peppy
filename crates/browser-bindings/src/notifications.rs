@@ -281,6 +281,13 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_carries_dismissal_blocks_in_camel_case() {
+        let (_directory, mut core) = fixture();
+        let snapshot = call(&mut core, "snapshot", json!({}));
+        assert_eq!(snapshot["notificationDismissalBlocks"], json!([]));
+    }
+
+    #[test]
     fn preferences_and_mute_are_reflected_without_changing_identity() {
         let (_directory, mut core) = fixture();
         let target = capture(&core, "notice", true);

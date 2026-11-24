@@ -2749,6 +2749,11 @@ impl Session {
             conversations: views,
             notifications: notification_snapshot.notifications,
             app_filters: notification_snapshot.app_filters,
+            notification_dismissal_blocks: notification_snapshot
+                .dismissal_blocks
+                .into_iter()
+                .map(dto::NotificationDismissalBlock::from)
+                .collect(),
             notification_preferences,
             active_conversation_id: active.map(|id| id.to_string()),
             requested_redirect,
