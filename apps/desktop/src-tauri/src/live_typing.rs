@@ -2211,10 +2211,6 @@ impl Default for LiveRetry {
 }
 
 impl LiveRetry {
-    fn after_failure(&mut self) -> Duration {
-        self.after_connection(Duration::ZERO)
-    }
-
     fn after_connection(&mut self, connected_for: Duration) -> Duration {
         if connected_for >= crate::sync::STABLE_CONNECTION {
             self.backoff = Duration::from_secs(1);
@@ -2222,7 +2218,7 @@ impl LiveRetry {
             return self.backoff;
         }
         let retry_delay = self.backoff;
-        self.backoff = next_live_backoff(self.backoff, false);
+        self.backoff = next_live_backoff(self.backoff);
         self.attempt = self.attempt.saturating_add(1);
         retry_delay
     }
@@ -2278,12 +2274,8 @@ fn millis_i64(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
-fn next_live_backoff(backoff: Duration, stable: bool) -> Duration {
-    if stable {
-        Duration::from_secs(1)
-    } else {
-        (backoff * 2).min(LIVE_MAX_BACKOFF)
-    }
+fn next_live_backoff(backoff: Duration) -> Duration {
+    (backoff * 2).min(LIVE_MAX_BACKOFF)
 }
 
 #[cfg(test)]
@@ -2555,9 +2547,13 @@ mod tests {
     #[test]
     fn probe_failure_backoff_is_jittered_and_capped() {
         assert_eq!(LIVE_MAX_BACKOFF, Duration::from_secs(60));
-        assert_eq!(next_live_backoff(LIVE_MAX_BACKOFF, false), LIVE_MAX_BACKOFF);
+        assert_eq!(next_live_backoff(LIVE_MAX_BACKOFF), LIVE_MAX_BACKOFF);
+        let mut retry = LiveRetry {
+            backoff: LIVE_MAX_BACKOFF,
+            attempt: 1,
+        };
         assert_eq!(
-            next_live_backoff(LIVE_MAX_BACKOFF, true),
+            retry.after_connection(crate::sync::STABLE_CONNECTION),
             Duration::from_secs(1)
         );
         assert!(live_backoff_delay(LIVE_MAX_BACKOFF) <= LIVE_MAX_BACKOFF);
@@ -2582,7 +2578,10 @@ mod tests {
         };
         for (step, delay) in [(0, 30), (1, 60)] {
             let attempt = start + Duration::from_secs(step * 5);
-            assert_eq!(retry.after_failure(), Duration::from_secs(delay));
+            assert_eq!(
+                retry.after_connection(Duration::ZERO),
+                Duration::from_secs(delay)
+            );
             session.live_context_wake.notify_one();
             let wait = wait_or_cancel_with(
                 &session,

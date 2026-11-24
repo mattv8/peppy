@@ -2376,13 +2376,17 @@ fn retire_terminal_phone_invitation(controller: &mut Controller) -> BridgeResult
         .ok_or_else(enrollment_error)?
         .clear_cancelled_owner_invitation(invitation_id)
         .map_err(|_| enrollment_error())?;
+    reset_phone_flow(controller);
+    Ok(())
+}
+
+fn reset_phone_flow(controller: &mut Controller) {
     controller.invitation_id = None;
     controller.invitation = None;
     controller.claim_pin = None;
     controller.claim_changed = false;
     controller.invitation_method = None;
     controller.phone_operation_epoch = None;
-    Ok(())
 }
 
 /// A completion is surfaced once. Later entry points retire it locally before polling or
@@ -2801,12 +2805,7 @@ fn finish_enrollment_cancel(
     controller.owner_resume = false;
     controller.vault_request_state = None;
     controller.vault_creation_in_flight = false;
-    controller.invitation_id = None;
-    controller.invitation = None;
-    controller.claim_pin = None;
-    controller.claim_changed = false;
-    controller.invitation_method = None;
-    controller.phone_operation_epoch = None;
+    reset_phone_flow(&mut controller);
     Ok(())
 }
 
@@ -2825,12 +2824,7 @@ fn clear_confirmed_phone_cancellation(
         .ok_or_else(enrollment_error)?
         .clear_cancelled_owner_invitation(expected_id)
         .map_err(|_| enrollment_error())?;
-    controller.invitation_id = None;
-    controller.invitation = None;
-    controller.claim_pin = None;
-    controller.claim_changed = false;
-    controller.invitation_method = None;
-    controller.phone_operation_epoch = None;
+    reset_phone_flow(&mut controller);
     Ok(())
 }
 
