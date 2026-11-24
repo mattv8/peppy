@@ -114,7 +114,6 @@ async fn create_invitation(
     let mut tx = scope::begin(&state.db, owner.vault_id)
         .await
         .map_err(database)?;
-    revalidate_owner(&mut tx, &owner).await?;
     let vault = sqlx::query(
         "SELECT profile_fingerprint,key_epoch FROM vaults WHERE vault_id=$1 FOR UPDATE",
     )
@@ -122,6 +121,7 @@ async fn create_invitation(
     .fetch_one(&mut *tx)
     .await
     .map_err(database)?;
+    revalidate_owner(&mut tx, &owner).await?;
     withdraw_legacy_enrollment(&mut tx, &headers, &owner).await?;
     let active: i64 = sqlx::query_scalar("SELECT count(*) FROM phone_invitations WHERE vault_id=$1 AND owner_device_id=$2 AND state IN ('waiting','claimed','approved','confirmed') AND expires_at>now()")
         .bind(owner.vault_id).bind(owner.device_id).fetch_one(&mut *tx).await.map_err(database)?;
@@ -367,8 +367,12 @@ async fn approve_invitation(
     let mut tx = scope::begin(&state.db, principal.vault_id)
         .await
         .map_err(database)?;
-    revalidate_owner(&mut tx, &principal).await?;
     let row = invitation_for_owner(&mut tx, invitation_id, &principal).await?;
+    revalidate_owner(&mut tx, &principal).await?;
+    let row = row.ok_or(InvitationError(
+        StatusCode::NOT_FOUND,
+        "invitation_not_found",
+    ))?;
     withdraw_legacy_enrollment(&mut tx, &headers, &principal).await?;
     if row.get::<String, _>("origin") != state.canonical_origin {
         return Err(InvitationError(StatusCode::FORBIDDEN, "origin_mismatch"));
@@ -565,8 +569,12 @@ async fn cancel_invitation(
     let mut tx = scope::begin(&state.db, principal.vault_id)
         .await
         .map_err(database)?;
-    revalidate_owner(&mut tx, &principal).await?;
     let row = invitation_for_owner(&mut tx, invitation_id, &principal).await?;
+    revalidate_owner(&mut tx, &principal).await?;
+    let row = row.ok_or(InvitationError(
+        StatusCode::NOT_FOUND,
+        "invitation_not_found",
+    ))?;
     withdraw_legacy_enrollment(&mut tx, &headers, &principal).await?;
     if row.get::<String, _>("state") == "consumed" {
         return Err(InvitationError(StatusCode::CONFLICT, "invitation_consumed"));
@@ -679,8 +687,8 @@ async fn invitation_for_owner(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: Uuid,
     owner: &Owner,
-) -> Result<sqlx::postgres::PgRow, InvitationError> {
-    sqlx::query("SELECT p.*,v.public_key_profile,p.expires_at > now() AS expires_valid,GREATEST(0,floor(extract(epoch FROM p.expires_at-now())))::bigint AS expires_remaining FROM phone_invitations p JOIN vaults v ON v.vault_id=p.vault_id WHERE p.id=$1 AND p.vault_id=$2 AND p.owner_device_id=$3 FOR UPDATE OF p,v").bind(id).bind(owner.vault_id).bind(owner.device_id).fetch_optional(&mut **tx).await.map_err(database)?.ok_or(InvitationError(StatusCode::NOT_FOUND,"invitation_not_found"))
+) -> Result<Option<sqlx::postgres::PgRow>, InvitationError> {
+    sqlx::query("SELECT p.*,v.public_key_profile,p.expires_at > now() AS expires_valid,GREATEST(0,floor(extract(epoch FROM p.expires_at-now())))::bigint AS expires_remaining FROM phone_invitations p JOIN vaults v ON v.vault_id=p.vault_id WHERE p.id=$1 AND p.vault_id=$2 AND p.owner_device_id=$3 FOR UPDATE OF p,v").bind(id).bind(owner.vault_id).bind(owner.device_id).fetch_optional(&mut **tx).await.map_err(database)
 }
 async fn expire(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,

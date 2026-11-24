@@ -136,7 +136,6 @@ async fn create(
     let mut tx = scope::begin(&state.db, owner.vault_id)
         .await
         .map_err(database)?;
-    revalidate_owner(&mut tx, &owner).await?;
     let vault = sqlx::query(
         "SELECT profile_fingerprint,key_epoch FROM vaults WHERE vault_id=$1 FOR UPDATE",
     )
@@ -144,6 +143,7 @@ async fn create(
     .fetch_one(&mut *tx)
     .await
     .map_err(database)?;
+    revalidate_owner(&mut tx, &owner).await?;
     withdraw_legacy_enrollment(&mut tx, &headers, &owner).await?;
     sqlx::query("UPDATE computer_enrollments SET state='expired' WHERE vault_id=$1 AND owner_device_id=$2 AND state='waiting' AND expires_at < now()")
         .bind(owner.vault_id)
@@ -272,8 +272,12 @@ async fn approve(
     let mut tx = scope::begin(&state.db, owner.vault_id)
         .await
         .map_err(database)?;
+    let row = sqlx::query("SELECT c.*,v.profile_fingerprint current_fingerprint,v.key_epoch current_epoch,d.revoked_at IS NOT NULL AS owner_revoked,c.expires_at > now() AS expires_valid,GREATEST(0,floor(extract(epoch FROM c.expires_at-now())))::bigint AS expires_remaining FROM computer_enrollments c JOIN vaults v ON v.vault_id=c.vault_id JOIN devices d ON d.vault_id=c.vault_id AND d.device_id=c.owner_device_id WHERE c.id=$1 AND c.vault_id=$2 AND c.owner_device_id=$3 FOR UPDATE OF c,v,d").bind(id).bind(owner.vault_id).bind(owner.device_id).fetch_optional(&mut *tx).await.map_err(database)?;
     revalidate_owner(&mut tx, &owner).await?;
-    let row = sqlx::query("SELECT c.*,v.profile_fingerprint current_fingerprint,v.key_epoch current_epoch,d.revoked_at IS NOT NULL AS owner_revoked,c.expires_at > now() AS expires_valid,GREATEST(0,floor(extract(epoch FROM c.expires_at-now())))::bigint AS expires_remaining FROM computer_enrollments c JOIN vaults v ON v.vault_id=c.vault_id JOIN devices d ON d.vault_id=c.vault_id AND d.device_id=c.owner_device_id WHERE c.id=$1 AND c.vault_id=$2 AND c.owner_device_id=$3 FOR UPDATE OF c,v,d").bind(id).bind(owner.vault_id).bind(owner.device_id).fetch_optional(&mut *tx).await.map_err(database)?.ok_or(Error(StatusCode::NOT_FOUND, "computer_enrollment_not_found"))?;
+    let row = row.ok_or(Error(
+        StatusCode::NOT_FOUND,
+        "computer_enrollment_not_found",
+    ))?;
     withdraw_legacy_enrollment(&mut tx, &headers, &owner).await?;
     if row.get::<bool, _>("owner_revoked")
         || row.get::<String, _>("profile_fingerprint")
