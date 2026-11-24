@@ -30,6 +30,7 @@ describe("BrowserScheduler", () => {
 
     await new BrowserScheduler(session, transport, { retention: retention as never }).poll();
 
+    expect(calls).toEqual(expect.arrayContaining(["retention:negotiate", "query:pending_outbox", "retention:reconcile", "http:/v1/events?after=0&limit=100"]));
     expect(calls.indexOf("retention:negotiate")).toBeLessThan(calls.indexOf("query:pending_outbox"));
     expect(calls.indexOf("retention:reconcile")).toBeGreaterThan(calls.indexOf("http:/v1/events?after=0&limit=100"));
   });
@@ -43,16 +44,28 @@ describe("BrowserScheduler", () => {
       hydrate: async () => undefined,
     };
     const sent: unknown[] = [];
+    let releaseUpload!: () => void;
+    let uploadStarted!: () => void;
+    const uploadPending = new Promise<void>(resolve => { releaseUpload = resolve; });
+    const started = new Promise<void>(resolve => { uploadStarted = resolve; });
     const transport = {
       json: async (_path: string, request: { body?: unknown }) => {
-        if (request.body) sent.push(request.body);
+        if (request.body) {
+          sent.push(request.body);
+          uploadStarted();
+          await uploadPending;
+        }
         return { events: [] };
       },
       upload: async () => undefined,
       download: async () => new Uint8Array(),
     };
-    await new BrowserScheduler(session, transport).poll();
+    const polling = new BrowserScheduler(session, transport).poll();
+    await Promise.race([started, polling]);
     expect(sent).toEqual([envelope]);
+    expect(calls).not.toContain("ack");
+    releaseUpload();
+    await polling;
     expect(calls).toContain("ack");
   });
 
@@ -804,6 +817,7 @@ describe("BrowserScheduler", () => {
 
     const ingest = mutations.filter(([command]) => command === "ingest_batch");
     expect(ingest).toEqual([["ingest_batch", { events }]]);
+    expect(mutations.map(([command]) => command)).toContain("apply_pending");
     expect(mutations.findIndex(([command]) => command === "apply_pending")).toBeGreaterThan(mutations.findIndex(([command]) => command === "ingest_batch"));
   });
 
