@@ -21,6 +21,10 @@ release-test:
     infra/release/test-android-signing.sh
     infra/release/test-android-distribution.sh
     infra/release/linux-repository/test-linux-repository.sh
+    bash infra/release/test-testflight.sh
+
+release-testflight-test:
+    bash infra/release/test-testflight.sh
 
 doctor:
     @command -v cargo >/dev/null || { echo "cargo is required; install the pinned Rust toolchain" >&2; exit 1; }
@@ -217,6 +221,9 @@ audit-secrets:
 
 backup destination:
     ./infra/compose/backup.sh {{ quote(destination) }}
+
+backup-restore-drill:
+    bash infra/compose/test-fixtures.sh
 
 restore archive project:
     PEPPY_RESTORE_MANIFEST_SHA256="${PEPPY_RESTORE_MANIFEST_SHA256:-}" ./infra/compose/restore.sh {{ quote(archive) }} {{ quote(project) }}

@@ -58,7 +58,7 @@ done
 [[ "$connect" == true && "$max_time" -ge 1 && "$max_time" -le 60 ]]
 exec 3>&1
 exec > "$output"
-[[ "$(stat -f %Lp "$API_PRIVATE_KEYS_DIR/AuthKey_TESTKEY.p8" 2>/dev/null || stat -c %a "$API_PRIVATE_KEYS_DIR/AuthKey_TESTKEY.p8")" == 600 ]]
+[[ "$(stat -c %a "$API_PRIVATE_KEYS_DIR/AuthKey_TESTKEY.p8" 2>/dev/null || stat -f %Lp "$API_PRIVATE_KEYS_DIR/AuthKey_TESTKEY.p8")" == 600 ]]
 if [[ "$url" == *betaGroups* || "$url" == *betaAppReviewSubmission* || "$query" == *'filter[betaGroups]'* ]]; then
   printf '%s %s %s\n' "$method" "$url" "$query" >> "$TEST_DIR/external-calls"
   case "$url:$method" in

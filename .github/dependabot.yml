@@ -30,3 +30,43 @@ updates:
       android-build-tooling:
         patterns:
           - "*"
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      rust-dependencies:
+        patterns:
+          - "*"
+  - package-ecosystem: cargo
+    directory: /apps/desktop/src-tauri
+    schedule:
+      interval: weekly
+    groups:
+      desktop-rust-dependencies:
+        patterns:
+          - "*"
+  - package-ecosystem: cargo
+    directory: /infra/release/manifest-verifier
+    schedule:
+      interval: weekly
+    groups:
+      verifier-rust-dependencies:
+        patterns:
+          - "*"
+  - package-ecosystem: gomod
+    directory: /apps/android/googlemessages
+    schedule:
+      interval: weekly
+    groups:
+      google-messages-go-dependencies:
+        patterns:
+          - "*"
+  - package-ecosystem: docker
+    directory: /infra/docker
+    schedule:
+      interval: weekly
+    groups:
+      docker-images:
+        patterns:
+          - "*"

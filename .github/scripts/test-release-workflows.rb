@@ -304,6 +304,15 @@ end
   end
 end
 android_consumers = %w[android-debug-unit-tests android-sideload-unit-tests android-lint-and-assembly].map { |name| android_ci_jobs.fetch(name) }
+preparation_steps = android_preparation.fetch('steps')
+aar_index = preparation_steps.index { |step| step['name'] == 'Build Google Messages AAR and licenses' }
+native_index = preparation_steps.index { |step| step['name'] == 'Verify and build Android native libraries' }
+linked_tests_index = preparation_steps.index { |step| step['name'] == 'Run Google Messages sideload unit tests' }
+assert.call(aar_index && linked_tests_index && aar_index < linked_tests_index, 'linked sideload tests must run after building the Google Messages AAR')
+assert.call(native_index && linked_tests_index && native_index < linked_tests_index, 'linked sideload tests must run after building Android native libraries')
+linked_tests_command = preparation_steps.fetch(linked_tests_index).fetch('run')
+assert.call(linked_tests_command.include?(':app:testSideloadUnitTest -PpeppyGoogleMessagesLink=true'), 'linked sideload tests must enable Google Messages')
+assert.call(linked_tests_command.include?('--dependency-verification=strict') && linked_tests_command.include?('../../.github/scripts/run-with-jvm-watchdog.sh 300 1080 -- ./gradlew'), 'linked sideload tests must use strict dependency verification and the JVM watchdog')
 assert.call(android_consumers.all? { |job| job.fetch('needs') == 'android-native-preparation' }, 'every Android consumer must require native preparation')
 assert.call(android_consumers.all? { |job| job.fetch('steps').any? { |step| step.dig('with', 'name') == 'android-native-${{ github.sha }}' } }, 'every Android consumer must download the SHA-bound native artifact')
 android_packaging = android_ci_jobs.fetch('android-lint-and-assembly').fetch('steps').find { |step| step['name'] == 'Lint and assemble Android artifacts' }
@@ -312,7 +321,7 @@ android_jvm_arguments = '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8'
 android_info_commands = {
   'Lint and assemble Android artifacts' => ['./gradlew', '--console=plain', '--dependency-verification=strict', '--info', '--stacktrace', android_jvm_arguments, '--max-workers=2', '-PpeppyGoogleMessagesLink=true', ':app:verifyReleaseManifestSecurity', ':app:lintDebug', ':app:lintSideload', ':app:assembleDebug', ':app:assembleDebugAndroidTest', ':app:assembleSideload', ':app:verifySideloadGoogleMessagesLink'],
   'Compile release with Google Messages link' => ['./gradlew', '--console=plain', '--dependency-verification=strict', '--info', '--stacktrace', android_jvm_arguments, '--max-workers=2', ':app:compileReleaseKotlin', '-PpeppyDistribution=play', '-PpeppyGoogleMessagesLink=true'],
-  'Verify release SMS diagnostics policy' => ['./gradlew', '--console=plain', '--dependency-verification=strict', '--info', ':app:testReleaseUnitTest', '--tests', 'dev.peppy.mobile.SmsCaptureReleasePolicyTest']
+  'Verify release unit-test policies' => ['./gradlew', '--console=plain', '--dependency-verification=strict', '--info', ':app:testReleaseUnitTest', '--tests', 'dev.peppy.mobile.SmsCaptureReleasePolicyTest', '--tests', 'dev.peppy.mobile.mms.RestrictedAccessActionReleaseTest']
 }
 Dir.mktmpdir('android-lint-assembly-info') do |fixture|
   project = File.join(fixture, 'apps', 'android')
@@ -1161,6 +1170,12 @@ end
 
 dependabot = YAML.load_file(File.join(root, 'dependabot.yml'))
 dependabot_updates = dependabot.fetch('updates')
+%w[/ /apps/desktop/src-tauri /infra/release/manifest-verifier].each do |directory|
+  assert.call(dependabot_updates.count { |update| update['package-ecosystem'] == 'cargo' && update['directory'] == directory } == 1, "Dependabot must configure Cargo updates for #{directory}")
+end
+{ 'gomod' => '/apps/android/googlemessages', 'docker' => '/infra/docker' }.each do |ecosystem, directory|
+  assert.call(dependabot_updates.count { |update| update['package-ecosystem'] == ecosystem && update['directory'] == directory } == 1, "Dependabot must configure #{ecosystem} updates for #{directory}")
+end
 android_gradle_updates = dependabot_updates.select { |update| update['package-ecosystem'] == 'gradle' && update['directory'] == '/apps/android' }
 assert.call(android_gradle_updates.length == 1, 'Dependabot must configure exactly one Android Gradle update')
 android_gradle_ignore = android_gradle_updates.first.fetch('ignore', nil)
