@@ -382,6 +382,369 @@ struct TestDevice {
     token: String,
 }
 
+#[tokio::test]
+async fn both_device_revocation_routes_preserve_refusals_and_side_effects() {
+    for instance_route in [false, true] {
+        let server = TestServer::start_without_maintenance().await;
+        let session = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO vault_owners(vault_id,username,password_hash,is_admin,operation_id,request_digest) VALUES($1,'owner','hash',TRUE,$2,$3)")
+            .bind(server.vault).bind(Uuid::new_v4()).bind(vec![1u8; 32])
+            .execute(&server.pool).await.unwrap();
+        sqlx::query("INSERT INTO instance_sessions(token_digest,vault_id,expires_at) VALUES($1,$2,now()+interval '1 hour')")
+            .bind(Sha256::digest(session.as_bytes()).as_slice()).bind(server.vault)
+            .execute(&server.pool).await.unwrap();
+        let foreign_vault = Uuid::new_v4();
+        let (foreign_profile, foreign_fingerprint) = profile(foreign_vault, 1);
+        let foreign = create_owner(
+            &server.pool,
+            foreign_profile,
+            vec![7, 8, 9],
+            foreign_fingerprint,
+            1,
+        )
+        .await
+        .unwrap();
+        let target = server.provision_device("device").await;
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let revoke = |id: Uuid| {
+            let path = if instance_route {
+                "instance/devices"
+            } else {
+                "devices"
+            };
+            let request = client.post(format!("{}/v1/{path}/{id}/revoke", server.base_url));
+            if instance_route {
+                request.header("peppy-instance-session", &session)
+            } else {
+                request.bearer_auth(&server.owner_token)
+            }
+        };
+        for (id, status, code) in [
+            (
+                server.owner_device,
+                StatusCode::CONFLICT,
+                "last_active_owner",
+            ),
+            (foreign.device_id, StatusCode::NOT_FOUND, "device_not_found"),
+            (Uuid::new_v4(), StatusCode::NOT_FOUND, "device_not_found"),
+        ] {
+            let response = revoke(id).send().await.unwrap();
+            assert_eq!(response.status(), status);
+            assert_eq!(
+                response.json::<Value>().await.unwrap(),
+                json!({"code": code})
+            );
+        }
+
+        sqlx::query(
+            "INSERT INTO device_cursors(vault_id,device_id,receive_cursor) VALUES($1,$2,5)",
+        )
+        .bind(server.vault)
+        .bind(target.id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO device_wake_routes(vault_id,device_id,route_id,wake_credential) VALUES($1,$2,$3,'credential')")
+            .bind(server.vault).bind(target.id).bind(Uuid::new_v4()).execute(&server.pool).await.unwrap();
+        sqlx::query("INSERT INTO device_wake_jobs(vault_id,device_id,cursor,job_id,opaque_nonce) VALUES($1,$2,1,$3,'opaque')")
+            .bind(server.vault).bind(target.id).bind(Uuid::new_v4()).execute(&server.pool).await.unwrap();
+        sqlx::query("INSERT INTO mcp_devices(vault_id,device_id) VALUES($1,$2)")
+            .bind(server.vault)
+            .bind(target.id)
+            .execute(&server.pool)
+            .await
+            .unwrap();
+        let grant = Uuid::new_v4();
+        sqlx::query("INSERT INTO mcp_grants(id,vault_id,device_id,client_name,scopes) VALUES($1,$2,$3,'test',ARRAY['conversations:read'])")
+            .bind(grant).bind(server.vault).bind(target.id).execute(&server.pool).await.unwrap();
+        let invitation = insert_phone_invitation(
+            &server.pool,
+            server.vault,
+            target.id,
+            &server.fingerprint,
+            "waiting",
+            false,
+        )
+        .await;
+        let enrollment =
+            insert_computer_enrollment(&server.pool, server.vault, target.id, &server.fingerprint)
+                .await;
+        sqlx::query("UPDATE computer_enrollments SET state='waiting' WHERE id=$1")
+            .bind(enrollment)
+            .execute(&server.pool)
+            .await
+            .unwrap();
+        let object_key = format!("revoke-{}", Uuid::new_v4());
+        sqlx::query("INSERT INTO upload_reservations(vault_id,attachment_id,device_id,object_key,declared_bytes,declared_sha256,uploaded_at) VALUES($1,$2,$3,$4,1,$5,now())")
+            .bind(server.vault).bind(Uuid::new_v4()).bind(target.id).bind(&object_key)
+            .bind(vec![1u8; 32]).execute(&server.pool).await.unwrap();
+        let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+        let connection = Uuid::new_v4();
+        presence::open(&mut tx, server.vault, target.id, connection)
+            .await
+            .unwrap();
+        presence::renew(
+            &mut tx,
+            server.vault,
+            target.id,
+            connection,
+            presence::LEASE_SECONDS,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut observer = tokio::time::timeout(
+            Duration::from_secs(10),
+            server.connect_ws(&server.owner_token),
+        )
+        .await
+        .expect("observer websocket connection timed out");
+        tokio::time::timeout(Duration::from_secs(10), send_hello(&mut observer, "0"))
+            .await
+            .expect("observer websocket hello timed out");
+        assert_eq!(next_json(&mut observer, 5).await["type"], "ready");
+        answer_ping(&mut observer, "observer initial challenge", 5).await;
+        assert_eq!(
+            next_json(&mut observer, 5).await,
+            json!({"type": "presence_changed"})
+        );
+
+        let response = revoke(target.id).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(response.bytes().await.unwrap().is_empty());
+        assert_eq!(
+            next_json(&mut observer, 5).await,
+            json!({"type": "presence_changed"})
+        );
+        tokio::time::timeout(Duration::from_secs(10), observer.close(None))
+            .await
+            .expect("observer websocket close timed out")
+            .unwrap();
+        let state: (bool, bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+            "SELECT d.revoked_at IS NOT NULL, c.revoked_at IS NOT NULL, \
+             NOT EXISTS(SELECT 1 FROM device_cursors WHERE vault_id=$1 AND device_id=$2), \
+             r.revoked_at IS NOT NULL, \
+             NOT EXISTS(SELECT 1 FROM device_wake_jobs WHERE vault_id=$1 AND device_id=$2), \
+             m.cleanup_pending, g.revoked_at IS NOT NULL, \
+             NOT g.fence_pending AND g.fence_attempts=0 AND g.fence_next_at IS NULL, \
+             NOT EXISTS(SELECT 1 FROM device_sockets WHERE vault_id=$1 AND device_id=$2) \
+             FROM devices d JOIN device_credentials c USING(vault_id,device_id) \
+             JOIN device_wake_routes r USING(vault_id,device_id) \
+             JOIN mcp_devices m USING(vault_id,device_id) JOIN mcp_grants g USING(vault_id,device_id) \
+             WHERE d.vault_id=$1 AND d.device_id=$2 AND g.id=$3")
+            .bind(server.vault).bind(target.id).bind(grant).fetch_one(&server.pool).await.unwrap();
+        assert_eq!(
+            state,
+            (true, true, true, true, true, true, true, true, true)
+        );
+        let fenced: (bool, bool, bool, bool) = sqlx::query_as(
+            "SELECT (SELECT state='denied' FROM phone_invitations WHERE id=$1), \
+             (SELECT state='cancelled' FROM computer_enrollments WHERE id=$2), \
+             NOT EXISTS(SELECT 1 FROM upload_reservations WHERE object_key=$3), \
+             EXISTS(SELECT 1 FROM storage_deletions WHERE object_key=$3 AND reason='upload_attempt')"
+        ).bind(invitation).bind(enrollment).bind(&object_key).fetch_one(&server.pool).await.unwrap();
+        assert_eq!(fenced, (true, true, true, true));
+        let response = revoke(target.id).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response.json::<Value>().await.unwrap(),
+            json!({"code": "device_already_revoked"})
+        );
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn revocation_routes_authentication_and_retention_differ() {
+    for instance_route in [false, true] {
+        let server = TestServer::start_without_maintenance().await;
+        let caller = server.provision_device("device").await;
+        let target = server.provision_device("device").await;
+        let path = if instance_route {
+            "instance/devices"
+        } else {
+            "devices"
+        };
+        let url = format!("{}/v1/{path}/{}/revoke", server.base_url, target.id);
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let response = client.post(&url).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.json::<Value>().await.unwrap(),
+            json!({"code": if instance_route { "invalid_session" } else { "missing_bearer" }})
+        );
+        let response = client
+            .post(&url)
+            .bearer_auth(&caller.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if instance_route {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::FORBIDDEN
+            }
+        );
+        assert_eq!(
+            response.json::<Value>().await.unwrap(),
+            json!({"code": if instance_route { "invalid_session" } else { "owner_required" }})
+        );
+        sqlx::query("UPDATE attachment_retention_devices SET cleanup_ready=TRUE,reconciliation_needed=FALSE WHERE vault_id=$1 AND device_id=$2")
+            .bind(server.vault).bind(server.owner_device).execute(&server.pool).await.unwrap();
+        let request = client.post(&url);
+        let request = if instance_route {
+            let session = Uuid::new_v4().to_string();
+            sqlx::query("INSERT INTO vault_owners(vault_id,username,password_hash,is_admin,operation_id,request_digest) VALUES($1,'owner','hash',TRUE,$2,$3)")
+                .bind(server.vault).bind(Uuid::new_v4()).bind(vec![1u8; 32]).execute(&server.pool).await.unwrap();
+            sqlx::query("INSERT INTO instance_sessions(token_digest,vault_id,expires_at) VALUES($1,$2,now()+interval '1 hour')")
+                .bind(Sha256::digest(session.as_bytes()).as_slice()).bind(server.vault).execute(&server.pool).await.unwrap();
+            request.header("peppy-instance-session", session)
+        } else {
+            request.bearer_auth(&server.owner_token)
+        };
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(response.bytes().await.unwrap().is_empty());
+        let readiness: (bool, bool) = sqlx::query_as("SELECT cleanup_ready,reconciliation_needed FROM attachment_retention_devices WHERE vault_id=$1 AND device_id=$2")
+            .bind(server.vault).bind(server.owner_device).fetch_one(&server.pool).await.unwrap();
+        assert_eq!(
+            readiness,
+            if instance_route {
+                (true, false)
+            } else {
+                (false, true)
+            }
+        );
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn both_device_revocation_routes_schedule_worker_grant_fences() {
+    for instance_route in [false, true] {
+        let server = TestServer::start_without_maintenance().await;
+        let target = server.provision_device("device").await;
+        let session = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO vault_owners(vault_id,username,password_hash,is_admin,operation_id,request_digest) VALUES($1,'owner','hash',TRUE,$2,$3)")
+            .bind(server.vault).bind(Uuid::new_v4()).bind(vec![1u8; 32])
+            .execute(&server.pool).await.unwrap();
+        sqlx::query("INSERT INTO instance_sessions(token_digest,vault_id,expires_at) VALUES($1,$2,now()+interval '1 hour')")
+            .bind(Sha256::digest(session.as_bytes()).as_slice()).bind(server.vault)
+            .execute(&server.pool).await.unwrap();
+        sqlx::query("INSERT INTO mcp_devices(vault_id,device_id) VALUES($1,$2)")
+            .bind(server.vault)
+            .bind(target.id)
+            .execute(&server.pool)
+            .await
+            .unwrap();
+        let grant = Uuid::new_v4();
+        sqlx::query("INSERT INTO mcp_grants(id,vault_id,device_id,client_name,scopes) VALUES($1,$2,$3,'test',ARRAY['conversations:read'])")
+            .bind(grant).bind(server.vault).bind(target.id).execute(&server.pool).await.unwrap();
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let entered = Arc::new(std::sync::Mutex::new(Some(entered_tx)));
+        let worker_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let worker_addr = worker_listener.local_addr().unwrap();
+        let worker_router = axum::Router::new().route(
+            "/internal/mcp/revoke-grant",
+            axum::routing::post({
+                let entered = entered.clone();
+                let pool = server.pool.clone();
+                move |axum::Json(body): axum::Json<Value>| {
+                    let entered = entered.clone();
+                    let pool = pool.clone();
+                    async move {
+                        let state: (bool, i32, bool) = sqlx::query_as(
+                            "SELECT fence_pending,fence_attempts,fence_next_at IS NOT NULL AND fence_next_at <= now() FROM mcp_grants WHERE id=$1"
+                        ).bind(grant).fetch_one(&pool).await.unwrap();
+                        entered.lock().unwrap().take().unwrap().send((body, state)).unwrap();
+                        StatusCode::NO_CONTENT
+                    }
+                }
+            }),
+        );
+        let worker_task = tokio::spawn(async move {
+            axum::serve(worker_listener, worker_router).await.unwrap();
+        });
+        let mut control_token = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut control_token, b"worker-test-token\n").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = peppy_server::config::Config {
+            bind_addr: addr,
+            database_url: std::env::var("TEST_DATABASE_URL").unwrap(),
+            release_identity: "test".into(),
+            s3: None,
+            public_api_url: None,
+            vault_attachment_quota_bytes: 512 * 1024 * 1024,
+            trusted_proxy_cidrs: Vec::new(),
+            replay_retention: TransportOptions::default().replay_retention,
+            relay_url: None,
+            web_client: None,
+            web_live_trusted_origin: None,
+            mcp_worker_url: Some(Url::parse(&format!("http://{worker_addr}/")).unwrap()),
+            mcp_worker_token_file: Some(control_token.path().into()),
+        };
+        let app = peppy_server::ServerBuilder::new(config, server.pool.clone())
+            .build()
+            .await
+            .unwrap()
+            .router();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let path = if instance_route {
+            "instance/devices"
+        } else {
+            "devices"
+        };
+        let request = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap()
+            .post(format!("http://{addr}/v1/{path}/{}/revoke", target.id));
+        let request = if instance_route {
+            request.header("peppy-instance-session", &session)
+        } else {
+            request.bearer_auth(&server.owner_token)
+        };
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(response.bytes().await.unwrap().is_empty());
+        let (body, state) = tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .expect("worker fence request timed out")
+            .unwrap();
+        assert_eq!(
+            body,
+            json!({"vault_id": server.vault, "device_id": target.id, "grant_id": grant})
+        );
+        assert_eq!(state, (true, 0, true));
+        let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+        let pending: bool = tokio::time::timeout(
+            Duration::from_secs(5),
+            sqlx::query_scalar("SELECT fence_pending FROM mcp_grants WHERE id=$1 FOR UPDATE")
+                .bind(grant)
+                .fetch_one(&mut *tx),
+        )
+        .await
+        .expect("worker fence completion timed out")
+        .unwrap();
+        assert!(!pending);
+        tx.commit().await.unwrap();
+        task.abort();
+        worker_task.abort();
+        server.shutdown().await;
+    }
+}
+
 fn profile(vault: Uuid, epoch: u32) -> (Value, String) {
     let salt: Vec<u8> = (0..16).collect();
     let mut digest = Sha256::new();
@@ -1169,6 +1532,211 @@ async fn send_detached(request: reqwest::RequestBuilder) -> (StatusCode, Value) 
         serde_json::from_str(&text).unwrap()
     };
     (status, body)
+}
+
+#[tokio::test]
+async fn roster_and_wake_mutations_revalidate_after_vault_lock() {
+    for action in [
+        "rename",
+        "revoke",
+        "register_wake",
+        "revoke_wake",
+        "delete_vault",
+    ] {
+        let server = TestServer::start_without_maintenance().await;
+        let target = server.provision_device("device").await;
+        sqlx::query("UPDATE devices SET name='original' WHERE vault_id=$1 AND device_id=$2")
+            .bind(server.vault)
+            .bind(target.id)
+            .execute(&server.pool)
+            .await
+            .unwrap();
+        if action == "revoke_wake" {
+            sqlx::query("INSERT INTO device_wake_routes(vault_id,device_id,route_id,wake_credential) VALUES($1,$2,$3,'credential')")
+                .bind(server.vault).bind(server.owner_device).bind(Uuid::new_v4()).execute(&server.pool).await.unwrap();
+        }
+        let (holder, holder_pid) = hold_vault_lock(&server).await;
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let request = match action {
+            "rename" => client
+                .put(format!("{}/v1/devices/{}/name", server.base_url, target.id))
+                .json(&json!({"name": "changed"})),
+            "revoke" => client.post(format!(
+                "{}/v1/devices/{}/revoke",
+                server.base_url, target.id
+            )),
+            "register_wake" => client
+                .put(format!("{}/v1/devices/self/wake-route", server.base_url))
+                .json(&json!({"route_id": Uuid::new_v4(), "wake_credential": "a".repeat(64)})),
+            "revoke_wake" => {
+                client.delete(format!("{}/v1/devices/self/wake-route", server.base_url))
+            }
+            "delete_vault" => client
+                .delete(format!("{}/v1/vault", server.base_url))
+                .json(&json!({"vault_id": server.vault})),
+            _ => unreachable!(),
+        };
+        let task = tokio::spawn(send_detached(request.bearer_auth(&server.owner_token)));
+        wait_for_lock_waiter(
+            &server,
+            holder_pid,
+            "SELECT 1 FROM vaults WHERE vault_id=$1 FOR UPDATE",
+        )
+        .await;
+        revoke_credential_and_release(holder, server.owner_device).await;
+        let (status, body) = finish_blocked(task).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{action}");
+        assert_eq!(body, json!({"code": "invalid_bearer"}), "{action}");
+        let state: (bool, String, bool, i64) = sqlx::query_as(
+            "SELECT (SELECT revoked_at IS NULL FROM devices WHERE vault_id=$1 AND device_id=$2), (SELECT name FROM devices WHERE vault_id=$1 AND device_id=$2), EXISTS(SELECT 1 FROM vaults WHERE vault_id=$1), (SELECT count(*) FROM device_wake_routes WHERE vault_id=$1 AND revoked_at IS NULL)",
+        ).bind(server.vault).bind(target.id).fetch_one(&server.pool).await.unwrap();
+        assert_eq!(
+            state,
+            (
+                true,
+                "original".to_owned(),
+                true,
+                i64::from(action == "revoke_wake")
+            ),
+            "{action}"
+        );
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn owner_mutations_reject_caller_demoted_while_waiting() {
+    for action in ["revoke", "delete_vault"] {
+        let server = TestServer::start_without_maintenance().await;
+        let target = server.provision_device("device").await;
+        let (mut holder, holder_pid) = hold_vault_lock(&server).await;
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let request = if action == "revoke" {
+            client.post(format!(
+                "{}/v1/devices/{}/revoke",
+                server.base_url, target.id
+            ))
+        } else {
+            client
+                .delete(format!("{}/v1/vault", server.base_url))
+                .json(&json!({"vault_id": server.vault}))
+        };
+        let task = tokio::spawn(send_detached(request.bearer_auth(&server.owner_token)));
+        wait_for_lock_waiter(
+            &server,
+            holder_pid,
+            "SELECT 1 FROM vaults WHERE vault_id=$1 FOR UPDATE",
+        )
+        .await;
+        sqlx::query("UPDATE devices SET role='device' WHERE vault_id=$1 AND device_id=$2")
+            .bind(server.vault)
+            .bind(server.owner_device)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        holder.commit().await.unwrap();
+        let (status, body) = finish_blocked(task).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{action}");
+        assert_eq!(body, json!({"code":"owner_required"}), "{action}");
+        let state: (bool, bool) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM vaults WHERE vault_id=$1), (SELECT revoked_at IS NULL FROM devices WHERE vault_id=$1 AND device_id=$2)")
+            .bind(server.vault).bind(target.id).fetch_one(&server.pool).await.unwrap();
+        assert_eq!(state, (true, true), "{action}");
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn draft_mutations_reject_caller_revoked_while_waiting() {
+    for action in ["put", "send", "discard"] {
+        let server = TestServer::start_without_maintenance().await;
+        let caller = server.provision_device("device").await;
+        let draft = Uuid::new_v4();
+        let revision = Uuid::new_v4();
+        server.put_draft(draft, revision).await;
+        let before: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM draft_revisions WHERE vault_id=$1 AND draft_id=$2), (SELECT count(*) FROM draft_revisions WHERE vault_id=$1 AND draft_id=$2 AND sealed_record IS NOT NULL), (SELECT count(*) FROM draft_branches WHERE vault_id=$1 AND draft_id=$2 AND state='live'), (SELECT count(*) FROM draft_terminals WHERE vault_id=$1 AND draft_id=$2), (SELECT draft_change_seq FROM vaults WHERE vault_id=$1)",
+        ).bind(server.vault).bind(draft).fetch_one(&server.pool).await.unwrap();
+        let (holder, pid) = hold_vault_lock(&server).await;
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let request = match action {
+            "put" => client.put(format!("{}/v1/drafts/{draft}/revisions/{}", server.base_url, Uuid::new_v4()))
+                .json(&json!({"base_revision_id": revision, "sealed_record": URL_SAFE_NO_PAD.encode(b"changed"), "attachment_ids": [], "authored": true})),
+            "send" => client.post(format!("{}/v1/drafts/{draft}/send", server.base_url))
+                .json(&json!({"revision_id": revision, "command_id": Uuid::new_v4()})),
+            "discard" => client.post(format!("{}/v1/drafts/{draft}/discard", server.base_url)),
+            _ => unreachable!(),
+        };
+        let task = tokio::spawn(send_detached(request.bearer_auth(&caller.token)));
+        wait_for_lock_waiter(
+            &server,
+            pid,
+            "SELECT vault_id FROM vaults WHERE vault_id=$1 FOR UPDATE",
+        )
+        .await;
+        revoke_credential_and_release(holder, caller.id).await;
+        let (status, body) = finish_blocked(task).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{action}");
+        assert_eq!(body, json!({"code":"invalid_bearer"}), "{action}");
+        let after: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM draft_revisions WHERE vault_id=$1 AND draft_id=$2), (SELECT count(*) FROM draft_revisions WHERE vault_id=$1 AND draft_id=$2 AND sealed_record IS NOT NULL), (SELECT count(*) FROM draft_branches WHERE vault_id=$1 AND draft_id=$2 AND state='live'), (SELECT count(*) FROM draft_terminals WHERE vault_id=$1 AND draft_id=$2), (SELECT draft_change_seq FROM vaults WHERE vault_id=$1)",
+        ).bind(server.vault).bind(draft).fetch_one(&server.pool).await.unwrap();
+        assert_eq!(after, before, "{action}");
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn retention_mutations_reject_caller_revoked_while_waiting() {
+    for action in ["register", "release", "capability"] {
+        let server = TestServer::start_without_maintenance().await;
+        let caller = server.provision_device("device").await;
+        let attachment = Uuid::new_v4();
+        let use_id = Uuid::new_v4();
+        if action == "release" {
+            sqlx::query("INSERT INTO attachment_retention_uses(vault_id,use_id,attachment_id,device_id,kind) VALUES($1,$2,$3,$4,'message_history')")
+                .bind(server.vault).bind(use_id).bind(attachment).bind(caller.id).execute(&server.pool).await.unwrap();
+        }
+        let (holder, pid) = hold_vault_lock(&server).await;
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let request = match action {
+            "register" => client.post(format!("{}/v1/attachments/{attachment}/retention-uses", server.base_url))
+                .json(&json!({"use_id":use_id,"attachment_id":attachment,"device_id":caller.id,"kind":"message_history"})),
+            "release" => client.post(format!("{}/v1/attachments/{attachment}/retention-uses/{use_id}/release", server.base_url))
+                .json(&json!({"use_id":use_id,"attachment_id":attachment,"device_id":caller.id})),
+            "capability" => client.put(format!("{}/v1/devices/self/retention-capability", server.base_url))
+                .json(&json!({"protocol_version":1,"cleanup_ready":true})),
+            _ => unreachable!(),
+        };
+        let task = tokio::spawn(send_detached(request.bearer_auth(&caller.token)));
+        wait_for_lock_waiter(
+            &server,
+            pid,
+            "SELECT vault_id FROM vaults WHERE vault_id=$1 FOR UPDATE",
+        )
+        .await;
+        revoke_credential_and_release(holder, caller.id).await;
+        let (status, body) = finish_blocked(task).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{action}");
+        assert_eq!(body, json!({"code":"invalid_bearer"}), "{action}");
+        let state: (i64, i64, bool, bool) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM attachment_retention_uses WHERE vault_id=$1 AND use_id=$2), (SELECT count(*) FROM attachment_retention_uses WHERE vault_id=$1 AND use_id=$2 AND released_at IS NULL), cleanup_ready,reconciliation_needed FROM attachment_retention_devices WHERE vault_id=$1 AND device_id=$3",
+        ).bind(server.vault).bind(use_id).bind(caller.id).fetch_one(&server.pool).await.unwrap();
+        let count = i64::from(action == "release");
+        assert_eq!(state, (count, count, false, true), "{action}");
+        server.shutdown().await;
+    }
 }
 
 #[tokio::test]

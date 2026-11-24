@@ -1025,6 +1025,59 @@ async fn vault_response_identifies_the_owner_credential() {
 }
 
 #[tokio::test]
+async fn duplicate_reservation_ignores_reference_tracking_and_draft_id() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let bytes = ciphertext(b"duplicate reservation");
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let attachment = Uuid::new_v4();
+    let draft = Uuid::new_v4();
+    let request = |reference_tracking: bool, draft_id: Option<Uuid>| {
+        server
+            .auth(Client::new().post(format!("{}/v1/attachments/reserve", server.base_url)))
+            .json(&json!({
+                "attachment_id": attachment,
+                "declared_ciphertext_bytes": bytes.len(),
+                "declared_ciphertext_sha256": hash,
+                "reference_tracking": reference_tracking,
+                "draft_id": draft_id,
+            }))
+    };
+    assert_eq!(
+        request(false, None).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    // Pins current behaviour of review finding D-15; flip this assertion when the fix is authorized.
+    assert_eq!(
+        request(true, None).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    // Pins current behaviour of review finding D-15; flip this assertion when the fix is authorized.
+    assert_eq!(
+        request(false, Some(draft)).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    let persisted: (bool, Option<Uuid>, i64, Vec<u8>) = sqlx::query_as(
+        "SELECT reference_tracked,draft_id,declared_bytes,declared_sha256 FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2",
+    )
+    .bind(server.vault)
+    .bind(attachment)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        persisted,
+        (
+            false,
+            None,
+            bytes.len() as i64,
+            Sha256::digest(&bytes).to_vec()
+        )
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn client_attachment_ids_are_idempotent_and_public_copies_are_separate_and_revocable() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
