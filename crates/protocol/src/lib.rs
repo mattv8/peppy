@@ -19,9 +19,7 @@ pub use ephemeral::{
     POSTGRES_NOTIFY_PAYLOAD_BYTES, SessionAckPlaintextV2, TypingOriginV2, TypingPlaintextV2,
     TypingStateV2,
 };
-pub use generate::{
-    GeneratedContracts, all_schema_references_resolve, generate_contracts, write_contracts,
-};
+pub use generate::{GeneratedContracts, all_schema_references_resolve, generate_contracts};
 pub use membership::{
     MAX_MEMBERSHIP_CONTROL_BYTES, MAX_MEMBERSHIP_ROSTER_ENTRIES, MEMBERSHIP_PROTOCOL_VERSION,
     MembershipBootstrapV1, MembershipChallengeV1, MembershipControlError, MembershipControlV1,

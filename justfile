@@ -172,7 +172,6 @@ server-test:
     cargo test -p peppy-server --locked
 
 contracts-check:
-    cargo run --locked -p peppy-protocol --bin generate-contracts -- --check
     cargo run --locked -p peppy-desktop-api --bin generate-search-contracts -- --check
     cargo run --locked -p peppy-desktop-api --bin generate-attachment-retention-contracts -- --check
     cargo run --locked -p peppy-desktop-api --bin generate-account-access-contracts -- --check

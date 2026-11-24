@@ -3,7 +3,6 @@ name = "peppy-protocol"
 version = "0.1.0"
 edition = "2024"
 publish = false
-default-run = "generate-contracts"
 
 [dependencies]
 base64.workspace = true
@@ -18,7 +17,3 @@ uuid.workspace = true
 [dev-dependencies]
 jsonschema = { version = "0.30", default-features = false }
 serde_json.workspace = true
-
-[[bin]]
-name = "generate-contracts"
-path = "src/bin/generate-contracts.rs"
