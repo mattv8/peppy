@@ -841,3 +841,199 @@ async fn computer_enrollment_rejects_mutation_revocation_expiry_and_cancellation
         .await
         .unwrap();
 }
+
+async fn hold_vault_lock(
+    pool: &PgPool,
+    vault: Uuid,
+) -> (sqlx::Transaction<'static, sqlx::Postgres>, i32) {
+    let mut holder = pool.begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    sqlx::query("SELECT 1 FROM vaults WHERE vault_id=$1 FOR UPDATE")
+        .bind(vault)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    (holder, pid)
+}
+
+mod support;
+
+async fn revoke_owner_credential_and_release(
+    mut holder: sqlx::Transaction<'static, sqlx::Postgres>,
+    owner_token: &str,
+) {
+    sqlx::query("UPDATE device_credentials SET revoked_at=now() WHERE token_digest=$1")
+        .bind(Sha256::digest(owner_token.as_bytes()).as_slice())
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+}
+
+async fn computer_count(pool: &PgPool, vault: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM computer_enrollments WHERE vault_id=$1")
+        .bind(vault)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn computer_state(pool: &PgPool, id: Uuid) -> String {
+    sqlx::query_scalar("SELECT state FROM computer_enrollments WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Creates a waiting enrollment with the owner and returns its approve request.
+async fn waiting_approval(
+    app: Router,
+    owner_token: &str,
+    vault: Uuid,
+    owner: Uuid,
+) -> (Router, Uuid, serde_json::Value) {
+    let id = Uuid::new_v4();
+    let device = Uuid::new_v4();
+    let claim = [7; 32];
+    let create = request_data(id, device, claim);
+    let (app, status, created) = call(
+        app,
+        owner_request(
+            "/v1/enrollment/computers".into(),
+            owner_token,
+            serde_json::to_value(&create).unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let transcript = ComputerEnrollmentTranscript {
+        origin: ORIGIN.into(),
+        vault_id: vault,
+        fingerprint: "11".repeat(32),
+        key_epoch: 1,
+        invitation_id: id,
+        server_nonce: created["server_nonce"].as_str().unwrap().into(),
+        owner_transfer_public_key: URL_SAFE_NO_PAD.encode([5; 32]),
+        owner_device_id: owner,
+        recipient: create.recipient.clone(),
+        recipient_transfer_public_key: create.recipient_transfer_public_key.clone(),
+        granted_role: EnrollmentRole::Device,
+    };
+    let approve = serde_json::json!({"transcript":transcript,"encrypted_key_package":URL_SAFE_NO_PAD.encode([6;32]),"transfer_nonce":URL_SAFE_NO_PAD.encode([7;24]),"owner_proof":URL_SAFE_NO_PAD.encode([8;32])});
+    (app, id, approve)
+}
+
+fn approve_request(id: Uuid, owner_token: &str, body: serde_json::Value) -> Request<Body> {
+    owner_request(
+        format!("/v1/enrollment/computers/{id}/approve"),
+        owner_token,
+        body,
+    )
+}
+
+#[tokio::test]
+async fn approve_rechecks_the_owner_credential_after_waiting_for_the_vault_lock() {
+    let (app, pool, schema, owner_token, _gateway_token, vault, owner) = fixture().await;
+    let (app, id, approve) = waiting_approval(app, &owner_token, vault, owner).await;
+
+    let (holder, holder_pid) = hold_vault_lock(&pool, vault).await;
+    let task = tokio::spawn(call(app, approve_request(id, &owner_token, approve)));
+    support::wait_blocked_by(&pool, holder_pid, None, std::time::Duration::from_secs(5)).await;
+    // Revoke only the owner's credential; the owner device row stays live.
+    revoke_owner_credential_and_release(holder, &owner_token).await;
+    let (_, status, body) = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .expect("blocked approve did not finish after the lock was released")
+        .unwrap();
+    let approved = computer_state(&pool, id).await == "approved";
+    let code = body["error"].as_str().unwrap_or("-");
+    eprintln!(
+        "P-5 POST /v1/enrollment/computers/{{id}}/approve status={} code={code} approved={approved}",
+        status.as_u16()
+    );
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"], "owner_required", "{body}");
+    assert!(
+        !approved,
+        "computer enrollment was approved with a revoked owner credential"
+    );
+}
+
+#[tokio::test]
+async fn approve_rechecks_the_owner_device_after_waiting_for_the_vault_lock() {
+    let (app, pool, schema, owner_token, _gateway_token, vault, owner) = fixture().await;
+    let (app, id, approve) = waiting_approval(app, &owner_token, vault, owner).await;
+
+    let (mut holder, holder_pid) = hold_vault_lock(&pool, vault).await;
+    let task = tokio::spawn(call(app, approve_request(id, &owner_token, approve)));
+    support::wait_blocked_by(&pool, holder_pid, None, std::time::Duration::from_secs(5)).await;
+    // Revoke only the owner device; its credential stays live.
+    sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
+        .bind(vault)
+        .bind(owner)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    let (_, status, body) = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .expect("blocked approve did not finish after the lock was released")
+        .unwrap();
+    let state = computer_state(&pool, id).await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"], "owner_required", "{body}");
+    assert_eq!(
+        state, "waiting",
+        "computer enrollment was approved after its owner device was revoked"
+    );
+}
+
+#[tokio::test]
+async fn create_rechecks_the_owner_credential_after_waiting_for_the_vault_lock() {
+    let (app, pool, schema, owner_token, _gateway_token, vault, _owner) = fixture().await;
+    let (app, status, _) = call(
+        app,
+        owner_request(
+            "/v1/enrollment/computers".into(),
+            &owner_token,
+            serde_json::to_value(request_data(Uuid::new_v4(), Uuid::new_v4(), [7; 32])).unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(computer_count(&pool, vault).await, 1);
+
+    let blocked = owner_request(
+        "/v1/enrollment/computers".into(),
+        &owner_token,
+        serde_json::to_value(request_data(Uuid::new_v4(), Uuid::new_v4(), [8; 32])).unwrap(),
+    );
+    let (holder, holder_pid) = hold_vault_lock(&pool, vault).await;
+    let task = tokio::spawn(call(app, blocked));
+    support::wait_blocked_by(&pool, holder_pid, None, std::time::Duration::from_secs(5)).await;
+    revoke_owner_credential_and_release(holder, &owner_token).await;
+    let (_, status, body) = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .expect("blocked create did not finish after the lock was released")
+        .unwrap();
+    let count = computer_count(&pool, vault).await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"], "owner_required", "{body}");
+    assert_eq!(count, 1, "blocked create wrote a computer enrollment");
+}

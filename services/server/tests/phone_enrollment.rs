@@ -493,3 +493,286 @@ async fn phone_claim_failures_carry_matching_error_and_code_fields() {
         .await
         .unwrap();
 }
+
+mod support;
+
+#[tokio::test]
+async fn approve_rechecks_the_owner_credential_after_waiting_for_the_vault_lock() {
+    let (mut app, pool, schema, owner_token, vault) = fixture().await;
+    let owner_device_id: Uuid =
+        sqlx::query_scalar("SELECT device_id FROM device_credentials WHERE token_digest=$1")
+            .bind(Sha256::digest(owner_token.as_bytes()).as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let invitation_token_digest = URL_SAFE_NO_PAD.encode(Sha256::digest([4; 32]));
+    let created_request = CreateInvitationRequest {
+        method: EnrollmentMethod::Transfer,
+        transfer_public_key: URL_SAFE_NO_PAD.encode([7; 32]),
+        invitation_token_digest: invitation_token_digest.clone(),
+    };
+    let (next, status, created) = request(
+        app,
+        Request::post("/v1/enrollment/invitations")
+            .header("authorization", format!("Bearer {owner_token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&created_request).unwrap()))
+            .unwrap(),
+    )
+    .await;
+    app = next;
+    assert_eq!(status, StatusCode::OK);
+    let device = crypto_sign::KeyPair::generate().unwrap();
+    let device_id = Uuid::new_v4();
+    let digest = "22".repeat(32);
+    let claim = serde_json::json!({"invitation_token_digest":invitation_token_digest,"claim_authenticator":URL_SAFE_NO_PAD.encode([5;32]),"device":{"device_id":device_id,"kind":"android","name":"phone","signing_public_key":URL_SAFE_NO_PAD.encode(device.public_key.as_bytes())},"transfer_public_key":URL_SAFE_NO_PAD.encode([8;32]),"credential_digest":digest});
+    let (next, status, _claimed) = request(
+        app,
+        Request::post("/v1/enrollment/invitations/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(claim.to_string()))
+            .unwrap(),
+    )
+    .await;
+    app = next;
+    assert_eq!(status, StatusCode::OK);
+    let invitation_id = created["invitation_id"].as_str().unwrap();
+    let invitation_uuid: Uuid = invitation_id.parse().unwrap();
+    let (next, status, status_body) = request(
+        app,
+        Request::get(format!("/v1/enrollment/invitations/{invitation_id}"))
+            .header("authorization", format!("Bearer {owner_token}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    app = next;
+    assert_eq!(status, StatusCode::OK);
+    let transcript: peppy_hosted_api::enrollment::EnrollmentTranscript =
+        serde_json::from_value(status_body["transcript"].clone()).unwrap();
+    let context = EnrollmentContext {
+        purpose: EnrollmentPurpose::Phone,
+        canonical_origin: transcript.origin,
+        vault_id: transcript.vault_id,
+        fingerprint: hex::decode(transcript.fingerprint)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        key_epoch: transcript.key_epoch,
+        enrollment_id: transcript.enrollment_id,
+        server_nonce: URL_SAFE_NO_PAD
+            .decode(transcript.nonce)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        owner_transfer_public_key: URL_SAFE_NO_PAD
+            .decode(transcript.owner_transfer_public_key)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        recipient_transfer_public_key: URL_SAFE_NO_PAD
+            .decode(transcript.recipient_transfer_public_key)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        recipient_signing_public_key: URL_SAFE_NO_PAD
+            .decode(transcript.signing_public_key)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        device_id,
+        credential_digest: hex::decode(digest).unwrap().try_into().unwrap(),
+        role: EnrollmentRole::Gateway,
+    };
+    let transcript_hash =
+        URL_SAFE_NO_PAD.encode(Sha256::digest(context.canonical_bytes().unwrap()));
+    let approve = serde_json::json!({"transcript_hash":transcript_hash,"encrypted_key_package":URL_SAFE_NO_PAD.encode([1;32]),"transfer_nonce":URL_SAFE_NO_PAD.encode([2;24])});
+    let approve_request = Request::post(format!(
+        "/v1/enrollment/invitations/{invitation_id}/approve"
+    ))
+    .header("authorization", format!("Bearer {owner_token}"))
+    .header("content-type", "application/json")
+    .body(Body::from(approve.to_string()))
+    .unwrap();
+
+    // Hold the vault row lock, as hold_vault_lock does in attachments.rs.
+    let mut holder = pool.begin().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    sqlx::query("SELECT 1 FROM vaults WHERE vault_id=$1 FOR UPDATE")
+        .bind(vault)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let task = tokio::spawn(request(app, approve_request));
+    support::wait_blocked_by(&pool, holder_pid, None, std::time::Duration::from_secs(5)).await;
+    // Revoke only the owner's credential; the owner device row stays live.
+    sqlx::query(
+        "UPDATE device_credentials SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(vault)
+    .bind(owner_device_id)
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+    holder.commit().await.unwrap();
+    let (_, status, body) = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .expect("blocked approve did not finish after the lock was released")
+        .unwrap();
+    let state: String = sqlx::query_scalar("SELECT state FROM phone_invitations WHERE id=$1")
+        .bind(invitation_uuid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let approved = state == "approved";
+    let code = body["code"]
+        .as_str()
+        .or(body["error"].as_str())
+        .unwrap_or("-");
+    eprintln!(
+        "P-5 POST /v1/enrollment/invitations/{{id}}/approve status={} code={code} approved={approved}",
+        status.as_u16()
+    );
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert!(
+        !approved,
+        "invitation was approved with a revoked owner credential"
+    );
+}
+
+async fn hold_vault_lock(
+    pool: &PgPool,
+    vault: Uuid,
+) -> (sqlx::Transaction<'static, sqlx::Postgres>, i32) {
+    let mut holder = pool.begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    sqlx::query("SELECT 1 FROM vaults WHERE vault_id=$1 FOR UPDATE")
+        .bind(vault)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    (holder, pid)
+}
+
+async fn revoke_owner_credential_and_release(
+    mut holder: sqlx::Transaction<'static, sqlx::Postgres>,
+    owner_token: &str,
+) {
+    sqlx::query("UPDATE device_credentials SET revoked_at=now() WHERE token_digest=$1")
+        .bind(Sha256::digest(owner_token.as_bytes()).as_slice())
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+}
+
+fn create_invitation_request(owner_token: &str, digest: [u8; 32]) -> Request<Body> {
+    let body = CreateInvitationRequest {
+        method: EnrollmentMethod::Transfer,
+        transfer_public_key: URL_SAFE_NO_PAD.encode([7; 32]),
+        invitation_token_digest: URL_SAFE_NO_PAD.encode(digest),
+    };
+    Request::post("/v1/enrollment/invitations")
+        .header("authorization", format!("Bearer {owner_token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn cancel_invitation_request(invitation_id: &str, owner_token: &str) -> Request<Body> {
+    Request::delete(format!("/v1/enrollment/invitations/{invitation_id}"))
+        .header("authorization", format!("Bearer {owner_token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn invitation_count(pool: &PgPool, vault: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM phone_invitations WHERE vault_id=$1")
+        .bind(vault)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn invitation_state(pool: &PgPool, invitation_id: &str) -> String {
+    let id: Uuid = invitation_id.parse().unwrap();
+    sqlx::query_scalar("SELECT state FROM phone_invitations WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn create_rechecks_the_owner_credential_after_waiting_for_the_vault_lock() {
+    let (app, pool, schema, owner_token, vault) = fixture().await;
+    let (app, status, _) = request(app, create_invitation_request(&owner_token, [4; 32])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(invitation_count(&pool, vault).await, 1);
+
+    let (holder, holder_pid) = hold_vault_lock(&pool, vault).await;
+    let task = tokio::spawn(request(
+        app,
+        create_invitation_request(&owner_token, [5; 32]),
+    ));
+    support::wait_blocked_by(&pool, holder_pid, None, std::time::Duration::from_secs(5)).await;
+    revoke_owner_credential_and_release(holder, &owner_token).await;
+    let (_, status, body) = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .expect("blocked create did not finish after the lock was released")
+        .unwrap();
+    let count = invitation_count(&pool, vault).await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["code"], "owner_required", "{body}");
+    assert_eq!(count, 1, "blocked create wrote an invitation");
+}
+
+#[tokio::test]
+async fn cancel_rechecks_the_owner_credential_after_waiting_for_the_vault_lock() {
+    let (app, pool, schema, owner_token, vault) = fixture().await;
+    let (app, status, created) =
+        request(app, create_invitation_request(&owner_token, [4; 32])).await;
+    assert_eq!(status, StatusCode::OK);
+    let control_id = created["invitation_id"].as_str().unwrap().to_owned();
+    let (app, status, _) = request(app, cancel_invitation_request(&control_id, &owner_token)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(invitation_state(&pool, &control_id).await, "denied");
+
+    let (app, status, created) =
+        request(app, create_invitation_request(&owner_token, [5; 32])).await;
+    assert_eq!(status, StatusCode::OK);
+    let invitation_id = created["invitation_id"].as_str().unwrap().to_owned();
+    let (holder, holder_pid) = hold_vault_lock(&pool, vault).await;
+    let task = tokio::spawn(request(
+        app,
+        cancel_invitation_request(&invitation_id, &owner_token),
+    ));
+    support::wait_blocked_by(&pool, holder_pid, None, std::time::Duration::from_secs(5)).await;
+    revoke_owner_credential_and_release(holder, &owner_token).await;
+    let (_, status, body) = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .expect("blocked cancel did not finish after the lock was released")
+        .unwrap();
+    let state = invitation_state(&pool, &invitation_id).await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["code"], "owner_required", "{body}");
+    assert_eq!(state, "waiting", "blocked cancel changed the invitation");
+}
