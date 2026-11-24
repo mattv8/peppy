@@ -1,6 +1,7 @@
 package dev.peppy.mobile.enrollment
 
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.LocalActivity
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -12,24 +13,31 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.StateRestorationTester
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.core.app.ApplicationProvider
+import android.content.Context
 import dev.peppy.mobile.R
+import dev.peppy.mobile.testing.ComposeTestActivityRule
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 
-@RunWith(AndroidJUnit4::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class WelcomeSetupNavigationTest {
-    @get:Rule
-    val composeRule = createAndroidComposeRule<ComponentActivity>()
+    private val composeRule = createComposeRule()
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(composeRule)
+    private lateinit var activity: ComponentActivity
 
     @Test
     fun hostedIsDefaultAndGetStartedOpensHostedEnrollment() {
@@ -37,7 +45,7 @@ class WelcomeSetupNavigationTest {
 
         composeRule.onNodeWithTag("welcome-screen").assertIsDisplayed()
         composeRule.onNodeWithText(
-            composeRule.activity.getString(R.string.peppy_onboarding_mode_hosted),
+            ApplicationProvider.getApplicationContext<Context>().getString(R.string.peppy_onboarding_mode_hosted),
         ).assertIsDisplayed()
         composeRule.onNodeWithTag("welcome-get-started-button").performClick()
 
@@ -64,8 +72,8 @@ class WelcomeSetupNavigationTest {
 
         composeRule.onNodeWithTag("welcome-server-mode-selector").performClick()
         composeRule.onNodeWithTag("welcome-server-mode-self-hosted").assertIsDisplayed()
-        composeRule.activity.runOnUiThread {
-            composeRule.activity.onBackPressedDispatcher.onBackPressed()
+        composeRule.runOnIdle {
+            activity.onBackPressedDispatcher.onBackPressed()
         }
         composeRule.waitForIdle()
 
@@ -81,8 +89,8 @@ class WelcomeSetupNavigationTest {
         composeRule.onNodeWithTag("welcome-screen").assertIsDisplayed()
 
         openSelfHostedSetup()
-        composeRule.activity.runOnUiThread {
-            composeRule.activity.onBackPressedDispatcher.onBackPressed()
+        composeRule.runOnIdle {
+            activity.onBackPressedDispatcher.onBackPressed()
         }
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("welcome-screen").assertIsDisplayed()
@@ -122,7 +130,10 @@ class WelcomeSetupNavigationTest {
     }
 
     private fun showWelcomeFlow(initialDestination: WelcomeDestination = WelcomeDestination.HOSTED) {
-        composeRule.setContent { WelcomeFlow(initialDestination) }
+        composeRule.setContent {
+            activity = requireNotNull(LocalActivity.current) as ComponentActivity
+            WelcomeFlow(initialDestination)
+        }
     }
 
     private fun openSelfHostedSetup() {

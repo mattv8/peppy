@@ -1,6 +1,6 @@
 package dev.peppy.mobile.diagnostics
 
-import androidx.activity.ComponentActivity
+import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -14,22 +14,28 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performClick
-import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.core.app.ApplicationProvider
 import dev.peppy.mobile.R
+import dev.peppy.mobile.testing.ComposeTestActivityRule
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 
-@RunWith(AndroidJUnit4::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class DiagnosticsSettingsSmokeTest {
-    @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
+    private val compose = createComposeRule()
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
 
     @Test
     fun switchBindsRecordingStateAndRetainedLogsStayActionableWhenOff() {
@@ -54,7 +60,7 @@ class DiagnosticsSettingsSmokeTest {
 
     @Test
     fun switchRetainsItsAccessibleLabelRoleAndToggleState() {
-        val label = compose.activity.getString(R.string.peppy_diagnostics_verbose_sync_logging)
+        val label = ApplicationProvider.getApplicationContext<Context>().getString(R.string.peppy_diagnostics_verbose_sync_logging)
         compose.setContent {
             DiagnosticsSettingsContent(
                 state = DiagnosticsState(enabled = false),

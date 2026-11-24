@@ -1,5 +1,6 @@
 package dev.peppy.mobile.enrollment
 
+import android.content.Context
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Text
@@ -22,17 +23,25 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.core.app.ApplicationProvider
 import dev.peppy.mobile.R
 import dev.peppy.mobile.account.HostedAccountClient
+import dev.peppy.mobile.testing.ComposeTestActivityRule
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35], qualifiers = "w411dp-h891dp-xxhdpi")
 class EnrollmentScreenTest {
-    @get:Rule val compose = createComposeRule()
+    private val compose = createComposeRule()
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
 
     @Test fun scanQrFromInitialServerStepOpensPhoneScanner() {
         compose.setContent {
@@ -135,7 +144,7 @@ class EnrollmentScreenTest {
         compose.runOnIdle { onUnavailable?.invoke() }
         compose.onNodeWithTag("phone-terminal-error")
             .assertIsDisplayed()
-            .assertTextEquals(InstrumentationRegistry.getInstrumentation().targetContext.getString(R.string.peppy_enrollment_camera_unavailable))
+            .assertTextEquals(ApplicationProvider.getApplicationContext<Context>().getString(R.string.peppy_enrollment_camera_unavailable))
         compose.onNodeWithTag("phone-retry").assertIsDisplayed()
         compose.onNodeWithTag("enrollment-cancel").assertIsDisplayed()
         compose.onNodeWithTag("enrollment-qr-scanner").assertDoesNotExist()

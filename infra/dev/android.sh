@@ -471,7 +471,16 @@ open() {
     fi
 }
 smoke() {
-    local serial output status apk_name test_apk_name
+    local serial output status apk_name test_apk_name skipped exclusion exclusions
+    local -a excluded_tests=(
+        'dev.peppy.mobile.MirroringPermissionFlowTest#masterSwitchOpensFullDisclosureBeforeAnyOsRequest|Requires unset mirroring policy and listener access; resetting existing app data is unsafe.'
+        'dev.peppy.mobile.MirroringPermissionFlowTest#notNowAndBackDismissWithoutOsAccessOrPolicyChange|Requires unset mirroring policy and listener access; resetting existing app data is unsafe.'
+        'dev.peppy.mobile.MirroringPermissionFlowTest#agreeLaunchesExactlyOneListenerSettingsIntentAndCancelledResultKeepsMirroringOff|Requires unset mirroring policy and listener access; resetting existing app data is unsafe.'
+        'dev.peppy.mobile.contacts.ContactPermissionFlowTest#switchOpensFullContactsDescriptionBeforeAnyPermissionRequest|Requires unset contact consent; resetting existing app data is unsafe.'
+        'dev.peppy.mobile.contacts.ContactPermissionFlowTest#declineLeavesContactSyncOffWithoutPermissionRequest|Requires unset contact consent; resetting existing app data is unsafe.'
+        'dev.peppy.mobile.contacts.ContactPermissionFlowTest#backLeavesContactSyncOffWithoutPermissionRequest|Requires unset contact consent; resetting existing app data is unsafe.'
+        'dev.peppy.mobile.messagingapp.SystemBlocklistAccessTest#writeSmsAppOpAllowsBlocklistReadAndConfirmedUnblock|Blocked-number provider availability and shell insertion vary by emulator image.'
+    )
     if [[ $ANDROID_BUILD_VARIANT == sideload ]]; then
         die "PEPPY_ANDROID_BUILD_VARIANT=sideload supports build only; test and smoke require debug"
     fi
@@ -484,11 +493,29 @@ smoke() {
     verify_apk_trust "$(apk "$apk_name")"
     adb -s "$serial" install -r "$(apk_for_adb "$apk_name")"
     adb -s "$serial" install -r "$(apk_for_adb "$test_apk_name")"
+    echo "Revoking READ_SMS from dev.peppy.mobile for permission-flow tests; this persists on the emulator and Android terminates the app process."
+    adb -s "$serial" shell pm revoke dev.peppy.mobile android.permission.READ_SMS || die "could not revoke READ_SMS for instrumentation smoke"
+    exclusions=
+    for exclusion in "${excluded_tests[@]}"; do
+        echo "Instrumentation smoke excludes ${exclusion%%|*}: ${exclusion#*|}"
+        exclusions="${exclusions:+$exclusions,}${exclusion%%|*}"
+    done
     local output_file
     output_file=$(mktemp)
-    set +e; adb -s "$serial" shell am instrument -r -w dev.peppy.mobile.test/androidx.test.runner.AndroidJUnitRunner >"$output_file" 2>&1; status=$?; set -e
+    set +e; adb -s "$serial" shell am instrument -r -w -e notClass "$exclusions" dev.peppy.mobile.test/androidx.test.runner.AndroidJUnitRunner >"$output_file" 2>&1; status=$?; set -e
     output=$(tr -d '\r' <"$output_file"); rm -f "$output_file"
     printf '%s\n' "$output"
+    skipped=$(awk '
+        /^INSTRUMENTATION_STATUS: class=/ { class = substr($0, 31) }
+        /^INSTRUMENTATION_STATUS: test=/ { test = substr($0, 30) }
+        /^INSTRUMENTATION_STATUS_CODE: -[34]$/ {
+            print (class ? class : "<unknown class>") "#" (test ? test : "<unknown test>")
+        }
+    ' <<<"$output")
+    if [[ -n $skipped ]]; then
+        printf 'instrumentation smoke skipped or ignored tests:\n%s\n' "$skipped" >&2
+        die "instrumentation smoke failed"
+    fi
     if (( status != 0 )) || grep -Eq 'FAILURES!!!|INSTRUMENTATION_FAILED|Process crashed|INSTRUMENTATION_CODE: (0|-[2-9][0-9]*|[1-9][0-9]*)' <<<"$output" || ! grep -Eq '^OK \([1-9][0-9]* tests?\)' <<<"$output" || ! grep -Eq '^INSTRUMENTATION_CODE: -1$' <<<"$output"; then die "instrumentation smoke failed"; fi
 }
 sms() { local serial; serial=$(adb_serial); [[ $# == 2 && -n $1 && -n $2 ]] || die "Usage: android.sh sms <number> <message>"; echo "Synthetic emulator SMS simulation only; no carrier message is sent." >&2; adb -s "$serial" emu sms send "$1" "$2"; }

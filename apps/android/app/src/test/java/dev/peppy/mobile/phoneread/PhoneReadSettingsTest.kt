@@ -1,9 +1,9 @@
 package dev.peppy.mobile.phoneread
 
 import android.Manifest
+import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.PackageManager
-import androidx.activity.ComponentActivity
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -15,29 +15,64 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.isEnabled
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.waitUntilExactlyOneExists
-import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.core.app.ApplicationProvider
+import androidx.work.Configuration
+import androidx.work.WorkManager
+import androidx.work.testing.SynchronousExecutor
+import androidx.work.testing.WorkManagerTestInitHelper
 import dev.peppy.mobile.R
+import dev.peppy.mobile.SmsCaptureRunner
+import dev.peppy.mobile.SmsCaptureWork
 import dev.peppy.mobile.enrollment.ConsentEffect
 import dev.peppy.mobile.enrollment.ConsentGatedToggle
 import dev.peppy.mobile.enrollment.ConsentPhase
+import dev.peppy.mobile.testing.ComposeTestActivityRule
 import dev.peppy.mobile.ui.ConsentSheet
+import java.util.concurrent.TimeUnit
+import org.junit.After
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 
-@RunWith(AndroidJUnit4::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 @OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
 class PhoneReadSettingsTest {
-    @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
+    private val compose = createComposeRule()
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
+    private var previousRunner: SmsCaptureRunner? = null
+
+    @Before fun setUpWorkManager() {
+        previousRunner = SmsCaptureWork.runner
+        SmsCaptureWork.runner = null
+        WorkManagerTestInitHelper.initializeTestWorkManager(
+            ApplicationProvider.getApplicationContext<Context>(),
+            Configuration.Builder().setExecutor(SynchronousExecutor()).build(),
+        )
+    }
+
+    @After fun tearDownWorkManager() {
+        try {
+            WorkManager.getInstance(ApplicationProvider.getApplicationContext<Context>())
+                .cancelAllWork().result.get(60, TimeUnit.SECONDS)
+        } finally {
+            SmsCaptureWork.takeHintCount()
+            SmsCaptureWork.runner = previousRunner
+        }
+    }
 
     @Test
     fun consentCanBeDismissedThenAppliedOnlyAfterANewExplicitEnable() {
@@ -79,7 +114,7 @@ class PhoneReadSettingsTest {
     @Test
     fun agreeingWritesTheExistingSettingWithoutNotificationAccess() {
         val store = FakePhoneReadSettingsStore(enabled = false, smsSyncEnabled = true)
-        val smsReadGrantedContext = object : ContextWrapper(compose.activity) {
+        val smsReadGrantedContext = object : ContextWrapper(ApplicationProvider.getApplicationContext<Context>()) {
             override fun checkPermission(permission: String, pid: Int, uid: Int): Int =
                 if (permission == Manifest.permission.READ_SMS) PackageManager.PERMISSION_GRANTED
                 else super.checkPermission(permission, pid, uid)
@@ -102,6 +137,11 @@ class PhoneReadSettingsTest {
         compose.waitUntil { store.writes == listOf(true) }
 
         assertEquals(true, store.enabled)
+        val workManager = WorkManager.getInstance(ApplicationProvider.getApplicationContext<Context>())
+        compose.waitUntil(TIMEOUT_MS) {
+            workManager.getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get(5, TimeUnit.SECONDS).isNotEmpty() &&
+                workManager.getWorkInfosForUniqueWork(SmsCaptureWork.PERIODIC_NAME).get(5, TimeUnit.SECONDS).isNotEmpty()
+        }
     }
 
     @Test
