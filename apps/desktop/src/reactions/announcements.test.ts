@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { intentOf, pickAnnouncement, requestAnnouncement, withFirstEmojiNote, type RequestSnapshot } from "./announcements";
 
-const request = (overrides: Partial<RequestSnapshot>): RequestSnapshot => ({ requestId: "r1", state: "sending", emoji: "😂", previousEmoji: null, ...overrides });
+const request = (overrides: Partial<RequestSnapshot>): RequestSnapshot => ({ requestId: "r1", state: "sending", emoji: "😂", previousEmoji: undefined, ...overrides });
 
 describe("pickAnnouncement", () => {
   it("names each pick: send, switch, remove and the text route", () => {
@@ -19,7 +19,7 @@ describe("pickAnnouncement", () => {
 
 describe("intentOf", () => {
   it("reads add, switch and remove from the request", () => {
-    expect(intentOf({ emoji: "😂", previousEmoji: null })).toBe("add");
+    expect(intentOf({ emoji: "😂", previousEmoji: undefined })).toBe("add");
     expect(intentOf({ emoji: "❤️", previousEmoji: "👍" })).toBe("switch");
     expect(intentOf({ emoji: null, previousEmoji: "😂" })).toBe("remove");
   });

@@ -1,6 +1,6 @@
 //! Desktop RCS views must expose display state only: provider conversation ids, provider message
 //! ids, tmp ids and history cursors never reach serialized output.
-use crate::{message_window_view, rcs_receive};
+use crate::{MessageStatus, message_window_view, rcs_receive};
 use peppy_client_core::{
     Client, ClientConfig, ConversationId, DatabaseKey, DeviceId, Direction, KeyProfile, Message,
     MessageWindowRequest, RcsCapabilityState, RcsIncomingAttachment, RcsLinkStatusEvent,
@@ -471,7 +471,7 @@ fn read_status_does_not_reuse_delivery_timestamp() {
 
     let view =
         rcs_receive::message_view(&fixture.client, &delivered, vec![], &HashSet::new()).unwrap();
-    assert_eq!(view.status, Some("read"));
+    assert_eq!(view.status, Some(MessageStatus::Read));
     assert_eq!(view.status_at, None);
     assert!(view.rcs_reported);
 }

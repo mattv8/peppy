@@ -826,24 +826,32 @@ impl BrowserCore {
                             let mut attachment = dto::attachment_view(&info, None, None);
                             attachment.draft_state =
                                 draft_state.map(|draft_state| match draft_state {
-                                    peppy_client_core::DraftAttachmentState::Saving => "saving",
-                                    peppy_client_core::DraftAttachmentState::Local => "local",
-                                    peppy_client_core::DraftAttachmentState::Waiting => "waiting",
-                                    peppy_client_core::DraftAttachmentState::Uploading => {
-                                        "uploading"
+                                    peppy_client_core::DraftAttachmentState::Saving => {
+                                        dto::DraftAttachmentState::Saving
                                     }
-                                    peppy_client_core::DraftAttachmentState::Uploaded => "uploaded",
+                                    peppy_client_core::DraftAttachmentState::Local => {
+                                        dto::DraftAttachmentState::Local
+                                    }
+                                    peppy_client_core::DraftAttachmentState::Waiting => {
+                                        dto::DraftAttachmentState::Waiting
+                                    }
+                                    peppy_client_core::DraftAttachmentState::Uploading => {
+                                        dto::DraftAttachmentState::Uploading
+                                    }
+                                    peppy_client_core::DraftAttachmentState::Uploaded => {
+                                        dto::DraftAttachmentState::Uploaded
+                                    }
                                     peppy_client_core::DraftAttachmentState::UploadFailed => {
-                                        "upload-failed"
+                                        dto::DraftAttachmentState::UploadFailed
                                     }
                                     peppy_client_core::DraftAttachmentState::Downloading => {
-                                        "downloading"
+                                        dto::DraftAttachmentState::Downloading
                                     }
                                     peppy_client_core::DraftAttachmentState::DownloadFailed => {
-                                        "download-failed"
+                                        dto::DraftAttachmentState::DownloadFailed
                                     }
                                     peppy_client_core::DraftAttachmentState::Unavailable => {
-                                        "unavailable"
+                                        dto::DraftAttachmentState::Unavailable
                                     }
                                 });
                             attachment
@@ -859,7 +867,7 @@ impl BrowserCore {
                                 name: "Saving image".into(),
                                 media_type: "application/octet-stream".into(),
                                 byte_size: 0,
-                                state: "uploading",
+                                state: dto::AttachmentStateDto::Uploading,
                                 error: None,
                                 preview_url: None,
                                 transfer: None,
@@ -868,7 +876,7 @@ impl BrowserCore {
                                 media_meta: None,
                                 remote_state: None,
                                 local_available: Some(false),
-                                draft_state: Some("saving"),
+                                draft_state: Some(dto::DraftAttachmentState::Saving),
                                 index: None,
                                 rcs_state: None,
                                 rcs_send_status: None,
@@ -879,7 +887,7 @@ impl BrowserCore {
                             name: "Image unavailable".into(),
                             media_type: "application/octet-stream".into(),
                             byte_size: 0,
-                            state: "failed",
+                            state: dto::AttachmentStateDto::Failed,
                             error: None,
                             preview_url: None,
                             transfer: None,
@@ -888,7 +896,7 @@ impl BrowserCore {
                             media_meta: None,
                             remote_state: None,
                             local_available: Some(false),
-                            draft_state: Some("unavailable"),
+                            draft_state: Some(dto::DraftAttachmentState::Unavailable),
                             index: None,
                             rcs_state: None,
                             rcs_send_status: None,

@@ -26,6 +26,10 @@ export type { NotificationDismissalBlock, NotificationDismissalBlockReason } fro
 import type { RcsStatusSnapshot } from "@peppy/generated/rcs-status";
 import type { GatewayPresence, GatewayView } from "@peppy/generated/gateway";
 export type { GatewayAvailability, GatewayPresence, GatewayView } from "@peppy/generated/gateway";
+import type { AttachmentView, AttachmentState, DraftAttachmentState, MediaMetadataView, MessageStatus, MessageView, RcsAttachmentState, RcsSendStatus, ReactionActorView, ReactionRoute, MessageReactionView, OwnReactionRequestView, SendCancellationView, SendRecoveryKind, SendRecoveryView } from "@peppy/generated/message";
+export type { AttachmentState, AttachmentView, DraftAttachmentState, MediaMetadataView, MessageReactionView, MessageStatus, MessageView, OwnReactionRequestView, RcsAttachmentState, RcsSendStatus, ReactionActorView, ReactionRoute, SendCancellationView, SendRecoveryKind } from "@peppy/generated/message";
+/** Message-family wire types, generated from desktop-api. `SendRecovery` is the name the UI uses for `SendRecoveryView`. */
+export type SendRecovery = SendRecoveryView;
 import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceStatus, McpGrantView, McpScope, WebhookCreated, WebhookInput, WebhookList, WebhookSecret, WebhookTestResult, WebhookView } from "@peppy/generated/mcp";
 export type {
   HistorySearchAttemptInput,
@@ -74,30 +78,11 @@ export type TypingSignal = {
   expiresAtMs?: string;
   participant?: string;
 };
-export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown" | "read";
-export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
-export type DraftAttachmentState = "saving" | "local" | "waiting" | "uploading" | "uploaded" | "upload-failed" | "downloading" | "download-failed" | "unavailable";
 export const MAX_DRAFT_ATTACHMENTS = 10;
-export type RcsAttachmentState = "downloading" | "stored" | "too_large" | "quota_full" | "failed" | "expired";
-export type RcsSendStatus = "sending" | "sent" | "not_sent" | "send_failed" | "outcome_unknown" | "members_changed";
-export type SendCancellationView = {
-  state: "none" | "requested" | "confirmed" | "too-late" | "unknown";
-  canCancel: boolean;
-  requiresGatewayUpdate: boolean;
-};
-export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; draftState?: DraftAttachmentState; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView; remoteState?: "available" | "removed_by_storage_policy"; localAvailable?: boolean; rcsState?: RcsAttachmentState; rcsSendStatus?: RcsSendStatus; index?: number };
-export type SendRecoveryKind = "not-sent" | "unconfirmed-removed" | "unconfirmed-removed-cancel";
-export type SendRecovery = { kind: SendRecoveryKind; canSendAgain: boolean; sentAgain?: { messageId: string } };
-export type ReactionActorView = { self: boolean; address?: string };
-export type MessageReactionView = { emoji: string; actors: ReactionActorView[] };
-export type OwnReactionRequestView = { requestId: string; emoji: string | null; previousEmoji?: string | null; state: "sending" | "not_sent" | "unknown"; refusal?: "expired" | "message_unavailable" | "not_rcs" | "link_unavailable" | "rejected" | "busy" | "invalid_emoji" };
-export type ReactionRoute = "native" | "text";
 export type ReactionSupport = "native" | "text" | "needs_phone_update" | "none";
 export type ReactionSubmitView = { accepted: boolean; requestId?: string; route?: ReactionRoute; reason?: "offline" | "unsupported" | "needs_phone_update" | "busy" | "not_reactable" | "invalid_emoji" };
-export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms" | "rcs"; subject?: string; participants?: string[]; rcsReported?: boolean; oneTimeCode?: string; groupHint?: "members_changed" | "update_required" | "withdrawn" | "create_unknown" | "create_not_rcs"; sendCancellation?: SendCancellationView; sendRecovery?: SendRecovery; sentAgain?: { messageId: string }; reactions?: MessageReactionView[]; ownReactionRequest?: OwnReactionRequestView; reactable?: ReactionRoute };
 export type MessageWindow = GeneratedMessageWindow<MessageView>;
 export type MediaCursor = { sortAtMs: string; localOrder: string; messageId: string; attachmentPosition: number };
-export type MediaMetadataView = { width?: number; height?: number; durationMs?: string; thumbnail?: AttachmentView; previewUnavailable?: "thumbnail_unavailable" };
 export type MediaPageItem = { messageId: string; senderAddress?: string; timestamp: string; attachment: AttachmentView; mediaMeta?: MediaMetadataView; cursor: MediaCursor };
 export type MediaPage = { items: MediaPageItem[]; nextCursor?: MediaCursor };
 export type MediaPageAround = { target: MediaPageItem; newer: MediaPageItem[]; older: MediaPageItem[]; newerCursor?: MediaCursor; olderCursor?: MediaCursor };

@@ -517,7 +517,7 @@ export const fixtureBridge: DesktopBridge = {
         return { accepted: true, route };
       }
       if (message.ownReactionRequest?.state === "sending" || message.ownReactionRequest?.state === "unknown") return { accepted: false, reason: "busy" };
-      const previousEmoji = message.reactions?.find(reaction => reaction.actors.some(actor => actor.self))?.emoji ?? null;
+      const previousEmoji = message.reactions?.find(reaction => reaction.actors.some(actor => actor.self))?.emoji ?? undefined;
       const requestId = `fixture-request-${Date.now()}`;
       conversation.messages[index] = { ...message, ownReactionRequest: { requestId, emoji, previousEmoji, state: "sending" } };
       publishFixtureChange();

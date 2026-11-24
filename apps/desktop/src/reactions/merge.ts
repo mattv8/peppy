@@ -79,7 +79,7 @@ function attemptChip(request: OwnReactionRequestView, previous: string | null, s
     actors: [selfActor],
     reactionIds: [],
     source: "native",
-    own: { state: chipState(request), source: "native", requestId: request.requestId, intent: intentOf({ emoji: request.emoji, previousEmoji: previous }), previousEmoji: previous },
+    own: { state: chipState(request), source: "native", requestId: request.requestId, intent: intentOf({ emoji: request.emoji, previousEmoji: previous ?? undefined }), previousEmoji: previous },
   };
 }
 

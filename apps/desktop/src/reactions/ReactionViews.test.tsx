@@ -132,7 +132,7 @@ describe("own reaction chips", () => {
 
   it("merges native and text badges into chips with their own states", () => {
     const parsed: ReactionBadgeInfo[] = [{ emoji: "😂", actors: [{ key: "other:+15550002", sender: "other", senderAddress: "+15550002" }], reactionIds: ["m9"] }];
-    renderOwn(mergeReactions({ parsed, native: [{ emoji: "👍", actors: [{ self: false, address: "+15550001" }] }], ownRequest: { requestId: "r5", emoji: "❤️", state: "sending", previousEmoji: null } }));
+    renderOwn(mergeReactions({ parsed, native: [{ emoji: "👍", actors: [{ self: false, address: "+15550001" }] }], ownRequest: { requestId: "r5", emoji: "❤️", state: "sending", previousEmoji: undefined } }));
     expect(screen.getByRole("img", { name: "👍 from +15550001" })).toHaveAttribute("data-reaction-source", "native");
     expect(screen.getByRole("img", { name: "😂 from +15550002" })).toHaveAttribute("data-reaction-source", "text");
     expect(screen.getByRole("button", { name: "Your ❤️ reaction is sending." })).toBeInTheDocument();

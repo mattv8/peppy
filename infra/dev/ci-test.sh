@@ -163,6 +163,8 @@ main() {
     cargo run --locked -p peppy-desktop-api --bin generate-rcs-status-contracts -- --check
     cargo run --locked -p peppy-desktop-api --bin generate-launch-progress-contracts -- --check
     cargo run --locked -p peppy-desktop-api --bin generate-notification-activation-contracts -- --check
+    cargo run --locked -p peppy-desktop-api --bin generate-message-contracts -- --check
+    cargo run --locked -p peppy-desktop-api --bin generate-gateway-contracts -- --check
     cargo run --locked -p peppy-hosted-api --bin generate-mcp-contracts -- --check
     cargo run --locked -p peppy-hosted-api --bin export-web-schema -- --check
     cargo deny check licenses bans sources
