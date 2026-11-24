@@ -1981,10 +1981,3 @@ public struct SessionRelayWakeRoutePublisher: RelayWakeRoutePublisher {
         try await session.removeWakeRoute(routeId: routeId)
     }
 }
-
-private extension UInt8 {
-    var isASCIIBase64URL: Bool {
-        (65...90).contains(self) || (97...122).contains(self) || (48...57).contains(self) || self == 45 || self == 95
-    }
-
-}

@@ -24,7 +24,7 @@ final class AppModel {
         let identity: EnrollmentIdentity?
     }
 
-    enum Activity: Equatable { case idle, importing, unlocking, enrolling, syncing, refreshing, disconnecting }
+    enum Activity: Equatable { case idle, unlocking, enrolling, syncing, refreshing, disconnecting }
 
     private(set) var status = SessionStatus()
     private(set) var activity = Activity.idle
@@ -56,9 +56,6 @@ final class AppModel {
     @ObservationIgnored private var wakeFence = WakeWorkFence()
     @ObservationIgnored private var wakeEnrollmentBinding: WakeEnrollmentBinding?
     @ObservationIgnored private let wakeReconcile = CoalescedWakeWork<WakeReconcileKey>()
-    /// The active enrollment cannot be opened (e.g. its database is gone after a reinstall);
-    /// disconnecting is the way out.
-    private(set) var enrollmentBlocked = false
     let telephony = TelephonyEligibility.evaluate()
     /// Contact sync settings and last pass, shown by `ContactsSection`.
     var contacts = ContactsState()
@@ -140,16 +137,6 @@ final class AppModel {
         if status.identity == nil { serverReachability = .unknown }
         await reconcileWakeRegistration()
         await refreshContacts()
-    }
-
-    func importCredential(from result: Result<URL, any Error>) async {
-        guard case .success(let url) = result else {
-            lastError = "The credential file could not be selected."
-            return
-        }
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        await run(.importing) { try await $0.importCredential(file: url) }
     }
 
     func refresh() async {
@@ -236,7 +223,6 @@ final class AppModel {
             )
             setStatus(claimed)
             lastError = nil
-            enrollmentBlocked = false
         } catch {
             let failure = error as? ClientError
             lastError = setupErrorMessage(for: failure) ?? failure?.userMessage ?? "Unexpected error."
@@ -362,7 +348,6 @@ final class AppModel {
         do {
             setStatus(try await session.confirmPhoneEnrollment(sharedSecret: sharedSecret))
             lastError = nil
-            enrollmentBlocked = false
             await reconcileWakeRegistration()
             return .succeeded
         } catch is CancellationError {
@@ -372,10 +357,6 @@ final class AppModel {
         } catch {
             let failure = error as? ClientError
             lastError = failure?.userMessage ?? "Unexpected error."
-            switch failure {
-            case .localDatabaseMissing, .missingSecret, .identityMismatch: enrollmentBlocked = true
-            default: break
-            }
             let retainedRequest = await session.phoneEnrollmentCanRetryConfirmation()
             if retainedRequest, case .some(.network) = failure { return .retryableFailure }
             if retainedRequest, case let .some(.server(status, _)) = failure, status >= 500 { return .retryableFailure }
@@ -970,15 +951,10 @@ final class AppModel {
                 relay = nil
             }
             lastError = nil
-            enrollmentBlocked = false
             await reconcileWakeRegistration()
         } catch {
             let failure = error as? ClientError
             lastError = failure?.userMessage ?? "Unexpected error."
-            switch failure {
-            case .localDatabaseMissing, .missingSecret, .identityMismatch: enrollmentBlocked = true
-            default: break
-            }
         }
     }
 
