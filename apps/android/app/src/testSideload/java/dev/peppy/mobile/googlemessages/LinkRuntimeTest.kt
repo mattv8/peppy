@@ -1,11 +1,10 @@
 package dev.peppy.mobile.googlemessages
 
 import android.app.NotificationManager
-import android.content.Context
-import androidx.test.core.app.ApplicationProvider
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
+import dev.peppy.mobile.gateway.GatewayTestBase
+import dev.peppy.mobile.gateway.NativeGateway
 import org.junit.After
-import org.junit.Before
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
@@ -20,18 +19,12 @@ import org.robolectric.annotation.Config
 import uniffi.peppy_mobile_bindings.NativeLiveAction
 import uniffi.peppy_mobile_bindings.NativeLiveOutcome
 import uniffi.peppy_mobile_bindings.NativeLiveSessionUpdate
+import uniffi.peppy_mobile_bindings.NativeRcsLinkState
 import uniffi.peppy_mobile_bindings.NativeTypingState
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
-class LinkRuntimeTest {
-    private val context = ApplicationProvider.getApplicationContext<Context>()
-
-    @Before
-    fun setUp() {
-        LinkCoreBridge.recorder = { _, _ -> true }
-    }
-
+class LinkRuntimeTest : GatewayTestBase() {
     @After
     fun cleanUp() {
         LinkRuntime.resetForTest()
@@ -298,6 +291,7 @@ class LinkRuntimeTest {
 
     @Test
     fun `reset stops closes wipes and records a fixed event`() {
+        enrollAndUnlock()
         val handle = FakeHandle()
         val events = mutableListOf<String>()
         val store = InMemoryStore()
@@ -311,18 +305,21 @@ class LinkRuntimeTest {
         assertTrue(handle.closed)
         assertTrue(store.wiped)
         assertEquals(listOf("link/reset_local"), events)
+        assertEquals(NativeRcsLinkState.UNLINKED, persistedLinkState())
         assertFalse(LinkRuntime.pairingInProgress.get())
     }
 
 
     @Test
     fun `panel observation keeps the token captured before its status read`() {
+        enrollAndUnlock()
         val beforeRecord = CountDownLatch(1)
         val releaseRecord = CountDownLatch(1)
         val recordDone = CountDownLatch(1)
-        val recorded = mutableListOf<String>()
-        val handle = FakeHandle()
-        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status.state }; true }
+        // A linked status: if the stale observation were written, the durable state would be LINKED.
+        val handle = object : FakeHandle() {
+            override fun status() = """{"state":"linked"}"""
+        }
         LinkRuntimeTestHooks.engine = availableEngine(handle)
         LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
         LinkRuntime.handle(context)
@@ -330,7 +327,7 @@ class LinkRuntimeTest {
         val status = LinkStatus.parse(handle.status())
         LinkRuntimeTestHooks.beforePanelObservationRecord = {
             beforeRecord.countDown()
-            releaseRecord.await()
+            assertTrue("panel record was never released", releaseRecord.await(5, TimeUnit.SECONDS))
         }
         Thread {
             LinkRuntime.recordPanelObservation(context, observation, status)
@@ -343,24 +340,23 @@ class LinkRuntimeTest {
         releaseRecord.countDown()
 
         assertTrue(recordDone.await(1, TimeUnit.SECONDS))
-        assertEquals(listOf("unlinked"), synchronized(recorded) { recorded.toList() })
+        assertEquals(NativeRcsLinkState.UNLINKED, persistedLinkState())
     }
 
     @Test
     fun `reset retires pairing authority before queued prestart publication`() {
+        enrollAndUnlock()
         val firstOwnershipCheckPassed = CountDownLatch(1)
         val releasePreStart = CountDownLatch(1)
         val preStartDone = CountDownLatch(1)
-        val recorded = mutableListOf<String>()
         var preStartResult = true
-        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status.state }; true }
         LinkRuntimeTestHooks.engine = availableEngine(FakeHandle())
         LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
         LinkRuntime.handle(context)
         val attempt = requireNotNull(LinkRuntime.tryBeginPairing())
         LinkRuntimeTestHooks.beforePreStartPublication = {
             firstOwnershipCheckPassed.countDown()
-            releasePreStart.await()
+            assertTrue("pre-start was never released", releasePreStart.await(5, TimeUnit.SECONDS))
         }
         Thread {
             preStartResult = LinkRuntime.recordPreStart(context, attempt)
@@ -373,13 +369,12 @@ class LinkRuntimeTest {
 
         assertTrue(preStartDone.await(1, TimeUnit.SECONDS))
         assertFalse(preStartResult)
-        assertEquals(listOf("unlinked"), synchronized(recorded) { recorded.toList() })
+        assertEquals(NativeRcsLinkState.UNLINKED, persistedLinkState())
     }
 
     @Test
     fun `reset rejects an observation captured before destructive retirement`() {
-        val recorded = mutableListOf<String>()
-        LinkCoreBridge.recorder = { _, status -> recorded += status.state; true }
+        enrollAndUnlock()
         val handle = FakeHandle()
         LinkRuntimeTestHooks.engine = availableEngine(handle)
         LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
@@ -389,7 +384,7 @@ class LinkRuntimeTest {
         LinkRuntime.resetLocalState(context)
         assertTrue(LinkCoreBridge.recordObservation(staleToken, LinkRuntime.handleLease(context)!!, context, LinkStatus(0, "linked", true, true, true, 1, "")))
 
-        assertEquals(listOf("unlinked"), recorded)
+        assertEquals(NativeRcsLinkState.UNLINKED, persistedLinkState())
     }
 
     @Test
@@ -422,7 +417,7 @@ class LinkRuntimeTest {
     fun `failed reset lifecycle record reports persistence failure`() {
         val handle = FakeHandle()
         val store = InMemoryStore()
-        LinkCoreBridge.recorder = { _, _ -> false }
+        // No enrolled gateway: the real completion returns false, so reset reports persist_failed.
         LinkRuntimeTestHooks.engine = availableEngine(handle)
         LinkRuntimeTestHooks.storeFactory = { store }
         LinkRuntime.handle(context)
@@ -561,44 +556,59 @@ class LinkRuntimeTest {
     }
 
     @Test
-    fun `reset final unlinked publication follows an admitted pairing prestart`() {
-        val preStartEntered = CountDownLatch(1)
-        val allowPreStart = CountDownLatch(1)
-        val resetFinished = CountDownLatch(1)
-        val recorded = mutableListOf<String>()
-        var preStartResult = true
-        LinkCoreBridge.recorder = { _, status ->
-            if (status.state == "unknown") {
-                preStartEntered.countDown()
-                allowPreStart.await()
-            }
-            synchronized(recorded) { recorded += status.state }
-            true
-        }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+    fun `queued prestart after reset retirement writes nothing while reset is still pending`() {
+        val client = enrollAndUnlock()
+        val now = System.currentTimeMillis()
+        // Baseline LINKED is durable; a leaked pre-start write (UNAVAILABLE) or an early reset (UNLINKED) would change it.
+        client.recordRcsLinkLifecycle(NativeRcsLinkState.LINKED, true, true, true, now, now)
+        val wipeEntered = CountDownLatch(1)
+        val releaseWipe = CountDownLatch(1)
+        LinkRuntimeTestHooks.engine = availableEngine(FakeHandle())
+        LinkRuntimeTestHooks.storeFactory = { PausingWipeStore(wipeEntered, releaseWipe) }
         val attempt = requireNotNull(LinkRuntime.tryBeginPairing())
-        val preStart = Thread {
-            preStartResult = LinkRuntime.recordPreStart(context, attempt)
-        }.also { it.start() }
-        assertTrue(preStartEntered.await(1, TimeUnit.SECONDS))
-        val reset = Thread {
-            LinkRuntime.resetLocalState(context)
-            resetFinished.countDown()
-        }.also { it.start() }
+        val tokenBeforePreStart = LinkCoreBridge.observationToken()
+        var preStartResult = true
+        var resetFailure: Throwable? = null
+        val preStart = Thread { preStartResult = LinkRuntime.recordPreStart(context, attempt) }
+        val reset = Thread { resetFailure = runCatching { LinkRuntime.resetLocalState(context) }.exceptionOrNull() }
 
-        assertFalse(resetFinished.await(100, TimeUnit.MILLISECONDS))
-        allowPreStart.countDown()
-        preStart.join(1_000)
-        reset.join(1_000)
+        try {
+            // Holding the bridge monitor keeps the admitted pre-start queued on the lifecycle executor.
+            synchronized(LinkCoreBridge) {
+                preStart.start()
+                // Milestone 1: the pre-start passed its admission check and invalidated observations (its write is queued).
+                assertTrue("pre-start did not reach its fence", awaitCondition { LinkCoreBridge.observationToken() != tokenBeforePreStart })
+                reset.start()
+                // Milestone 2: reset retired pairing authority and reached the store wipe, before its unlink publication.
+                assertTrue("reset did not reach wipe", wipeEntered.await(5, TimeUnit.SECONDS))
+                assertFalse(LinkRuntime.pairingInProgress.get())
+            }
 
-        assertFalse(preStart.isAlive)
-        assertFalse(reset.isAlive)
-        assertFalse(preStartResult)
-        assertEquals(listOf("unknown", "unlinked"), synchronized(recorded) { recorded.toList() })
+            // The queued pre-start now runs after retirement while reset is still paused in wipe.
+            preStart.join(TimeUnit.SECONDS.toMillis(5))
+            assertFalse("pre-start did not finish", preStart.isAlive)
+            assertFalse(preStartResult)
+            assertTrue("reset completed before it was released", reset.isAlive)
+            assertEquals(NativeRcsLinkState.LINKED, persistedLinkState())
+
+            releaseWipe.countDown()
+            reset.join(TimeUnit.SECONDS.toMillis(5))
+            assertFalse("reset did not finish", reset.isAlive)
+            assertTrue("reset failed: $resetFailure", resetFailure == null)
+            assertEquals(NativeRcsLinkState.UNLINKED, persistedLinkState())
+        } finally {
+            // Runs after the monitor is left, even on an earlier failure: unpause reset, then bounded-join both threads.
+            releaseWipe.countDown()
+            preStart.join(TimeUnit.SECONDS.toMillis(5))
+            reset.join(TimeUnit.SECONDS.toMillis(5))
+            assertFalse("pre-start thread leaked", preStart.isAlive)
+            assertFalse("reset thread leaked", reset.isAlive)
+        }
     }
 
     @Test
     fun `reset after pairing lease closes the admitted handle without opening a replacement`() {
+        enrollAndUnlock()
         val handle = object : FakeHandle() {
             var pairCalls = 0
             override fun pair(cookiesJson: ByteArray) {
@@ -807,12 +817,37 @@ class LinkRuntimeTest {
     fun `runtime event sink records through the production diagnostic path`() {
         val records = mutableListOf<String>()
         SyncDiagnostics.configureRuntime(enabled = true) { records += it }
+        try {
+            LinkRuntimeEventSink.record("link", "reset_local", 0)
 
-        LinkRuntimeEventSink.record("link", "reset_local", 0)
+            val record = records.single()
+            assertTrue(record.contains("event=27"))
+            assertTrue(record.contains("29=17"))
+        } finally {
+            SyncDiagnostics.configureRuntime(enabled = false) {}
+        }
+    }
 
-        assertTrue(records.single().contains("event=27"))
-        assertTrue(records.single().contains("29=17"))
-        SyncDiagnostics.configureRuntime(enabled = false) {}
+    private fun persistedLinkState(): NativeRcsLinkState? =
+        NativeGateway.open(context)?.rcsLinkStatus(deviceId, System.currentTimeMillis())?.state
+
+    /** Polls a condition for at most five seconds; the caller asserts the result. */
+    private fun awaitCondition(condition: () -> Boolean): Boolean {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (!condition() && System.nanoTime() < deadline) Thread.yield()
+        return condition()
+    }
+
+    private class PausingWipeStore(
+        private val wipeEntered: CountDownLatch,
+        private val releaseWipe: CountDownLatch,
+    ) : LinkStateStorage {
+        override fun read() = ByteArray(0)
+        override fun write(state: ByteArray) = Unit
+        override fun wipe() {
+            wipeEntered.countDown()
+            assertTrue("wipe was never released", releaseWipe.await(5, TimeUnit.SECONDS))
+        }
     }
 
     private class QueueExecutor : Executor {

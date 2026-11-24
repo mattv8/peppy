@@ -9,6 +9,8 @@ import android.webkit.WebView
 import android.widget.Button
 import android.widget.TextView
 import dev.peppy.mobile.R
+import dev.peppy.mobile.gateway.GatewayTestBase
+import dev.peppy.mobile.gateway.NativeGateway
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -27,10 +29,11 @@ import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import uniffi.peppy_mobile_bindings.NativeRcsLinkState
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
-class LinkSignInActivityTest {
+class LinkSignInActivityTest : GatewayTestBase() {
     @After
     fun reset() {
         LinkSignInActivityTestHooks.reset()
@@ -258,16 +261,15 @@ class LinkSignInActivityTest {
 
     @Test
     fun `queued retired pairing cannot publish prestart or open a replacement handle`() {
+        enrollAndUnlock()
         val startup = ControlledStartup()
         val pairing = QueueExecutor()
-        val recorded = mutableListOf<String>()
         val diagnostics = mutableListOf<String>()
         val handle = PairCountingHandle()
         var opens = 0
         LinkSignInActivityTestHooks.startupExecutor = startup::capture
         LinkSignInActivityTestHooks.awaitSignInReady = { false }
         LinkSignInRuntimeTestHooks.pairingExecutor = pairing
-        LinkCoreBridge.recorder = { _, status -> recorded += status.state; true }
         LinkRuntimeTestHooks.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle.also { opens++ }
@@ -281,7 +283,8 @@ class LinkSignInActivityTest {
         LinkRuntime.resetLocalState(activity)
         pairing.runAll()
 
-        assertEquals(listOf("unlinked"), recorded)
+        // The reset's unlinked completion is durable; the retired pre-start never wrote unknown after it.
+        assertEquals(NativeRcsLinkState.UNLINKED, persistedLinkState())
         assertEquals(0, opens)
         assertEquals(0, handle.pairCalls.get())
         assertEquals(listOf("link/reset_local", "link/persist_failed"), diagnostics)
@@ -290,16 +293,17 @@ class LinkSignInActivityTest {
 
     @Test
     fun `current queued pairing publishes prestart before native pair`() {
+        enrollAndUnlock()
         val startup = ControlledStartup()
         val pairing = QueueExecutor()
-        val order = mutableListOf<String>()
+        val stateAtNativePair = mutableListOf<NativeRcsLinkState?>()
         val handle = object : LinkedHandle() {
-            override fun pair(cookiesJson: ByteArray) { order += "pair" }
+            // The pre-start lifecycle write must already be durable when native pairing starts.
+            override fun pair(cookiesJson: ByteArray) { stateAtNativePair += persistedLinkState() }
         }
         LinkSignInActivityTestHooks.startupExecutor = startup::capture
         LinkSignInActivityTestHooks.awaitSignInReady = { false }
         LinkSignInRuntimeTestHooks.pairingExecutor = pairing
-        LinkCoreBridge.recorder = { _, status -> order += status.state; true }
         LinkRuntimeTestHooks.engine = availableEngine(handle)
         LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
 
@@ -307,7 +311,7 @@ class LinkSignInActivityTest {
         queuePairing(controller.get())
         pairing.runAll()
 
-        assertEquals(listOf("unknown", "pair"), order)
+        assertEquals(listOf(NativeRcsLinkState.UNAVAILABLE), stateAtNativePair)
         controller.destroy()
     }
 
@@ -318,7 +322,7 @@ class LinkSignInActivityTest {
         val persistFailure = CountDownLatch(1)
         LinkSignInActivityTestHooks.startupExecutor = startup::capture
         LinkSignInActivityTestHooks.awaitSignInReady = { false }
-        LinkCoreBridge.recorder = { _, _ -> false }
+        // No enrolled gateway: the real lifecycle write returns false, so pairing never reaches native pair.
         LinkRuntimeTestHooks.engine = availableEngine(handle)
         LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
         LinkRuntimeTestHooks.eventRecorder = { _, code, _ -> if (code == "persist_failed") persistFailure.countDown() }
@@ -345,11 +349,11 @@ class LinkSignInActivityTest {
         pairing: QueueExecutor,
         onPair: () -> Unit = {},
     ): ActivityController<LinkSignInActivity> {
+        enrollAndUnlock()
         val startup = ControlledStartup()
         LinkSignInActivityTestHooks.startupExecutor = startup::capture
         LinkSignInActivityTestHooks.awaitSignInReady = { true }
         LinkSignInRuntimeTestHooks.pairingExecutor = pairing
-        LinkCoreBridge.recorder = { _, _ -> true }
         LinkRuntimeTestHooks.engine = availableEngine(object : LinkedHandle() {
             override fun status() = """{"state":"unlinked"}"""
             override fun pair(cookiesJson: ByteArray) = onPair()
@@ -390,6 +394,9 @@ class LinkSignInActivityTest {
             isAccessible = true
             get(activity)
         }
+
+    private fun persistedLinkState(): NativeRcsLinkState? =
+        NativeGateway.open(context)?.rcsLinkStatus(deviceId, System.currentTimeMillis())?.state
 
     private fun queuePairing(activity: LinkSignInActivity) {
         LinkSignInActivity::class.java.getDeclaredField("pendingCookies").apply {
