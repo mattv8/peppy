@@ -3549,6 +3549,54 @@ mod first_snapshot_tests {
         assert!(session.client.decoder_recovery_pending().unwrap().is_some());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn coded_outbox_rejection_leaves_envelope_queued_after_one_round() {
+        let (origin, seen) =
+            crate::contacts::tests::mock_server(|method, path, _| match (method, path) {
+                ("POST", "/v1/commands") => (400, r#"{"code":"invalid_command"}"#.into()),
+                _ => (404, r#"{"code":"unsupported"}"#.into()),
+            })
+            .await;
+        let fixture = crate::tests::fixture_at(&origin);
+        let session = Arc::new(crate::tests::open_deferred(&fixture, &fixture.binding, &[]));
+        crate::tests::unlock(&session, &fixture);
+        while session.client.recover_decoder_page(1).unwrap().is_some() {}
+        session
+            .client
+            .queue_send(
+                peppy_client_core::OutgoingSms {
+                    conversation_id: peppy_client_core::ConversationId::new(),
+                    recipients: vec!["+15555550101".into()],
+                    body: "pending".into(),
+                },
+                peppy_client_core::GatewayRoute::Carrier {
+                    gateway_device_id: peppy_client_core::DeviceId::new(),
+                    subscription_id: "sim-1".into(),
+                },
+            )
+            .unwrap();
+        let before = session.client.pending_outbox().unwrap();
+        assert_eq!(before.len(), 1);
+        crate::attachment_retention::negotiate(&session)
+            .await
+            .unwrap();
+
+        work_round(&session).await.unwrap();
+
+        // Pins current behaviour of review finding D-29; flip this assertion when the fix is authorized.
+        let after = session.client.pending_outbox().unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].envelope_id, before[0].envelope_id);
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.method == "POST" && request.path == "/v1/commands")
+                .count(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn cancelled_recovery_resumes_in_reopened_session() {
         let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
@@ -4658,6 +4706,40 @@ mod contact_photo_tests {
     use serde_json::{json, Value};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reclaim_fetches_proof_inputs_before_deleting() {
+        let (origin, seen) = mock_server(|method, path, _| match (method, path) {
+            ("GET", "/v1/snapshot") => (200, json!({"high_water_cursor": "80", "record_count": "0", "compaction_supported": true, "compaction_generation": "3"}).to_string()),
+            ("GET", "/v1/events?after=0&limit=1") => (200, json!({"high_water_cursor": "80", "replay_floor_cursor": "50", "next_after": null, "events": []}).to_string()),
+            ("DELETE", _) => (409, json!({"code": "attachment_release_not_proven"}).to_string()),
+            _ => (404, "{}".into()),
+        }).await;
+        let fixture = fixture_at(&origin);
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        let remote = uuid::Uuid::new_v4().to_string();
+        let reclaims = vec![PhotoReclaim {
+            attachment_id: uuid::Uuid::new_v4().to_string(),
+            remote_object_id: remote.clone(),
+            release_after_cursor: Some("40".into()),
+        }];
+
+        reclaim_contact_photos(&session, &reclaims).await.unwrap();
+
+        // Pins current behaviour of review finding D-31; flip this assertion when the fix is authorized.
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .map(|request| (request.method.clone(), request.path.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("GET".into(), "/v1/snapshot".into()),
+                ("GET".into(), "/v1/events?after=0&limit=1".into()),
+                ("DELETE".into(), format!("/v1/attachments/{remote}")),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reclaims_use_fresh_generation_and_floor_only_once_the_floor_covers_references() {
         let (origin, seen) = mock_server(|method, path, _| match (method, path) {
             ("GET", "/v1/snapshot") => (200, json!({"high_water_cursor": "80", "record_count": "0", "compaction_supported": true, "compaction_generation": "3"}).to_string()),
@@ -5028,12 +5110,14 @@ mod drain_tests {
 
     #[tokio::test]
     async fn timeout_does_not_abort_a_worker() {
-        let worker = tokio::spawn(async {
-            tokio::time::sleep(Duration::from_millis(30)).await;
+        let (release, released) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            released.await.unwrap();
         });
         let mut workers = vec![worker];
         assert!(!join_workers(&mut workers, Duration::from_millis(1)).await);
         assert!(!workers[0].is_finished());
+        release.send(()).unwrap();
         assert!(join_workers(&mut workers, Duration::from_secs(1)).await);
     }
 
@@ -5064,13 +5148,15 @@ mod drain_tests {
         let session = Arc::new(open(&fixture, &fixture.binding, &[]));
         Session::register_started(&session);
         let worker_session = session.clone();
-        session.track_worker(tokio::spawn(async {
+        let (release, released) = tokio::sync::oneshot::channel();
+        session.track_worker(tokio::spawn(async move {
             let _session = worker_session;
-            tokio::time::sleep(Duration::from_millis(30)).await;
+            released.await.unwrap();
         }));
         drop(session);
 
         assert!(!drain_all(Duration::from_millis(1)).await);
+        release.send(()).unwrap();
         assert!(drain_all(Duration::from_secs(1)).await);
     }
 

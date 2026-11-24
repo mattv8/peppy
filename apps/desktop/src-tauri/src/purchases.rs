@@ -875,6 +875,22 @@ mod tests {
     }
 
     #[test]
+    fn billing_failure_fallback_summary_reports_no_provider() {
+        // Pins current behaviour of review finding D-27; flip this assertion when the fix is authorized.
+        assert_eq!(
+            serde_json::to_value(no_billing_summary()).unwrap(),
+            serde_json::json!({
+                "provider": "none",
+                "manageableIn": "none",
+                "planActive": false,
+                "storagePacks": 0,
+                "storageRenewsWithoutPlan": false,
+                "deletionPending": false,
+            })
+        );
+    }
+
+    #[test]
     fn purchase_requires_an_eligible_apple_catalog_product() {
         let catalog: BillingCatalogResponse = serde_json::from_value(serde_json::json!({
             "products": [{

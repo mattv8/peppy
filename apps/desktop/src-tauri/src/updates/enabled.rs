@@ -917,6 +917,8 @@ fn unix_timestamp(time: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use ed25519_dalek::Signer as _;
 
     fn state() -> Inner {
         Inner {
@@ -1214,28 +1216,28 @@ mod tests {
     const TEST_UPDATE_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE0OUVGNDc0NkZBNkU2RDcKUldUWDVxWnZkUFNlcERHV2cyYno4bjZBclFuQk13Z1FLMWdlVm9zb3JjYkx6Y3VuRCtLSitjWWU=";
     const TEST_UPDATE_SIGNATURE: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUWDVxWnZkUFNlcFBGMnpzanZQL0wvVFF0QkxSbldSdmFxKzRvbUsxVUV1Z3RRcC9VU3JHaUkxdjc2MnNEeTNpZDNhb3I3YlJDOUVUeWVvdDZsTUhIcldvWjVoalVNMVFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNjQ5MDUxCWZpbGU6cGF5bG9hZAl2ZXJzaW9uOjIuMC4wCkREcTJDTE9FbDVjUW1DMmVKUkhsblpQVlZpT1pzdTFDanBQS1FvZWk0QS9YQmZrRHFHTzBCK1FNcmNySGdFUTVxVjNtbmU3NXRkRldoSnBxVVhoOUFBPT0=";
 
-    fn signed_update_manifest() -> serde_json::Value {
+    fn signed_update_manifest(signature: &str) -> serde_json::Value {
         serde_json::json!({
             "version": "2.0.0",
             "platforms": {
                 "test-target": {
                     "url": "https://example.invalid/package",
-                    "signature": TEST_UPDATE_SIGNATURE,
+                    "signature": signature,
                 }
             }
         })
     }
 
-    fn signed_staged_update(path: PathBuf) -> StagedUpdate {
+    fn staged_update_with(path: PathBuf, public_key: &str, signature: &str) -> StagedUpdate {
         let mut context = tauri::test::mock_context(tauri::test::noop_assets());
         context.config_mut().plugins.0.insert(
             "updater".into(),
-            serde_json::json!({ "pubkey": TEST_UPDATE_PUBLIC_KEY }),
+            serde_json::json!({ "pubkey": public_key }),
         );
         let app = tauri::test::mock_builder()
             .plugin(
                 tauri_plugin_updater::Builder::new()
-                    .pubkey(TEST_UPDATE_PUBLIC_KEY)
+                    .pubkey(public_key)
                     .build(),
             )
             .build(context)
@@ -1249,12 +1251,95 @@ mod tests {
             .build()
             .unwrap();
         let update = updater
-            .restore_update(signed_update_manifest())
+            .restore_update(signed_update_manifest(signature))
             .unwrap()
             .unwrap();
-        let staged = StagedUpdate { update, path };
+        StagedUpdate { update, path }
+    }
+
+    fn signed_staged_update(path: PathBuf) -> StagedUpdate {
+        let staged = staged_update_with(path, TEST_UPDATE_PUBLIC_KEY, TEST_UPDATE_SIGNATURE);
         assert_eq!(staged.verified_bytes().unwrap(), b"test");
         staged
+    }
+
+    /// A minisign key pair built at test time, so a test can sign with a key the updater does not
+    /// trust. The encoding matches the checked-in fixture: an `Ed` algorithm tag, an 8-byte key id,
+    /// the Ed25519 key or signature, and the trusted comment with its global signature.
+    struct MinisignFixture {
+        key: ed25519_dalek::SigningKey,
+        key_id: [u8; 8],
+    }
+
+    impl MinisignFixture {
+        fn new(seed: [u8; 32], key_id: [u8; 8]) -> Self {
+            Self {
+                key: ed25519_dalek::SigningKey::from_bytes(&seed),
+                key_id,
+            }
+        }
+
+        fn public_key(&self) -> String {
+            let mut key = b"Ed".to_vec();
+            key.extend_from_slice(&self.key_id);
+            key.extend_from_slice(&self.key.verifying_key().to_bytes());
+            let text = format!(
+                "untrusted comment: minisign public key\n{}\n",
+                STANDARD.encode(key)
+            );
+            STANDARD.encode(text)
+        }
+
+        fn signature(&self, payload: &[u8]) -> String {
+            let signature = self.key.sign(payload).to_bytes();
+            // The comment names the version the manifest announces, which the updater requires.
+            // minisign's global signature covers the comment text after its prefix.
+            let trusted_comment = "timestamp:0\tfile:payload\tversion:2.0.0";
+            let mut global = signature.to_vec();
+            global.extend_from_slice(trusted_comment.as_bytes());
+            let global = self.key.sign(&global).to_bytes();
+            let mut bin = b"Ed".to_vec();
+            bin.extend_from_slice(&self.key_id);
+            bin.extend_from_slice(&signature);
+            let text = format!(
+                "untrusted comment: signature\n{}\ntrusted comment: {trusted_comment}\n{}\n",
+                STANDARD.encode(bin),
+                STANDARD.encode(global)
+            );
+            STANDARD.encode(text)
+        }
+    }
+
+    #[test]
+    fn staged_update_rejects_tampered_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("payload");
+        std::fs::write(&path, b"test").unwrap();
+        let staged = signed_staged_update(path.clone());
+        std::fs::write(path, b"tampered").unwrap();
+
+        let error = staged.verified_bytes().unwrap_err();
+        assert_eq!(error.code, "update-signature");
+        assert_eq!(error.message, "Cached update verification failed.");
+    }
+
+    #[test]
+    fn staged_update_rejects_payload_signed_by_an_untrusted_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("payload");
+        std::fs::write(&path, b"test").unwrap();
+        let other = MinisignFixture::new([9; 32], *b"OTHERKEY");
+        let signature = other.signature(b"test");
+
+        // The same bytes and signature verify under the other key's public key, so the rejection
+        // below is caused by the key mismatch and not by a malformed fixture.
+        let control = staged_update_with(path.clone(), &other.public_key(), &signature);
+        assert_eq!(control.verified_bytes().unwrap(), b"test");
+
+        let staged = staged_update_with(path, TEST_UPDATE_PUBLIC_KEY, &signature);
+        let error = staged.verified_bytes().unwrap_err();
+        assert_eq!(error.code, "update-signature");
+        assert_eq!(error.message, "Cached update verification failed.");
     }
 
     #[test]
@@ -1270,7 +1355,7 @@ mod tests {
                 version: "2.0.0".into(),
                 channel: "stable".into(),
                 package_kind: "app".into(),
-                manifest: signed_update_manifest(),
+                manifest: signed_update_manifest(TEST_UPDATE_SIGNATURE),
                 payload: String::new(),
             },
             &source,

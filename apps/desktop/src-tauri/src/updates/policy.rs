@@ -101,6 +101,7 @@ mod tests {
     fn only_accepts_newer_versions_in_the_build_channel() {
         assert!(strictly_newer("1.0.0", "1.0.1", UpdateChannel::Stable));
         assert!(!strictly_newer("1.0.0", "1.0.0", UpdateChannel::Stable));
+        assert!(!strictly_newer("1.0.1", "1.0.0", UpdateChannel::Stable));
         assert!(!strictly_newer(
             "1.0.0",
             "1.0.0-staging.2",
@@ -109,6 +110,11 @@ mod tests {
         assert!(strictly_newer(
             "1.0.0-staging.1",
             "1.0.0-staging.2",
+            UpdateChannel::Staging
+        ));
+        assert!(!strictly_newer(
+            "1.0.0-staging.2",
+            "1.0.0-staging.1",
             UpdateChannel::Staging
         ));
         assert!(!strictly_newer("1.0.0", "2.0.0", UpdateChannel::Disabled));

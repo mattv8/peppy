@@ -45,6 +45,8 @@ mod heads_runtime;
 #[cfg(test)]
 mod activation_session_tests;
 #[cfg(test)]
+mod command_registry_tests;
+#[cfg(test)]
 mod draft_command_tests;
 mod hosted;
 mod launch_progress;

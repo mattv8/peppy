@@ -2362,30 +2362,33 @@ async fn reserve_conflict_does_not_mark_upload_without_duplicate_finalize_proof(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn work_requests_wake_only_the_worker() {
+    use std::future::Future;
+
     let f = fixture_at("http://127.0.0.1:9");
     let session: Arc<Session> = Arc::new(open(&f, &f.binding, &[]));
-    let (worker_session, live_session) = (session.clone(), session.clone());
-    let live =
-        tokio::spawn(async move { sync::pause_live(&live_session, Duration::from_secs(30)).await });
-    let worker =
-        tokio::spawn(
-            async move { sync::pause_worker(&worker_session, Duration::from_secs(30)).await },
-        );
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut live = std::pin::pin!(sync::pause_live(&session, Duration::from_secs(30)));
+    let mut worker = std::pin::pin!(sync::pause_worker(&session, Duration::from_secs(30)));
+    std::future::poll_fn(|cx| {
+        assert!(live.as_mut().poll(cx).is_pending());
+        assert!(worker.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
     session.request_work();
     assert!(tokio::time::timeout(Duration::from_secs(2), worker)
         .await
-        .expect("worker woke")
-        .unwrap());
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        !live.is_finished(),
-        "a reconnect wait must not consume the worker's wake-up"
-    );
+        .expect("worker woke"));
+    std::future::poll_fn(|cx| {
+        assert!(
+            live.as_mut().poll(cx).is_pending(),
+            "a reconnect wait must not consume the worker's wake-up"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
     session.reconnect_wake.notify_one();
     assert!(tokio::time::timeout(Duration::from_secs(2), live)
         .await
-        .unwrap()
         .unwrap());
     // Cancellation ends both waits with `false`.
     let waiter = session.clone();
