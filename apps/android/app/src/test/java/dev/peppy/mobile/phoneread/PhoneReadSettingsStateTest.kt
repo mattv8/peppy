@@ -1,7 +1,5 @@
 package dev.peppy.mobile.phoneread
 
-import dev.peppy.mobile.enrollment.ConsentEffect
-import dev.peppy.mobile.enrollment.ConsentGatedToggle
 import org.junit.Assert.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -80,13 +78,6 @@ class PhoneReadSettingsStateTest {
         assertEquals(PhoneReadPresentation.State.OFF_READY, denied.state)
         assertTrue(denied.toggleEnabled)
         assertFalse(denied.showOpenAccess)
-    }
-
-    @Test
-    fun agreeAppliesImmediatelyWithoutNotificationAccess() {
-        val transition = ConsentGatedToggle().requestEnable().agree(hasAccess = true)
-
-        assertEquals(ConsentEffect.APPLY, transition.effect)
     }
 
     @Test

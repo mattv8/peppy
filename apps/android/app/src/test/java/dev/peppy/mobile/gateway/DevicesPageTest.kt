@@ -303,27 +303,6 @@ class DevicesPageTest {
         assertEquals(0, refreshes.get())
     }
 
-    @Test fun repeatedConfirmWhileInFlightCallsRevokeOnce() {
-        val phone = device(phoneId)
-        val gate = CompletableDeferred<Boolean>()
-        val calls = AtomicInteger()
-        page(
-            GatewayAccountState(self = owner(), devices = listOf(owner(), phone)),
-            revoke = {
-                calls.incrementAndGet()
-                gate.await()
-            },
-        )
-        click("device-menu-$phoneId")
-        click("device-remove-$phoneId")
-        click("device-revoke-confirm-$phoneId")
-        compose.waitUntil { exists("device-revoke-progress") }
-        compose.onNodeWithTag("device-revoke-confirm-$phoneId", useUnmergedTree = true).assertIsNotEnabled()
-        compose.runOnIdle { gate.complete(true) }
-        compose.waitUntil { !exists("device-revoke-dialog") }
-        assertEquals(1, calls.get())
-    }
-
     @Test fun ineligibleDialogWaitsForInFlightCallThenCloses() {
         val phone = device(phoneId)
         val gate = CompletableDeferred<Boolean>()
@@ -491,6 +470,7 @@ class DevicesPageTest {
         click("device-remove-$phoneId")
         clickTwiceInSameFrame("device-revoke-confirm-$phoneId")
         compose.waitUntil { exists("device-revoke-progress") }
+        compose.onNodeWithTag("device-revoke-confirm-$phoneId", useUnmergedTree = true).assertIsNotEnabled()
         compose.runOnIdle { gate.complete(true) }
         compose.waitUntil { !exists("device-revoke-dialog") }
         assertEquals(1, calls.get())

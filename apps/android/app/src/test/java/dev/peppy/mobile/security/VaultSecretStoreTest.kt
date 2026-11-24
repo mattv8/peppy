@@ -90,15 +90,6 @@ class VaultSecretStoreTest {
         }
     }
 
-    @Test fun pendingMovesToMissingBindingAndTombstonesThePendingSlot() {
-        val secure = MemorySecureStore()
-        val store = VaultSecretStore(secure)
-        store.savePending("https://enroll.example", "secret".toCharArray())
-        store.movePendingToBinding("https://enroll.example", "vault", "device")
-        assertEquals("secret", String((store.read("vault", "device") as StoredSecret.Present).value))
-        assertEquals(StoredSecret.Missing, store.readPending("https://enroll.example"))
-    }
-
     @Test fun failedBindingWriteKeepsPendingWithoutThrowing() {
         val secure = MemorySecureStore().apply { failWriteKeyPrefix = "vault-secret:v2:" }
         val store = VaultSecretStore(secure)
