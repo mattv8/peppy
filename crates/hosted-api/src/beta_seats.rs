@@ -657,11 +657,9 @@ mod tests {
     #[test]
     fn seat_limit_cannot_drop_below_active_claims() {
         assert!(validate_seat_limit(15, 15).is_ok());
-        assert!(validate_seat_limit(15, 16).is_err());
-        assert_eq!(BetaLinkAction::Enable, BetaLinkAction::Enable);
         assert_eq!(
-            BetaErrorCode::LimitBelowClaimed,
-            BetaErrorCode::LimitBelowClaimed
+            validate_seat_limit(15, 16),
+            Err(BetaErrorCode::LimitBelowClaimed)
         );
     }
 

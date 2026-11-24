@@ -51,7 +51,7 @@ impl BrowserCore {
         {
             return Err(invalid());
         }
-        // A status-only update (no roster fields) keeps the last verified roster, whatever the connection.
+        // A status-only update keeps cached gateway presentation but clears roster trust unless offline.
         // A roster, when present, is validated only for a connected or degraded connection.
         let has_roster = input.devices.is_some() || input.capabilities.is_some();
         let applies_roster =

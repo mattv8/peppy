@@ -106,12 +106,7 @@ pub fn verify_computer_owner_proof(
     if expected_recipient != input.recipient
         || expected_canonical_origin != input.context.canonical_origin
         || expected_invitation_id != input.context.enrollment_id
-        || input.context.purpose != crate::enrollment::EnrollmentPurpose::Computer
-        || input.context.recipient_transfer_public_key != input.recipient.transfer_public_key
-        || input.context.recipient_signing_public_key != input.recipient.signing_public_key
-        || input.context.device_id != input.recipient.device_id
-        || input.context.credential_digest != input.recipient.credential_digest
-        || input.context.role != input.granted_role
+        || !context_matches_recipient(input)
     {
         return Ok(false);
     }
@@ -147,17 +142,20 @@ fn derive_qr_key(qr_secret: &[u8; 32], label: &[u8]) -> Result<[u8; 32], CryptoE
 }
 
 fn validate_input(input: &ComputerOwnerProofInput<'_>) -> Result<(), CryptoError> {
-    if input.context.purpose != crate::enrollment::EnrollmentPurpose::Computer
-        || input.context.recipient_transfer_public_key != input.recipient.transfer_public_key
-        || input.context.recipient_signing_public_key != input.recipient.signing_public_key
-        || input.context.device_id != input.recipient.device_id
-        || input.context.credential_digest != input.recipient.credential_digest
-        || input.context.role != input.granted_role
-    {
+    if !context_matches_recipient(input) {
         return Err(CryptoError::InvalidEnrollment);
     }
     computer_recipient_commitment(input.recipient)?;
     input.context.canonical_bytes().map(|_| ())
+}
+
+fn context_matches_recipient(input: &ComputerOwnerProofInput<'_>) -> bool {
+    input.context.purpose == crate::enrollment::EnrollmentPurpose::Computer
+        && input.context.recipient_transfer_public_key == input.recipient.transfer_public_key
+        && input.context.recipient_signing_public_key == input.recipient.signing_public_key
+        && input.context.device_id == input.recipient.device_id
+        && input.context.credential_digest == input.recipient.credential_digest
+        && input.context.role == input.granted_role
 }
 
 fn framed_text(out: &mut Vec<u8>, value: &str) -> Result<(), CryptoError> {

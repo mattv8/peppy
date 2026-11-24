@@ -247,7 +247,7 @@ async fn simulated_sms_checkpoint_over_real_postgres_http_and_ws() {
     let temp = TempDir::new().unwrap();
     eprintln!("phase=E01 status=ok");
 
-    // Both SQLCipher clients unlock only after actual signed owner pairing.
+    // Both SQLCipher clients unlock after fixture devices are enrolled directly in PostgreSQL.
     eprintln!("phase=E02 status=desktop_unlock");
     let desktop = client(&temp, "desktop", &server, desktop_p.id);
     eprintln!("phase=E02 status=gateway_unlock");
