@@ -368,6 +368,9 @@ const SMS_ONLY: GatewayView = {
   simulated: false,
   supportsSms: true,
   supportsMms: false,
+  availability: "unknown",
+  settingUp: false,
+  wakeRoute: false,
 };
 describe("draft lifecycle flushing", () => {
   it("continues saving newer typing after a fresh draft receives its first host identity", async () => {

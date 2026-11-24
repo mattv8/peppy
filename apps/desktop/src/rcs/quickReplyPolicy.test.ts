@@ -26,7 +26,7 @@ describe("notification quick-reply RCS policy corpus", () => {
       mode: "native",
       connection: { state: "connected" },
       encryption: { state: "unlocked" },
-      gateways: [{ id: "gateway", name: "Gateway", simId: "sim", online: true, simulated: false, supportsSms: true, supportsMms: true }],
+      gateways: [{ id: "gateway", name: "Gateway", simId: "sim", online: true, simulated: false, supportsSms: true, supportsMms: true, availability: "unknown", settingUp: false, wakeRoute: false }],
       conversations: [{ id: "conversation", name: "Conversation", preview: "", unread: 0, messages: [], participants: ["recipient"], rcsEncryption: fixture.knownRcs === false ? undefined : true }],
       head: { enabled: false, capability: "unsupported" },
       pendingCount: 0,

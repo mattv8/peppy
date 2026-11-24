@@ -22,6 +22,8 @@ import type {
 } from "@peppy/generated/attachment-retention";
 import type { AccountAccessResult } from "@peppy/generated/account-access";
 import type { RcsStatusSnapshot } from "@peppy/generated/rcs-status";
+import type { GatewayPresence, GatewayView } from "@peppy/generated/gateway";
+export type { GatewayAvailability, GatewayPresence, GatewayView } from "@peppy/generated/gateway";
 import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceStatus, McpGrantView, McpScope, WebhookCreated, WebhookInput, WebhookList, WebhookSecret, WebhookTestResult, WebhookView } from "@peppy/generated/mcp";
 export type {
   HistorySearchAttemptInput,
@@ -108,9 +110,6 @@ export type ConversationView = { id: string; name: string; preview: string; unre
 /** Effective folder from core: an archived conversation reads as `inbox` once a newer message arrives. */
 export type ConversationFolder = "inbox" | "archived" | "spam";
 export type HistoryPage = { conversationId: string; messages: MessageView[]; hasMore: boolean };
-export type GatewayAvailability = "unknown" | "connected" | "delayed" | "setting_up" | "offline" | "never_connected" | "no_sms_sim" | "sms_permission_needed" | "sms_unavailable" | "capabilities_unknown" | "unsupported_platform";
-export type GatewayPresence = { state: "connected" | "seen" | "never"; last_seen_age_seconds: number | null };
-export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; availability?: GatewayAvailability; settingUp?: boolean; lastSeenAgeSeconds?: number; presence?: GatewayPresence; wakeRoute?: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
 export type DraftConflictView = { branchId: string; text: string; attachmentIds: string[]; recipientIds: string[]; gatewayId?: string; simId?: string };
 export type DraftSyncView = { state: "local-only" | "saving" | "saved-local" | "syncing" | "synced" | "paused" | "failed"; expiresAt: string | null; conflicts: DraftConflictView[]; notice: "restored-after-expiry" | "kept-after-sent" | "updated-from-other-device" | null; sendRequiresConnection: boolean };
 export type SendResultView = { accepted: boolean; status: MessageStatus; reason?: "members_changed" | "update_required" | "withdrawn" | "create_unconfirmed" | "create_not_rcs" | string; refusedAttachmentIds?: string[]; revision?: string; parts?: number; group?: { members: string[]; memberRevision: string } };

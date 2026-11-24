@@ -48,7 +48,7 @@ describe("MessageMeta send recovery", () => {
   it("moves focus from the sent-again row to history when the copy arrives", async () => {
     const first = outgoing({ kind: "not-sent", canSendAgain: true });
     const latest = outgoing(undefined, { id: "copy", status: "server-accepted" });
-    const gateway: GatewayView = { id: "phone", name: "Phone", simId: "sim", online: true, simulated: false, supportsSms: true, supportsMms: true };
+    const gateway: GatewayView = { id: "phone", name: "Phone", simId: "sim", online: true, simulated: false, supportsSms: true, supportsMms: true, availability: "unknown", settingUp: false, wakeRoute: false };
     vi.spyOn(bridge, "send_again").mockResolvedValue({ messageId: "copy" });
     const build = (grouped: boolean) => <SendAgainHost conversation={{ id: "c", name: "Test", preview: "", unread: 0, messages: grouped ? [first, latest] : [first] }} gateways={[gateway]} routeLabel={() => ({ statusLabel: "Connected" })} serverOffline={false} onGoToLatest={() => {}}>
       {grouped ? <MessageMeta message={latest} resend={{ attempts: [first, latest], earlierRisk: "none" }} /> : <MessageMeta message={first} />}
@@ -65,7 +65,7 @@ describe("MessageMeta send recovery", () => {
     const snapshot = await bridge.load_state("conv-aurora");
     const first = outgoing({ kind: "not-sent", canSendAgain: true }, { id: "chain-a" });
     const latest = outgoing(undefined, { id: "chain-b", status: "server-accepted" });
-    const gateway: GatewayView = { id: "phone", name: "Phone", simId: "sim", online: true, simulated: false, supportsSms: true, supportsMms: true };
+    const gateway: GatewayView = { id: "phone", name: "Phone", simId: "sim", online: true, simulated: false, supportsSms: true, supportsMms: true, availability: "unknown", settingUp: false, wakeRoute: false };
     let grouped = false;
     const listeners = new Set<() => void>();
     vi.spyOn(bridge, "subscribe").mockImplementation((listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; });
@@ -321,7 +321,7 @@ describe("MessageMeta send recovery", () => {
 });
 
 describe("sendAgainRouteLabel", () => {
-  const delayed: GatewayView = { id: "pixel", name: "Pixel 8", simId: "sim-1", online: true, simulated: false, supportsSms: true, supportsMms: false, availability: "delayed", lastSeenAgeSeconds: 720 };
+  const delayed: GatewayView = { id: "pixel", name: "Pixel 8", simId: "sim-1", online: true, simulated: false, supportsSms: true, supportsMms: false, availability: "delayed", settingUp: false, wakeRoute: false, lastSeenAgeSeconds: 720 };
 
   it("uses the composer's paused wording while the account is read-only", () => {
     expect(sendAgainRouteLabel([delayed], true)(delayed).statusLabel).toContain(peppyCopy.account_send_paused_status);

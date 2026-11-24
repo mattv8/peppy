@@ -19,6 +19,7 @@ const settingUpPhone = (overrides: Partial<GatewayView> = {}): GatewayView => ({
   supportsMms: false,
   availability: "setting_up",
   settingUp: true,
+  wakeRoute: false,
   ...overrides,
 });
 
@@ -32,6 +33,8 @@ const readyPhone: GatewayView = {
   supportsMms: true,
   mmsContentVersion: 2,
   availability: "connected",
+  settingUp: false,
+  wakeRoute: false,
 };
 
 describe("routeProblem for a phone that is setting up", () => {
