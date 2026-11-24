@@ -339,6 +339,10 @@ class GatewaySync(
     private val sessionCurrent: () -> Boolean = { true },
     /** Reconciles durable cancellation requests after receive/apply and before effects. */
     private val processPendingSendCancellations: () -> Boolean = { client.processPendingSendCancellations() },
+    /** Publishes this phone's dismissal availability; the production caller supplies the OS facts. */
+    private val publishNotificationDismissalStatus: () -> Unit = {},
+    /** Applies core-owned dismissals through the notification listener, which may be disconnected. */
+    private val notificationDismissals: () -> Unit = { NotificationMirrorService.runPendingDismissals() },
     /**
      * Retires commands a snapshot swallowed as history, at most one core batch per LIVE pass before
      * dispatch. Returns true while the core reports more to retire, so the pass asks for another pass.
@@ -354,7 +358,7 @@ class GatewaySync(
     private val elapsedMs: () -> Long = { SystemClock.elapsedRealtime() },
 ) {
     private enum class GatewayPhase(val code: Long) {
-        RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), SEND_CANCELLATIONS(23), RETIRE_SWALLOWED(24), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_MARK_READS(25), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE), MESSAGING_APP(22),
+        RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), SEND_CANCELLATIONS(23), RETIRE_SWALLOWED(24), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSAL_STATUS(26), NOTIFICATION_DISMISSALS(11), NOTIFICATION_MARK_READS(25), NOTIFICATION_PHONE_READS(21), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE), MESSAGING_APP(22),
     }
     class PassResult(
         val more: Boolean,
@@ -461,9 +465,12 @@ class GatewaySync(
                     phase(GatewayPhase.CONTACT_REPAIR) { repairContactProjection() }
                 }
                 phase(GatewayPhase.NOTIFICATION_RECONCILE) { NotificationMirrorService.reconcile(); false }
+                // Publishes before dismissals, so a computer sees this phone's block before any
+                // dismissal it sent is applied. It needs no listener connection.
+                phase(GatewayPhase.NOTIFICATION_DISMISSAL_STATUS) { publishNotificationDismissalStatus(); false }
                 // Receive/apply precedes any OS effect and outbound upload. A disconnected listener
                 // or revoked access leaves the durable core effect pending rather than completing it.
-                phase(GatewayPhase.NOTIFICATION_DISMISSALS) { NotificationMirrorService.runPendingDismissals(); false }
+                phase(GatewayPhase.NOTIFICATION_DISMISSALS) { notificationDismissals(); false }
                 // Mark-read follows dismissals and precedes phone reads; both are core-owned effects.
                 phase(GatewayPhase.NOTIFICATION_MARK_READS) { NotificationMirrorService.runPendingMarkReads(); false }
                 phase(GatewayPhase.NOTIFICATION_PHONE_READS) { NotificationMirrorService.runPhoneReads(); false }
@@ -1092,6 +1099,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         val routes = SimRoutes.current()
         val hostPolicy = GatewayPolicyHost(applicationContext)
         val policy = hostPolicy.decision(smsAvailable = sendGranted)
+        val dismissalStatus = NotificationDismissalStatus(NativeNotificationDismissalStatusCore(session.client))
         val mmsEnabled = MmsPreferences(applicationContext).enabled && policy?.captureMms == true
         val mmsReceiveGranted = smsReadGranted && ContextCompat.checkSelfPermission(
             applicationContext,
@@ -1163,6 +1171,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             messagingApp = { MessagingAppSync.forGateway(applicationContext, session.client).run() },
             sessionCurrent = { NativeGateway.isCurrent(applicationContext, session) },
             effectPermitted = { job?.isActive != false },
+            publishNotificationDismissalStatus = { dismissalStatus.publish(hostPolicy.hostFacts(smsAvailable = sendGranted)) },
         )
         val result = try {
             sync.run()
