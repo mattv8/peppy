@@ -6,12 +6,14 @@ export type SeenBadgeObservation = {
   root: HTMLElement | null;
   obscuredBottom: number | null;
   enabled: boolean;
+  /** The caller decides whether the user's attention permits recording. */
   canRecord(): boolean;
   badges: readonly VisibleReactionBadge[];
   onSeen(reactionIds: readonly string[]): void;
 };
 
 const MIN_VISIBLE_RATIO = 0.5;
+const SCROLL_SETTLE_MS = 150;
 
 export function useSeenBadges(input: SeenBadgeObservation): (key: string, node: HTMLElement | null) => void {
   const nodes = useRef(new Map<string, HTMLElement>());
@@ -41,7 +43,7 @@ export function useSeenBadges(input: SeenBadgeObservation): (key: string, node: 
       }
       let current = true;
       const observer = new IntersectionObserver((entries) => {
-        if (!current || !document.hasFocus() || document.visibilityState !== "visible" || !input.canRecord()) return;
+        if (!current || document.visibilityState !== "visible" || !input.canRecord()) return;
         const seen = new Set<string>();
         for (const entry of entries) {
           if (!entry.isIntersecting || entry.intersectionRatio < MIN_VISIBLE_RATIO
@@ -63,12 +65,20 @@ export function useSeenBadges(input: SeenBadgeObservation): (key: string, node: 
     };
     refresh.current = reobserve;
     reobserve();
+    let scrollTimer: ReturnType<typeof setTimeout> | undefined;
+    const onScroll = () => {
+      clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(reobserve, SCROLL_SETTLE_MS);
+    };
+    input.root?.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("focus", reobserve);
     window.addEventListener("blur", reobserve);
     document.addEventListener("visibilitychange", reobserve);
     return () => {
       refresh.current = () => {};
       dispose();
+      clearTimeout(scrollTimer);
+      input.root?.removeEventListener("scroll", onScroll);
       window.removeEventListener("focus", reobserve);
       window.removeEventListener("blur", reobserve);
       document.removeEventListener("visibilitychange", reobserve);
