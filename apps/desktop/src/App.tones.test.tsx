@@ -4,18 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { conversationAvatar, incomingToneSeed, paletteIndex, seedKey } from "@peppy/desktop-ui";
 import { App } from "./App";
 import { bridge, fixtureBridge, type DesktopSnapshot, type MessageView } from "./bridge/bridge";
+import { deferred } from "./test-support/appFixtures";
+import { resetAppStorage } from "./test-support/appSetup";
 
 let currentSnapshot: DesktopSnapshot;
 let stateHint: (() => void) | undefined;
 
 const toneVariable = (seed: string) => `var(--peppy-avatar-${paletteIndex(seed)}, var(--peppy-accent))`;
-
-const deferred = <T,>() => {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
-  return { promise, resolve, reject };
-};
 
 function message(id: string, senderAddress?: string): MessageView {
   return {
@@ -31,16 +26,7 @@ function message(id: string, senderAddress?: string): MessageView {
 
 beforeEach(async () => {
   vi.restoreAllMocks();
-  const storage = new Map<string, string>();
-  Object.defineProperty(window, "localStorage", {
-    configurable: true,
-    value: {
-      getItem: (key: string) => storage.get(key) ?? null,
-      setItem: (key: string, value: string) => storage.set(key, value),
-      removeItem: (key: string) => storage.delete(key),
-      clear: () => storage.clear(),
-    },
-  });
+  resetAppStorage();
   currentSnapshot = structuredClone(await fixtureBridge.load_state());
   currentSnapshot.encryption.profileFingerprint = "tone-profile";
   stateHint = undefined;

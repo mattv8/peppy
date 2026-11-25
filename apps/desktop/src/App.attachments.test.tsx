@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import type { AttachmentView, DesktopSnapshot, Draft, DraftInput, PreparedPastedAttachments } from "@peppy/desktop-ui/bridge-contracts";
 import { App, hasInFlightAttachmentPreparation } from "./App";
 import { bridge, fixtureBridge } from "./bridge/bridge";
+import { resetAppStorage } from "./test-support/appSetup";
 
 // Captured before any test saves a draft, so every test starts from the pristine fixture conversations.
 const pristine = structuredClone(await fixtureBridge.load_state());
@@ -14,13 +15,7 @@ let drafts = new Map<string, Draft>();
 let pastedCount = 0;
 
 beforeEach(() => {
-  const values = new Map<string, string>();
-  Object.defineProperty(window, "localStorage", { configurable: true, value: {
-    getItem: (key: string) => values.get(key) ?? null,
-    setItem: (key: string, value: string) => values.set(key, value),
-    removeItem: (key: string) => values.delete(key),
-    clear: () => values.clear(),
-  } });
+  resetAppStorage();
   encryptionState = "unlocked";
   drafts = new Map();
   pastedCount = 0;

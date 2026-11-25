@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { stubMatchMedia } from "../test-support/browserStubs";
 import { useState } from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
@@ -277,10 +278,7 @@ describe("ContactsView book lookup", () => {
   });
 
   it("shows the compact selector and lookup strip instead of the rail at 700px", async () => {
-    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
-      matches: query === "(max-width: 700px)", media: query,
-      addEventListener: vi.fn(), removeEventListener: vi.fn(),
-    })));
+    stubMatchMedia(["(max-width: 700px)"]);
     vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, { ...otherBook, id: "book-1234", deviceName: "Pixel 8", lookupExcluded: true }]);
     render(<ContactsView />);
     expect(await screen.findByRole("option", { name: "Pixel 8, ID 1234, Active, hidden from names" })).toBeInTheDocument();
@@ -407,10 +405,7 @@ describe("contact book rail collapse and resize", () => {
   });
 
   it("omits the resize handle at 700px and below", async () => {
-    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
-      matches: query === "(max-width: 700px)", media: query,
-      addEventListener: vi.fn(), removeEventListener: vi.fn(),
-    })));
+    stubMatchMedia(["(max-width: 700px)"]);
     render(<ContactsView />);
     await waitFor(() => expect(bridge.list_contact_books).toHaveBeenCalled());
     await screen.findByRole("heading", { name: "Pixel 8" });

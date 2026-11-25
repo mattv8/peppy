@@ -29,6 +29,8 @@ import {
   type GatewayView,
   type ContactBookView,
 } from "./bridge/bridge";
+import { renderApp } from "./test-support/renderApp";
+import { stubIntersectionObserver } from "./test-support/browserStubs";
 
 // Mock only the distribution hook: its module-level cache would otherwise leak a result across tests.
 vi.mock("./updates/updates", async (importOriginal) => ({
@@ -329,29 +331,28 @@ describe("conversation add-contact action", () => {
   it("hides for saved contacts, groups, drafts, and unusable books", async () => {
     host.conversations[0] = { ...host.conversations[0], participants: ["+18015551234"] };
     host.contactBooks = [writableBook];
+    const control = await renderApp({ loaded: () => screen.findByText("Hello from Aurora") });
+    expect(await screen.findByRole("button", { name: "Add (801) 555-1234 to contacts" })).toBeInTheDocument();
+    control.unmount();
     host.contactResolution = { "+18015551234": { bookId: "book-1", contactId: "contact-1", displayName: "Ada" } };
-    const view = render(<App />);
-    await screen.findByText("Hello from Aurora");
+    const view = await renderApp({ loaded: () => screen.findByText("Hello from Aurora") });
     expect(screen.queryByRole("button", { name: /Add .* to contacts/ })).not.toBeInTheDocument();
     view.unmount();
 
     host.contactResolution = undefined;
     host.conversations[0] = { ...host.conversations[0], participants: ["+18015551234", "+18015551235"] };
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
+    await renderApp({ loaded: () => screen.findByText("Hello from Aurora") });
     expect(screen.queryByRole("button", { name: /Add .* to contacts/ })).not.toBeInTheDocument();
     cleanup();
 
     host.conversations[0] = { ...host.conversations[0], participants: ["+18015551234"], draftOnly: true };
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
+    await renderApp({ loaded: () => screen.findByText("Hello from Aurora") });
     expect(screen.queryByRole("button", { name: /Add .* to contacts/ })).not.toBeInTheDocument();
     cleanup();
 
     host.conversations[0] = { ...host.conversations[0], draftOnly: undefined };
     host.contactBooks = [{ ...writableBook, capabilities: { ...writableBook.capabilities, canWrite: false } }];
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
+    await renderApp({ loaded: () => screen.findByText("Hello from Aurora") });
     expect(screen.queryByRole("button", { name: /Add .* to contacts/ })).not.toBeInTheDocument();
   });
 });
@@ -6184,7 +6185,7 @@ describe("host state display", () => {
       rootMargin = "";
       thresholds = [];
     }
-    vi.stubGlobal("IntersectionObserver", Observer);
+    stubIntersectionObserver(Observer);
     render(<App />);
     await screen.findByText("Hello from Aurora");
     expect(mark).not.toHaveBeenCalled();
