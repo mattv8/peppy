@@ -46,6 +46,8 @@ import androidx.compose.ui.test.onNodeWithTag
 import dev.peppy.mobile.googlemessages.ui.GoogleMessagesLinkPanel
 import dev.peppy.mobile.googlemessages.ui.GoogleMessagesLinkPanelDetails
 import dev.peppy.mobile.R
+import dev.peppy.mobile.gateway.GatewayTestBase
+import dev.peppy.mobile.gateway.NativeGateway
 import dev.peppy.mobile.googlemessages.ui.GoogleMessagesLinkPanelHost
 import dev.peppy.mobile.testing.ComposeTestActivityRule
 import dev.peppy.mobile.ui.theme.PeppyTheme
@@ -58,10 +60,13 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
+import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
@@ -73,6 +78,14 @@ import kotlinx.coroutines.flow.StateFlow
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import uniffi.peppy_mobile_bindings.NativeRcsLinkState
+import uniffi.peppy_mobile_bindings.NativeIncomingSms
+import uniffi.peppy_mobile_bindings.NativeRcsEligibilityPublication
+import uniffi.peppy_mobile_bindings.NativeRcsLinkOwnershipClaimOutcome
+import uniffi.peppy_mobile_bindings.NativeRcsMappingVerification
+import uniffi.peppy_mobile_bindings.gatewayPublishRcsEligibility
+import uniffi.peppy_mobile_bindings.gatewayVerifyRcsMapping
+import uniffi.peppy_mobile_bindings.rcsCanonicalizerRevision
 
 /** Which composable surface a test renders: the card, the details page, or a card that opens details on Manage. */
 private enum class PanelSurface { Card, Details, Managed }
@@ -150,7 +163,7 @@ private fun ManagedLinkPanel(host: GoogleMessagesLinkPanelHost?) {
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
-class GoogleMessagesLinkPanelTest {
+class GoogleMessagesLinkPanelTest : GatewayTestBase() {
     // Queue IO completions until the test clock drains them on the main looper.
     // The legacy rule uses an unconfined dispatcher even when given Dispatchers.Main.
     private val compose = createComposeRule()
@@ -250,8 +263,53 @@ class GoogleMessagesLinkPanelTest {
     }
 
     @Test fun `cutover ambiguity notice shows on the card and dismisses`() {
-        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        LinkCoreBridgeTestHooks.cutoverAlertIds = { setOf("conversation") }
+        val client = enrollAndUnlock()
+        val conversationId = UUID.randomUUID().toString()
+        val googleId = "google-${UUID.randomUUID()}"
+        val peer = "+12025550123"
+        val own = "+12025550101"
+        val now = System.currentTimeMillis()
+        client.captureIncoming(NativeIncomingSms(conversationId, peer, "", "link-$conversationId", true))
+        client.recordRcsLinkLifecycle(NativeRcsLinkState.LINKED, true, true, true, now, now)
+        val outgoing = JSONObject().put("outgoing_id", "google-outgoing").put("sim_participant_id", "google-outgoing")
+            .put("own_identity_raw", own).put("sim_payload", JSONObject().put("two", 2).put("sim_number", 7))
+            .put("rcs_chats_enabled", true)
+        val observation = JSONObject()
+            .put("google_conversation_id", googleId).put("google_candidate_count", 1)
+            .put("participants", JSONArray().put(JSONObject().put("identity", peer).put("google_participant_id", "google-peer")
+                .put("identifier_type", 1).put("is_visible", true).put("is_me", false)))
+            .put("conversation_type", "Rcs").put("status", "eligible").put("send_mode", "Automatic")
+            .put("read_only", false).put("default_outgoing", true).put("selected_sim_id", "android-subscription-7")
+            .put("selected_sim_own_identity", own)
+            .put("carrier_binding", JSONObject().put("carrier_route_id", "android-subscription-7")
+                .put("android_subscription_id", 7).put("is_current_default_sms", true).put("own_number_raw", own)
+                .put("own_number_source", "SubscriptionManagerPhoneNumber").put("route_observed_at_ms", now)
+                .put("route_context_revision", 1).put("same_handset_evidence_id", "verified-handset"))
+            .put("outgoing", outgoing)
+            .put("native_evidence", JSONObject().put("lifetime", JSONObject().put("runtime_id", "runtime")
+                .put("run_generation", 1).put("link_generation", 1).put("session_generation", 1).put("context_revision", 1))
+                .put("lookup_id", "lookup").put("lookup_complete", true).put("google_candidate_count", 1)
+                .put("settings_revision", 1).put("settings_provenance", "CurrentEvent").put("settings_observed_at_ms", now)
+                .put("settings_stream_epoch", 1).put("settings_currentness", "ContinuousVerifiedFeed")
+                .put("current_settings_sims", JSONArray().put(outgoing)).put("settings_validated_at_ms", now)
+                .put("conversation_observed_at_ms", now))
+            .put("identity_region", "US").put("observed_at_ms", now).put("context_revision", 1)
+            .put("link_generation", 1).put("session_generation", 1)
+            .put("canonicalizer_revision", rcsCanonicalizerRevision().toLong())
+            .put("mapping_revision", 1).put("link_state", "Linked")
+        assertEquals(NativeRcsMappingVerification.MAPPED, gatewayVerifyRcsMapping(client, observation.toString(), now))
+        gatewayPublishRcsEligibility(client, listOf(NativeRcsEligibilityPublication(conversationId)), now)
+        val claim = JSONObject().put("conversationId", conversationId).put("googleConversationId", googleId)
+            .put("mappingRevision", 1).put("providerFloor", 0)
+            .put("expectedLifecycleGeneration", checkNotNull(client.gatewayRcsLinkLifecycleGeneration()).toLong())
+            .put("expectedLinkGeneration", 1).put("expectedSessionGeneration", 1).put("expectedContextRevision", 1)
+        val ownership = client.gatewayClaimRcsLinkOwnershipJson(claim.toString())
+        assertEquals(NativeRcsLinkOwnershipClaimOutcome.CLAIMED, ownership.outcome)
+        val detector = JSONObject().put("providerRowId", 11).put("providerThreadId", 2).put("providerType", 132)
+            .put("observedAtMs", now).put("observedGeneration", ownership.ownershipGeneration.toLong())
+        assertEquals("recorded", client.gatewayRecordRcsProviderDetectorJson(conversationId, ownership.ownershipGeneration, detector.toString()))
+        assertTrue(LinkCoreBridge.recordExplicitUnlinkCompleted(context))
+        assertEquals(listOf(conversationId), client.gatewayRcsCutoverAlerts().conversationIds)
         panel("linked") {
             compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice-cutover").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_notice_cutover_ambiguous)).fetchSemanticsNode()
@@ -259,6 +317,7 @@ class GoogleMessagesLinkPanelTest {
             compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-notice-cutover").fetchSemanticsNodes().isEmpty() }
         }
         check(!GoogleMessagesLink.cutoverMayHaveMissedMessages(context))
+        assertEquals(listOf(conversationId), client.gatewayRcsCutoverAlerts().conversationIds)
     }
 
     @Test fun `dismissing a local notice does not record the stop code as dismissed`() {
@@ -759,17 +818,15 @@ class GoogleMessagesLinkPanelTest {
     }
 
     @Test fun `reset after relink admission prevents prestart service and native relink`() {
-        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        enrollAndUnlock()
         val acquireEntered = CountDownLatch(1)
         val releaseAcquire = CountDownLatch(1)
-        val recorded = mutableListOf<String>()
         val handle = FakeHandle("needs_relink")
         LinkRuntimeTestHooks.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
         }
         LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
-        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status.state }; true }
         val host = FakePanelHost(handle).apply {
             acquirePairingLease = { token ->
                 LinkRuntime.acquirePairingLease(context, token).also {
@@ -787,18 +844,18 @@ class GoogleMessagesLinkPanelTest {
         releaseAcquire.countDown()
         compose.waitUntil(5_000) { host.endedTokens.isNotEmpty() }
 
-        assertEquals(listOf("unlinked"), synchronized(recorded) { recorded.toList() })
+        assertEquals(NativeRcsLinkState.UNLINKED, persistedLinkState())
         assertEquals(0, host.serviceStarts)
         assertEquals(0, handle.relinkCalls)
     }
 
     @Test fun `reset while admitted prestart records prevents service and retired relink`() {
-        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        val preStartEntered = CountDownLatch(1)
-        val releasePreStart = CountDownLatch(1)
+        val client = enrollAndUnlock()
+        val now = System.currentTimeMillis()
+        client.recordRcsLinkLifecycle(NativeRcsLinkState.LINKED, true, true, true, now, now)
+        val wipeEntered = CountDownLatch(1)
+        val releaseWipe = CountDownLatch(1)
         val handleClosed = CountDownLatch(1)
-        val resetFinished = CountDownLatch(1)
-        val recorded = mutableListOf<String>()
         val handle = object : FakeHandle("needs_relink") {
             override fun close() { handleClosed.countDown() }
         }
@@ -806,39 +863,44 @@ class GoogleMessagesLinkPanelTest {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
-        LinkCoreBridge.recorder = { _, status ->
-            if (status.state == "unknown") {
-                preStartEntered.countDown()
-                awaitIgnoringInterrupts(releasePreStart)
-            }
-            synchronized(recorded) { recorded += status.state }
-            true
-        }
+        LinkRuntimeTestHooks.storeFactory = { PausingWipeStore(wipeEntered, releaseWipe) }
         val host = FakePanelHost(handle).apply {
             acquirePairingLease = { token -> LinkRuntime.acquirePairingLease(context, token) }
             recordTokenPreStart = { token -> LinkRuntime.recordPreStart(context, token) }
         }
         showPanel(host)
 
-        confirm("google-messages-link-relink")
-        compose.waitUntil(5_000) { preStartEntered.count == 0L }
-        Thread {
-            LinkRuntime.resetLocalState(context)
-            resetFinished.countDown()
-        }.start()
-        compose.waitUntil(5_000) { handleClosed.count == 0L }
-        releasePreStart.countDown()
-        compose.waitUntil(5_000) { resetFinished.count == 0L }
-        compose.waitUntil(5_000) { host.endedTokens.isNotEmpty() }
-
-        assertEquals(listOf("unknown", "unlinked"), synchronized(recorded) { recorded.toList() })
-        assertEquals(0, host.serviceStarts)
-        assertEquals(0, handle.relinkCalls)
+        val tokenBeforePreStart = LinkCoreBridge.observationToken()
+        var resetFailure: Throwable? = null
+        val reset = Thread { resetFailure = runCatching { LinkRuntime.resetLocalState(context) }.exceptionOrNull() }
+        try {
+            synchronized(LinkCoreBridge) {
+                confirm("google-messages-link-relink")
+                compose.waitUntil(5_000) { LinkCoreBridge.observationToken() != tokenBeforePreStart }
+                reset.start()
+                assertTrue("reset did not reach wipe", wipeEntered.await(5, TimeUnit.SECONDS))
+                assertEquals("retired handle was not closed before wipe", 0L, handleClosed.count)
+                assertFalse(LinkRuntime.pairingInProgress.get())
+            }
+            compose.waitUntil(5_000) { host.endedTokens.isNotEmpty() }
+            assertTrue("reset completed before release", reset.isAlive)
+            assertEquals(NativeRcsLinkState.LINKED, persistedLinkState())
+            assertEquals(0, host.serviceStarts)
+            assertEquals(0, handle.relinkCalls)
+            releaseWipe.countDown()
+            reset.join(TimeUnit.SECONDS.toMillis(5))
+            assertFalse("reset did not finish", reset.isAlive)
+            assertTrue("reset failed: $resetFailure", resetFailure == null)
+            assertEquals(NativeRcsLinkState.UNLINKED, persistedLinkState())
+        } finally {
+            releaseWipe.countDown()
+            reset.join(TimeUnit.SECONDS.toMillis(5))
+            assertFalse("reset thread leaked", reset.isAlive)
+        }
     }
 
     @Test fun `reset between displayed handle and admission never relinks the retired handle`() {
-        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        enrollAndUnlock()
         val retired = FakeHandle("needs_relink")
         val replacement = FakeHandle("unlinked")
         LinkRuntimeTestHooks.engine = object : LinkEngine {
@@ -846,19 +908,33 @@ class GoogleMessagesLinkPanelTest {
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = replacement
         }
         LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
-        LinkCoreBridge.recorder = { _, _ -> true }
+        val admitted = AtomicReference<Pair<Long, LinkHandleLease>>()
         val host = FakePanelHost(retired).apply {
-            acquirePairingLease = { token -> LinkRuntime.acquirePairingLease(context, token) }
+            acquirePairingLease = { token ->
+                LinkRuntime.acquirePairingLease(context, token)?.also { admitted.set(token to it) }
+            }
             recordTokenPreStart = { token -> LinkRuntime.recordPreStart(context, token) }
         }
         showPanel(host)
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-relink").fetchSemanticsNodes().isNotEmpty() }
         LinkRuntime.resetLocalState(context)
+        assertEquals(NativeRcsLinkState.UNLINKED, persistedLinkState())
+        val afterReset = requireNotNull(NativeGateway.open(context)?.gatewayRcsLinkLifecycleGeneration())
+        assertTrue(host.pairingTokens.isEmpty())
 
         confirm("google-messages-link-relink")
-        compose.waitUntil(5_000) { host.endedTokens.isNotEmpty() }
+        compose.waitUntil(5_000) { host.endedTokens.isNotEmpty() && !LinkRuntime.pairingInProgress.get() }
 
         assertEquals(0, retired.relinkCalls)
+        assertEquals(1, replacement.relinkCalls)
+        assertEquals(1, host.serviceStarts)
+        assertEquals(host.pairingTokens, host.endedTokens)
+        val (token, lease) = requireNotNull(admitted.get())
+        assertEquals(host.pairingTokens.single(), token)
+        assertSame(replacement, lease.handle)
+        assertTrue(lease.generation > 0)
+        assertEquals(NativeRcsLinkState.UNAVAILABLE, persistedLinkState())
+        assertEquals(afterReset + 1uL, NativeGateway.open(context)?.gatewayRcsLinkLifecycleGeneration())
     }
 
     @Test fun `owner unlink fences a linked status observation delayed after its read`() {
@@ -888,14 +964,13 @@ class GoogleMessagesLinkPanelTest {
     }
 
     @Test fun `opening a sealed terminal link reconciles core without starting native work`() {
+        enrollAndUnlock()
         val handle = object : FakeHandle("needs_relink") {
             var pairCalls = 0
             var runCalls = 0
             override fun pair(cookiesJson: ByteArray) { pairCalls++ }
             override fun run() { runCalls++ }
         }
-        val recorded = mutableListOf<String>()
-        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status.state }; true }
         GoogleMessagesLinkTestHooks.available = true
         LinkRuntimeTestHooks.engine = object : LinkEngine {
             override val available = true
@@ -904,9 +979,9 @@ class GoogleMessagesLinkPanelTest {
         LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
 
         compose.setContent { PeppyTheme { GoogleMessagesLinkPanel {} } }
-        compose.waitUntil(5_000) { synchronized(recorded) { recorded.contains("needs_relink") } }
+        compose.waitUntil(5_000) { persistedLinkState() == NativeRcsLinkState.NEEDS_RELINK }
 
-        assertEquals(listOf("needs_relink"), synchronized(recorded) { recorded.toList() })
+        assertEquals(NativeRcsLinkState.NEEDS_RELINK, persistedLinkState())
         assertEquals(0, handle.pairCalls)
         assertEquals(0, handle.runCalls)
     }
@@ -1236,6 +1311,21 @@ class GoogleMessagesLinkPanelTest {
         compose.onNodeWithTag("google-messages-link-chip").fetchSemanticsNode()
         compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_status_needs_relink)).fetchSemanticsNode()
         check(compose.onAllNodesWithTag("google-messages-link-last-ok").fetchSemanticsNodes().isEmpty())
+    }
+
+    private fun persistedLinkState(): NativeRcsLinkState? =
+        NativeGateway.open(context)?.rcsLinkStatus(deviceId, System.currentTimeMillis())?.state
+
+    private class PausingWipeStore(
+        private val wipeEntered: CountDownLatch,
+        private val releaseWipe: CountDownLatch,
+    ) : LinkStateStorage {
+        override fun read() = ByteArray(0)
+        override fun write(state: ByteArray) = Unit
+        override fun wipe() {
+            wipeEntered.countDown()
+            assertTrue("wipe was never released", releaseWipe.await(5, TimeUnit.SECONDS))
+        }
     }
 
     /** Degraded linked card: the help line, last answer, the primary action and Manage are all present. */
