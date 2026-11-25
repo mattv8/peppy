@@ -4,7 +4,7 @@ import { groupAllowsTypingSend, groupComposerNotice, groupIsReadOnly, groupMembe
 import { interleaveGroupNotices } from "./groupTimeline";
 import { groupNoticeItems } from "./groupNotices";
 
-const view = (state: GroupView["state"], members: string[] = []): GroupView => ({ members, state, memberRevision: "1", canCreate: false, createNeedsConfirmation: false });
+const view = (state: GroupView["state"], members: string[] = []): GroupView => ({ members, state, memberRevision: "1", canCreate: false, createNeedsConfirmation: false, notices: [] });
 
 describe("group read-only and typing", () => {
   it("makes only a withdrawn group read-only", () => {

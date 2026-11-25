@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { conversationWireDefaults } from "../test-support/conversationWireDefaults";
 import type { DesktopSnapshot } from "../bridge/bridge";
 import { currentRcsRoute, knownRcsChat, rcsDownloadRetryBlock, rcsSendBlock } from "./rcsRoute";
 
@@ -9,7 +10,7 @@ function snapshot(): DesktopSnapshot {
     connection: { state: "connected" },
     encryption: { state: "unlocked" },
     gateways: [{ id: "gateway-a", name: "Gateway", simId: "sim-a", online: true, simulated: false, supportsSms: true, supportsMms: true, availability: "unknown", settingUp: false, wakeRoute: false }],
-    conversations: [{ id: "conversation-a", name: "Conversation", preview: "", unread: 0, messages: [], participants: ["recipient"] }],
+    conversations: [{ ...conversationWireDefaults, id: "conversation-a", name: "Conversation", preview: "", unread: 0, messages: [], participants: ["recipient"] }],
     head: { enabled: false, capability: "unsupported" },
     pendingCount: 0,
     quarantineCount: 0,
@@ -55,7 +56,7 @@ describe("currentRcsRoute", () => {
   ] as const)("routes a group in state %s: %s", (state, routed) => {
     const value = snapshot();
     value.conversations[0].participants = ["one", "two"];
-    value.conversations[0].group = { members: ["one", "two"], state, memberRevision: "1", canCreate: false, createNeedsConfirmation: false };
+    value.conversations[0].group = { members: ["one", "two"], state, memberRevision: "1", canCreate: false, createNeedsConfirmation: false, notices: [] };
     const route = currentRcsRoute({ snapshot: value, activeConversationId: "conversation-a", gatewayId: "gateway-a", nowMs: 149, locked: false });
 
     expect(route.current).toBe(routed);
@@ -130,7 +131,7 @@ describe("rcsDownloadRetryBlock", () => {
   it.each(["paused", "withdrawn"] as const)("permits a healthy linked phone for a %s group", (state) => {
     const value = snapshot();
     value.conversations[0].participants = ["one", "two"];
-    value.conversations[0].group = { members: ["one", "two"], state, memberRevision: "1", canCreate: false, createNeedsConfirmation: false };
+    value.conversations[0].group = { members: ["one", "two"], state, memberRevision: "1", canCreate: false, createNeedsConfirmation: false, notices: [] };
 
     expect(rcsDownloadRetryBlock(retryInput(value))).toEqual({ kind: "none" });
   });

@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { conversationWireDefaults } from "./test-support/conversationWireDefaults";
 import { resetAppStorage } from "./test-support/appSetup";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -66,8 +67,8 @@ function snapshot(messages: MessageView[], activeConversationId = "aurora"): Des
     encryption: { state: "unlocked" },
     gateways: [],
     conversations: [
-      { id: "aurora", name: "Aurora", preview: "", unread: 0, messages: activeConversationId === "aurora" ? messages : [] },
-      { id: "river", name: "River", preview: "", unread: 0, messages: activeConversationId === "river" ? [message("river-message", image("river-image"))] : [] },
+      { ...conversationWireDefaults, id: "aurora", name: "Aurora", preview: "", unread: 0, messages: activeConversationId === "aurora" ? messages : [] },
+      { ...conversationWireDefaults, id: "river", name: "River", preview: "", unread: 0, messages: activeConversationId === "river" ? [message("river-message", image("river-image"))] : [] },
     ],
     activeConversationId,
     head: { enabled: false, capability: "unsupported" },

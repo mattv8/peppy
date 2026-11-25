@@ -11,7 +11,15 @@ use peppy_client_core::{
 use serde::Serialize;
 use std::str::FromStr;
 
-const NONE: &str = "none";
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename = "ReactionSupport")]
+pub enum ReactionSupportDto {
+    Native,
+    Text,
+    NeedsPhoneUpdate,
+    None,
+}
 
 /// Route a reaction travels by: `native` over RCS or `text` over SMS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
@@ -92,7 +100,7 @@ pub struct ReactionSubmitView {
 /// `gateway_online`; `text_route` is the composer's route for text reactions.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ConversationReactions {
-    pub support: &'static str,
+    pub support: ReactionSupportDto,
     pub gateway_id: Option<String>,
     pub gateway_online: bool,
     pub text_route: Option<GatewayRoute>,
@@ -101,7 +109,7 @@ pub struct ConversationReactions {
 impl ConversationReactions {
     fn none() -> Self {
         Self {
-            support: NONE,
+            support: ReactionSupportDto::None,
             gateway_id: None,
             gateway_online: false,
             text_route: None,
@@ -195,12 +203,12 @@ fn submit_refusal_wire(reason: SubmitRefusal) -> &'static str {
     }
 }
 
-fn support_wire(support: ReactionSupport) -> &'static str {
+fn support_wire(support: ReactionSupport) -> ReactionSupportDto {
     match support {
-        ReactionSupport::Native => "native",
-        ReactionSupport::Text => "text",
-        ReactionSupport::NeedsPhoneUpdate => "needs_phone_update",
-        ReactionSupport::None => NONE,
+        ReactionSupport::Native => ReactionSupportDto::Native,
+        ReactionSupport::Text => ReactionSupportDto::Text,
+        ReactionSupport::NeedsPhoneUpdate => ReactionSupportDto::NeedsPhoneUpdate,
+        ReactionSupport::None => ReactionSupportDto::None,
     }
 }
 
@@ -235,7 +243,7 @@ fn text_reactions(
         return ConversationReactions::none();
     };
     ConversationReactions {
-        support: "text",
+        support: ReactionSupportDto::Text,
         gateway_id: Some(gateway.id.clone()),
         gateway_online: gateway.online,
         text_route: Some(GatewayRoute::Carrier {
@@ -299,7 +307,7 @@ pub fn react(
         Some(conversation) => conversation_reactions(&conversation, gateways, stored.as_ref()),
         None => ConversationReactions::none(),
     };
-    if message.reactable.is_some() && routing.support == NONE {
+    if message.reactable.is_some() && routing.support == ReactionSupportDto::None {
         return Ok(unsupported());
     }
     let (gateway_online, text_route) = match message.reactable {
@@ -484,10 +492,13 @@ mod tests {
         );
         assert_eq!(reactable_wire(None), None);
         for (support, expected) in [
-            (ReactionSupport::Native, "native"),
-            (ReactionSupport::Text, "text"),
-            (ReactionSupport::NeedsPhoneUpdate, "needs_phone_update"),
-            (ReactionSupport::None, "none"),
+            (ReactionSupport::Native, ReactionSupportDto::Native),
+            (ReactionSupport::Text, ReactionSupportDto::Text),
+            (
+                ReactionSupport::NeedsPhoneUpdate,
+                ReactionSupportDto::NeedsPhoneUpdate,
+            ),
+            (ReactionSupport::None, ReactionSupportDto::None),
         ] {
             assert_eq!(support_wire(support), expected);
         }
@@ -530,7 +541,7 @@ mod tests {
             &gateways,
             None,
         );
-        assert_eq!(routing.support, "native");
+        assert_eq!(routing.support, ReactionSupportDto::Native);
         assert_eq!(routing.gateway_id.as_deref(), Some(GATEWAY));
         assert!(!routing.gateway_online);
         assert!(routing.text_route.is_none());
@@ -555,13 +566,13 @@ mod tests {
 
         let stored = carrier(GATEWAY, "sim-1");
         let routing = conversation_reactions(&text, &reported, Some(&stored));
-        assert_eq!(routing.support, "text");
+        assert_eq!(routing.support, ReactionSupportDto::Text);
         assert_eq!(routing.text_route, Some(stored));
         assert!(routing.gateway_online);
 
         let stale = carrier(GATEWAY, "sim-9");
         let routing = conversation_reactions(&text, &reported, Some(&stale));
-        assert_eq!(routing.support, "none");
+        assert_eq!(routing.support, ReactionSupportDto::None);
         assert!(routing.text_route.is_none());
     }
 
@@ -610,14 +621,17 @@ mod tests {
     fn a_single_reported_gateway_is_the_implicit_text_route() {
         let text = conversation(ReactionSupport::Text, None, ConversationFolder::Inbox);
         let routing = conversation_reactions(&text, &[gateway(GATEWAY, "sim-1", true)], None);
-        assert_eq!(routing.support, "text");
+        assert_eq!(routing.support, ReactionSupportDto::Text);
         assert_eq!(routing.gateway_id.as_deref(), Some(GATEWAY));
 
         let two = [
             gateway(GATEWAY, "sim-1", true),
             gateway(GATEWAY, "sim-2", true),
         ];
-        assert_eq!(conversation_reactions(&text, &two, None).support, "none");
+        assert_eq!(
+            conversation_reactions(&text, &two, None).support,
+            ReactionSupportDto::None
+        );
     }
 
     #[test]
@@ -627,13 +641,13 @@ mod tests {
         no_sms.supports_sms = false;
         assert_eq!(
             conversation_reactions(&text, &[no_sms], None).support,
-            "none"
+            ReactionSupportDto::None
         );
 
         let spam = conversation(ReactionSupport::Text, None, ConversationFolder::Spam);
         assert_eq!(
             conversation_reactions(&spam, &[gateway(GATEWAY, "sim-1", true)], None).support,
-            "none"
+            ReactionSupportDto::None
         );
     }
 }

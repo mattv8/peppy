@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ConversationView, DesktopSnapshot } from "@peppy/desktop-ui/bridge-contracts";
 import { groupDraftFields, normalizeGroupSnapshot, parseGroupView, parseSendResult, parseTypingSignal } from "./group-payload";
+import { conversationWireDefaults } from "../../desktop/src/test-support/conversationWireDefaults";
 
 /** Wire fixtures, one per UX state in ux-spec §12 and contracts §6. */
 const fixtures = {
@@ -14,16 +15,16 @@ const fixtures = {
   longName: { name: "Ünïcode 🌊 ".repeat(9), members: ["+15551230001"], state: "live", memberRevision: "3", canCreate: false, createNeedsConfirmation: false },
 };
 
-const conversation = (group?: unknown): ConversationView => ({ id: "conv-group", name: "Weekend crew", preview: "", unread: 0, messages: [], participants: ["+15551230001", "+15551230002"], ...(group === undefined ? {} : { group }) }) as ConversationView;
+const conversation = (group?: unknown): ConversationView => ({ ...conversationWireDefaults, id: "conv-group", name: "Weekend crew", preview: "", unread: 0, messages: [], participants: ["+15551230001", "+15551230002"], ...(group === undefined ? {} : { group }) }) as ConversationView;
 const snapshot = (conversations: ConversationView[]): DesktopSnapshot => ({ version: "1", mode: "browser", conversations } as unknown as DesktopSnapshot);
 
 describe("parseGroupView", () => {
-  it.each(Object.entries(fixtures))("accepts the %s group fixture unchanged", (_, fixture) => {
-    expect(parseGroupView(fixture)).toEqual(fixture);
+  it.each(Object.entries(fixtures))("accepts the %s group fixture", (_, fixture) => {
+    expect(parseGroupView(fixture)).toEqual({ ...fixture, notices: [] });
   });
 
   it("drops fields the contract does not define", () => {
-    expect(parseGroupView({ ...fixtures.liveNamed, secret: "x" })).toEqual(fixtures.liveNamed);
+    expect(parseGroupView({ ...fixtures.liveNamed, secret: "x" })).toEqual({ ...fixtures.liveNamed, notices: [] });
   });
 
   it("keeps the core's notices and drops only the notices it cannot describe", () => {
@@ -46,8 +47,9 @@ describe("parseGroupView", () => {
     ]);
   });
 
-  it("omits notices when the core sent none", () => {
-    expect(parseGroupView(fixtures.liveNamed)).not.toHaveProperty("notices");
+  it("defaults missing or non-array notices to an empty list", () => {
+    expect(parseGroupView(fixtures.liveNamed)?.notices).toEqual([]);
+    expect(parseGroupView({ ...fixtures.liveNamed, notices: "invalid" })?.notices).toEqual([]);
   });
 
   it("omits an absent name instead of inventing one", () => {
@@ -81,7 +83,7 @@ describe("normalizeGroupSnapshot", () => {
       { ...conversation(), id: "conv-plain" },
     ]));
     expect(result.conversations.map((item) => item.id)).toEqual(["conv-group", "conv-bad", "conv-plain"]);
-    expect(result.conversations[0].group).toEqual(fixtures.liveNamed);
+    expect(result.conversations[0].group).toEqual({ ...fixtures.liveNamed, notices: [] });
     expect(result.conversations[1]).not.toHaveProperty("group");
     expect(result.conversations[2]).not.toHaveProperty("group");
   });

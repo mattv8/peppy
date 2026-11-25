@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { conversationWireDefaults } from "./test-support/conversationWireDefaults";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GatewayView, MessageView, SendRecovery } from "@peppy/desktop-ui/bridge-contracts";
@@ -50,7 +51,7 @@ describe("MessageMeta send recovery", () => {
     const latest = outgoing(undefined, { id: "copy", status: "server-accepted" });
     const gateway: GatewayView = { id: "phone", name: "Phone", simId: "sim", online: true, simulated: false, supportsSms: true, supportsMms: true, availability: "unknown", settingUp: false, wakeRoute: false };
     vi.spyOn(bridge, "send_again").mockResolvedValue({ messageId: "copy" });
-    const build = (grouped: boolean) => <SendAgainHost conversation={{ id: "c", name: "Test", preview: "", unread: 0, messages: grouped ? [first, latest] : [first] }} gateways={[gateway]} routeLabel={() => ({ statusLabel: "Connected" })} serverOffline={false} onGoToLatest={() => {}}>
+    const build = (grouped: boolean) => <SendAgainHost conversation={{ ...conversationWireDefaults, id: "c", name: "Test", preview: "", unread: 0, messages: grouped ? [first, latest] : [first] }} gateways={[gateway]} routeLabel={() => ({ statusLabel: "Connected" })} serverOffline={false} onGoToLatest={() => {}}>
       {grouped ? <MessageMeta message={latest} resend={{ attempts: [first, latest], earlierRisk: "none" }} /> : <MessageMeta message={first} />}
     </SendAgainHost>;
     const view = render(build(false));

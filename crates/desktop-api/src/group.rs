@@ -6,15 +6,34 @@ use peppy_client_core::{
 };
 use serde::Serialize;
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupState {
+    Unlinked,
+    Proving,
+    Live,
+    Paused,
+    Withdrawn,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupNoticeKindView {
+    Renamed,
+    Added,
+    Removed,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupView {
     /// Omitted when the group has no name; an empty name is never sent.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub name: Option<String>,
     /// Other members, canonical E.164, without the user's own addresses.
     pub members: Vec<String>,
-    pub state: &'static str,
+    pub state: GroupState,
     /// Decimal `u64`; the composer echoes it back as `expectedMemberRevision`.
     pub member_revision: String,
     pub can_create: bool,
@@ -22,13 +41,15 @@ pub struct GroupView {
     pub notices: Vec<GroupNoticeView>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupNoticeView {
-    pub kind: &'static str,
+    pub kind: GroupNoticeKindView,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub member: Option<String>,
     /// Decimal epoch milliseconds.
     pub at_ms: String,
@@ -66,25 +87,25 @@ fn group_view(view: CoreGroupView, notices: &[GroupNotice]) -> GroupView {
     }
 }
 
-pub fn group_state_label(state: GroupLinkState) -> &'static str {
+pub fn group_state_label(state: GroupLinkState) -> GroupState {
     match state {
-        GroupLinkState::Unlinked => "unlinked",
-        GroupLinkState::Proving => "proving",
-        GroupLinkState::Live => "live",
-        GroupLinkState::Paused => "paused",
-        GroupLinkState::Withdrawn => "withdrawn",
+        GroupLinkState::Unlinked => GroupState::Unlinked,
+        GroupLinkState::Proving => GroupState::Proving,
+        GroupLinkState::Live => GroupState::Live,
+        GroupLinkState::Paused => GroupState::Paused,
+        GroupLinkState::Withdrawn => GroupState::Withdrawn,
     }
 }
 
 /// One notice per member change. A member notice without its member is dropped, never guessed.
 fn notice_view(notice: &GroupNotice) -> Option<GroupNoticeView> {
     let kind = match notice.kind {
-        GroupNoticeKind::Renamed => "renamed",
-        GroupNoticeKind::Added if notice.member.is_some() => "added",
-        GroupNoticeKind::Removed if notice.member.is_some() => "removed",
+        GroupNoticeKind::Renamed => GroupNoticeKindView::Renamed,
+        GroupNoticeKind::Added if notice.member.is_some() => GroupNoticeKindView::Added,
+        GroupNoticeKind::Removed if notice.member.is_some() => GroupNoticeKindView::Removed,
         GroupNoticeKind::Added | GroupNoticeKind::Removed => return None,
     };
-    let is_member_notice = kind != "renamed";
+    let is_member_notice = kind != GroupNoticeKindView::Renamed;
     Some(GroupNoticeView {
         kind,
         name: notice.name.clone().filter(|name| !name.is_empty()),
@@ -184,7 +205,13 @@ mod tests {
 
         assert_eq!(
             labels,
-            ["unlinked", "proving", "live", "paused", "withdrawn"]
+            [
+                GroupState::Unlinked,
+                GroupState::Proving,
+                GroupState::Live,
+                GroupState::Paused,
+                GroupState::Withdrawn
+            ]
         );
     }
 
@@ -223,7 +250,7 @@ mod tests {
         ))
         .unwrap();
 
-        assert_eq!(value.kind, "renamed");
+        assert_eq!(value.kind, GroupNoticeKindView::Renamed);
         assert_eq!(value.member, None);
     }
 

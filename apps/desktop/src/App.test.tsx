@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { conversationWireDefaults } from "./test-support/conversationWireDefaults";
 import { StrictMode } from "react";
 import {
   act,
@@ -292,7 +293,7 @@ describe("group sender attribution", () => {
     host.conversations[0] = {
       ...host.conversations[0],
       participants: ["+18015551234"],
-      group: { members: ["+18015551234", "+18015551235"], state: "unlinked", memberRevision: "3", canCreate: false, createNeedsConfirmation: false },
+      group: { members: ["+18015551234", "+18015551235"], state: "unlinked", memberRevision: "3", canCreate: false, createNeedsConfirmation: false, notices: [] },
       messages: [
         { id: "mms-solo-first", revision: "1", sender: "other", senderAddress: "+18015551234", body: "Solo first", timestamp: "1788434460000", transport: "mms", attachments: [] },
         { id: "mms-solo-last", revision: "1", sender: "other", senderAddress: "+18015551234", body: "Solo last", timestamp: "1788434461000", transport: "mms", attachments: [] },
@@ -350,7 +351,7 @@ describe("conversation add-contact action", () => {
     expect(screen.queryByRole("button", { name: /Add .* to contacts/ })).not.toBeInTheDocument();
     cleanup();
 
-    host.conversations[0] = { ...host.conversations[0], draftOnly: undefined };
+    host.conversations[0] = { ...host.conversations[0], draftOnly: false };
     host.contactBooks = [{ ...writableBook, capabilities: { ...writableBook.capabilities, canWrite: false } }];
     await renderApp({ loaded: () => screen.findByText("Hello from Aurora") });
     expect(screen.queryByRole("button", { name: /Add .* to contacts/ })).not.toBeInTheDocument();
@@ -2742,8 +2743,8 @@ describe("new-recipient drafts", () => {
   });
 
   it("reuses a singleton or local draft but never a group conversation", async () => {
-    host.conversations.push({ id: "single", name: "Single", preview: "", unread: 0, messages: [], participants: ["+12025550100"] });
-    host.conversations.push({ id: "group", name: "Group", preview: "", unread: 0, messages: [], participants: ["+12025550101", "+12025550102"] });
+    host.conversations.push({ ...conversationWireDefaults, id: "single", name: "Single", preview: "", unread: 0, messages: [], participants: ["+12025550100"] });
+    host.conversations.push({ ...conversationWireDefaults, id: "group", name: "Group", preview: "", unread: 0, messages: [], participants: ["+12025550101", "+12025550102"] });
     render(<App />);
     const omni = await screen.findByRole("combobox", { name: "Search Peppy" });
 
@@ -2984,6 +2985,7 @@ describe("new-recipient drafts", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
 
     host.conversations.push({
+      ...conversationWireDefaults,
       id: "conv-new-1",
       name: "+12025550100",
       preview: "Incoming while composing",
@@ -3976,6 +3978,7 @@ describe("draft durability", () => {
 
     host.drafts.delete("terminal-source");
     host.conversations = [{
+      ...conversationWireDefaults,
       id: "canonical-conversation",
       name: "Canonical recipient",
       preview: "sent from another device",
@@ -4013,6 +4016,7 @@ describe("draft durability", () => {
 
     host.drafts.delete("terminal-source");
     host.conversations = [{
+      ...conversationWireDefaults,
       id: "canonical-conversation",
       name: "Canonical recipient",
       preview: "old caption",
@@ -7423,6 +7427,7 @@ describe("development fixture bridge", () => {
 describe("display-only contact names", () => {
   it("shows resolved names and photos without changing stored names or recipient IDs", async () => {
     host.conversations.push({
+      ...conversationWireDefaults,
       id: "ada",
       name: "+12025550100",
       preview: "Ping",
@@ -7445,9 +7450,10 @@ describe("display-only contact names", () => {
 
   it("uses person and group identities from raw conversation addresses", async () => {
     host.conversations.push(
-      { id: "short-code", name: "5556", preview: "Ping", unread: 0, messages: [] },
-      { id: "unresolved-number", name: "+18015551234", preview: "Ping", unread: 0, participants: ["+18015551234"], messages: [] },
+      { ...conversationWireDefaults, id: "short-code", name: "5556", preview: "Ping", unread: 0, messages: [] },
+      { ...conversationWireDefaults, id: "unresolved-number", name: "+18015551234", preview: "Ping", unread: 0, participants: ["+18015551234"], messages: [] },
       {
+        ...conversationWireDefaults,
         id: "group-addresses",
         name: "+18015551234, +15555550199",
         preview: "Group ping",

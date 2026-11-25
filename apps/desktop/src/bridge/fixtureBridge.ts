@@ -35,6 +35,17 @@ import type { DesktopBridge } from "./bridge";
 import { normalizePhoneNumber } from "@peppy/desktop-ui";
 import { fixtureRcsMediaMessages } from "./rcsMediaFixtures";
 
+type FixtureConversationInput = Omit<ConversationView, "recipientlessDraft" | "draftOnly" | "pinned" | "folder" | "canUnblock"> & Partial<Pick<ConversationView, "recipientlessDraft" | "draftOnly" | "pinned" | "folder" | "canUnblock">>;
+
+const fixtureConversation = (conversation: FixtureConversationInput): ConversationView => ({
+  recipientlessDraft: false,
+  draftOnly: false,
+  pinned: false,
+  folder: "inbox",
+  canUnblock: false,
+  ...conversation,
+});
+
 const fixtureMessages: MessageView[] = [
   { id: "message-aurora-1", revision: "1", sender: "other", body: "Can you send over the estimate?", timestamp: "1788434460000", attachments: [] },
   { id: "message-aurora-2", revision: "2", sender: "self", body: "I'll have it to you shortly.\nIt was received by the phone and can still be cancelled.", timestamp: "1788434580000", status: "gateway-persisted", statusAt: "1788434640000", subject: "Fixture subject", attachments: [{ id: "attachment-aurora-1", name: "fixture-photo.png", mediaType: "image/png", byteSize: 67, state: "ready", previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" }], sendCancellation: { state: "none", canCancel: true, requiresGatewayUpdate: false } },
@@ -55,7 +66,7 @@ function composeFixtureReactionText(body: string, emoji: string): string {
 }
 
 /** Reaction states from spec 4.8 and section 9, one conversation per route situation. */
-export const fixtureReactionConversations: ConversationView[] = [
+export const fixtureReactionConversations: ConversationView[] = ([
   { id: "conv-reaction-states", name: "Reaction states", preview: "Are we still on for 5 tonight?", unread: 0, reactionSupport: "native", reactionGatewayId: "gateway-pixel8", participants: ["Sam Rivera", "Alex Chen", "Jo Lee", "Maya Ortiz", "Priya Shah"], messages: [
     { id: "reaction-group-dinner", revision: "1", sender: "other", senderAddress: "+15555550142", body: "Dinner at 7 at the usual place?", timestamp: "1788434100000", transport: "rcs", attachments: [], reactable: "native", reactions: [
       { emoji: "👍", actors: [{ self: false, address: "+15555550101" }, { self: false, address: "+15555550102" }, { self: false, address: "+15555550103" }] },
@@ -87,7 +98,7 @@ export const fixtureReactionConversations: ConversationView[] = [
   { id: "conv-phone-offline", name: "Lee Park", preview: "Are you coming tonight?", unread: 0, reactionSupport: "native", reactionGatewayId: "gateway-offline", messages: [
     { id: "reaction-offline", revision: "1", sender: "other", senderAddress: "+15555550170", body: "Are you coming tonight?", timestamp: "1788434800000", transport: "rcs", attachments: [], reactable: "native" },
   ] },
-];
+] satisfies FixtureConversationInput[]).map(fixtureConversation);
 const fixtureChatNotificationIcon = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAaUlEQVR42mPQrPz/fyAxw6gDkDmXXiAwLg3UUoMzBOjtCAZaWkCMGgZaW0BIDd5ESA9HEMwFtHYEUdmQ2o7Amw3p4QiC5QC9yoDRgmi0IBotiEYLotGCaLQgGi2IRguiwVcQjfYNBwIDAAwPd9Z4B+yXAAAAAElFTkSuQmCC";
 const fixtureMailNotificationIcon = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAaUlEQVR42mP4nx3+fyAxw6gDUAQe3kJgXJqopQZnCNDZEQw0tYAINQw09yUBNfgTIR0cQTgX0NgRxGVDajsCbzakhyMIlgN0KgNGC6LRgmi0IBotiEYLotGCaLQgGi2IBmFBNNo3HAAMAKbz3HgryQcuAAAAAElFTkSuQmCC";
 /** Tests only: adds a message (for example one in a send-recovery state) to a fixture conversation. Not used by the app. */
@@ -117,7 +128,7 @@ export function mergeFixtureConversation(from: string, to: string): () => void {
   };
 }
 
-const fixtureSnapshot: DesktopSnapshot = { writesPaused: false, version: "1", mode: "fixture", connection: { state: "connected", origin: "https://push.example.com" }, encryption: { state: "unlocked" }, gateways: [{ id: "gateway-pixel8", name: "Pixel 8", simId: "sim-1", online: true, simulated: true, supportsSms: true, supportsMms: true, availability: "unknown", settingUp: false, wakeRoute: false, mmsContentVersion: 2, mmsMaxBytes: 300 * 1024, mmsLimitSource: "fallback", mmsMaxRecipients: 20 }], conversations: [{ id: "conv-aurora", name: "Aurora Chen", preview: "Can you send over the estimate?", unread: 2, messages: fixtureMessages }, { id: "conv-river", name: "River Park", preview: "Attachment received", unread: 0, participants: ["River Park", "Mina Torres"], messages: [{ id: "message-river-1", revision: "1", sender: "other", body: "Attachment received", timestamp: "1788348060000", transport: "mms", subject: "Estimate", attachments: [{ id: "attachment-river-1", name: "estimate.pdf", mediaType: "application/pdf", byteSize: 182000, state: "ready", transfer: "download", retryable: true }] }] }, { id: "conv-short-code", name: "5556", preview: "Short code", unread: 0, messages: [] }, { id: "conv-unresolved-number", name: "+18015551234", preview: "Unresolved number", unread: 0, participants: ["+18015551234"], messages: [] }, { id: "conv-group-numbers", name: "+18015551234, +15555550199", preview: "Group conversation", unread: 0, participants: ["+18015551234", "+15555550199"], messages: [] }], activeConversationId: "conv-aurora", draft: undefined, head: { enabled: true, capability: "supported" }, deviceRole: "owner", pendingCount: 1, quarantineCount: 0, notifications: [{ target: { sourceDeviceId: "gateway-pixel8", notificationKey: "chat-42", lifetime: "1" }, packageName: "com.example.chat", appName: "Chat", appIconPngBase64: fixtureChatNotificationIcon, title: "Morgan", text: "Are we still meeting after lunch?", postedAt: Date.now() - 120000, dismissible: true, seen: false, dismissalPending: false }, { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "chat-43", lifetime: "1" }, packageName: "com.example.chat", appName: "Chat", appIconPngBase64: fixtureChatNotificationIcon, title: "Verification", text: "Your verification code is 839201.", oneTimeCode: "839201", postedAt: Date.now() - 180000, dismissible: true, seen: false, dismissalPending: false }, { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "mail-7", lifetime: "1" }, packageName: "com.example.mail", appName: "Mail", appIconPngBase64: fixtureMailNotificationIcon, title: "Project update", text: "A detailed update is ready for your review.", postedAt: Date.now() - 3600000, dismissible: true, seen: false, dismissalPending: false }], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full", muteWithHeads: true }, notificationDismissalBlocks: [] };
+const fixtureSnapshot: DesktopSnapshot = { writesPaused: false, version: "1", mode: "fixture", connection: { state: "connected", origin: "https://push.example.com" }, encryption: { state: "unlocked" }, gateways: [{ id: "gateway-pixel8", name: "Pixel 8", simId: "sim-1", online: true, simulated: true, supportsSms: true, supportsMms: true, availability: "unknown", settingUp: false, wakeRoute: false, mmsContentVersion: 2, mmsMaxBytes: 300 * 1024, mmsLimitSource: "fallback", mmsMaxRecipients: 20 }], conversations: ([{ id: "conv-aurora", name: "Aurora Chen", preview: "Can you send over the estimate?", unread: 2, messages: fixtureMessages }, { id: "conv-river", name: "River Park", preview: "Attachment received", unread: 0, participants: ["River Park", "Mina Torres"], messages: [{ id: "message-river-1", revision: "1", sender: "other", body: "Attachment received", timestamp: "1788348060000", transport: "mms", subject: "Estimate", attachments: [{ id: "attachment-river-1", name: "estimate.pdf", mediaType: "application/pdf", byteSize: 182000, state: "ready", transfer: "download", retryable: true }] }] }, { id: "conv-short-code", name: "5556", preview: "Short code", unread: 0, messages: [] }, { id: "conv-unresolved-number", name: "+18015551234", preview: "Unresolved number", unread: 0, participants: ["+18015551234"], messages: [] }, { id: "conv-group-numbers", name: "+18015551234, +15555550199", preview: "Group conversation", unread: 0, participants: ["+18015551234", "+15555550199"], messages: [] }] satisfies FixtureConversationInput[]).map(fixtureConversation), activeConversationId: "conv-aurora", draft: undefined, head: { enabled: true, capability: "supported" }, deviceRole: "owner", pendingCount: 1, quarantineCount: 0, notifications: [{ target: { sourceDeviceId: "gateway-pixel8", notificationKey: "chat-42", lifetime: "1" }, packageName: "com.example.chat", appName: "Chat", appIconPngBase64: fixtureChatNotificationIcon, title: "Morgan", text: "Are we still meeting after lunch?", postedAt: Date.now() - 120000, dismissible: true, seen: false, dismissalPending: false }, { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "chat-43", lifetime: "1" }, packageName: "com.example.chat", appName: "Chat", appIconPngBase64: fixtureChatNotificationIcon, title: "Verification", text: "Your verification code is 839201.", oneTimeCode: "839201", postedAt: Date.now() - 180000, dismissible: true, seen: false, dismissalPending: false }, { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "mail-7", lifetime: "1" }, packageName: "com.example.mail", appName: "Mail", appIconPngBase64: fixtureMailNotificationIcon, title: "Project update", text: "A detailed update is ready for your review.", postedAt: Date.now() - 3600000, dismissible: true, seen: false, dismissalPending: false }], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full", muteWithHeads: true }, notificationDismissalBlocks: [] };
 fixtureSnapshot.notifications.push(
   { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "slack-1", lifetime: "1" }, packageName: "com.slack", appName: "Slack", title: "Design", text: "Alex mentioned you in #product.", postedAt: Date.now() - 900000, dismissible: true, seen: false, dismissalPending: false },
   { target: { sourceDeviceId: "gateway-work", notificationKey: "calendar-1", lifetime: "1" }, packageName: "com.google.android.calendar", appName: "Calendar", title: "Planning session", text: "Starts tomorrow at 9:00 AM.", postedAt: Date.now() - 26 * 60 * 60 * 1000, dismissible: true, seen: true, dismissalPending: false },
@@ -154,18 +165,18 @@ fixtureSnapshot.contactResolution = {
 };
 fixtureSnapshot.contactsPendingCount = 1;
 fixtureSnapshot.conversations.push(...fixtureReactionConversations);
-fixtureSnapshot.conversations.push({ id: "conv-sam", name: "Sam Rivera", preview: "Reacted 👍 to “a message from last year that is not loaded…”", unread: 0, participants: ["+15555550142"], messages: fixtureReactionMessages });
+fixtureSnapshot.conversations.push(fixtureConversation({ id: "conv-sam", name: "Sam Rivera", preview: "Reacted 👍 to “a message from last year that is not loaded…”", unread: 0, participants: ["+15555550142"], messages: fixtureReactionMessages }));
 
 // Group fixtures, one per UX state (ux-spec §2, §4, §7). Member addresses are fixture-only.
 const fixtureGroupMembers = ["+15555550142", "+15555550199"];
-const fixtureGroupNamed = (name: string, group: Omit<GroupView, "name" | "members" | "canCreate" | "createNeedsConfirmation">): GroupView => ({ name, members: fixtureGroupMembers, canCreate: false, createNeedsConfirmation: false, ...group });
-fixtureSnapshot.conversations.push(
+const fixtureGroupNamed = (name: string, group: Omit<GroupView, "name" | "members" | "canCreate" | "createNeedsConfirmation" | "notices">): GroupView => ({ name, members: fixtureGroupMembers, canCreate: false, createNeedsConfirmation: false, notices: [], ...group });
+fixtureSnapshot.conversations.push(...([
   { id: "conv-group-live", name: "Weekend crew", preview: "Saturday works", unread: 0, participants: fixtureGroupMembers, group: { ...fixtureGroupNamed("Weekend crew", { state: "live", memberRevision: "3" }), notices: [{ kind: "added", member: "+15555550199", atMs: "1788434100000" }, { kind: "renamed", name: "Weekend crew", atMs: "1788434150000" }] }, messages: [
     { id: "message-group-live-1", revision: "1", sender: "other", senderAddress: "+15555550142", body: "Plans for Saturday?", timestamp: "1788434200000", transport: "rcs", attachments: [] },
     { id: "message-group-live-2", revision: "1", sender: "other", body: "Sent from a number that is not in the roster", timestamp: "1788434300000", transport: "rcs", attachments: [] },
     { id: "message-group-live-3", revision: "1", sender: "self", body: "Saturday works", timestamp: "1788434400000", transport: "rcs", status: "delivery-confirmed", attachments: [] },
   ] },
-  { id: "conv-group-unnamed", name: "+15555550142, +15555550199", preview: "Unnamed group", unread: 0, participants: fixtureGroupMembers, group: { members: fixtureGroupMembers, state: "live", memberRevision: "1", canCreate: false, createNeedsConfirmation: false }, messages: [] },
+  { id: "conv-group-unnamed", name: "+15555550142, +15555550199", preview: "Unnamed group", unread: 0, participants: fixtureGroupMembers, group: { members: fixtureGroupMembers, state: "live", memberRevision: "1", canCreate: false, createNeedsConfirmation: false, notices: [] }, messages: [] },
   { id: "conv-group-paused", name: "Project team", preview: "Members changed", unread: 0, participants: fixtureGroupMembers, group: { ...fixtureGroupNamed("Project team", { state: "paused", memberRevision: "5" }) }, messages: [
     { id: "message-group-paused-1", revision: "1", sender: "other", senderAddress: "+15555550199", body: "Moving the review to Monday", timestamp: "1788434500000", transport: "rcs", attachments: [] },
   ] },
@@ -173,10 +184,10 @@ fixtureSnapshot.conversations.push(
     { id: "message-group-withdrawn-1", revision: "1", sender: "other", senderAddress: "+15555550142", body: "Thanks everyone", timestamp: "1788434600000", transport: "rcs", attachments: [] },
   ] },
   { id: "conv-group-long-name", name: "Long group name for the header and details dialog", preview: "Long name", unread: 0, participants: fixtureGroupMembers, group: { ...fixtureGroupNamed("Long group name for the header and details dialog that keeps going well past the header width and wraps inside the dialog", { state: "live", memberRevision: "2" }) }, messages: [] },
-);
-fixtureSnapshot.conversations.find(conversation => conversation.id === "conv-group-numbers")!.group = { members: ["+18015551234", "+15555550199"], state: "unlinked", memberRevision: "1", canCreate: true, createNeedsConfirmation: false };
+] satisfies FixtureConversationInput[]).map(fixtureConversation));
+fixtureSnapshot.conversations.find(conversation => conversation.id === "conv-group-numbers")!.group = { members: ["+18015551234", "+15555550199"], state: "unlinked", memberRevision: "1", canCreate: true, createNeedsConfirmation: false, notices: [] };
 // RCS media UX states (incoming placeholders and outgoing send statuses); see rcsMediaFixtures.ts.
-fixtureSnapshot.conversations.push({ id: "conv-rcs-media", name: "Google Messages media", preview: "Ten files from the trip", unread: 0, participants: ["+15555550142"], messages: fixtureRcsMediaMessages });
+fixtureSnapshot.conversations.push(fixtureConversation({ id: "conv-rcs-media", name: "Google Messages media", preview: "Ten files from the trip", unread: 0, participants: ["+15555550142"], messages: fixtureRcsMediaMessages }));
 // Send-again UX states (resend-ux spec, Fixtures). Chains link only through sentAgain; ids are fixture-only.
 const fixtureResendParticipants = ["+15555550188"];
 const fixtureResendMessages: MessageView[] = [
@@ -193,7 +204,7 @@ const fixtureResendMessages: MessageView[] = [
   { id: "fixture-resend-gap-reply", revision: "1", sender: "other", senderAddress: "+15555550188", body: "Yes, see you then.", timestamp: "1788436600000", transport: "sms", attachments: [] },
   { id: "fixture-resend-gap-copy", revision: "1", sender: "self", body: "Is the 3pm still on?", timestamp: "1788436660000", transport: "sms", participants: fixtureResendParticipants, status: "server-accepted", statusAt: "1788436690000", attachments: [] },
 ];
-fixtureSnapshot.conversations.push({ id: "conv-resend", name: "Resend states", preview: "Is the 3pm still on?", unread: 0, participants: fixtureResendParticipants, messages: fixtureResendMessages });
+fixtureSnapshot.conversations.push(fixtureConversation({ id: "conv-resend", name: "Resend states", preview: "Is the 3pm still on?", unread: 0, participants: fixtureResendParticipants, messages: fixtureResendMessages }));
 
 /** Fixture drafts keyed by conversation ID; mirrors the native compose-draft save contract (session.rs). */
 const fixtureDrafts = new Map<string, Draft>();
@@ -379,7 +390,7 @@ const fixtureConversationIds = () => [...fixtureSnapshot.conversations.map(c => 
 /** Draft-only conversations are listed like the host lists them. */
 const fixtureDraftConversations = (): ConversationView[] => [...fixtureDrafts.values()]
   .filter(draft => !fixtureSnapshot.conversations.some(c => c.id === draft.conversationId))
-  .map(draft => ({ id: draft.conversationId, name: draft.recipientIds.join(", ") || "New message", preview: draft.text ? `Draft: ${draft.text.slice(0, 80)}` : "Draft", unread: 0, messages: [], draftOnly: true, recipientlessDraft: draft.recipientIds.length === 0 }));
+  .map(draft => fixtureConversation({ id: draft.conversationId, name: draft.recipientIds.join(", ") || "New message", preview: draft.text ? `Draft: ${draft.text.slice(0, 80)}` : "Draft", unread: 0, messages: [], draftOnly: true, recipientlessDraft: draft.recipientIds.length === 0 }));
 /**
  * Empty draft ID: create the draft (or attach to the conversation's existing one); an empty
  * conversation ID also creates a new conversation. Saves are CAS on a numeric revision.

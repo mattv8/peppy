@@ -385,7 +385,7 @@ describe("member-change media recovery", () => {
       ...(mixed ? [{ id: "never-sent", name: "rest.pdf", mediaType: "application/pdf", byteSize: 1024, state: "ready" as const, index: 3, rcsSendStatus: "not_sent" as const }] : []),
     ];
     snapshot.draft = { ...snapshot.draft!, text: "", attachmentIds: [] };
-    snapshot.conversations = snapshot.conversations.map(c => c.id === snapshot.activeConversationId ? { ...c, participants: ["+15555550101", "+15555550102"], group: { members: ["+15555550101", "+15555550102"], memberRevision: "reviewed-7", state: "live", canCreate: false, createNeedsConfirmation: false }, messages: [{ id: "review-media", revision: "1", sender: "self", body: "Original caption", timestamp: "2026-01-01", transport: "rcs", attachments }] } : c);
+    snapshot.conversations = snapshot.conversations.map(c => c.id === snapshot.activeConversationId ? { ...c, participants: ["+15555550101", "+15555550102"], group: { members: ["+15555550101", "+15555550102"], memberRevision: "reviewed-7", state: "live", canCreate: false, createNeedsConfirmation: false, notices: [] }, messages: [{ id: "review-media", revision: "1", sender: "self", body: "Original caption", timestamp: "2026-01-01", transport: "rcs", attachments }] } : c);
     const sendDraft = vi.spyOn(bridge, "send_draft");
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: peppyCopy.group_message_edit_resend }));
@@ -409,7 +409,7 @@ describe("member-change media recovery", () => {
     snapshot.conversations = snapshot.conversations.map(c => c.id === snapshot.activeConversationId ? {
       ...c,
       participants: ["+15555550101", "+15555550102"],
-      group: { members: ["+15555550101", "+15555550102"], memberRevision: "reviewed-7", state: "live", canCreate: false, createNeedsConfirmation: false },
+      group: { members: ["+15555550101", "+15555550102"], memberRevision: "reviewed-7", state: "live", canCreate: false, createNeedsConfirmation: false, notices: [] },
       messages: ["source-one", "source-two"].map((id, index) => ({
         id,
         revision: "1",

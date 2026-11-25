@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { conversationWireDefaults } from "../test-support/conversationWireDefaults";
 
 import type { DesktopSnapshot } from "../bridge/bridge";
 import { rcsSendBlock } from "./rcsRoute";
@@ -27,7 +28,7 @@ describe("notification quick-reply RCS policy corpus", () => {
       connection: { state: "connected" },
       encryption: { state: "unlocked" },
       gateways: [{ id: "gateway", name: "Gateway", simId: "sim", online: true, simulated: false, supportsSms: true, supportsMms: true, availability: "unknown", settingUp: false, wakeRoute: false }],
-      conversations: [{ id: "conversation", name: "Conversation", preview: "", unread: 0, messages: [], participants: ["recipient"], rcsEncryption: fixture.knownRcs === false ? undefined : true }],
+      conversations: [{ ...conversationWireDefaults, id: "conversation", name: "Conversation", preview: "", unread: 0, messages: [], participants: ["recipient"], rcsEncryption: fixture.knownRcs === false ? undefined : true }],
       head: { enabled: false, capability: "unsupported" },
       pendingCount: 0,
       quarantineCount: 0,

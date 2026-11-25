@@ -30,6 +30,8 @@ import type { AttachmentView, AttachmentState, DraftAttachmentState, MediaMetada
 export type { AttachmentState, AttachmentView, DraftAttachmentState, MediaMetadataView, MessageReactionView, MessageStatus, MessageView, OwnReactionRequestView, RcsAttachmentState, RcsSendStatus, ReactionActorView, ReactionRoute, SendCancellationView, SendRecoveryKind } from "@peppy/generated/message";
 import type { DraftView } from "@peppy/generated/draft";
 export type { DraftConflictView, DraftSyncView } from "@peppy/generated/draft";
+import type { ConversationFolder, ConversationView, HistoryPage } from "@peppy/generated/conversation";
+export type { ConversationFolder, ConversationFolderReason, ConversationView, GroupNoticeKindView, GroupNoticeView, GroupState, GroupView, HistoryPage, ReactionSupport, SenderUnblockStatus } from "@peppy/generated/conversation";
 /** Message-family wire types, generated from desktop-api. `SendRecovery` is the name the UI uses for `SendRecoveryView`. */
 export type SendRecovery = SendRecoveryView;
 import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceStatus, McpGrantView, McpScope, WebhookCreated, WebhookInput, WebhookList, WebhookSecret, WebhookTestResult, WebhookView } from "@peppy/generated/mcp";
@@ -81,7 +83,6 @@ export type TypingSignal = {
   participant?: string;
 };
 export const MAX_DRAFT_ATTACHMENTS = 10;
-export type ReactionSupport = "native" | "text" | "needs_phone_update" | "none";
 export type ReactionSubmitView = { accepted: boolean; requestId?: string; route?: ReactionRoute; reason?: "offline" | "unsupported" | "needs_phone_update" | "busy" | "not_reactable" | "invalid_emoji" };
 export type MessageWindow = GeneratedMessageWindow<MessageView>;
 export type MediaCursor = { sortAtMs: string; localOrder: string; messageId: string; attachmentPosition: number };
@@ -89,16 +90,6 @@ export type MediaPageItem = { messageId: string; senderAddress?: string; timesta
 export type MediaPage = { items: MediaPageItem[]; nextCursor?: MediaCursor };
 export type MediaPageAround = { target: MediaPageItem; newer: MediaPageItem[]; older: MediaPageItem[]; newerCursor?: MediaCursor; olderCursor?: MediaCursor };
 export type MediaOpen = { state: "ready"; url: string; mediaType: string; byteSize: number } | { state: "pending" };
-/** `participants` are native-provided reply addressees and exclude a confirmed self address. */
-/** Draft flags are authoritative host metadata; do not infer them from an unloaded message list. */
-/** RCS facts absent from the snapshot make no claim. `rcsEncryption` is only what Google reports. */
-export type GroupView = { name?: string; members: string[]; state: "unlinked" | "proving" | "live" | "paused" | "withdrawn"; memberRevision: string; canCreate: boolean; createNeedsConfirmation: boolean; /** Best-effort local notices from core, oldest first. Compaction may drop some. */ notices?: GroupNoticeView[] };
-/** One membership or name change. `member` is canonical; `name` is absent when the group name was removed. `atMs` is decimal ms. */
-export type GroupNoticeView = { kind: "renamed" | "added" | "removed"; name?: string; member?: string; atMs: string };
-export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; hasOlderMessages?: boolean; participants?: string[]; recipientlessDraft?: boolean; draftOnly?: boolean; pinned?: boolean; folder?: ConversationFolder; folderReason?: "marked" | "blocked"; unblock?: "pending" | "failed"; canUnblock?: boolean; rcsEncryption?: boolean; rcsHistoryGap?: boolean; group?: GroupView; reactionSupport?: ReactionSupport; reactionGatewayId?: string };
-/** Effective folder from core: an archived conversation reads as `inbox` once a newer message arrives. */
-export type ConversationFolder = "inbox" | "archived" | "spam";
-export type HistoryPage = { conversationId: string; messages: MessageView[]; hasMore: boolean };
 export type SendResultView = { accepted: boolean; status: MessageStatus; reason?: "members_changed" | "update_required" | "withdrawn" | "create_unconfirmed" | "create_not_rcs" | string; refusedAttachmentIds?: string[]; revision?: string; parts?: number; group?: { members: string[]; memberRevision: string } };
 /** Attachments are authoritative host views for the draft. */
 export type Draft = DraftView;

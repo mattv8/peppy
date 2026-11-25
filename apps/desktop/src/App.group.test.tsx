@@ -1,5 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { resetAppStorage } from "./test-support/appSetup";
+import { conversationWireDefaults } from "./test-support/conversationWireDefaults";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConversationView, GroupView, MessageView, SendResultView, TypingSignal } from "@peppy/desktop-ui/bridge-contracts";
@@ -48,6 +49,7 @@ afterEach(() => {
 });
 
 const group = (overrides: Partial<GroupView> = {}): GroupView => ({
+  notices: [],
   members: MEMBERS,
   state: "live",
   memberRevision: "3",
@@ -57,6 +59,7 @@ const group = (overrides: Partial<GroupView> = {}): GroupView => ({
 });
 
 const groupConversation = (overrides: Partial<ConversationView> = {}): ConversationView => ({
+  ...conversationWireDefaults,
   id: GROUP_ID,
   name: "Weekend crew",
   preview: "",
@@ -97,7 +100,7 @@ function useSnapshot(conversations: ConversationView[], draft: Partial<NonNullab
 }
 
 /** A two-recipient draft that has no conversation yet, as the new-conversation composer uses. */
-const newGroupConversation = (): ConversationView => ({ id: NEW_ID, name: "", preview: "", unread: 0, participants: [], messages: [], draftOnly: true });
+const newGroupConversation = (): ConversationView => ({ ...conversationWireDefaults, id: NEW_ID, name: "", preview: "", unread: 0, participants: [], messages: [], draftOnly: true });
 
 async function typeText(text: string) {
   const textarea = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Message" });

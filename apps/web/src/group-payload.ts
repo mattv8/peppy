@@ -48,7 +48,7 @@ export function parseGroupView(value: unknown): GroupView | undefined {
     memberRevision,
     canCreate,
     createNeedsConfirmation,
-    ...(Array.isArray(notices) ? { notices: notices.flatMap(parseGroupNotice) } : {}),
+    notices: Array.isArray(notices) ? notices.flatMap(parseGroupNotice) : [],
   };
 }
 

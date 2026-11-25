@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { conversationWireDefaults } from "./test-support/conversationWireDefaults";
 import { resetAppStorage } from "./test-support/appSetup";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -28,7 +29,7 @@ function snapshot(messages: MessageView[]): DesktopSnapshot {
     connection: { state: "connected", origin: "https://example.test" },
     encryption: { state: "unlocked" },
     gateways: [],
-    conversations: [{ id: "aurora", name: "Aurora", preview: "", unread: 0, messages }],
+    conversations: [{ ...conversationWireDefaults, id: "aurora", name: "Aurora", preview: "", unread: 0, messages }],
     activeConversationId: "aurora",
     head: { enabled: false, capability: "unsupported" },
     pendingCount: 0,
