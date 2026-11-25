@@ -6,7 +6,7 @@
 //! converted with heck, exactly as the `#[tauri::command]` wrapper does at compile time.
 //!
 //! CI runs the same command with `--check`:
-//! `cargo run --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --features command-manifest --bin generate-tauri-command-contracts -- --check`
+//! `cargo run --locked -p peppy-tauri-command-manifest -- --check`
 
 use heck::{ToLowerCamelCase, ToSnakeCase};
 use proc_macro2::{Span, TokenStream, TokenTree};
@@ -18,8 +18,8 @@ use std::{
     str::FromStr,
 };
 use syn::{
-    ext::IdentExt, punctuated::Punctuated, spanned::Spanned, Attribute, Expr, ExprLit, FnArg, Item,
-    ItemFn, Lit, Meta, Pat, Token, Type, UseTree,
+    Attribute, Expr, ExprLit, FnArg, Item, ItemFn, Lit, Meta, Pat, Token, Type, UseTree,
+    ext::IdentExt, punctuated::Punctuated, spanned::Spanned,
 };
 
 /// Message for command attribute arguments outside the `rename` / `rename_all` allowlist.
@@ -71,7 +71,7 @@ fn main() -> ExitCode {
         [] => false,
         [flag] if flag == "--check" => true,
         _ => {
-            eprintln!("usage: generate-tauri-command-contracts [--check]");
+            eprintln!("usage: peppy-tauri-command-manifest [--check]");
             return ExitCode::from(2);
         }
     };
@@ -88,13 +88,14 @@ fn main() -> ExitCode {
 /// Returns `Ok(false)` when `--check` finds a stale manifest.
 fn run(check: bool) -> Result<bool, String> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = fs::canonicalize(manifest_dir.join("../../.."))
+    let repo_root = fs::canonicalize(manifest_dir.join("../.."))
         .map_err(|error| format!("cannot resolve the repository root: {error}"))?;
     let output = repo_root.join(MANIFEST_RELATIVE_PATH);
+    let desktop_dir = repo_root.join("apps/desktop/src-tauri");
 
-    let commands = discover_commands(&manifest_dir.join("src"), &repo_root)?;
-    let build_names = build_command_names(&manifest_dir.join("build.rs"))?;
-    let handler_idents = handler_registrations(&manifest_dir.join("src/lib.rs"))?;
+    let commands = discover_commands(&desktop_dir.join("src"), &repo_root)?;
+    let build_names = build_command_names(&desktop_dir.join("build.rs"))?;
+    let handler_idents = handler_registrations(&desktop_dir.join("src/lib.rs"))?;
     cross_check(&commands, &build_names, &handler_idents)?;
 
     let rendered = render(&commands);
@@ -767,10 +768,9 @@ fn collect_handler_paths(stream: TokenStream, out: &mut Vec<String>) -> Result<(
             TokenTree::Ident(ident) if HANDLER_MACROS.contains(&ident.to_string().as_str()) => {
                 if let (Some(TokenTree::Punct(bang)), Some(TokenTree::Group(args))) =
                     (tokens.get(index + 1), tokens.get(index + 2))
+                    && bang.as_char() == '!'
                 {
-                    if bang.as_char() == '!' {
-                        collect_registered_paths(args.stream(), out)?;
-                    }
+                    collect_registered_paths(args.stream(), out)?;
                 }
             }
             _ => {}
@@ -918,6 +918,11 @@ fn nearest_command(lines: &[&str], index: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manifest_is_current() {
+        assert!(super::run(true).expect("manifest generation failed"));
+    }
+
     use super::*;
 
     fn commands(source: &str) -> Result<Vec<Command>, String> {

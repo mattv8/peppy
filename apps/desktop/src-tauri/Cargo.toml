@@ -10,16 +10,10 @@ publish = false
 name = "peppy_desktop_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
-[[bin]]
-name = "generate-tauri-command-contracts"
-path = "src/bin/generate-tauri-command-contracts.rs"
-required-features = ["command-manifest"]
-
 [features]
 default = ["self-update"]
 self-update = ["dep:tauri-plugin-updater", "dep:zbus"]
 dev-local-tls = []
-command-manifest = ["dep:syn", "dep:proc-macro2", "dep:heck", "proc-macro2/span-locations"]
 
 [build-dependencies]
 serde_json = "1"
@@ -69,10 +63,6 @@ peppy-crypto = { path = "../../../crates/crypto", version = "0.1.0" }
 peppy-protocol = { path = "../../../crates/protocol", version = "0.1.0" }
 peppy-hosted-client = { path = "../../../crates/hosted-client", version = "0.1.0" }
 peppy-hosted-api = { path = "../../../crates/hosted-api", version = "0.1.0" }
-# Optional: only the generate-tauri-command-contracts bin (feature `command-manifest`) uses these.
-syn = { version = "2.0.119", features = ["full"], optional = true }
-proc-macro2 = { version = "1", optional = true }
-heck = { version = "0.5", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"

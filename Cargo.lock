@@ -2519,6 +2519,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "peppy-tauri-command-manifest"
+version = "0.1.0"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "peppy-tester-crypto"
 version = "0.1.0"
 dependencies = [
