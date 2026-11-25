@@ -279,6 +279,13 @@ impl Coordinator {
         })
     }
 
+    fn collapse_pending(&self, label: &str) -> bool {
+        self.pending.as_ref().is_some_and(|pending| {
+            pending.operation == Operation::Window(Action::Collapse)
+                && pending.remaining.contains(label)
+        })
+    }
+
     fn take_failure(&mut self, kind: FailureKind, failed_label: Option<String>) -> Option<Failure> {
         let pending = self.pending.take()?;
         let failure = Failure {
@@ -719,6 +726,15 @@ pub fn update_flush_pending(app: &tauri::AppHandle, label: &str) -> bool {
         .lock()
         .ok()
         .is_some_and(|coordinator| coordinator.update_flush_pending(label))
+}
+
+/// True while this webview still owes an answer to a collapse request, so it is about to be hidden.
+pub fn collapse_pending(app: &tauri::AppHandle, label: &str) -> bool {
+    app.state::<crate::AppState>()
+        .lifecycle
+        .lock()
+        .ok()
+        .is_some_and(|coordinator| coordinator.collapse_pending(label))
 }
 
 fn begin(

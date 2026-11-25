@@ -359,6 +359,14 @@ impl NotificationSettings {
         };
     }
 
+    /// The conversation the main window shows, when it is on the conversations view.
+    pub fn viewed_conversation(&self) -> Option<String> {
+        let context = self.context.lock().unwrap_or_else(|p| p.into_inner());
+        (context.view == Some(NotificationView::Conversations))
+            .then(|| context.conversation_id.clone())
+            .flatten()
+    }
+
     /// Starts one drain or records one coalesced trailing drain while it is active.
     pub fn request_banner_drain(&self) -> bool {
         let mut drain = self.banner_drain.lock().unwrap_or_else(|p| p.into_inner());
