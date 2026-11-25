@@ -1,0 +1,22 @@
+{
+  "page": {
+    "code": "ok",
+    "has_more": true,
+    "newest_ms": 9000,
+    "next_cursor": "AAAAAAAAIyhwYWdlLTE",
+    "records": [
+      {
+        "body": "synthetic body",
+        "direction": "incoming",
+        "google_conversation_id": "conversation-1",
+        "google_message_id": "message-1",
+        "rcs_reported": true,
+        "reactions": [],
+        "sent_at_ms": 9000,
+        "status": "sent"
+      }
+    ],
+    "signals": [],
+    "skipped": 0
+  }
+}

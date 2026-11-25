@@ -1,0 +1,21 @@
+{
+  "prepare_invalid": {
+    "code": "invalid_request"
+  },
+  "prepared": {
+    "candidate_snapshot": "{\"code\":\"conversation_candidate_snapshot\",\"snapshot_token\":\"1:2:5\",\"generation\":1,\"stream_epoch\":2,\"revision\":5,\"run_incarnation\":\"123e4567-e89b-12d3-a456-426614174002\",\"pairing_evidence_id\":\"123e4567-e89b-12d3-a456-426614174003\",\"complete\":true,\"conversations\":[{\"google_conversation_id\":\"synthetic-conversation\",\"conversation_type\":2,\"conversation_status\":1,\"classification\":\"eligible\",\"group\":false,\"visible_non_self_count\":1,\"last_message_ms\":0,\"participants\":[{\"participant_id\":\"synthetic-outgoing\",\"identifier_type\":0,\"raw_number\":\"\",\"formatted_number\":\"\",\"participant_id_present\":true,\"number_present\":false,\"visible\":true,\"self\":true,\"canonical_address\":\"\",\"canonical_address_present\":false,\"display_name\":\"\"},{\"participant_id\":\"\",\"identifier_type\":0,\"raw_number\":\"+12025550102\",\"formatted_number\":\"\",\"participant_id_present\":false,\"number_present\":true,\"visible\":true,\"self\":false,\"canonical_address\":\"+12025550102\",\"canonical_address_present\":true,\"display_name\":\"\"}],\"name\":\"\",\"is_group_chat\":false,\"read_only\":false,\"invisible_participant_count\":0,\"member_digest\":\"6p4X3v/Dk1XLrvIl1OVnXOOmJMdClBGcGmqBc/xEbm4=\"}]}",
+    "code": "prepared",
+    "pairing_evidence_id": "123e4567-e89b-12d3-a456-426614174003",
+    "run_generation": 1,
+    "run_incarnation": "123e4567-e89b-12d3-a456-426614174002",
+    "stream_epoch": 2,
+    "ticket_id": "123e4567-e89b-42d3-a456-426614174000"
+  },
+  "route": {
+    "code": "route_bound",
+    "observation": "{\"google_conversation_id\":\"\",\"google_candidate_count\":0,\"participants\":[],\"conversation_type\":\"Other\",\"status\":\"\",\"send_mode\":\"Other\",\"read_only\":true,\"default_outgoing\":false,\"selected_sim_id\":\"android-subscription-1\",\"selected_sim_own_identity\":\"+12025550101\",\"carrier_binding\":{\"carrier_route_id\":\"android-subscription-1\",\"android_subscription_id\":1,\"is_current_default_sms\":true,\"own_number_raw\":\"+12025550101\",\"own_number_source\":\"SubscriptionManagerPhoneNumber\",\"route_observed_at_ms\":1700000000000,\"route_context_revision\":23,\"same_handset_evidence_id\":\"123e4567-e89b-12d3-a456-426614174003\"},\"outgoing\":{\"outgoing_id\":\"synthetic-outgoing\",\"sim_participant_id\":\"synthetic-outgoing\",\"own_identity_raw\":\"+12025550101\",\"sim_payload\":{\"two\":0,\"sim_number\":1},\"rcs_chats_enabled\":true},\"native_evidence\":{\"lifetime\":{\"runtime_id\":\"123e4567-e89b-12d3-a456-426614174002\",\"run_generation\":1,\"link_generation\":11,\"session_generation\":17,\"context_revision\":23},\"lookup_id\":\"123e4567-e89b-42d3-a456-426614174004\",\"lookup_complete\":false,\"google_candidate_count\":0,\"settings_revision\":2,\"settings_provenance\":\"CurrentEvent\",\"settings_observed_at_ms\":1700000000000,\"settings_stream_epoch\":2,\"settings_currentness\":\"ContinuousVerifiedFeed\",\"current_settings_sims\":[{\"outgoing_id\":\"synthetic-outgoing\",\"sim_participant_id\":\"synthetic-outgoing\",\"own_identity_raw\":\"+12025550101\",\"sim_payload\":{\"two\":0,\"sim_number\":1},\"rcs_chats_enabled\":true}],\"settings_validated_at_ms\":1700000000000,\"conversation_observed_at_ms\":1700000000000},\"identity_region\":\"US\",\"observed_at_ms\":1700000000000,\"link_generation\":11,\"session_generation\":17,\"context_revision\":23,\"canonicalizer_revision\":1,\"mapping_revision\":29,\"link_state\":\"Linked\"}"
+  },
+  "route_rejected": {
+    "code": "rejected"
+  }
+}
