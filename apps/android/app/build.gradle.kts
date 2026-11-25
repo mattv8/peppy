@@ -395,6 +395,9 @@ android {
                 // Robolectric tests exercise the real generated bindings against the host build of
                 // the same Rust crate (SQLCipher + libsodium); there is no mock message store.
                 test.dependsOn(prepareRobolectricDependencies)
+                // Per-test vault unlock and store setup (Argon2id, SQLCipher secure memory) is native work
+                // on one thread per JVM, so two test JVMs run classes side by side.
+                test.maxParallelForks = 2
                 test.systemProperty("robolectric.offline", "true")
                 test.systemProperty("peppyGoogleMessagesLink", peppyGoogleMessagesLink.toString())
                 test.systemProperty("robolectric.dependency.dir", robolectricDependencyDirectory.get().asFile.canonicalPath)
