@@ -32,7 +32,7 @@ import org.robolectric.annotation.Config
 class GatewayDiagnosticsTest {
     @Test fun cleanupReportsOnlyBoundedNumericCountsAndHonorsDiagnosticsOptOut() {
         val traces = mutableListOf<String>()
-        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, traces::add) {
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, traces::add, recordingThread = Thread.currentThread()) {
             BackgroundDiagnostics.mmsCleanup(3, 2, 1)
         }
         assertEquals(1, traces.size)
@@ -49,7 +49,7 @@ class GatewayDiagnosticsTest {
 
     @Test fun rcsSweepRecordsOnlyBoundedNumericCounts() {
         val events = mutableListOf<String>()
-        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add, recordingThread = Thread.currentThread()) {
             BackgroundDiagnostics.rcsSweep(considered = 9, skipped = 4, complete = 3, incomplete = 1, aborted = 1, pages = 12, durationMs = 77)
         }
 
@@ -83,7 +83,7 @@ class GatewayDiagnosticsTest {
                 else -> LoopbackHttpServer.Response(409, "bad")
             }
         }.use { server ->
-            SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+            SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add, recordingThread = Thread.currentThread()) {
                 val http = GatewayHttp(server.origin, "secret-token")
                 assertEquals(200, http.get("/v1/events?after=7&limit=50").code)
                 assertEquals(409, http.postJson("/v1/attachments/private", "abc").code)
@@ -111,7 +111,7 @@ class GatewayDiagnosticsTest {
         val server = LoopbackHttpServer { LoopbackHttpServer.Response(200, "[]") }
         val origin = server.origin
         server.close()
-        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add, recordingThread = Thread.currentThread()) {
             try {
                 GatewayHttp(origin, "token").get("/v1/events")
                 fail("expected closed loopback transport failure")
@@ -141,7 +141,7 @@ class GatewayDiagnosticsTest {
 
     @Test fun backgroundProgressUsesOnlyNumericCountersWhenEnabled() {
         val events = mutableListOf<String>()
-        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add, recordingThread = Thread.currentThread()) {
             BackgroundDiagnostics.gateway(received = 3, snapshotReceived = 5, progressed = 2, uploaded = 1, snapshotRemaining = 4, readiness = null)
         }
 
@@ -162,7 +162,7 @@ class GatewayDiagnosticsTest {
 
     @Test fun gatewayReadinessFixtureRecordsCoreReadyAndBackfillState() {
         val events = mutableListOf<String>()
-        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add, recordingThread = Thread.currentThread()) {
             val readiness = BackgroundDiagnostics.gatewayReadiness("""{"contacts_ready":true,"state":"ready"}""")
             BackgroundDiagnostics.gateway(received = 3, snapshotReceived = 5, progressed = 2, uploaded = 1, snapshotRemaining = 4, readiness = readiness)
         }
@@ -174,7 +174,7 @@ class GatewayDiagnosticsTest {
 
     @Test fun gatewayBackfillFixtureRecordsPendingWithoutClaimingReady() {
         val events = mutableListOf<String>()
-        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add, recordingThread = Thread.currentThread()) {
             val readiness = BackgroundDiagnostics.gatewayReadiness("""{"contacts_ready":false,"state":"backfill_pending"}""")
             BackgroundDiagnostics.gateway(received = 0, snapshotReceived = 0, progressed = 0, uploaded = 0, snapshotRemaining = 0, readiness = readiness)
         }
@@ -186,7 +186,7 @@ class GatewayDiagnosticsTest {
 
     @Test fun malformedGatewayReadinessIsDroppedWithoutDiagnosticsFailure() {
         val events = mutableListOf<String>()
-        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add, recordingThread = Thread.currentThread()) {
             assertEquals(null, BackgroundDiagnostics.gatewayReadiness("not-json"))
             BackgroundDiagnostics.gateway(received = 0, snapshotReceived = 0, progressed = 0, uploaded = 0, snapshotRemaining = 0, readiness = null)
         }
@@ -204,7 +204,7 @@ class GatewayDiagnosticsTest {
 
     @Test fun contactSocketAndNotificationSummariesUseNumericFields() {
         val events = mutableListOf<String>()
-        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add, recordingThread = Thread.currentThread()) {
             BackgroundDiagnostics.contact(
                 full = false,
                 report = ContactPassReport(ContactPassReport.Outcome.PARTIAL, observed = 7, captured = 5, applied = 2, deleted = 3, more = true),
@@ -248,7 +248,7 @@ class GatewayDiagnosticsTest {
             Configuration.Builder().setExecutor(SynchronousExecutor()).build(),
         )
         val events = mutableListOf<String>()
-        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add, recordingThread = Thread.currentThread()) {
             GatewayWork.enqueue(context, GatewayEnqueueCause.SETTINGS, diagnosticParent = 41L)
             GatewayWork.enqueue(context, GatewayEnqueueCause.SETTINGS, diagnosticParent = 99L)
         }

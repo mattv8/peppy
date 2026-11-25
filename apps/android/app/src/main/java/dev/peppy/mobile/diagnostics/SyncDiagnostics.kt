@@ -25,6 +25,7 @@ internal object SyncDiagnostics {
         val cpuMs: () -> Long,
         val sink: (String) -> Unit,
         val sessionToken: Long?,
+        val recordingThread: Thread?,
     )
 
     private val trace = ThreadLocal<Long>()
@@ -36,13 +37,14 @@ internal object SyncDiagnostics {
         cpuMs = { Debug.threadCpuTimeNanos() / NANOS_PER_MILLISECOND },
         sink = {},
         sessionToken = null,
+        recordingThread = null,
     )
 
     val enabled: Boolean get() = configuration.enabled
 
     internal fun configureRuntime(enabled: Boolean, sink: (String) -> Unit) {
         val current = configuration
-        configuration = current.copy(enabled = enabled, sink = sink, sessionToken = null)
+        configuration = current.copy(enabled = enabled, sink = sink, sessionToken = null, recordingThread = null)
     }
 
     fun nowMs(): Long = if (enabled) configuration.clock() else 0L
@@ -56,7 +58,7 @@ internal object SyncDiagnostics {
 
     fun record(event: SyncTraceEvent, vararg fields: Pair<SyncTraceField, Long>) {
         val current = configuration
-        if (!current.enabled) return
+        if (!current.enabled || (current.recordingThread != null && current.recordingThread !== Thread.currentThread())) return
         try {
             val payload = buildString {
                 append("event=").append(event.code)
@@ -193,10 +195,11 @@ internal object SyncDiagnostics {
         }
     }
 
+    /** @param recordingThread confines a synchronous test sink to its installing thread; production never sets it. */
     @VisibleForTesting
-    internal fun <T> withTestConfiguration(enabled: Boolean, clock: () -> Long, cpuMs: () -> Long, sink: (String) -> Unit, sessionToken: Long = 1L, block: () -> T): T {
+    internal fun <T> withTestConfiguration(enabled: Boolean, clock: () -> Long, cpuMs: () -> Long, sink: (String) -> Unit, sessionToken: Long = 1L, recordingThread: Thread? = null, block: () -> T): T {
         val previous = configuration
-        configuration = Configuration(enabled, clock, cpuMs, sink, sessionToken)
+        configuration = Configuration(enabled, clock, cpuMs, sink, sessionToken, recordingThread)
         return try { block() } finally { configuration = previous; trace.remove() }
     }
 

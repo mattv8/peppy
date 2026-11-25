@@ -27,6 +27,37 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class SyncDiagnosticsTest : GatewayTestBase() {
+    @Test fun scopedSinkRecordsOnlyTheInstallingThread() {
+        val events = CopyOnWriteArrayList<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add, recordingThread = Thread.currentThread()) {
+            Thread { SyncDiagnostics.record(SyncTraceEvent.GATEWAY_START, SyncTraceField.COUNT to 2L) }.apply { start(); join() }
+            SyncDiagnostics.record(SyncTraceEvent.GATEWAY_START, SyncTraceField.COUNT to 1L)
+        }
+        assertEquals(1L, traceFields(events.single()).getValue(SyncTraceField.COUNT.code.toString()))
+    }
+
+    @Test fun unscopedSinkRecordsBackgroundThread() {
+        val events = CopyOnWriteArrayList<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+            Thread { SyncDiagnostics.record(SyncTraceEvent.GATEWAY_START) }.apply { start(); join() }
+        }
+        assertEquals(SyncTraceEvent.GATEWAY_START.code, traceFields(events.single()).getValue("event"))
+    }
+
+    @Test fun nestedScopedConfigurationRestoresOuterSinkAfterFailure() {
+        val events = CopyOnWriteArrayList<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+            try {
+                SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, { error("inner sink") }, recordingThread = Thread.currentThread()) {
+                    throw IllegalStateException("expected")
+                }
+            } catch (_: IllegalStateException) {
+            }
+            Thread { SyncDiagnostics.record(SyncTraceEvent.GATEWAY_START) }.apply { start(); join() }
+        }
+        assertEquals(SyncTraceEvent.GATEWAY_START.code, traceFields(events.single()).getValue("event"))
+    }
+
     @Test fun disabledDiagnosticsDoNotInvokeTheSinkOrSetATrace() {
         var sinkCalled = false
         SyncDiagnostics.withTestConfiguration(false, { 1L }, { 1L }, { sinkCalled = true }) {
@@ -46,7 +77,7 @@ class SyncDiagnosticsTest : GatewayTestBase() {
 
     @Test fun measureRecordsDurationAndCpuAndRethrowsOriginalFailure() {
         val events = mutableListOf<String>()
-        SyncDiagnostics.withTestConfiguration(true, listOf(10L, 40L, 100L).iterator()::next, listOf(3L, 11L).iterator()::next, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, listOf(10L, 40L, 100L).iterator()::next, listOf(3L, 11L).iterator()::next, events::add, recordingThread = Thread.currentThread()) {
             val failure = IllegalStateException("original")
             try {
                 SyncDiagnostics.measure(SyncTraceEvent.HTTP_REQUEST) { throw failure }
@@ -82,7 +113,7 @@ class SyncDiagnosticsTest : GatewayTestBase() {
         context.getSharedPreferences("peppy-secure", 0).edit().clear().commit()
         NativeGateway.closeForTest()
         val events = mutableListOf<String>()
-        SyncDiagnostics.withTestConfiguration(true, listOf(10L, 30L, 40L).iterator()::next, listOf(2L, 7L).iterator()::next, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, listOf(10L, 30L, 40L).iterator()::next, listOf(2L, 7L).iterator()::next, events::add, recordingThread = Thread.currentThread()) {
             assertNull(NativeGateway.open(context))
         }
         val event = traceFields(events.single())
@@ -96,7 +127,7 @@ class SyncDiagnosticsTest : GatewayTestBase() {
     @Test fun nativeMeasurementRethrowsTheOriginalFailureWithExactDeltas() {
         val events = mutableListOf<String>()
         val failure = IllegalStateException("native failure")
-        SyncDiagnostics.withTestConfiguration(true, listOf(20L, 50L, 80L).iterator()::next, listOf(4L, 13L).iterator()::next, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, listOf(20L, 50L, 80L).iterator()::next, listOf(4L, 13L).iterator()::next, events::add, recordingThread = Thread.currentThread()) {
             try {
                 SyncDiagnostics.measureNativeOpen(cold = false) { throw failure }
                 fail("expected native failure")
@@ -112,7 +143,7 @@ class SyncDiagnosticsTest : GatewayTestBase() {
 
     @Test fun cachedNativeOpenDoesNotRecordButColdAndFailedOpensDo() {
         val events = mutableListOf<String>()
-        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add, recordingThread = Thread.currentThread()) {
             assertEquals("cached", SyncDiagnostics.measureNativeOpen(cold = false) { "cached" })
             assertEquals("cold", SyncDiagnostics.measureNativeOpen(cold = true) { "cold" })
             assertNull(SyncDiagnostics.measureNativeOpen(cold = false, succeeded = { it != null }) { null })
@@ -141,7 +172,7 @@ class SyncDiagnosticsTest : GatewayTestBase() {
 
     @Test fun measureStageUsesInjectedClockCpuAndRecordsTheStage() {
         val events = mutableListOf<String>()
-        SyncDiagnostics.withTestConfiguration(true, listOf(10L, 40L, 100L).iterator()::next, listOf(3L, 11L).iterator()::next, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, listOf(10L, 40L, 100L).iterator()::next, listOf(3L, 11L).iterator()::next, events::add, recordingThread = Thread.currentThread()) {
             assertEquals("result", SyncDiagnostics.measureStage(SyncTraceEvent.CAPTURE_PROGRESS, SyncDiagnosticStage.SMS_LIVE) { "result" })
         }
 
@@ -190,7 +221,7 @@ class SyncDiagnosticsTest : GatewayTestBase() {
         val events = mutableListOf<String>()
         val failure = IllegalStateException("original")
 
-        SyncDiagnostics.withTestConfiguration(true, listOf(10L, 40L, 50L).iterator()::next, listOf(3L, 11L).iterator()::next, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, listOf(10L, 40L, 50L).iterator()::next, listOf(3L, 11L).iterator()::next, events::add, recordingThread = Thread.currentThread()) {
             try {
                 SyncDiagnostics.measureWithFields(SyncTraceEvent.MMS_CAPTURE_PASS, { arrayOf(SyncTraceField.ROWS to 2L) }) {
                     throw failure
@@ -217,7 +248,7 @@ class SyncDiagnosticsTest : GatewayTestBase() {
             providerDurationMs = 11
         }
 
-        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add, recordingThread = Thread.currentThread()) {
             PhoneReadDiagnostics.pass(PhoneReadDiagnostics.ACTED, counters)
         }
 
@@ -288,7 +319,7 @@ class SyncDiagnosticsTest : GatewayTestBase() {
     @Test fun failedGatewayPhaseRecordsStableErrorKindAndRethrowsTheOriginalFailure() {
         val events = mutableListOf<String>()
         val failure = IllegalStateException("original")
-        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add, recordingThread = Thread.currentThread()) {
             try {
                 SyncDiagnostics.measurePhase(4L, { 3L }) { throw failure }
                 fail("expected original failure")
@@ -305,7 +336,7 @@ class SyncDiagnosticsTest : GatewayTestBase() {
 
     @Test fun successfulGatewayPhaseOmitsErrorKind() {
         val events = mutableListOf<String>()
-        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add, recordingThread = Thread.currentThread()) {
             assertEquals("ok", SyncDiagnostics.measurePhase(4L, { 3L }) { "ok" })
         }
         val event = traceFields(events.single())
