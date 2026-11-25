@@ -693,6 +693,31 @@ describe("fixture draft saves", () => {
     expect(Number(saved.revision)).toBeGreaterThan(Number(target.revision));
   });
 
+  it("rejects save and discard of a moved draft id with destination details", async () => {
+    const source = await fixtureBridge.save_draft({ id: "", conversationId: "", expectedRevision: "0", text: "source", recipientIds: ["+15555550991"], attachmentIds: [] });
+    const target = await fixtureBridge.save_draft({ id: "", conversationId: "", expectedRevision: "0", text: "target", recipientIds: ["+15555550992"], attachmentIds: [] });
+    const moved = await fixtureBridge.save_draft({ ...source, expectedRevision: source.revision, recipientIds: target.recipientIds });
+    expect(moved.id).toBe(target.id);
+    expect(moved.conversationId).not.toBe(source.conversationId);
+    const expected = { code: "draft-moved", details: { draftId: moved.id, conversationId: moved.conversationId, currentRevision: moved.revision } };
+    const saveResult = await Promise.allSettled([fixtureBridge.save_draft({ ...source, expectedRevision: source.revision })]);
+    const discardResult = await Promise.allSettled([fixtureBridge.discard_draft({ id: source.id, conversationId: source.conversationId, expectedRevision: source.revision })]);
+    expect.soft(saveResult[0]).toMatchObject({ status: "rejected", reason: expected });
+    expect.soft(discardResult[0]).toMatchObject({ status: "rejected", reason: expected });
+
+    const updated = await fixtureBridge.save_draft({ ...moved, expectedRevision: moved.revision, text: "updated" });
+    await expect(fixtureBridge.save_draft({ ...source, expectedRevision: source.revision })).rejects.toMatchObject({
+      code: "draft-moved",
+      details: { draftId: updated.id, conversationId: updated.conversationId, currentRevision: updated.revision },
+    });
+    const finalTarget = await fixtureBridge.save_draft({ id: "", conversationId: "", expectedRevision: "0", text: "final", recipientIds: ["+15555550993"], attachmentIds: [] });
+    const movedAgain = await fixtureBridge.save_draft({ ...updated, expectedRevision: updated.revision, recipientIds: finalTarget.recipientIds });
+    await expect(fixtureBridge.discard_draft({ id: source.id, conversationId: source.conversationId, expectedRevision: source.revision })).rejects.toMatchObject({
+      code: "draft-moved",
+      details: { draftId: movedAgain.id, conversationId: movedAgain.conversationId, currentRevision: movedAgain.revision },
+    });
+  });
+
   it("forks recipient changes after adopting history instead of changing that history", async () => {
     const blank = await fixtureBridge.save_draft({ id: "", conversationId: "", text: "", recipientIds: [], attachmentIds: [], expectedRevision: "0" });
     const adopted = await fixtureBridge.save_draft({ id: blank.id, conversationId: blank.conversationId, text: "Reply", recipientIds: ["+12025550123"], attachmentIds: [], expectedRevision: blank.revision });

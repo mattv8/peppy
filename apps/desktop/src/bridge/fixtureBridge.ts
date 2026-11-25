@@ -208,6 +208,7 @@ fixtureSnapshot.conversations.push(fixtureConversation({ id: "conv-resend", name
 
 /** Fixture drafts keyed by conversation ID; mirrors the native compose-draft save contract (session.rs). */
 const fixtureDrafts = new Map<string, Draft>();
+const fixtureDraftRedirects = new Map<string, string>();
 /** Merged-away conversation ID to its survivor; requests for the former resolve to the latter, as the core does. */
 const fixtureRedirects = new Map<string, string>();
 const fixtureToneOverrides = new Map<string, number>();
@@ -378,6 +379,10 @@ const fixtureMovedError = (target: Draft) => ({
   currentRevision: target.revision,
   details: { conversationId: target.conversationId, draftId: target.id, currentRevision: target.revision },
 });
+const fixtureMovedDraft = (id: string): Draft | undefined => {
+  const targetId = fixtureDraftRedirects.get(id);
+  return targetId ? [...fixtureDrafts.values()].find(draft => draft.id === targetId) : undefined;
+};
 const fixtureAccount = (): HostedAccountView => ({ available: true, signedIn: false, accountLabel: null, classification: null, entitlement: null, access: null, hasVault: false, resumable: false, providers: ["apple", "google"] });
 /** Display-only fixture views deliberately have no reducer or event transition logic. */
 const cannedHostedView = (screen = "welcome", scenario = "new"): HostedPreviewView => ({
@@ -400,7 +405,11 @@ const fixtureSave = (input: DraftInput): Draft => {
   if (!/^\d+$/.test(input.expectedRevision)) throw fixtureError("invalid-draft", "The draft revision is invalid.");
   const recipientIds = canonicalRecipients(input.recipientIds);
   const source = input.id ? [...fixtureDrafts.values()].find((draft) => draft.id === input.id) : undefined;
-  if (input.id && !source) throw fixtureError("not-found", "The requested stored item was not found.");
+  if (input.id && !source) {
+    const moved = fixtureMovedDraft(input.id);
+    if (moved) throw fixtureMovedError(moved);
+    throw fixtureError("not-found", "The requested stored item was not found.");
+  }
   if (source && input.conversationId && input.conversationId !== source.conversationId) throw fixtureError("invalid-draft", "The draft does not belong to this conversation.");
   if (source && Number(source.revision) !== expected) throw fixtureError("stale-draft", `The draft changed elsewhere (current revision ${source.revision}); both versions were kept.`);
   if (Boolean(input.gatewayId) !== Boolean(input.simId)) throw fixtureError("invalid-route", "Select a gateway and SIM together.");
@@ -442,7 +451,13 @@ const fixtureSave = (input: DraftInput): Draft => {
     simId: input.simId || target.simId || source?.simId,
     revision: String(Number(target.revision) + 1),
   };
-  if (source && source.conversationId !== targetConversationId) fixtureDrafts.delete(source.conversationId);
+  if (source && source.conversationId !== targetConversationId) {
+    fixtureDrafts.delete(source.conversationId);
+    for (const [id, targetId] of fixtureDraftRedirects) {
+      if (targetId === source.id) fixtureDraftRedirects.set(id, saved.id);
+    }
+    fixtureDraftRedirects.set(source.id, saved.id);
+  }
   fixtureDrafts.set(saved.conversationId, saved);
   return saved;
 };
@@ -565,6 +580,8 @@ export const fixtureBridge: DesktopBridge = {
   unlock_app: async () => true,
   save_draft: async input => fixtureSave(input),
   discard_draft: async input => {
+    const moved = fixtureMovedDraft(input.id);
+    if (moved) throw fixtureMovedError(moved);
     const draft = fixtureDrafts.get(input.conversationId);
     if (!draft) return;
     if (draft.id !== input.id || draft.revision !== input.expectedRevision) throw fixtureError("stale-draft", "The draft changed elsewhere; reload before deleting it.");
