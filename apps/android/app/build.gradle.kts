@@ -412,6 +412,8 @@ android {
                 if (System.getenv("CI") == "true") {
                     test.testLogging {
                         events("started", "passed", "skipped", "failed")
+                        // `--info` builds use the info-level settings; keep the per-test lines the CI stall watchdog reads.
+                        info.events("started", "passed", "skipped", "failed", "standard_out", "standard_error")
                     }
                 }
             }
