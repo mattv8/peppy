@@ -18,6 +18,7 @@ rust_mobile:
 
 rust_desktop:
   - 'crates/desktop-api/**'
+  - 'crates/tauri-command-manifest/**'
 
 rust_browser:
   - 'crates/browser-bindings/**'
@@ -116,6 +117,7 @@ unclassified:
   - '!crates/hosted-client/**'
   - '!crates/mobile-bindings/**'
   - '!crates/desktop-api/**'
+  - '!crates/tauri-command-manifest/**'
   - '!crates/browser-bindings/**'
   - '!crates/hosted-onboarding/**'
   - '!crates/tester-crypto/**'
