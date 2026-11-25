@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import { Clock, Info, MessageSquare, SmilePlus, TriangleAlert, WifiOff, detectPlatform } from "@peppy/desktop-ui";
 import type { MessageView, ReactionRoute, ReactionSubmitView, ReactionSupport } from "@peppy/desktop-ui/bridge-contracts";
-import { ALREADY_REACTION_COPY, pickAnnouncement, REFUSAL_COPY, UNREACHABLE_COPY, withFirstEmojiNote } from "./announcements";
+import { ALREADY_REACTION_COPY, pickAnnouncement, withFirstEmojiNote } from "./announcements";
 import { QUICK_REACTIONS } from "./emoji";
 import { ReactionCapture } from "./ReactionCapture";
 import { BAR_OVERHANG, barMetrics, placeReactionBar, type ReactionPlacement } from "./placement";
@@ -136,6 +136,7 @@ export type MessageReactionLayerProps = {
   /** Writes to the announcers that the owner renders outside the log. */
   announce(text: string, alert?: boolean): void;
   openPicker?: () => Promise<void>;
+  isInFlight(messageId: string): boolean;
   onSubmit(message: MessageView, emoji: string | null): Promise<ReactionSubmitView | undefined>;
 };
 
@@ -143,22 +144,19 @@ export type MessageReactionLayerProps = {
  * The single reaction bar, portaled to the body and positioned from the target bubble. It is outside `#message-list`,
  * so opening it never changes row layout or fires log announcements.
  */
-export function MessageReactionLayer({ reaction, barRef, messages, reactionSupport, routeOffline, writesPaused = false, nameOf, announce, openPicker, onSubmit }: MessageReactionLayerProps) {
+export function MessageReactionLayer({ reaction, barRef, messages, reactionSupport, routeOffline, writesPaused = false, nameOf, announce, openPicker, isInFlight, onSubmit }: MessageReactionLayerProps) {
   const target = reaction.target;
   const message = target ? messages.get(target.messageId) : undefined;
   const [mode, setMode] = useState<"quick" | "capture">("quick");
   const [placement, setPlacement] = useState<ReactionPlacement | null>(null);
   const [quickCount, setQuickCount] = useState<number>(QUICK_REACTIONS.length);
-  const [inFlight, setInFlight] = useState<ReadonlySet<string>>(new Set());
-  // Ref, not state: a second pick must see the first one even before React re-renders.
-  const inFlightRef = useRef(new Set<string>());
   const [rovingIndex, setRovingIndex] = useState<number>();
   const returnFocus = useRef<HTMLElement | null>(null);
   const focusMoreAfterBack = useRef(false);
   const focusedKeyboardOpen = useRef("");
   const baseView = message ? barViewFor(message, reactionSupport, routeOffline) : undefined;
   // A send from this layer shows busy until the call returns, on either route, before the snapshot catches up.
-  const view = baseView && !baseView.notice && message && inFlight.has(message.id)
+  const view = baseView && message && isInFlight(message.id)
     ? { route: baseView.route, notice: "busy" as const }
     : baseView;
   const route = view?.route ?? "native";
@@ -289,25 +287,15 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
    * a second call. A rejected call is announced once and never retried.
    */
   const submit = (subject: MessageView, emoji: string | null, text: string) => {
-    if (writesPaused || inFlightRef.current.has(subject.id)) return;
+    if (writesPaused || isInFlight(subject.id)) return;
     close(true);
     announce(text);
-    inFlightRef.current.add(subject.id);
-    setInFlight(new Set(inFlightRef.current));
-    void onSubmit(subject, emoji)
-      .then((result) => {
-        if (result && !result.accepted && result.reason) announce(REFUSAL_COPY[result.reason], true);
-      })
-      .catch(() => announce(UNREACHABLE_COPY, true))
-      .finally(() => {
-        inFlightRef.current.delete(subject.id);
-        setInFlight(new Set(inFlightRef.current));
-      });
+    void onSubmit(subject, emoji);
   };
 
   /** A pick from the quick row or the capture field. `multiple` is set when capture dropped extra emoji. */
   const choose = (emoji: string, fromCapture: boolean, multiple = false) => {
-    if (writesPaused || !message || !view) return;
+    if (writesPaused || !message || !view || isInFlight(message.id)) return;
     if (route === "native" && emoji === selected && fromCapture) {
       close(true);
       announce(ALREADY_REACTION_COPY);
@@ -358,7 +346,7 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
   if (hidden) return null;
   const Icon = notice ? NOTICE_ICON[notice] : undefined;
   const compact = quickCount < QUICK_REACTIONS.length;
-  const busy = inFlight.has(message.id);
+  const busy = isInFlight(message.id);
   const moreIndex = quick.length;
 
   return createPortal(<div id="message-reaction-layer" data-reaction-layer style={{ left: placement.left, top: placement.top }}>

@@ -10,6 +10,16 @@ const request = (overrides: Partial<OwnReactionRequestView> & Pick<OwnReactionRe
 const nativeSelf = (emoji: string) => ({ emoji, actors: [{ self: true }] });
 
 describe("mergeReactions", () => {
+  it("replaces an earlier own text reaction with a pending text request without a request id", () => {
+    const badges = mergeReactions({
+      parsed: [{ emoji: "❤️", actors: [self], reactionIds: ["text"] }],
+      ownRequest: { requestId: "local:m:1", emoji: "👍", state: "sending" },
+      ownRequestSource: "text",
+    });
+    expect(badges).toHaveLength(1);
+    expect(badges[0]).toMatchObject({ emoji: "👍", source: "text", own: { state: "sending", source: "text" } });
+    expect(badges[0].own?.requestId).toBeUndefined();
+  });
   it("returns no chips without any reaction facts", () => {
     expect(mergeReactions({})).toEqual([]);
   });

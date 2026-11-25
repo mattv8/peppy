@@ -20,9 +20,10 @@ function stubLayout() {
   });
 }
 
-async function openConversation(conversationId: string) {
+async function openConversation(conversationId: string, otherConversationId?: string) {
   const conversation = fixtureReactionConversations.find((candidate) => candidate.id === conversationId)!;
   snapshot.conversations = [structuredClone(conversation)];
+  if (otherConversationId) snapshot.conversations.push(structuredClone(fixtureReactionConversations.find((candidate) => candidate.id === otherConversationId)!));
   snapshot.activeConversationId = conversationId;
   vi.mocked(bridge.load_message_window).mockImplementation(async (input) => ({
     conversationId: input.conversationId,
@@ -65,6 +66,82 @@ afterEach(() => {
 });
 
 describe("finding 1: one submit at a time, on both routes", () => {
+  it("returns focus to the message when a focused own chip is removed", async () => {
+    await openConversation("conv-reaction-states");
+    vi.mocked(bridge.react_to_message!).mockReturnValueOnce(new Promise(() => undefined));
+    const chip = document.querySelector<HTMLElement>('[data-reaction-badges="reaction-own-sent"] [data-reaction-own="true"][data-reaction-state="sent"]')!;
+    chip.focus();
+    fireEvent.click(chip);
+    expect(article("reaction-own-sent")).toHaveFocus();
+    expect(document.querySelector('[data-reaction-badges="reaction-own-sent"] [data-reaction-state="removing"]')).not.toBeNull();
+  });
+
+  it("keeps exactly one pending own text chip when the outgoing text arrives during the call", async () => {
+    await openConversation("conv-reaction-text");
+    vi.mocked(bridge.react_to_message!).mockReturnValueOnce(new Promise(() => undefined));
+    keyOpen("reaction-text-incoming");
+    fireEvent.click(document.querySelector('[data-reaction-quick="thumbs-up"]')!);
+    snapshot.conversations[0].messages.push({ id: "reaction-new-text", revision: "1", sender: "self", body: "Reacted 👍 to “Running late, start without me”", timestamp: "1788434680000", transport: "sms", status: "queued-local", attachments: [] });
+    await publish();
+    const chips = document.querySelectorAll('[data-reaction-badges="reaction-text-incoming"] [data-reaction-own="true"]');
+    expect(chips).toHaveLength(1);
+    expect(chips[0]).toHaveAttribute("data-reaction-state", "pending");
+    expect(chips[0]).toHaveAttribute("data-reaction-source", "text");
+  });
+
+  it("does not announce when an accepted text overlay clears", async () => {
+    await openConversation("conv-reaction-text");
+    vi.mocked(bridge.react_to_message!).mockResolvedValueOnce({ accepted: true, route: "text" });
+    keyOpen("reaction-text-incoming");
+    fireEvent.click(document.querySelector('[data-reaction-quick="thumbs-up"]')!);
+    await waitFor(() => expect(document.getElementById("reaction-announcer")).toHaveTextContent("Sending your 👍 as a text message."));
+    const announcer = document.getElementById("reaction-announcer")!;
+    const observer = vi.fn();
+    const mutations = new MutationObserver(observer);
+    mutations.observe(announcer, { childList: true, characterData: true, subtree: true });
+    await publish();
+    await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => resolve())); });
+    expect(observer).not.toHaveBeenCalled();
+    mutations.disconnect();
+  });
+
+  it.each([
+    ["conv-reaction-states", "reaction-group-dinner", "conv-reaction-text", "reaction-text-incoming"],
+    ["conv-reaction-text", "reaction-text-incoming", "conv-reaction-states", "reaction-group-dinner"],
+  ])("retains the pending chip and busy bar after leaving and returning to %s", async (conversationId, messageId, otherId, otherMessageId) => {
+    await openConversation(conversationId, otherId);
+    vi.mocked(bridge.react_to_message!).mockReturnValueOnce(new Promise(() => undefined));
+    keyOpen(messageId);
+    fireEvent.click(document.querySelector('[data-reaction-quick="thumbs-up"]')!);
+    expect(document.querySelector(`[data-reaction-badges="${messageId}"] [data-reaction-state="pending"]`)).not.toBeNull();
+    fireEvent.click(document.querySelector(`[data-conversation-id="${otherId}"]`)!);
+    await waitFor(() => expect(document.querySelector(`article[data-message-id="${otherMessageId}"]`)).not.toBeNull());
+    fireEvent.click(document.querySelector(`[data-conversation-id="${conversationId}"]`)!);
+    await waitFor(() => expect(document.querySelector(`article[data-message-id="${messageId}"]`)).not.toBeNull());
+    expect(document.querySelector(`[data-reaction-badges="${messageId}"] [data-reaction-state="pending"]`)).not.toBeNull();
+    keyOpen(messageId);
+    expect(document.querySelector("[data-reaction-bar-notice='busy']")).not.toBeNull();
+    expect(bridge.react_to_message).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the native pending chip before the bridge call settles", async () => {
+    await openConversation("conv-reaction-states");
+    vi.mocked(bridge.react_to_message!).mockReturnValueOnce(new Promise(() => undefined));
+    keyOpen("reaction-group-dinner");
+    fireEvent.click(document.querySelector('[data-reaction-quick="heart"]')!);
+    expect(document.querySelector('[data-reaction-badges="reaction-group-dinner"] [data-reaction-state="pending"]')).not.toBeNull();
+    keyOpen("reaction-group-dinner");
+    expect(document.querySelector("[data-reaction-bar-notice='busy']")).not.toBeNull();
+  });
+
+  it("shows a pending text chip before the bridge call settles", async () => {
+    await openConversation("conv-reaction-text");
+    vi.mocked(bridge.react_to_message!).mockReturnValueOnce(new Promise(() => undefined));
+    keyOpen("reaction-text-incoming");
+    fireEvent.click(document.querySelector('[data-reaction-quick="thumbs-up"]')!);
+    expect(document.querySelector('[data-reaction-badges="reaction-text-incoming"] [data-reaction-source="text"][data-reaction-state="pending"]')).not.toBeNull();
+  });
+
   it("does not send a second text reaction when the bar reopens during an unresolved text submit", async () => {
     await openConversation("conv-reaction-text");
     // The first text submit never settles, as a slow phone would leave it.
@@ -238,6 +315,52 @@ describe("review round 2 (R2-C): the optimistic overlay reconciles against autho
   const settledNoChange = () => { snapshot.conversations[0].messages = snapshot.conversations[0].messages.map((m) => (m.id === "reaction-group-dinner" ? { ...m, ownReactionRequest: undefined } : m)); };
   const groupChipPending = () => article("reaction-group-dinner").closest(".message-row")!.querySelector('[data-reaction-state="pending"]');
 
+  it("keeps the provisional chip during a snapshot and drops it when the accepted call catches up", async () => {
+    await openConversation("conv-reaction-states");
+    let resolve!: (value: { accepted: boolean; requestId: string }) => void;
+    vi.mocked(bridge.react_to_message!).mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    keyOpen("reaction-group-dinner");
+    fireEvent.click(document.querySelector('[data-reaction-quick="surprised"]')!);
+    settledNoChange();
+    await publish();
+    expect(groupChipPending()).not.toBeNull();
+    await act(async () => { resolve({ accepted: true, requestId: "real" }); });
+    expect(groupChipPending()).toBeNull();
+  });
+
+  it.each(["refused", "rejected"] as const)("removes the provisional chip after a deferred %s call", async (outcome) => {
+    await openConversation("conv-reaction-states");
+    let resolve!: (value: { accepted: boolean; reason: "busy" }) => void;
+    let reject!: (error: Error) => void;
+    vi.mocked(bridge.react_to_message!).mockReturnValueOnce(new Promise((yes, no) => { resolve = yes; reject = no; }));
+    keyOpen("reaction-group-dinner");
+    fireEvent.click(document.querySelector('[data-reaction-quick="surprised"]')!);
+    expect(groupChipPending()).not.toBeNull();
+    const alert = document.getElementById("reaction-alert")!;
+    const expected = outcome === "refused" ? "Sending your reaction…" : "Couldn't reach Peppy. Try again.";
+    let announcements = 0;
+    const observer = new MutationObserver(() => { if (alert.textContent === expected) announcements += 1; });
+    observer.observe(alert, { childList: true, characterData: true, subtree: true });
+    await act(async () => { if (outcome === "refused") resolve({ accepted: false, reason: "busy" }); else reject(new Error("offline")); });
+    expect(groupChipPending()).toBeNull();
+    await waitFor(() => expect(alert).toHaveTextContent(expected));
+    await act(async () => { await new Promise<void>((done) => requestAnimationFrame(() => done())); });
+    expect(announcements).toBe(1);
+    observer.disconnect();
+  });
+
+  it("ignores a second activation of the pending own chip", async () => {
+    await openConversation("conv-reaction-states");
+    vi.mocked(bridge.react_to_message!).mockReturnValueOnce(new Promise(() => undefined));
+    keyOpen("reaction-group-dinner");
+    const button = document.querySelector('[data-reaction-quick="surprised"]')!;
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(groupChipPending()).not.toBeNull();
+    fireEvent.click(groupChipPending()!);
+    expect(bridge.react_to_message).toHaveBeenCalledTimes(1);
+  });
+
   it("clears on a snapshot delivered before the response, with no reaction change and no open request", async () => {
     await openConversation("conv-reaction-states");
     vi.mocked(bridge.react_to_message!).mockImplementationOnce(async () => {
@@ -275,9 +398,16 @@ describe("review round 2 (R2-C): the optimistic overlay reconciles against autho
     fireEvent.click(document.querySelector('[data-reaction-quick="surprised"]')!);
     await waitFor(() => expect(groupChipPending()).not.toBeNull());
     await act(async () => {});
+    const announcer = document.getElementById("reaction-announcer")!;
+    let sentAnnouncements = 0;
+    const observer = new MutationObserver(() => { if (announcer.textContent === "Your 😮 reaction was sent.") sentAnnouncements += 1; });
+    observer.observe(announcer, { childList: true, characterData: true, subtree: true });
     snapshot.conversations[0].messages = snapshot.conversations[0].messages.map((m) => (m.id === "reaction-group-dinner" ? { ...m, ownReactionRequest: undefined, reactions: [...(m.reactions ?? []), { emoji: "😮", actors: [{ self: true }] }] } : m));
     await publish();
     await waitFor(() => expect(document.getElementById("reaction-announcer")).toHaveTextContent("Your 😮 reaction was sent."));
+    await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => resolve())); });
+    expect(sentAnnouncements).toBe(1);
+    observer.disconnect();
     expect(groupChipPending()).toBeNull();
   });
 
