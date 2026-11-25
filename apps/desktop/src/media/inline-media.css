@@ -3,6 +3,7 @@
 [data-inline-media][data-media-kind="video"]:not([data-attachment-storage-removed]),
 [data-chromeless] [data-media-tile][data-media-kind="video"][data-variant="single"] {
   width: calc(var(--video-max-h) * (var(--video-ar)));
+  min-width: min(280px, 100%);
   max-width: 100%;
   aspect-ratio: var(--video-ar);
   position: relative;
@@ -14,6 +15,7 @@
 }
 
 video[data-inline-media] { display: block; height: auto; object-fit: contain; background: #000; }
+video[data-inline-media][data-controls-idle] { cursor: none; }
 video[data-inline-media][data-media-kind="video"]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: -2px; }
 audio[data-media-kind="audio"] { width: min(100%, 420px); }
 [data-inline-media][data-media-kind="audio"] { width: min(100%, 420px); padding: 8px; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-radius-md); background: var(--peppy-surface-widget); color: var(--peppy-text-primary); }
