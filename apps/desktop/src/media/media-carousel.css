@@ -18,7 +18,7 @@
 /* Mixed carousels reserve a 34px footer below the track; chevrons and counter sit there instead of over tiles. */
 [data-media-carousel]:has([data-original-sync-button]) .carousel-chevron { top: auto; bottom: 1px; transform: none; }
 [data-media-carousel]:has([data-original-sync-button]) .carousel-counter { right: auto; bottom: 7px; left: 50%; transform: translateX(-50%); }
-[data-group-hold-note] { display: flex; align-items: center; gap: 4px; margin: 4px 0 0; color: var(--peppy-text-secondary); font-size: 12px; }
+.message-bubble[data-media-bare] [data-group-hold-note] { display: flex; align-items: center; gap: 4px; margin: 4px 0 0; color: var(--peppy-text-secondary); font-size: 12px; }
 [data-media-frame]:has([data-media-carousel][data-sync="error"]) ~ [data-group-hold-note] { color: var(--peppy-warning-text); }
 @media (max-width: 600px) { [data-media-slide] { flex-basis: 160px; } }
 @media (hover: none) { .carousel-chevron { display: none; } [data-media-carousel]:focus-within .carousel-chevron { display: grid; } }

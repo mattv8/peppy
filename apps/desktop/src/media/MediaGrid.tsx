@@ -151,12 +151,12 @@ function Group({ group, onOpen, renderMessageMeta, messageRef, renderCaption, ca
   const singleReactable = group.messages.length === 1 && group.attachments.length === 1 && Boolean(reactable?.(group.messages[0]));
   const pending = Boolean(isMessagePending?.(group.messages[0]));
   const actions = group.messages.map((message) => <span key={message.id} data-media-message-action={message.id}>{renderMessageAction?.(message)}</span>);
-  const notices = group.messages.map((message) => <span key={message.id} data-media-message-action={message.id}>{renderMessageNotice?.(message)}</span>);
+  const notices = group.messages.map((message) => <span key={message.id} data-media-message-notice={message.id}>{renderMessageNotice?.(message)}</span>);
   const article = <article className="message-bubble" data-media-bare={!pending || undefined} data-media-message-content={group.id} data-grouped={isGrouped || undefined} data-reaction-ok={singleReactable ? "" : undefined} data-reaction-message={singleReactable ? group.messages[0].id : undefined} aria-keyshortcuts={singleReactable ? "R" : undefined} data-sender={group.messages[0].sender} data-sender-address={group.messages[0].senderAddress} aria-label={sender?.ariaName ? `${imageLabel} from ${sender.ariaName}` : imageLabel} title={group.attachments.length === 1 && onlyAttachment ? messageTitle?.(onlyAttachment.message) : undefined}>
       {pending ? actions : <>
         {group.attachments.length === 1 && onlyAttachment ? <div data-media-frame={group.id}>{actions}<MediaTile attachment={onlyAttachment.attachment} message={onlyAttachment.message} variant="single" describedBy={singleReactable ? REACTION_HINT_ID : undefined} onOpen={() => onOpen(onlyAttachment)} />{group.messages.length === 1 && renderBadges?.(group.messages[0])}</div> : <Carousel group={group} onOpen={onOpen} messageTitle={messageTitle} reactable={reactable} renderBadges={renderBadges} frameActions={actions} notices={notices} />}
         {group.attachments.length === 1 && notices}
-        {finalMessage && <MediaCaption messageId={finalMessage.id} sender={finalMessage.sender} body={finalMessage.body ? renderCaption?.(finalMessage) ?? finalMessage.body : undefined} subject={finalMessage.subject} toneStyle={captionStyle?.(finalMessage)} />}
+        {finalMessage && <MediaCaption messageId={finalMessage.id} sender={finalMessage.sender} body={finalMessage.body ? renderCaption?.(finalMessage) ?? finalMessage.body : undefined} subject={finalMessage.subject} toneStyle={finalMessage.sender === "other" ? captionStyle?.(finalMessage) : undefined} />}
       </>}
     </article>;
   return <div className={`message-row ${group.messages[0].sender}`} data-message-group={group.id} data-media-group={group.id} data-sender={group.messages[0].sender} data-sender-gutter={sender?.gutter ? "" : undefined} data-sender-run-start={sender?.start ? "" : undefined} data-sender-run-end={sender?.end ? "" : undefined}>

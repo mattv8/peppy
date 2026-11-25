@@ -288,6 +288,13 @@ export function visiblePendingSends(pendingSends: PendingSend[], conversation: C
     }));
 }
 
+function cancellationNoticeText(state: CancellationState | LocalCancellationState | undefined): string | undefined {
+  if (state === "too-late") return "Cancellation was too late.";
+  if (state === "unknown") return "Cancellation status is unknown.";
+  if (state === "failed") return "Could not request cancellation.";
+  return undefined;
+}
+
 export function cancellationDisplayState(authoritative: CancellationState | undefined, local: LocalCancellationState | undefined): CancellationState | LocalCancellationState | undefined {
   if (local === "too-late" || local === "unknown" || (local === "failed" && authoritative !== "requested")) return local;
   return authoritative && authoritative !== "none" ? authoritative : local;
@@ -1366,6 +1373,7 @@ function MessageList({
       </div>
     );
   const conversationToneSeed = conversationAvatar({ id: conversation.id, name: conversation.name, participants: conversation.participants, recipientless: conversation.recipientlessDraft }).seed;
+  const incomingMessageTone = (message: MessageView) => message.sender === "other" ? toneStyle(incomingToneSeed(conversationToneSeed, message.senderAddress), toneOverrides) : undefined;
   const pendingById = new Map(pendingSends.map((pending) => [pending.id, pending]));
   const visualMessages = [
     ...conversation.messages.filter(message => message.sendCancellation?.state !== "confirmed" && !suppressed.has(message.id)),
@@ -1481,18 +1489,21 @@ function MessageList({
             if (onEditRcsUnsent && candidate.attachments.some((attachment) => attachment.rcsSendStatus === "not_sent")) return () => onEditRcsUnsent(candidate);
             return undefined;
           };
-          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} reactable={reactionEligible} renderBadges={(candidate) => badgeElement(candidate, "overlay-bottom-start")} renderMessageMeta={(candidate) => <MessageMeta message={candidate} resend={chains.byLatest.get(candidate.id)} hideTime={hiddenTimes.has(candidate.id)} onEditResend={resendFor(candidate)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} captionStyle={(candidate) => candidate.sender === "other" ? toneStyle(incomingToneSeed(conversationToneSeed, candidate.senderAddress), toneOverrides) : undefined} hasMessageAction={hasCancellationAction} renderMessageAction={(candidate) => cancellationState(candidate) === "requested" ? <SendCancellationPending messageId={candidate.id} waitingForPhone /> : candidate.sender === "self" && candidate.sendCancellation?.canCancel && !candidate.sendRecovery && bridge.cancel_send ? <CancelSendControl messageId={candidate.id} disabled={cancellingMessageIds.has(candidate.id)} onCancel={() => void requestSendCancellation(candidate)} /> : undefined} renderMessageNotice={(candidate) => cancellationState(candidate) === "too-late" || cancellationState(candidate) === "unknown" || cancellationState(candidate) === "failed" ? <span data-message-cancellation-notice={candidate.id} role="status">{cancellationState(candidate) === "too-late" ? "Cancellation was too late." : cancellationState(candidate) === "unknown" ? "Cancellation status is unknown." : "Could not request cancellation."}</span> : undefined} isMessagePending={(candidate) => cancellationState(candidate) === "requested"} messageRef={(candidate) => (row) => registerMessageRow(candidate, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
+          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} reactable={reactionEligible} renderBadges={(candidate) => badgeElement(candidate, "overlay-bottom-start")} renderMessageMeta={(candidate) => <MessageMeta message={candidate} resend={chains.byLatest.get(candidate.id)} hideTime={hiddenTimes.has(candidate.id)} onEditResend={resendFor(candidate)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} captionStyle={incomingMessageTone} hasMessageAction={hasCancellationAction} renderMessageAction={(candidate) => cancellationState(candidate) === "requested" ? <SendCancellationPending messageId={candidate.id} waitingForPhone /> : candidate.sender === "self" && candidate.sendCancellation?.canCancel && !candidate.sendRecovery && bridge.cancel_send ? <CancelSendControl messageId={candidate.id} disabled={cancellingMessageIds.has(candidate.id)} onCancel={() => void requestSendCancellation(candidate)} /> : undefined} renderMessageNotice={(candidate) => {
+            const notice = cancellationNoticeText(cancellationState(candidate));
+            return notice ? <span data-message-cancellation-notice={candidate.id} role="status">{notice}</span> : undefined;
+          }} isMessagePending={(candidate) => cancellationState(candidate) === "requested"} messageRef={(candidate) => (row) => registerMessageRow(candidate, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
           if (reactionNotice) return <ReactionNotice key={message.id} reaction={message} notice={reactionNotice} actorName={actorName} rowRef={(row) => registerRow(message.id, row)} onOpen={onOpenReactionTarget} busy={pendingReactionId === message.id} feedback={reactionFeedback?.reactionId === message.id ? reactionFeedback.message : undefined} meta={showsReactionNoticeMeta(message) ? <MessageMeta message={message} /> : undefined} />;
           const badges = badgesFor(message);
           const chromeless = message.attachments.length > 0 && message.attachments.every((attachment) => attachment.mediaType.startsWith("video/")) && !message.attachments.some((attachment) => rcsPlaceholderState(attachment));
           const messageCancellationState = cancellationState(message);
           const cancellationPending = messageCancellationState === "requested";
-          const cancellationNotice = messageCancellationState === "too-late" ? "Cancellation was too late." : messageCancellationState === "unknown" ? "Cancellation status is unknown." : messageCancellationState === "failed" ? "Could not request cancellation." : undefined;
+          const cancellationNotice = cancellationNoticeText(messageCancellationState);
           const video = chromeless && message.attachments.length === 1 ? message.attachments[0] : undefined;
           const aspectRatio = videoAspectRatio(video?.mediaMeta);
           const bubbleStyle: CSSProperties | undefined = chromeless
             ? aspectRatio ? { "--video-ar": aspectRatio } as CSSProperties : undefined
-            : message.sender === "other" ? toneStyle(incomingToneSeed(conversationToneSeed, message.senderAddress), toneOverrides) : undefined;
+            : incomingMessageTone(message);
           // The roving stop announces the reaction hint and the badge group together (ux-design E).
           const describedBy = [
             searchTargetId === message.id ? "search-result-message-hint" : undefined,
@@ -1606,7 +1617,7 @@ function MessageList({
                   ? <RcsAttachmentSlot key={rcsSlotKey} slotId={rcsSlotKey} phase={file.rcsState}>{renderAttachment()}</RcsAttachmentSlot>
                   : renderAttachment();
               })}
-                {chromeless && <MediaCaption messageId={message.id} sender={message.sender} body={message.body ? <MessageText text={message.body} onOpenExternal={onOpenExternal} /> : undefined} subject={message.subject} toneStyle={message.sender === "other" ? toneStyle(incomingToneSeed(conversationToneSeed, message.senderAddress), toneOverrides) : undefined} />}
+                {chromeless && <MediaCaption messageId={message.id} sender={message.sender} body={message.body ? <MessageText text={message.body} onOpenExternal={onOpenExternal} /> : undefined} subject={message.subject} toneStyle={incomingMessageTone(message)} />}
               </>}
               {cancellationNotice && <span data-message-cancellation-notice={message.id} role="status">{cancellationNotice}</span>}
               {message.sender === "other" && message.oneTimeCode && conversation?.folder !== "spam" && (

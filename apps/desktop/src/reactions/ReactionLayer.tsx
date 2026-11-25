@@ -52,12 +52,18 @@ const MEDIA_CONTROLS = "a[href], [data-message-cancel], [data-message-caption]";
 const CHROMELESS_CONTROLS = "a[href], button, [data-message-caption], [data-message-cancel]";
 const MEDIA_ANCHOR = "[data-media-message-content], [data-media-slide], .message-bubble[data-chromeless]";
 
+export function reachBox(anchor: HTMLElement) {
+  const article = anchor.getBoundingClientRect();
+  const frame = anchor.querySelector<HTMLElement>(":scope > [data-media-frame]")?.getBoundingClientRect();
+  return frame ? { top: frame.top, left: frame.left, right: frame.right, bottom: article.bottom } : article;
+}
+
 /** Limit overlap to the anchor edge and keep controls clear. Media retains a 16px edge. */
 export function measureReach(anchor: HTMLElement): { top: number; bottom: number } {
   const media = anchor.matches(MEDIA_ANCHOR);
   const style = window.getComputedStyle(anchor);
   const px = (value: string) => Number.parseFloat(value) || 0;
-  const box = (anchor.querySelector<HTMLElement>(":scope > [data-media-frame]") ?? anchor).getBoundingClientRect();
+  const box = reachBox(anchor);
   let top = media ? BAR_OVERHANG : px(style.borderTopWidth) + px(style.paddingTop);
   let bottom = media ? BAR_OVERHANG : px(style.borderBottomWidth) + px(style.paddingBottom);
   const controls = anchor.matches(".message-bubble[data-chromeless]") ? CHROMELESS_CONTROLS : media ? MEDIA_CONTROLS : BUBBLE_CONTROLS;
@@ -189,7 +195,7 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
     const viewport = visual ? { top: visual.offsetTop, bottom: visual.offsetTop + visual.height } : { top: 0, bottom: window.innerHeight };
     setQuickCount(metrics.quick || QUICK_REACTIONS.length);
     setPlacement(placeReactionBar({
-      anchor: (anchor.querySelector<HTMLElement>(":scope > [data-media-frame]") ?? anchor).getBoundingClientRect(),
+      anchor: reachBox(anchor),
       outgoing: message.sender === "self",
       list: listRect,
       composerTop: document.getElementById("composer-area")?.getBoundingClientRect().top ?? window.innerHeight,

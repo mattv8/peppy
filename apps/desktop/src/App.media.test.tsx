@@ -119,6 +119,25 @@ afterEach(() => {
 });
 
 describe("App media wiring", () => {
+  it.each([
+    ["too-late", "Cancellation was too late."],
+    ["unknown", "Cancellation status is unknown."],
+    ["failed", "Could not request cancellation."],
+  ] as const)("places %s cancellation notices after image frames", async (state, text) => {
+    const first = image("notice-image");
+    currentSnapshot = snapshot([{ ...message("notice-message", first), sender: "self", attachments: [first, image("notice-image-2")], sendCancellation: { state: "none", canCancel: true, requiresGatewayUpdate: false } }]);
+    const cancel = vi.spyOn(bridge, "cancel_send");
+    if (state === "failed") cancel.mockRejectedValueOnce(new Error("offline"));
+    else cancel.mockResolvedValueOnce({ state, canCancel: false, requiresGatewayUpdate: false });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel send and remove message" }));
+    const notice = await screen.findByText(text);
+    const frame = document.querySelector('[data-media-frame="notice-message"]')!;
+    expect(frame.querySelector("[data-media-carousel]")).toBeInTheDocument();
+    expect(frame.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(notice.closest("[data-media-message-notice]")).toBeInTheDocument();
+  });
+
   it("renders video-only messages without bubble chrome and places the caption after the video", async () => {
     const attachment = { ...video("clip"), mediaMeta: { width: 1080, height: 1920 } };
     currentSnapshot = snapshot([{ ...message("video-only", attachment), sender: "self", body: "Watch this" }]);
@@ -133,7 +152,7 @@ describe("App media wiring", () => {
     expect(article).not.toHaveClass("self");
     expect(article).not.toHaveAttribute("data-peppy-tone");
     expect(article).toHaveStyle("--video-ar: 1080 / 1920");
-    expect(caption).toHaveAttribute("data-media-caption", "video-only");
+    expect(caption).toHaveAttribute("data-message-caption", "video-only");
     expect(caption.querySelector(".media-caption-bubble")).toBeInTheDocument();
     expect(caption).toHaveTextContent("Watch this");
     expect(inlineMedia.compareDocumentPosition(caption) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -179,6 +198,15 @@ describe("App media wiring", () => {
     expect(caption).toContainElement(subject);
     expect(caption.compareDocumentPosition(subject) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(subject.querySelector("bdi")?.textContent).toBe(bidiSubject);
+  });
+
+  it("renders a subject-only video caption", async () => {
+    currentSnapshot = snapshot([{ ...message("subject-only-video", video("only-subject")), body: "", subject: "Only subject" }]);
+    render(<App />);
+    await screen.findByRole("button", { name: "Play video: only-subject.mp4" });
+    const caption = document.querySelector('[data-message-caption="subject-only-video"]')!;
+    expect(caption).toHaveTextContent("Subject: Only subject");
+    expect(caption.querySelectorAll("p")).toHaveLength(1);
   });
 
   it("keeps mixed attachment messages in their bubble", async () => {
@@ -414,7 +442,7 @@ describe("App media wiring", () => {
     const captionLink = screen.getByRole("link", { name: captionUrl });
     expect(bodyLink).toHaveAttribute("href", bodyUrl);
     expect(captionLink).toHaveAttribute("href", captionUrl);
-    const subject = document.querySelector('[data-media-caption="linked-caption"] .message-subject')!;
+    const subject = document.querySelector('[data-message-caption="linked-caption"] .message-subject')!;
     expect(subject).toHaveTextContent(`Subject: Reference ${subjectUrl}`);
     expect(subject.querySelector("a")).toBeNull();
     if (hostKind === "native") {
