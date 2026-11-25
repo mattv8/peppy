@@ -3235,12 +3235,28 @@ async fn react_to_message(
     let submit_session = session.clone();
     let result =
         blocking(move || react_to_message_scoped(&submit_session, message_id, emoji, conversation))
-            .await?;
+            .await;
+    if reaction_refused(&result) {
+        heads_runtime::send_settled(
+            window.app_handle(),
+            window.label(),
+            &conversation.map(|id| id.to_string()).unwrap_or_default(),
+            &session,
+            false,
+        );
+    }
+    let result = result??;
     if result.accepted {
         session.request_work();
     }
     session.notify();
     Ok(result)
+}
+
+fn reaction_refused(result: &BridgeResult<BridgeResult<dto::ReactionSubmitView>>) -> bool {
+    result
+        .as_ref()
+        .is_ok_and(|result| result.as_ref().map_or(true, |view| !view.accepted))
 }
 
 /// The conversation a reaction command may touch: `None` for the main window, the composer's own
@@ -3262,7 +3278,7 @@ fn react_to_message_scoped(
     message_id: MessageId,
     emoji: Option<String>,
     conversation: Option<ConversationId>,
-) -> BridgeResult<dto::ReactionSubmitView> {
+) -> BridgeResult<BridgeResult<dto::ReactionSubmitView>> {
     if let Some(conversation) = conversation {
         let belongs = session
             .client
@@ -3276,7 +3292,7 @@ fn react_to_message_scoped(
         }
     }
     let (gateways, _) = session.gateways();
-    dto::reactions::react(&session.client, message_id, emoji, &gateways).map_err(core_error)
+    Ok(dto::reactions::react(&session.client, message_id, emoji, &gateways).map_err(core_error))
 }
 
 #[tauri::command]
@@ -3312,6 +3328,29 @@ fn dismiss_reaction_request_scoped(
 #[cfg(test)]
 mod reaction_command_tests {
     use super::*;
+
+    #[test]
+    fn only_core_reaction_failures_mark_the_head() {
+        let view = |accepted| dto::ReactionSubmitView {
+            accepted,
+            request_id: None,
+            route: None,
+            reason: None,
+        };
+        assert!(!reaction_refused(&Ok(Ok(view(true)))));
+        assert!(reaction_refused(&Ok(Ok(view(false)))));
+        assert!(reaction_refused(&Ok(Err(BridgeError::new(
+            "core", "error"
+        )))));
+        assert!(!reaction_refused(&Err(BridgeError::new(
+            "window-context",
+            "error"
+        ))));
+        assert!(!reaction_refused(&Err(BridgeError::new(
+            "invalid-message",
+            "error"
+        ))));
+    }
 
     #[test]
     fn reaction_session_guard_rejects_a_message_outside_the_composer_window() {

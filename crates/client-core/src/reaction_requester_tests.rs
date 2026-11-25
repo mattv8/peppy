@@ -115,6 +115,216 @@ fn reaction_routing_matches_merged_conversation_folder() {
     assert_eq!(routing.stored_route, None);
 }
 
+#[test]
+fn reaction_latest_failed_request_allows_clock_skew_and_cancelled_messages() {
+    let fixture = Fixture::new();
+    let gateway = DeviceId::new();
+    let conversation = native_conversation(&fixture, gateway, true);
+    let message = seed_message(
+        &fixture,
+        Transport::Rcs,
+        Direction::Incoming,
+        "hi",
+        conversation,
+    );
+    let request = fixture
+        .client
+        .react_to_message(message, Some("👍".into()), true, None)
+        .unwrap()
+        .request_id
+        .unwrap();
+    fixture.execute(&format!("UPDATE reaction_requests SET state='not_sent',requested_at_ms=1000000 WHERE request_id='{request}'"));
+    for (offset, expected) in [(120_000, Some(request)), (300_000, None), (600_000, None)] {
+        fixture.execute(&format!(
+            "UPDATE messages SET sort_at_ms={} WHERE id='{message}'",
+            1_000_000 + offset
+        ));
+        assert_eq!(
+            fixture
+                .client
+                .latest_failed_reaction_request(conversation)
+                .unwrap(),
+            expected
+        );
+    }
+    fixture.execute(&format!("INSERT INTO send_cancellations(message_id,command_id,target_gateway_id,state) VALUES('{message}','{}','{gateway}','confirmed')", CommandId::new()));
+    assert_eq!(
+        fixture
+            .client
+            .latest_failed_reaction_request(conversation)
+            .unwrap(),
+        Some(request)
+    );
+}
+
+#[test]
+fn reaction_latest_failed_request_tracks_displayed_state() {
+    let fixture = Fixture::new();
+    let gateway = DeviceId::new();
+    let conversation = native_conversation(&fixture, gateway, true);
+    let message = seed_message(
+        &fixture,
+        Transport::Rcs,
+        Direction::Incoming,
+        "hi",
+        conversation,
+    );
+    assert_eq!(
+        fixture
+            .client
+            .latest_failed_reaction_request(conversation)
+            .unwrap(),
+        None
+    );
+    let request = fixture
+        .client
+        .react_to_message(message, Some("👍".into()), true, None)
+        .unwrap()
+        .request_id
+        .unwrap();
+    fixture.execute(&format!(
+        "UPDATE messages SET sort_at_ms=0 WHERE id='{message}'"
+    ));
+    assert_eq!(
+        fixture
+            .client
+            .latest_failed_reaction_request(conversation)
+            .unwrap(),
+        None
+    );
+    fixture.execute(&format!(
+        "UPDATE reaction_requests SET state='not_sent' WHERE request_id='{request}'"
+    ));
+    assert_eq!(
+        fixture
+            .client
+            .latest_failed_reaction_request(conversation)
+            .unwrap(),
+        Some(request)
+    );
+    fixture.execute(&format!("UPDATE reaction_requests SET state='sending',requested_at_ms={} WHERE request_id='{request}'", notifications::now_ms() - REACTION_REQUEST_TTL_MS - REACTION_REQUEST_SKEW_MS - 1_000));
+    assert_eq!(
+        fixture
+            .client
+            .latest_failed_reaction_request(conversation)
+            .unwrap(),
+        Some(request)
+    );
+    fixture.execute(&format!(
+        "UPDATE messages SET sort_at_ms={} WHERE id='{message}'",
+        notifications::now_ms()
+    ));
+    assert_eq!(
+        fixture
+            .client
+            .latest_failed_reaction_request(conversation)
+            .unwrap(),
+        None
+    );
+    fixture.execute(&format!(
+        "UPDATE messages SET sort_at_ms=0 WHERE id='{message}'"
+    ));
+    fixture.client.dismiss_reaction_request(request).unwrap();
+    assert_eq!(
+        fixture
+            .client
+            .latest_failed_reaction_request(conversation)
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn reaction_latest_failed_request_follows_conversation_merge() {
+    let fixture = Fixture::new();
+    let gateway = DeviceId::new();
+    let source = native_conversation(&fixture, gateway, true);
+    let message = seed_message(&fixture, Transport::Rcs, Direction::Incoming, "hi", source);
+    let request = fixture
+        .client
+        .react_to_message(message, Some("👍".into()), true, None)
+        .unwrap()
+        .request_id
+        .unwrap();
+    let target = ConversationId::new();
+    fixture.execute(&format!(
+        "INSERT INTO conversation_merges(source_id,target_id) VALUES('{source}','{target}')"
+    ));
+    fixture.execute(&format!(
+        "UPDATE messages SET effective_conversation_id='{target}',sort_at_ms=0 WHERE id='{message}'"
+    ));
+    fixture.execute(&format!(
+        "UPDATE reaction_requests SET state='unknown' WHERE request_id='{request}'"
+    ));
+    assert_eq!(
+        fixture
+            .client
+            .latest_failed_reaction_request(target)
+            .unwrap(),
+        Some(request)
+    );
+}
+
+#[test]
+fn reaction_latest_failed_request_selects_newest_own_failure() {
+    let fixture = Fixture::new();
+    let gateway = DeviceId::new();
+    let conversation = native_conversation(&fixture, gateway, true);
+    let first_message = seed_message(
+        &fixture,
+        Transport::Rcs,
+        Direction::Incoming,
+        "one",
+        conversation,
+    );
+    let second_message = seed_message(
+        &fixture,
+        Transport::Rcs,
+        Direction::Incoming,
+        "two",
+        conversation,
+    );
+    let first = fixture
+        .client
+        .react_to_message(first_message, Some("👍".into()), true, None)
+        .unwrap()
+        .request_id
+        .unwrap();
+    let second = fixture
+        .client
+        .react_to_message(second_message, Some("👍".into()), true, None)
+        .unwrap()
+        .request_id
+        .unwrap();
+    fixture.execute(&format!(
+        "UPDATE messages SET sort_at_ms=0 WHERE effective_conversation_id='{conversation}'"
+    ));
+    fixture.execute(&format!(
+        "UPDATE reaction_requests SET state='not_sent',requested_at_ms=1 WHERE request_id='{first}'"
+    ));
+    fixture.execute(&format!(
+        "UPDATE reaction_requests SET state='unknown',requested_at_ms=2 WHERE request_id='{second}'"
+    ));
+    assert_eq!(
+        fixture
+            .client
+            .latest_failed_reaction_request(conversation)
+            .unwrap(),
+        Some(second)
+    );
+    fixture.execute(&format!(
+        "UPDATE reaction_requests SET requester_device_id='{}' WHERE request_id='{second}'",
+        DeviceId::new()
+    ));
+    assert_eq!(
+        fixture
+            .client
+            .latest_failed_reaction_request(conversation)
+            .unwrap(),
+        Some(first)
+    );
+}
+
 /// An RCS conversation whose gateway reports the capability for the active epoch.
 fn native_conversation(fixture: &Fixture, gateway: DeviceId, supported: bool) -> ConversationId {
     let conversation = ConversationId::new();
