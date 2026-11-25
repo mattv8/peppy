@@ -1,0 +1,8 @@
+.media-caption { align-self: stretch; contain: inline-size; display: flex; justify-content: flex-start; min-width: 0; margin-top: 2px; }
+.message-row.self .media-caption { justify-content: flex-end; }
+.media-caption-bubble { box-sizing: border-box; width: fit-content; max-width: 100%; padding: 10px 14px; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-radius-md, 8px); background: color-mix(in srgb, var(--peppy-surface-active) 92%, var(--peppy-surface-panel)); box-shadow: var(--peppy-shadow-2); color: var(--peppy-text-primary); font-size: 15px; line-height: 1.5; text-align: start; white-space: pre-wrap; overflow-wrap: anywhere; }
+.message-bubble .media-caption-bubble p { margin: 0; }
+.message-row.self .media-caption-bubble { background: var(--peppy-bubble-self-surface); color: var(--peppy-bubble-self-text); border-color: var(--peppy-bubble-self-border); }
+.media-caption-bubble[data-peppy-tone] { --peppy-tone-surface: var(--peppy-tone); --peppy-tone-on-surface: var(--peppy-tone-text); --peppy-tone-border: var(--peppy-tone); background: var(--peppy-tone-surface); color: var(--peppy-tone-on-surface); border-color: var(--peppy-tone-border); }
+.message-bubble .media-caption-bubble .message-subject { margin-top: 2px; color: inherit; font-size: 11px; opacity: .85; }
+@media (forced-colors: active) { .media-caption-bubble, .media-caption-bubble[data-peppy-tone] { background: Canvas; color: CanvasText; border-color: CanvasText; box-shadow: none; } }

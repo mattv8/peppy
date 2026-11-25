@@ -48,7 +48,7 @@ function isCoarsePointer(): boolean {
 }
 
 const BUBBLE_CONTROLS = "a[href], button, input, select, textarea, summary, [tabindex]:not([tabindex='-1'])";
-const MEDIA_CONTROLS = "a[href], [data-message-cancel]";
+const MEDIA_CONTROLS = "a[href], [data-message-cancel], [data-message-caption]";
 const CHROMELESS_CONTROLS = "a[href], button, [data-message-caption], [data-message-cancel]";
 const MEDIA_ANCHOR = "[data-media-message-content], [data-media-slide], .message-bubble[data-chromeless]";
 
@@ -57,7 +57,7 @@ export function measureReach(anchor: HTMLElement): { top: number; bottom: number
   const media = anchor.matches(MEDIA_ANCHOR);
   const style = window.getComputedStyle(anchor);
   const px = (value: string) => Number.parseFloat(value) || 0;
-  const box = anchor.getBoundingClientRect();
+  const box = (anchor.querySelector<HTMLElement>(":scope > [data-media-frame]") ?? anchor).getBoundingClientRect();
   let top = media ? BAR_OVERHANG : px(style.borderTopWidth) + px(style.paddingTop);
   let bottom = media ? BAR_OVERHANG : px(style.borderBottomWidth) + px(style.paddingBottom);
   const controls = anchor.matches(".message-bubble[data-chromeless]") ? CHROMELESS_CONTROLS : media ? MEDIA_CONTROLS : BUBBLE_CONTROLS;
@@ -189,7 +189,7 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
     const viewport = visual ? { top: visual.offsetTop, bottom: visual.offsetTop + visual.height } : { top: 0, bottom: window.innerHeight };
     setQuickCount(metrics.quick || QUICK_REACTIONS.length);
     setPlacement(placeReactionBar({
-      anchor: anchor.getBoundingClientRect(),
+      anchor: (anchor.querySelector<HTMLElement>(":scope > [data-media-frame]") ?? anchor).getBoundingClientRect(),
       outgoing: message.sender === "self",
       list: listRect,
       composerTop: document.getElementById("composer-area")?.getBoundingClientRect().top ?? window.innerHeight,
