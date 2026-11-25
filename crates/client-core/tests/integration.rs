@@ -28,6 +28,7 @@ mod conversation_split;
 mod conversation_tones;
 mod deferred_media;
 mod device_succession;
+mod draft_cas_goldens;
 mod draft_policy;
 mod draft_send_parts;
 mod draft_sync;
