@@ -1,0 +1,276 @@
+{
+  "coreVectors": [
+    {
+      "expected": {
+        "kind": "saved",
+        "revision": "1"
+      },
+      "name": "create new",
+      "operation": {
+        "expectedRevision": "0",
+        "kind": "create",
+        "text": "created"
+      },
+      "start": {
+        "kind": "new"
+      }
+    },
+    {
+      "expected": {
+        "kind": "not-found"
+      },
+      "name": "save absent",
+      "operation": {
+        "expectedRevision": "0",
+        "kind": "save",
+        "text": "after"
+      },
+      "start": {
+        "kind": "absent"
+      }
+    },
+    {
+      "expected": {
+        "kind": "discarded"
+      },
+      "name": "discard absent",
+      "operation": {
+        "expectedRevision": "18446744073709551615",
+        "kind": "discard"
+      },
+      "start": {
+        "kind": "absent"
+      }
+    },
+    {
+      "expected": {
+        "kind": "not-found"
+      },
+      "name": "save discarded",
+      "operation": {
+        "expectedRevision": "0",
+        "kind": "save",
+        "text": "after"
+      },
+      "start": {
+        "kind": "discarded"
+      }
+    },
+    {
+      "expected": {
+        "kind": "discarded"
+      },
+      "name": "discard discarded",
+      "operation": {
+        "expectedRevision": "1",
+        "kind": "discard"
+      },
+      "start": {
+        "kind": "discarded"
+      }
+    },
+    {
+      "expected": {
+        "currentRevision": "2",
+        "kind": "stale-draft"
+      },
+      "name": "save retired",
+      "operation": {
+        "expectedRevision": "1",
+        "kind": "save",
+        "text": "after"
+      },
+      "start": {
+        "kind": "retired"
+      }
+    },
+    {
+      "expected": {
+        "kind": "discarded"
+      },
+      "name": "discard retired",
+      "operation": {
+        "expectedRevision": "1",
+        "kind": "discard"
+      },
+      "start": {
+        "kind": "retired"
+      }
+    },
+    {
+      "expected": {
+        "kind": "saved",
+        "revision": "2"
+      },
+      "name": "save matching",
+      "operation": {
+        "expectedRevision": "1",
+        "kind": "save",
+        "text": "after"
+      },
+      "start": {
+        "kind": "present",
+        "revision": "1",
+        "text": "before"
+      }
+    },
+    {
+      "expected": {
+        "currentRevision": "1",
+        "kind": "stale-draft"
+      },
+      "name": "save stale",
+      "operation": {
+        "expectedRevision": "0",
+        "kind": "save",
+        "text": "after"
+      },
+      "start": {
+        "kind": "present",
+        "revision": "1",
+        "text": "before"
+      }
+    },
+    {
+      "expected": {
+        "currentRevision": "1",
+        "kind": "stale-draft"
+      },
+      "name": "save u64 maximum expectation",
+      "operation": {
+        "expectedRevision": "18446744073709551615",
+        "kind": "save",
+        "text": "after"
+      },
+      "start": {
+        "kind": "present",
+        "revision": "1",
+        "text": "before"
+      }
+    },
+    {
+      "expected": {
+        "kind": "discarded"
+      },
+      "name": "discard matching",
+      "operation": {
+        "expectedRevision": "1",
+        "kind": "discard"
+      },
+      "start": {
+        "kind": "present",
+        "revision": "1",
+        "text": "before"
+      }
+    },
+    {
+      "expected": {
+        "currentRevision": "1",
+        "kind": "stale-draft"
+      },
+      "name": "discard stale",
+      "operation": {
+        "expectedRevision": "0",
+        "kind": "discard"
+      },
+      "start": {
+        "kind": "present",
+        "revision": "1",
+        "text": "before"
+      }
+    },
+    {
+      "expected": {
+        "conversationId": "destination",
+        "currentRevision": "2",
+        "draftId": "destination",
+        "kind": "draft-moved"
+      },
+      "name": "save moved identity",
+      "operation": {
+        "expectedRevision": "1",
+        "kind": "save",
+        "text": "after"
+      },
+      "start": {
+        "kind": "moved",
+        "revision": "2",
+        "text": "source"
+      }
+    },
+    {
+      "expected": {
+        "conversationId": "destination",
+        "currentRevision": "2",
+        "draftId": "destination",
+        "kind": "draft-moved"
+      },
+      "name": "discard moved identity",
+      "operation": {
+        "expectedRevision": "1",
+        "kind": "discard"
+      },
+      "start": {
+        "kind": "moved",
+        "revision": "2",
+        "text": "source"
+      }
+    }
+  ],
+  "description": {
+    "operations": {
+      "create": "Save the new revision-0 compose row with the supplied text.",
+      "discard": "Discard the identified draft with expectedRevision.",
+      "save": "Save the identified draft with the supplied text and expectedRevision."
+    },
+    "placeholders": {
+      "destination": "The draft or conversation that received the moved draft, according to the field containing the token."
+    },
+    "revisions": "Revision fields are decimal strings. expectedRevision is the operation's compare-and-swap expectation; currentRevision is the authoritative revision returned by an error.",
+    "starts": {
+      "absent": "An unknown draft ID with no compose row or retirement record.",
+      "discarded": "A fresh recipientless compose row discarded before the operation; its ID is retained.",
+      "moved": "A source draft moved to an existing destination; revision is the destination revision and text is the carried source text.",
+      "new": "A fresh recipientless compose row at revision 0.",
+      "present": "A recipientless compose row saved with the given text and revision.",
+      "retired": "A sent draft whose cleared retired identity has been replaced by an authored save; its ID is retained."
+    }
+  },
+  "revisionStrings": {
+    "cases": [
+      {
+        "input": "0",
+        "parsed": "0"
+      },
+      {
+        "input": "01",
+        "parsed": "1"
+      },
+      {
+        "input": "+1",
+        "parsed": "1"
+      },
+      {
+        "input": "18446744073709551615",
+        "parsed": "18446744073709551615"
+      },
+      {
+        "error": "invalid-draft",
+        "input": ""
+      },
+      {
+        "error": "invalid-draft",
+        "input": "-1"
+      },
+      {
+        "error": "invalid-draft",
+        "input": " 1"
+      },
+      {
+        "error": "invalid-draft",
+        "input": "18446744073709551616"
+      }
+    ],
+    "owner": "desktop-host"
+  }
+}
