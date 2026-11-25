@@ -1,0 +1,47 @@
+{
+  "linked": {
+    "healthy": true,
+    "last_ok_ms": 1700000000000,
+    "phone_responding": true,
+    "running": true,
+    "seq": 42,
+    "state": "linked",
+    "stop_code": ""
+  },
+  "needs_relink": {
+    "healthy": false,
+    "last_ok_ms": 0,
+    "phone_responding": false,
+    "running": false,
+    "seq": 42,
+    "state": "needs_relink",
+    "stop_code": "relink_needed"
+  },
+  "pairing": {
+    "healthy": false,
+    "last_ok_ms": 0,
+    "phone_responding": false,
+    "running": false,
+    "seq": 42,
+    "state": "pairing",
+    "stop_code": ""
+  },
+  "signed_out": {
+    "healthy": false,
+    "last_ok_ms": 0,
+    "phone_responding": false,
+    "running": false,
+    "seq": 42,
+    "state": "signed_out",
+    "stop_code": "signed_out"
+  },
+  "unlinked": {
+    "healthy": false,
+    "last_ok_ms": 0,
+    "phone_responding": false,
+    "running": false,
+    "seq": 42,
+    "state": "unlinked",
+    "stop_code": ""
+  }
+}

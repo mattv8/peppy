@@ -1,0 +1,19 @@
+{
+  "download_invalid": {
+    "code": "invalid_request"
+  },
+  "download_ok": {
+    "code": "ok",
+    "size": 5
+  },
+  "download_too_large": {
+    "code": "too_large"
+  },
+  "upload_invalid": {
+    "code": "invalid_request"
+  },
+  "upload_ok": {
+    "code": "ok",
+    "media_ref": "{\"media_id\":\"id\",\"key\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\",\"mime\":\"image/jpeg\",\"size\":5,\"name\":\"source.jpg\"}"
+  }
+}

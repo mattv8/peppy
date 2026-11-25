@@ -1,0 +1,56 @@
+{
+  "snapshot": {
+    "code": "conversation_candidate_snapshot",
+    "complete": true,
+    "conversations": [
+      {
+        "classification": "eligible",
+        "conversation_status": 1,
+        "conversation_type": 2,
+        "google_conversation_id": "synthetic-conversation",
+        "group": false,
+        "invisible_participant_count": 0,
+        "is_group_chat": false,
+        "last_message_ms": 0,
+        "member_digest": "6p4X3v/Dk1XLrvIl1OVnXOOmJMdClBGcGmqBc/xEbm4=",
+        "name": "",
+        "participants": [
+          {
+            "canonical_address": "",
+            "canonical_address_present": false,
+            "display_name": "",
+            "formatted_number": "",
+            "identifier_type": 0,
+            "number_present": false,
+            "participant_id": "synthetic-outgoing",
+            "participant_id_present": true,
+            "raw_number": "",
+            "self": true,
+            "visible": true
+          },
+          {
+            "canonical_address": "+12025550102",
+            "canonical_address_present": true,
+            "display_name": "",
+            "formatted_number": "",
+            "identifier_type": 0,
+            "number_present": true,
+            "participant_id": "",
+            "participant_id_present": false,
+            "raw_number": "+12025550102",
+            "self": false,
+            "visible": true
+          }
+        ],
+        "read_only": false,
+        "visible_non_self_count": 1
+      }
+    ],
+    "generation": 1,
+    "pairing_evidence_id": "123e4567-e89b-12d3-a456-426614174003",
+    "revision": 5,
+    "run_incarnation": "123e4567-e89b-12d3-a456-426614174002",
+    "snapshot_token": "1:2:5",
+    "stream_epoch": 2
+  }
+}
