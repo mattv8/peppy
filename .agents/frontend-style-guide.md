@@ -111,10 +111,12 @@ recipient-rail boundaries, pane resizing, and saved layouts when restyling.
   window managers work; `AppTitlebar` reserves their 76px slot with a non-interactive spacer
   (`nativeWindowControls`). Composer windows, head panels, Windows and Linux stay app-drawn.
   Close paths use `closeAfterSave` or the native `CloseRequested` lifecycle, and a draft
-  flush failure keeps the window open. A close, collapse, or quit first waits up to 6
-  seconds (`CLOSE_SEND_WAIT_MS`) for an in-flight send to settle. A refused send keeps
-  the window open with only its composer "Not sent" notice. A send still running at the
-  bound keeps the window open with a warning banner, not a draft-save error. The detached
+  flush failure keeps the window open. A close, quit, or lock first waits up to 6
+  seconds (`CLOSE_SEND_WAIT_MS`) for an in-flight send to settle; a refused send keeps
+  the window open with only its composer "Not sent" notice; a send still running at the
+  bound keeps the window open with a warning banner, not a draft-save error. Collapsing
+  a floating chat panel does not wait: it hides the panel once the send has been handed
+  to the host, and the flush skips the draft held behind that send. The detached
   composer is not a second main window.
 
 ## Icons and compose
@@ -298,6 +300,7 @@ notification previews and floating heads.
 - The row renders only when the list ends at the live tail: not in detached history, empty threads, read-only groups, loading, or other tabs. The existing near-bottom stick reveals it above the composer overlay and never moves a reader of older history.
 - Typing announcements stay in the sr-only `#typing-announcer` outside the log. The composer toolbar keeps only its spacer and the `data-typing-send` attribute for the user's own typing.
 - Floating heads (macOS and Windows; Linux has no heads) show typing in the unread badge slot. A three-dot pill replaces the count while a contact types in that conversation, and the count returns afterward. Only conversations whose typing arrives through the Google Messages link show it. Groups show the pill with no typer identity. The head stays one element: its label and tooltip gain ", typing" after the name, with one wording for groups and one-to-one. Nothing is announced, and the pill is not a separate element. Reduced motion shows static dots at 0.7 opacity, or full opacity under Increase Contrast or High Contrast. Timing belongs to [heads_runtime.rs](../apps/desktop/src-tauri/src/heads_runtime.rs). The head's bounce differs from the in-conversation dots, which pulse opacity only, on purpose. Unit-tested only; not seen running on macOS or Windows (see Native and fixture limits).
+- A message that failed to send from a conversation shows a `!` in that head's badge slot (the count badge's red fill, white text and one-digit size) until the panel is opened. It outranks the unread count but not the typing pill, and the head's label and tooltip gain ", send failed" after the name (and after ", typing") while the unread count stays in them. The marker covers a send refused while the panel was hidden and a latest outgoing message whose delivery failed or is unknown; it is kept in memory only, so it can return after a restart until the panel is opened. Viewing the conversation in the main window does not clear it. Rules belong to [heads_runtime.rs](../apps/desktop/src-tauri/src/heads_runtime.rs). Unit-tested only; not seen running on macOS or Windows.
 - On macOS the floating chat panel accepts the first click (`accept_first_mouse`), so one click on an inactive panel both activates it and acts. The main window and the separate composer window keep standard activation. A composer window later turned into a panel keeps the setting it was created with. Not seen running on macOS.
 - On macOS the floating chat panel and the media viewers it opens sit at AppKit's floating window level (3), the heads' level, through [window_level.rs](../apps/desktop/src-tauri/src/window_level.rs). Tauri's always-on-top would put them at level 5, above every other app's floating window, so a browser picker such as Choosy, which opens at level 3 under the pointer, would draw behind the panel. A floating window that another app opens later shows in front of the panel. Browser windows still open behind it. Not seen running on macOS.
 
