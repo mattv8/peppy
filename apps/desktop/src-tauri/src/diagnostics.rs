@@ -1,5 +1,5 @@
 //! Opt-in desktop diagnostics log, the counterpart of Android's `DiagnosticsLog`. Records are
-//! numbers only (no identifiers, content or derived values), bounded and validated; the writer
+//! numbers only (no identifiers, content or values derived from user data), bounded and validated; the writer
 //! lives in `recorder.rs`. Other modules record through `record`, which costs one atomic load while
 //! recording is off.
 
@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use peppy_client_core::LiveTypingCause;
+use peppy_client_core::{DatabaseFault, DatabaseFaultKind, LiveTypingCause};
 use serde::Serialize;
 use tauri::Manager;
 
@@ -28,6 +28,7 @@ pub const EVENT_LIVE_SOCKET: u32 = 30;
 pub const EVENT_TYPING_SEND: u32 = 31;
 pub const EVENT_TYPING_INBOUND: u32 = 32;
 pub const EVENT_HEAD_TYPING: u32 = 33;
+pub const EVENT_DATABASE_FAULT: u32 = 36;
 
 pub const FIELD_DELAY_MS: u32 = 4;
 pub const FIELD_ATTEMPT: u32 = 5;
@@ -36,6 +37,10 @@ pub const FIELD_OUTCOME: u32 = 28;
 pub const FIELD_REASON: u32 = 29;
 pub const FIELD_DROPPED: u32 = 34;
 pub const FIELD_ENABLED: u32 = 35;
+pub const FIELD_SQLITE_CODE: u32 = 70;
+pub const FIELD_SITE: u32 = 71;
+pub const FIELD_LINE: u32 = 72;
+pub const FIELD_AGE_MS: u32 = 73;
 
 /// `reason` values of event 30 (`live_socket`).
 pub mod live_socket_reason {
@@ -133,6 +138,34 @@ pub fn enabled() -> bool {
     ACTIVE.get().is_some_and(DiagnosticsLog::enabled)
 }
 
+/// Records the last SQLite failure converted on this thread, if one was present.
+pub fn record_database_fault(fault: Option<DatabaseFault>) {
+    if !enabled() {
+        return;
+    }
+    let Some(fault) = fault else {
+        record(EVENT_DATABASE_FAULT, &[(FIELD_REASON, 0)]);
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0);
+    let mut fields = vec![(FIELD_REASON, fault.kind as i64)];
+    if let Some(code) = fault.sqlite_extended_code {
+        fields.push((FIELD_SQLITE_CODE, i64::from(code)));
+    }
+    fields.extend([
+        (FIELD_SITE, i64::from(fault.site)),
+        (FIELD_LINE, i64::from(fault.line)),
+        (
+            FIELD_AGE_MS,
+            now.saturating_sub(fault.recorded_at_ms).max(0),
+        ),
+    ]);
+    record(EVENT_DATABASE_FAULT, &fields);
+}
+
 /// Records `event` with `fields` (`(field code, value)` pairs). Returns immediately when recording
 /// is off; never blocks or panics.
 pub fn record(event: u32, fields: &[(u32, i64)]) {
@@ -212,9 +245,9 @@ fn header() -> String {
         "schema=2 platform=desktop version={}",
         env!("CARGO_PKG_VERSION")
     );
-    header.push_str(" events=24:diagnostic_state,29:live_typing(reason=cause,count=delta),30:live_socket,31:typing_send,32:typing_inbound,33:head_typing");
+    header.push_str(" events=24:diagnostic_state,29:live_typing(reason=cause,count=delta),30:live_socket,31:typing_send,32:typing_inbound,33:head_typing,36:database_fault(reason=kind)");
     header.push_str(
-        " fields=4:delay_ms,5:attempt,19:count,28:outcome,29:reason,34:dropped,35:enabled",
+        " fields=4:delay_ms,5:attempt,19:count,28:outcome,29:reason,34:dropped,35:enabled,70:sqlite_code,71:site,72:line,73:age_ms",
     );
     header.push_str(" live_socket_reasons=1:connecting,2:hello_ok,3:hello_rejected,4:connect_failed,5:closed,6:backoff,7:context_wake,8:typing_enabled,9:typing_no_context,10:typing_disabled,11:suspend_detected");
     header.push_str(
@@ -223,6 +256,10 @@ fn header() -> String {
     header.push_str(" typing_inbound_outcomes=1:display_started,2:display_stopped,3:reply_sent,4:follow_ups_sent,5:nothing,6:not_current,7:reply_refused");
     header.push_str(" head_typing_outcomes=0:hidden,1:shown");
     append_core_cause_table(&mut header);
+    header.push_str(" database_fault_kinds=0:none");
+    for kind in DatabaseFaultKind::ALL {
+        let _ = write!(header, ",{}:{}", kind as u16, kind.name());
+    }
     header
 }
 
@@ -270,8 +307,31 @@ mod header_tests {
             .expect("header carries the field table");
         assert_eq!(
             fields,
-            "4:delay_ms,5:attempt,19:count,28:outcome,29:reason,34:dropped,35:enabled"
+            "4:delay_ms,5:attempt,19:count,28:outcome,29:reason,34:dropped,35:enabled,70:sqlite_code,71:site,72:line,73:age_ms"
         );
+    }
+
+    #[test]
+    fn database_fault_kinds_lists_every_core_kind_in_code_order() {
+        let header = header();
+        assert!(header.contains("36:database_fault(reason=kind)"));
+        let listed = header
+            .split_once(" database_fault_kinds=")
+            .unwrap()
+            .1
+            .split(' ')
+            .next()
+            .unwrap();
+        let expected = std::iter::once("0:none".to_owned())
+            .chain(
+                DatabaseFaultKind::ALL
+                    .iter()
+                    .map(|kind| format!("{}:{}", *kind as u16, kind.name())),
+            )
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(listed, expected);
+        assert_eq!(listed, "0:none,1:sqlite_failure,2:no_rows,3:decode,4:other");
     }
 }
 

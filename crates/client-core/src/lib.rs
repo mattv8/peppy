@@ -40,6 +40,10 @@ mod conversation_match;
 mod conversation_merge;
 mod conversation_pinning;
 mod conversation_tones;
+mod database_fault;
+pub use database_fault::{
+    DatabaseFault, DatabaseFaultKind, database_fault_site, take_database_fault,
+};
 mod deferred_media;
 mod device_succession;
 mod draft_sync;
@@ -495,7 +499,9 @@ pub struct RcsMediaOutgoingStatus {
     pub reason: Option<RcsMediaNotSentReason>,
 }
 impl From<rusqlite::Error> for Error {
-    fn from(_: rusqlite::Error) -> Self {
+    #[track_caller]
+    fn from(error: rusqlite::Error) -> Self {
+        database_fault::note(&error, std::panic::Location::caller());
         Self::Database
     }
 }
