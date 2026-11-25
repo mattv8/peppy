@@ -133,8 +133,9 @@ describe("ContactsView paging", () => {
     await screen.findByText("Person 0");
     const list = document.getElementById("contacts-list")!;
     Object.defineProperty(list, "scrollTop", { configurable: true, writable: true, value: 120 });
+    // The list observes its sentinel from an effect that runs once more pages are known to exist.
+    await waitFor(() => expect(liveObservers[liveObservers.length - 1]?.options?.root).toBe(list));
     const sentinelOptions = liveObservers[liveObservers.length - 1]?.options;
-    expect(sentinelOptions?.root).toBe(list);
     expect(sentinelOptions?.rootMargin).toBe("0px 0px 600px 0px");
 
     await revealSentinel();
