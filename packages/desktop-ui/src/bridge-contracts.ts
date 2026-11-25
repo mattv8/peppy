@@ -356,7 +356,7 @@ export interface DesktopBridge {
   subscribe_typing?(listener: (signal: TypingSignal) => void): (() => void) & { ready?: Promise<void> };
   subscribe_lifecycle(listener: (request: { id: string; action: "quit" | "close" | "collapse" }) => void): () => void;
   subscribe_lifecycle_finished(listener: (result: { id: string; ok: boolean }) => void): () => void;
-  acknowledge_lifecycle(id: string, ok: boolean): Promise<void>;
+  acknowledge_lifecycle(id: string, ok: boolean, reason?: "send"): Promise<void>;
   window(action: "minimize" | "maximize" | "close"): Promise<void>;
   list_contact_books(): Promise<ContactBookView[]>;
   list_devices(): Promise<DeviceRosterView>;

@@ -5223,7 +5223,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     void flushForClose(request.action === "collapse" ? "collapse" : "close").then(async outcome => {
       if (!outcome.ok) {
         showFlushFailure(outcome, "The window stayed open because a draft was not saved");
-        await bridge.acknowledge_lifecycle(request.id, false);
+        if ("reason" in outcome) await bridge.acknowledge_lifecycle(request.id, false, "send");
+        else await bridge.acknowledge_lifecycle(request.id, false);
         return;
       }
       await bridge.acknowledge_lifecycle(request.id, true);

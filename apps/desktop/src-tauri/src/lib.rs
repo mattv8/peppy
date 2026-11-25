@@ -6332,8 +6332,9 @@ fn acknowledge_lifecycle(
     app: tauri::AppHandle,
     id: String,
     ok: bool,
+    reason: Option<String>,
 ) -> BridgeResult<()> {
-    lifecycle::acknowledge(&app, window.label(), &id, ok)
+    lifecycle::acknowledge(&app, window.label(), &id, ok, reason.as_deref())
 }
 
 #[tauri::command]
