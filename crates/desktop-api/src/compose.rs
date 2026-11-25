@@ -1015,6 +1015,28 @@ mod tests {
     };
     use peppy_crypto::{KeyProfile, create_vault_check_header, derive_root_key};
 
+    #[test]
+    fn revision_strings_match_desktop_host_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/draft-cas.json"
+        ))
+        .unwrap();
+        for case in fixture["revisionStrings"]["cases"].as_array().unwrap() {
+            let input = case["input"].as_str().unwrap();
+            match revision(input) {
+                Ok(value) => assert_eq!(
+                    Some(value.to_string().as_str()),
+                    case["parsed"].as_str(),
+                    "input {input:?}"
+                ),
+                Err(ComposeError::Ui { code, .. }) => {
+                    assert_eq!(Some(code), case["error"].as_str(), "input {input:?}")
+                }
+                Err(_) => panic!("unexpected error for {input:?}"),
+            }
+        }
+    }
+
     const PASSPHRASE: &str = "compose test passphrase";
     const GATEWAY_ID: &str = "00000000-0000-4000-8000-000000000001";
 
