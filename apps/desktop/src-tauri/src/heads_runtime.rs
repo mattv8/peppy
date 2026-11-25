@@ -452,14 +452,17 @@ fn should_restore_panel_topmost(fullscreen: Option<bool>, topmost: Option<bool>)
 
 #[cfg(target_os = "macos")]
 fn prepare_windowed_panel(window: &tauri::Window) -> bool {
-    let (Ok(fullscreen), Ok(topmost)) = (window.is_fullscreen(), window.is_always_on_top()) else {
+    let (Ok(fullscreen), Some(topmost)) = (
+        window.is_fullscreen(),
+        crate::window_level::is_floating(window),
+    ) else {
         return false;
     };
     if fullscreen {
         return false;
     }
     if should_restore_panel_topmost(Some(fullscreen), Some(topmost)) {
-        return window.set_always_on_top(true).is_ok();
+        return crate::window_level::set_floating(window, true).is_ok();
     }
     true
 }

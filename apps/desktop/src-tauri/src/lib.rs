@@ -90,6 +90,7 @@ mod update_safety;
 mod updates;
 mod window_chrome;
 mod window_geometry;
+mod window_level;
 mod window_placement;
 mod windows;
 
@@ -591,7 +592,7 @@ pub(crate) fn sync_media_viewer_topmost(app: &tauri::AppHandle, parent_label: &s
         .unwrap_or_default();
     for label in labels {
         if let Some(window) = app.get_webview_window(&label) {
-            let _ = window.set_always_on_top(atop);
+            let _ = window_level::set_floating(&window.as_ref().window(), atop);
         }
     }
 }
@@ -4622,6 +4623,7 @@ async fn open_media_viewer(
                 session: session.clone(),
             },
         );
+    let floating = heads_runtime::is_panel(&app, window.label());
     let builder =
         tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(url.into()))
             .title("Peppy media")
@@ -4631,7 +4633,7 @@ async fn open_media_viewer(
             .resizable(true)
             .visible(false)
             .focused(true)
-            .always_on_top(heads_runtime::is_panel(&app, window.label()));
+            .always_on_top(floating && cfg!(not(target_os = "macos")));
     let viewer = match builder.build() {
         Ok(viewer) => viewer,
         Err(_) => {
@@ -4660,6 +4662,8 @@ async fn open_media_viewer(
         let _ = viewer.destroy();
         return Err(window_error());
     }
+    #[cfg(target_os = "macos")]
+    let _ = window_level::set_floating(&viewer.as_ref().window(), floating);
     if let Some(placement) = placement {
         #[cfg(not(target_os = "windows"))]
         let position =
