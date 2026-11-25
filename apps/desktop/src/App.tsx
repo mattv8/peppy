@@ -236,6 +236,7 @@ import {
   type CancelledSendRestore,
 } from "./drafts/cancelledSendRestore";
 import { DraftNotice } from "./drafts/DraftNotice";
+import { CLOSE_SEND_WAIT_MS, waitForSend, type SendSettlement } from "./drafts/sendSettlement";
 import { DraftSyncStatus } from "./drafts/DraftSyncStatus";
 import type { DraftResolutionResult } from "./drafts/DraftConflictReviewDialog";
 import { selectDraftNotice, type DraftNoticeCandidate } from "./drafts/draftNoticeModel";
@@ -251,6 +252,8 @@ type RefreshRequest = {
 };
 
 type ActionNotice = Omit<AppNotice, "source">;
+type CloseOutcome = SaveOutcome | { ok: false; reason: "send-unsent" | "still-sending" };
+const CLOSE_SEND_NOTICES = { "still-sending": "Your message is still sending. You can close this window again once it finishes." };
 type ComposerFeedback = { key: string; message: string; severity: AppNotice["severity"]; kind?: "attachment-feedback" };
 type LocalCancellationState = "requested" | "too-late" | "unknown" | "failed";
 type CancellationState = NonNullable<MessageView["sendCancellation"]>["state"];
@@ -2799,6 +2802,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
   const sendingRef = useRef(false);
+  const inFlightSendRef = useRef<{ settled: Promise<SendSettlement>; resolve(s: SendSettlement): void } | null>(null);
   const closingRef = useRef(false);
   const loadSequence = useRef(0);
   const historySequence = useRef(0);
@@ -4889,6 +4893,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     autoAcknowledgeDraftSyncNotice();
     const session = currentSearchSessionKey();
     sendingRef.current = true;
+    let resolveSend!: (settlement: SendSettlement) => void;
+    const inFlightSend = { settled: new Promise<SendSettlement>((resolve) => { resolveSend = resolve; }), resolve: (settlement: SendSettlement) => resolveSend(settlement) };
+    inFlightSendRef.current = inFlightSend;
     setSending(true);
     setGroupNotice(null);
     setComposerNotice(slotKey, "");
@@ -5006,6 +5013,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
         }
         const postSendContent = store.get(current.key)?.content;
         store.markSent(current.key, sentGeneration, result.revision, postSendContent);
+        inFlightSend.resolve("sent");
         setNewComposeKey(null);
         if (result.reason === "create_not_rcs") setGroupNotice({ kind: "create-not-rcs", key: store.resolve(current.key) });
         if (detachedHistoryRef.current?.conversationId === current.conversationId) clearDetached();
@@ -5079,6 +5087,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       }
       await refresh(current.conversationId).catch(reportRefresh(""));
     } finally {
+      inFlightSend.resolve("unsent");
+      if (inFlightSendRef.current === inFlightSend) inFlightSendRef.current = null;
       if (pendingSendId) setPendingSends((sends) => sends.filter((pending) => pending.id !== pendingSendId));
       sendingRef.current = false;
       setSending(false);
@@ -5133,17 +5143,28 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   };
 
   /** Closing never discards an unsaved draft: a failed save keeps the window open. */
-  const flushForClose = async () => {
+  const flushForClose = async (): Promise<CloseOutcome> => {
+    const inFlightSend = inFlightSendRef.current;
+    if (inFlightSend) {
+      const outcome = await waitForSend(inFlightSend.settled, CLOSE_SEND_WAIT_MS);
+      if (outcome !== "sent") return { ok: false, reason: outcome === "unsent" ? "send-unsent" : "still-sending" };
+    }
     const reviewedKeys = new Set<string>();
     for (;;) {
       const outcome = await store.flushAll();
+      if (!outcome.ok && outcome.key && store.get(store.resolve(outcome.key))?.held) return { ok: false, reason: "still-sending" };
       if (outcome.ok || !outcome.reviewRequired || !outcome.key || reviewedKeys.has(outcome.key)) return outcome;
       // The store reports reviewRequired only for a clean, durably adopted host row.
       reviewedKeys.add(outcome.key);
       store.acknowledgeReview(outcome.key);
     }
   };
-  const showFlushFailure = (outcome: Extract<SaveOutcome, { ok: false }>, prefix: string) => {
+  const showFlushFailure = (outcome: Extract<CloseOutcome, { ok: false }>, prefix: string, sendNotices: { "still-sending": string; "send-unsent"?: string } = CLOSE_SEND_NOTICES) => {
+    if ("reason" in outcome) {
+      const notice = sendNotices[outcome.reason];
+      if (notice) setNotice(notice, "warning");
+      return;
+    }
     if (outcome.key) {
       setActiveView("conversations");
       if (outcome.key !== selectedRef.current) choose(outcome.key);
@@ -5414,7 +5435,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   const lockSync = lock ? async () => {
     const saved = await flushForClose();
     if (!saved.ok) {
-      showFlushFailure(saved, "Not locked: the draft could not be saved");
+      showFlushFailure(saved, "Not locked: the draft could not be saved", { "still-sending": "Not locked: your message is still sending. Try again once it finishes.", "send-unsent": "Not locked: your message was not sent." });
       return;
     }
     try {
