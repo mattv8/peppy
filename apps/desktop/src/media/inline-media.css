@@ -14,6 +14,8 @@
   color: var(--peppy-text-primary);
 }
 
+/* The wrapper shrinks to its content, so without this cap the video's max-width resolves against its own width. */
+.message-bubble[data-chromeless] > [data-attachment-id] { min-width: 0; max-width: 100%; }
 video[data-inline-media] { display: block; height: auto; max-height: var(--video-max-h); object-fit: contain; background: #000; }
 video[data-inline-media][data-controls-idle] { cursor: none; }
 video[data-inline-media][data-media-kind="video"]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: -2px; }
