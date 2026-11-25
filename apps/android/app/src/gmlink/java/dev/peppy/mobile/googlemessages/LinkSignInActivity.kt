@@ -85,15 +85,12 @@ class LinkSignInActivity : AppCompatActivity() {
     }
 
     private fun launchStartup(task: () -> Unit) {
-        LinkSignInActivityTestHooks.startupExecutor?.invoke(task) ?: Thread(task).start()
+        linkSignInDeps(applicationContext).startupExecutor(task)
     }
 
-    private fun awaitSignInReady(): Boolean =
-        LinkSignInActivityTestHooks.awaitSignInReady?.invoke(applicationContext)
-            ?: GoogleMessagesLink.awaitSignInReady(applicationContext)
+    private fun awaitSignInReady(): Boolean = linkSignInDeps(applicationContext).awaitSignInReady(applicationContext)
 
-    private fun cookieManager(): CookieManager =
-        LinkSignInActivityTestHooks.cookieManager?.invoke() ?: CookieManager.getInstance()
+    private fun cookieManager(): CookieManager = linkSignInDeps(applicationContext).cookieManager()
 
     private fun initializeWebView() {
         if (!ownsReadyLease() || LinkSignInRuntime.isSignInBlocked()) return
@@ -197,7 +194,7 @@ class LinkSignInActivity : AppCompatActivity() {
             return
         }
         GoogleMessagesLinkService.start(this)
-        val queued = LinkSignInRuntime.executePairing(attempt) {
+        val queued = LinkSignInRuntime.executePairing(attempt, linkSignInDeps(applicationContext).pairingExecutor) {
             try {
                 if (!LinkRuntime.recordPreStart(applicationContext, attempt.token)) {
                     LinkRuntimeEventSink.record("link", "persist_failed", 0)
@@ -297,17 +294,5 @@ class LinkSignInActivity : AppCompatActivity() {
         const val CONFIG_URL = "https://messages.google.com/web/config"
         const val ACCOUNT_CHOOSER = "https://accounts.google.com/AccountChooser?continue=$CONFIG_URL"
         val PAIRABLE_STATES = setOf("unlinked", "signed_out")
-    }
-}
-
-internal object LinkSignInActivityTestHooks {
-    @Volatile var startupExecutor: ((() -> Unit) -> Unit)? = null
-    @Volatile var awaitSignInReady: ((android.content.Context) -> Boolean)? = null
-    @Volatile var cookieManager: (() -> CookieManager)? = null
-
-    fun reset() {
-        startupExecutor = null
-        awaitSignInReady = null
-        cookieManager = null
     }
 }

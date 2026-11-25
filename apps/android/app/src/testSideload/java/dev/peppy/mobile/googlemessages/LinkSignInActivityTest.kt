@@ -36,7 +36,6 @@ import uniffi.peppy_mobile_bindings.NativeRcsLinkState
 class LinkSignInActivityTest : GatewayTestBase() {
     @After
     fun reset() {
-        LinkSignInActivityTestHooks.reset()
         LinkSignInRuntime.resetForTest()
         LinkRuntime.resetForTest()
         LinkCoreBridge.resetForTest()
@@ -46,9 +45,9 @@ class LinkSignInActivityTest : GatewayTestBase() {
     fun `failed startup wipe finishes blocked and releases untouched lease without jar access`() {
         val startup = ControlledStartup()
         val cookieManagerRequests = AtomicInteger()
-        LinkSignInActivityTestHooks.startupExecutor = startup::capture
-        LinkSignInActivityTestHooks.awaitSignInReady = { false }
-        LinkSignInActivityTestHooks.cookieManager = {
+        LinkTestDeps.startupExecutor = startup::capture
+        LinkTestDeps.awaitSignInReady = { false }
+        LinkTestDeps.cookieManager = {
             cookieManagerRequests.incrementAndGet()
             CookieManager.getInstance()
         }
@@ -68,9 +67,9 @@ class LinkSignInActivityTest : GatewayTestBase() {
     fun `non-pairable existing link finishes error and releases untouched lease without jar access`() {
         val startup = ControlledStartup()
         val cookieManagerRequests = AtomicInteger()
-        LinkSignInActivityTestHooks.startupExecutor = startup::capture
-        LinkSignInActivityTestHooks.awaitSignInReady = { true }
-        LinkSignInActivityTestHooks.cookieManager = {
+        LinkTestDeps.startupExecutor = startup::capture
+        LinkTestDeps.awaitSignInReady = { true }
+        LinkTestDeps.cookieManager = {
             cookieManagerRequests.incrementAndGet()
             CookieManager.getInstance()
         }
@@ -92,8 +91,8 @@ class LinkSignInActivityTest : GatewayTestBase() {
     fun `sign-in reads link status off the main thread`() {
         val startup = ControlledStartup()
         val statusReadOnMain = AtomicBoolean()
-        LinkSignInActivityTestHooks.startupExecutor = startup::capture
-        LinkSignInActivityTestHooks.awaitSignInReady = { true }
+        LinkTestDeps.startupExecutor = startup::capture
+        LinkTestDeps.awaitSignInReady = { true }
         LinkTestDeps.engine = availableEngine(object : LinkedHandle() {
             override fun status(): String {
                 statusReadOnMain.set(Thread.currentThread() === Looper.getMainLooper().thread)
@@ -113,8 +112,8 @@ class LinkSignInActivityTest : GatewayTestBase() {
     @Test
     fun `sign-in screen keeps Cancel without Google blocked sign-in`() {
         val startup = ControlledStartup()
-        LinkSignInActivityTestHooks.startupExecutor = startup::capture
-        LinkSignInActivityTestHooks.awaitSignInReady = { true }
+        LinkTestDeps.startupExecutor = startup::capture
+        LinkTestDeps.awaitSignInReady = { true }
         LinkTestDeps.engine = availableEngine(object : LinkedHandle() {
             override fun status() = "{\"state\":\"unlinked\"}"
         })
@@ -264,9 +263,9 @@ class LinkSignInActivityTest : GatewayTestBase() {
         val diagnostics = mutableListOf<String>()
         val handle = PairCountingHandle()
         var opens = 0
-        LinkSignInActivityTestHooks.startupExecutor = startup::capture
-        LinkSignInActivityTestHooks.awaitSignInReady = { false }
-        LinkSignInRuntimeTestHooks.pairingExecutor = pairing
+        LinkTestDeps.startupExecutor = startup::capture
+        LinkTestDeps.awaitSignInReady = { false }
+        LinkTestDeps.pairingExecutor = pairing
         LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle.also { opens++ }
@@ -298,9 +297,9 @@ class LinkSignInActivityTest : GatewayTestBase() {
             // The pre-start lifecycle write must already be durable when native pairing starts.
             override fun pair(cookiesJson: ByteArray) { stateAtNativePair += persistedLinkState() }
         }
-        LinkSignInActivityTestHooks.startupExecutor = startup::capture
-        LinkSignInActivityTestHooks.awaitSignInReady = { false }
-        LinkSignInRuntimeTestHooks.pairingExecutor = pairing
+        LinkTestDeps.startupExecutor = startup::capture
+        LinkTestDeps.awaitSignInReady = { false }
+        LinkTestDeps.pairingExecutor = pairing
         LinkTestDeps.engine = availableEngine(handle)
         LinkTestDeps.storeFactory = { EmptyLinkStateStorage }
 
@@ -318,12 +317,12 @@ class LinkSignInActivityTest : GatewayTestBase() {
         val handle = PairCountingHandle()
         val pairing = QueueExecutor()
         val diagnostics = mutableListOf<String>()
-        LinkSignInActivityTestHooks.startupExecutor = startup::capture
-        LinkSignInActivityTestHooks.awaitSignInReady = { false }
+        LinkTestDeps.startupExecutor = startup::capture
+        LinkTestDeps.awaitSignInReady = { false }
         // No enrolled gateway: the real lifecycle write returns false, so pairing never reaches native pair.
         LinkTestDeps.engine = availableEngine(handle)
         LinkTestDeps.storeFactory = { EmptyLinkStateStorage }
-        LinkSignInRuntimeTestHooks.pairingExecutor = pairing
+        LinkTestDeps.pairingExecutor = pairing
 
         val controller = Robolectric.buildActivity(LinkSignInActivity::class.java).setup()
         val activity = controller.get()
@@ -352,9 +351,9 @@ class LinkSignInActivityTest : GatewayTestBase() {
     ): ActivityController<LinkSignInActivity> {
         enrollAndUnlock()
         val startup = ControlledStartup()
-        LinkSignInActivityTestHooks.startupExecutor = startup::capture
-        LinkSignInActivityTestHooks.awaitSignInReady = { true }
-        LinkSignInRuntimeTestHooks.pairingExecutor = pairing
+        LinkTestDeps.startupExecutor = startup::capture
+        LinkTestDeps.awaitSignInReady = { true }
+        LinkTestDeps.pairingExecutor = pairing
         LinkTestDeps.engine = availableEngine(object : LinkedHandle() {
             override fun status() = """{"state":"unlinked"}"""
             override fun pair(cookiesJson: ByteArray) = onPair()
