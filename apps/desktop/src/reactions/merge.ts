@@ -14,7 +14,7 @@ export type OwnReactionChip = {
   previousEmoji?: string | null;
 };
 export type MergedReactionBadge = ReactionBadgeInfo & { own?: OwnReactionChip; source: ReactionSource };
-export type MergeInput = { parsed?: ReactionBadgeInfo[]; native?: MessageReactionView[]; ownRequest?: OwnReactionRequestView };
+export type MergeInput = { parsed?: ReactionBadgeInfo[]; native?: MessageReactionView[]; ownRequest?: OwnReactionRequestView; ownRequestSource?: ReactionSource };
 
 /** The actor key for this device's user. Every merge uses it; there is no other self identity. */
 const SELF_KEY = "self";
@@ -71,24 +71,24 @@ function chipState(request: OwnReactionRequestView): OwnChipState {
   return request.state;
 }
 
-function attemptChip(request: OwnReactionRequestView, previous: string | null, selfActor: ReactionActor): MergedReactionBadge | undefined {
+function attemptChip(request: OwnReactionRequestView, previous: string | null, selfActor: ReactionActor, source: ReactionSource): MergedReactionBadge | undefined {
   const emoji = request.emoji ?? previous;
   if (!emoji) return undefined;
   return {
     emoji,
     actors: [selfActor],
     reactionIds: [],
-    source: "native",
-    own: { state: chipState(request), source: "native", requestId: request.requestId, intent: intentOf({ emoji: request.emoji, previousEmoji: previous ?? undefined }), previousEmoji: previous },
+    source,
+    own: { state: chipState(request), source, ...(source === "native" ? { requestId: request.requestId } : {}), intent: intentOf({ emoji: request.emoji, previousEmoji: previous ?? undefined }), previousEmoji: previous },
   };
 }
 
 /** A pending request replaces the confirmed own chip; a failed or unknown one sits beside it. */
-function ownChips(self: Entry | undefined, request: OwnReactionRequestView | undefined, selfActor: ReactionActor): MergedReactionBadge[] {
+function ownChips(self: Entry | undefined, request: OwnReactionRequestView | undefined, selfActor: ReactionActor, source: ReactionSource): MergedReactionBadge[] {
   const confirmed = self ? [confirmedChip(self)] : [];
   if (!request) return confirmed;
   const previous = request.previousEmoji ?? self?.emoji ?? null;
-  const attempt = attemptChip(request, previous, selfActor);
+  const attempt = attemptChip(request, previous, selfActor, source);
   if (request.state === "sending") return attempt ? [attempt] : [];
   return attempt ? [...confirmed, attempt] : confirmed;
 }
@@ -104,5 +104,5 @@ export function mergeReactions(input: MergeInput): MergedReactionBadge[] {
   const self = resolved.get(SELF_KEY);
   const others = [...resolved.values()].filter((entry) => entry.actor.key !== SELF_KEY);
   const selfActor = SELF_ACTOR;
-  return [...groupOthers(others), ...ownChips(self, input.ownRequest, selfActor)];
+  return [...groupOthers(others), ...ownChips(self, input.ownRequest, selfActor, input.ownRequestSource ?? "native")];
 }
