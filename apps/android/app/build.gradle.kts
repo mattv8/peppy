@@ -437,7 +437,7 @@ androidComponents {
 }
 
 dependencies {
-    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
+    implementation(platform("androidx.compose:compose-bom:2026.11.01"))
     implementation("androidx.activity:activity-compose:1.10.0")
     implementation("androidx.work:work-runtime-ktx:2.12.0")
     implementation("com.squareup.okhttp3:okhttp:5.5.1")
@@ -449,9 +449,9 @@ dependencies {
     implementation("com.google.zxing:core:3.5.4")
     // Offline, on-device QR decoding. CameraX 1.4.2 supports minSdk 21/compileSdk 36;
     // ML Kit barcode-scanning 17.3.0 bundles the decoder and makes no cloud request.
-    implementation("androidx.camera:camera-camera2:1.4.2")
-    implementation("androidx.camera:camera-lifecycle:1.4.2")
-    implementation("androidx.camera:camera-view:1.4.2")
+    implementation("androidx.camera:camera-camera2:1.7.0")
+    implementation("androidx.camera:camera-lifecycle:1.7.0")
+    implementation("androidx.camera:camera-view:1.7.0")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     // Optional at runtime without google-services.json; required to compile the content-free wake service.
     implementation("com.google.firebase:firebase-messaging:26.0.2")
@@ -466,10 +466,10 @@ dependencies {
     implementation("com.android.billingclient:billing:9.1.0")
 
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.robolectric:robolectric:4.18")
+    testImplementation("org.robolectric:robolectric:4.18.1")
     testImplementation("androidx.test:core:1.6.1")
     testImplementation("androidx.work:work-testing:2.12.0")
-    testImplementation(platform("androidx.compose:compose-bom:2026.09.00"))
+    testImplementation(platform("androidx.compose:compose-bom:2026.11.01"))
     testImplementation("androidx.compose.ui:ui-test-junit4")
     // Desktop JNA jar (with host jnidispatch) for the JVM-hosted Robolectric runtime.
     testImplementation("net.java.dev.jna:jna:$jnaVersion")
@@ -477,7 +477,7 @@ dependencies {
     androidTestImplementation("androidx.test:core:1.6.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
-    androidTestImplementation(platform("androidx.compose:compose-bom:2026.09.00"))
+    androidTestImplementation(platform("androidx.compose:compose-bom:2026.11.01"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     add("sideloadImplementation", project(":libadb"))
