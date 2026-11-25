@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { bridge, type ContactBookView } from "../bridge/bridge";
 import { ContactsView } from "./Contacts";
 import { deferred, mockContactBook, resetContactBridgeMocks, restoreContactDomGlobals } from "./contacts-test-utils";
+import { stubMatchMedia } from "../test-support/browserStubs";
 
 vi.mock("../bridge/bridge", { spy: true });
 
@@ -155,10 +156,7 @@ it("moves focus from the vanished row to the replacement", async () => {
 });
 
 it("uses the compact focus fallback when the rail is collapsed", async () => {
-  vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
-    matches: query === "(max-width: 700px)", media: query,
-    addEventListener: vi.fn(), removeEventListener: vi.fn(),
-  })));
+  stubMatchMedia(["(max-width: 700px)"]);
   let hint: (() => void) | undefined;
   const oldBook = { ...mockContactBook, id: "old" };
   const replacement = { ...oldBook, id: "new", replacedBookIds: ["old"] };

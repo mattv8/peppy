@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { resetAppStorage } from "./test-support/appSetup";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatDateTime } from "@peppy/desktop-ui";
@@ -49,16 +50,7 @@ function renderMessages(messages: MessageView[]) {
 
 beforeEach(() => {
   vi.restoreAllMocks();
-  const storage = new Map<string, string>();
-  Object.defineProperty(window, "localStorage", {
-    configurable: true,
-    value: {
-      getItem: (key: string) => storage.get(key) ?? null,
-      setItem: (key: string, value: string) => storage.set(key, value),
-      removeItem: (key: string) => storage.delete(key),
-      clear: () => storage.clear(),
-    },
-  });
+  resetAppStorage();
   vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: false, locked: false, storageAvailable: true, pending: false });
   vi.spyOn(bridge, "subscribe").mockReturnValue(() => undefined);
   vi.spyOn(bridge, "subscribe_lifecycle").mockReturnValue(() => undefined);

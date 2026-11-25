@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { resetAppStorage } from "./test-support/appSetup";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatDateTime } from "@peppy/desktop-ui";
@@ -85,16 +86,7 @@ const setWindowSearch = (search: string) => window.history.replaceState({}, "", 
 beforeEach(() => {
   vi.restoreAllMocks();
   delete bridge.open_media_viewer;
-  const storage = new Map<string, string>();
-  Object.defineProperty(window, "localStorage", {
-    configurable: true,
-    value: {
-      getItem: (key: string) => storage.get(key) ?? null,
-      setItem: (key: string, value: string) => storage.set(key, value),
-      removeItem: (key: string) => storage.delete(key),
-      clear: () => storage.clear(),
-    },
-  });
+  resetAppStorage();
   currentSnapshot = snapshot([]);
   setWindowSearch("");
   stateHint = undefined;

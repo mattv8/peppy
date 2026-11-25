@@ -5,16 +5,11 @@ import { ContactsView } from "./Contacts";
 import { bridge, type ContactBookView } from "../bridge/bridge";
 import { contactPage, mockContactBook, mockContactRiver, resetContactBridgeMocks, restoreContactDomGlobals } from "./contacts-test-utils";
 
+import { stubMatchMedia } from "../test-support/browserStubs";
+
 vi.mock("../bridge/bridge", { spy: true });
 
 const otherBook: ContactBookView = { ...mockContactBook, id: "book-other", deviceName: "Other", contactCount: 1 };
-
-function stubMediaQueries(matching: string[]) {
-  vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
-    matches: matching.includes(query), media: query,
-    addEventListener: vi.fn(), removeEventListener: vi.fn(),
-  })));
-}
 
 describe("ContactsView list header", () => {
   beforeEach(() => resetContactBridgeMocks());
@@ -71,7 +66,7 @@ describe("ContactsView list header", () => {
   });
 
   it("shows the book selector in place of the title when the rail is hidden, and switches books through it", async () => {
-    stubMediaQueries(["(max-width: 700px)"]);
+    stubMatchMedia(["(max-width: 700px)"]);
     vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, otherBook]);
     vi.mocked(bridge.list_contacts_page).mockImplementation(async bookId => ({ contacts: [], total: bookId === "book-other" ? 1 : 2 }));
     render(<ContactsView />);
@@ -87,7 +82,7 @@ describe("ContactsView list header", () => {
   });
 
   it("keeps the title when only one book exists even if the rail is hidden", async () => {
-    stubMediaQueries(["(max-width: 700px)"]);
+    stubMatchMedia(["(max-width: 700px)"]);
     render(<ContactsView />);
     expect(await screen.findByRole("heading", { level: 2, name: "Pixel 8" })).toBeInTheDocument();
     expect(document.getElementById("contacts-book-selector")).toBeNull();

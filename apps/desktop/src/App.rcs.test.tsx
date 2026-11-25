@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { resetAppStorage } from "./test-support/appSetup";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
@@ -36,16 +37,7 @@ const currentSnapshot = async () => {
 beforeEach(async () => {
   window.history.replaceState({}, "", "/");
   vi.restoreAllMocks();
-  const values = new Map<string, string>();
-  Object.defineProperty(window, "localStorage", {
-    configurable: true,
-    value: {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => values.set(key, value),
-      removeItem: (key: string) => values.delete(key),
-      clear: () => values.clear(),
-    },
-  });
+  resetAppStorage();
   snapshot = await currentSnapshot();
   vi.spyOn(bridge, "load_state").mockImplementation(async (conversationId) => ({
     ...structuredClone(snapshot),
