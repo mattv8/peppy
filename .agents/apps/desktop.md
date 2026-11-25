@@ -48,7 +48,7 @@ Floating heads on macOS and Windows show a contact's typing as a pill in the unr
 
 Diagnostics is off by default. Turn on **Verbose logging** in **Settings → Diagnostics**; it is the last category in the Settings navigation. It appears only where the host provides the four diagnostics commands, so the desktop app has it and the web app does not. The commands are not on the locked-app allowlist in [lib.rs](../../apps/desktop/src-tauri/src/lib.rs), so the section works only while the app is unlocked. Android keeps its Diagnostics entry on a locked screen; the desktop does not.
 
-When recording is on, the recorder writes content-free numeric records for the live socket, typing sends, inbound typing, floating-head typing, and the core's typing cause counters. The records hold numbers only: no message text, contacts, identifiers, or credentials. The core counters are read only while recording is on, so turn it on before the test.
+When recording is on, the recorder writes content-free numeric records for the live socket, typing sends, inbound typing, floating-head typing, the core's typing cause counters, and database faults. The records hold numbers only: no message text, contacts, identifiers, or credentials. The core counters are read only while recording is on, so turn it on before the test.
 
 The log lives in the `diagnostics` folder under the app's local data directory. Tauri resolves that directory as the platform's local data folder joined with the bundle identifier. For the base development identifier in [tauri.conf.json](../../apps/desktop/src-tauri/tauri.conf.json), that gives:
 
@@ -72,7 +72,7 @@ event=<code> session=<token> timestamp_ms=<ms> trace=0 <field>=<value> ...
 
 `session` is random per app process, `timestamp_ms` counts from app start, and `trace` is always `0` on desktop. Values are integers. The state record (event 24) writes `session` and `timestamp_ms` as `0`, `34` as the dropped count, and `35` as `1` when recording is on or `0` when it is off. A line is at most 512 bytes, including its newline.
 
-The first line of an export is `schema=2 platform=desktop version=<app version>`, followed by the event, field, and value tables and `live_typing_causes=`. The desktop header records the app version but no source commit, so the commit check used for phone exports does not apply here.
+The first line of an export is `schema=2 platform=desktop version=<app version>`, followed by the event, field, and value tables, `live_typing_causes=`, and `database_fault_kinds=`. The desktop header records the app version but no source commit, so the commit check used for phone exports does not apply here.
 
 | Event | Name | Fields | Recorded when |
 | --- | --- | --- | --- |
@@ -82,6 +82,7 @@ The first line of an export is `schema=2 platform=desktop version=<app version>`
 | 31 | `typing_send` | `28` outcome | Each outbound typing decision |
 | 32 | `typing_inbound` | `28` outcome; `19` count with outcome 4 | Each inbound frame's result: a display change, a reply sent or refused, follow-ups sent, nothing to do, or not current |
 | 33 | `head_typing` | `28` outcome | A floating head's displayed typing flag changes |
+| 36 | `database_fault` | `29` kind, `70` SQLite code when present, `71` site, `72` line, `73` age_ms | A database error reaches the bridge; kind 0 carries only kind |
 
 Values by event:
 
@@ -91,7 +92,14 @@ Values by event:
 | 31 | `28` outcome | 1 `sealed`, 2 `not_sealed`, 3 `no_target`, 4 `transmit_refused`, 5 `not_current` |
 | 32 | `28` outcome | 1 `display_started`, 2 `display_stopped`, 3 `reply_sent`, 4 `follow_ups_sent`, 5 `nothing`, 6 `not_current`, 7 `reply_refused` |
 | 33 | `28` outcome | 0 `hidden`, 1 `shown` |
+| 36 | `29` kind | 0 `none`, 1 `sqlite_failure`, 2 `no_rows`, 3 `decode`, 4 `other` |
+| 36 | `70` sqlite_code | SQLite extended result code, only for `sqlite_failure` |
+| 36 | `71` site | Source path hash |
+| 36 | `72` line | Source line of the conversion |
+| 36 | `73` age_ms | Milliseconds since the conversion, at least 0 |
 
 Event 29 cause codes and names are listed in the export header's `live_typing_causes` table and in the [typing indicators notes](../ops/google-messages-link-triage.md#typing-indicators).
+
+Event 36 records the last SQLite failure converted on that thread before a `database unavailable or corrupt` error reached the bridge, with its age. It can belong to a nearby error that was handled; kind 0 means no SQLite failure was converted on that thread since the last bridge error mapping. To decode `site`, use `database_fault_site` to hash source paths after `src/` (for example `draft_sync.rs`) under `crates/client-core/src`.
 
 The recorder and the Settings section have unit tests. Nothing here has been seen in a running desktop app.
