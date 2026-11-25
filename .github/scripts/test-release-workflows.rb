@@ -113,7 +113,7 @@ installer_steps = installer_workflows.flat_map do |name, workflow|
 end
 assert.call(installer_steps.none? { |_, _, step| step['run'].to_s.include?('apt-get') }, 'workflows must not invoke apt-get directly; they must use install-apt-packages.sh')
 bounded_installer_steps = installer_steps.select { |_, _, step| step['run'].to_s.include?('install-apt-packages.sh') }
-assert.call(bounded_installer_steps.length == 13, "every Linux apt call site must use install-apt-packages.sh; found #{bounded_installer_steps.length}")
+assert.call(bounded_installer_steps.length == 15, "every Linux apt call site must use install-apt-packages.sh; expected exactly one per Linux job that installs build dependencies (15 across ci, build-artifacts and test-android), found #{bounded_installer_steps.length}")
 assert.call(bounded_installer_steps.all? { |_, _, step| step['timeout-minutes'].is_a?(Integer) && step['timeout-minutes'] <= 30 }, 'every install-apt-packages.sh step must have an integer timeout of at most 30 minutes')
 %w[desktop-windows-build desktop-windows-check desktop-windows].each do |job|
   assert.call(ci_jobs[job]&.fetch('timeout-minutes') == 60, "#{job} must retain a 60-minute timeout")
@@ -233,6 +233,18 @@ assert.call(sideload_test && sideload_diagnostic, 'sideload tests and resolution
 assert.call(sideload_steps.index(sideload_diagnostic) == sideload_steps.index(sideload_test) + 1 && sideload_diagnostic['if'] == "${{ failure() && steps.sideload-tests.outcome == 'failure' }}" && sideload_diagnostic['timeout-minutes'].to_i.between?(1, 5) && !sideload_test.key?('continue-on-error'), 'sideload diagnostic must be bounded and run only after the original test fails')
 test_script = sideload_test.fetch('run')
 assert.call(test_script.include?('set -o pipefail') && test_script.include?('2>&1 | tee') && test_script.scan('--info').length == 2 && test_script.scan('--dependency-verification=strict').length == 2, 'sideload test logging must preserve pipeline failure and strict informative Gradle invocations')
+link_flag_count = ->(job) { job.fetch('steps').sum { |step| step.fetch('run', '').scan('-PpeppyGoogleMessagesLink=true').length } }
+assert.call(link_flag_count.call(android_ci_jobs.fetch('android-sideload-unit-tests')) == 0 && link_flag_count.call(android_ci_jobs.fetch('android-debug-unit-tests')) == 0, 'the default sideload and debug unit-test jobs must stay link-off')
+link_job = android_ci_jobs.fetch('android-sideload-link-unit-tests')
+link_test = link_job.fetch('steps').find { |step| step['name'] == 'Run Android sideload unit tests with Google Messages link' }
+link_argv = ['../../.github/scripts/run-with-jvm-watchdog.sh', '180', '1500', '--', './gradlew', '--console=plain', '--dependency-verification=strict', '-PpeppyGoogleMessagesLink=true', ':app:testSideloadUnitTest', '--rerun']
+link_prep = link_job.fetch('steps').find { |step| step['id'] == 'sideload-link-preparation' }
+link_prep_argv = ['./gradlew', '--console=plain', '--dependency-verification=strict', '--info', '-PpeppyGoogleMessagesLink=true', ':app:compileSideloadUnitTestKotlin', ':app:prepareRobolectricDependencies']
+assert.call(link_prep && link_prep['working-directory'] == 'apps/android' && link_prep.fetch('run').include?("set -o pipefail\n") && link_prep.fetch('run').include?('2>&1 | tee "$RUNNER_TEMP/sideload-link-preparation.log"') && Shellwords.shellsplit(link_prep.fetch('run').lines.find { |line| line.include?('./gradlew') }.split('2>&1').first.strip) == link_prep_argv && link_job.fetch('steps').index(link_prep) == link_job.fetch('steps').index(link_test) - 1, 'the link job must compile link-on sideload tests and prepare Robolectric runtimes, unwatched and logged, immediately before the watched test step')
+assert.call(link_test && Shellwords.shellsplit(link_test.fetch('run')) == link_argv && link_test['working-directory'] == 'apps/android' && link_job.fetch('timeout-minutes') == 35 && link_flag_count.call(link_job) == 2, 'the sideload link job must keep its watched link-on test with exact strict arguments, a 180 s stall / 1500 s cap, and a 35-minute job limit; the link flag appears exactly twice (prepare and test)')
+assert.call(android_ci_jobs.fetch('android-native-preparation').fetch('steps').any? { |step| step.fetch('run', '').include?('apps/android/googlemessages/test-build-aar.sh') }, 'Android native preparation must test the AAR build script')
+sideload_job = android_ci_jobs.fetch('android-sideload-unit-tests')
+assert.call(sideload_job.fetch('timeout-minutes') == 25, 'the default sideload job must keep its 25-minute limit above its 1080 s cap and setup')
 Dir.mktmpdir('sideload-test-failure') do |fixture|
   project = File.join(fixture, 'apps', 'android')
   scripts = File.join(fixture, '.github', 'scripts')
@@ -303,7 +315,7 @@ end
     assert.call(setup_status.exitstatus == 17 && File.readlines(File.join(runner, 'calls')).length == 2 && File.readlines(File.join(runner, 'curl-calls')).length == 4 && !File.exist?(File.join(runner, 'failed-mktemp')), 'diagnostic must stop immediately on failed temporary-directory setup')
   end
 end
-android_consumers = %w[android-debug-unit-tests android-sideload-unit-tests android-lint-and-assembly].map { |name| android_ci_jobs.fetch(name) }
+android_consumers = %w[android-debug-unit-tests android-sideload-unit-tests android-sideload-link-unit-tests android-release-unit-tests android-lint-and-assembly].map { |name| android_ci_jobs.fetch(name) }
 preparation_steps = android_preparation.fetch('steps')
 aar_index = preparation_steps.index { |step| step['name'] == 'Build Google Messages AAR and licenses' }
 native_index = preparation_steps.index { |step| step['name'] == 'Verify and build Android native libraries' }
@@ -321,9 +333,11 @@ android_info_command_steps = android_ci_jobs.fetch('android-lint-and-assembly').
 android_jvm_arguments = '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8'
 android_info_commands = {
   'Lint and assemble Android artifacts' => ['./gradlew', '--console=plain', '--dependency-verification=strict', '--info', '--stacktrace', android_jvm_arguments, '--max-workers=2', '-PpeppyGoogleMessagesLink=true', ':app:verifyReleaseManifestSecurity', ':app:lintDebug', ':app:lintSideload', ':app:assembleDebug', ':app:assembleDebugAndroidTest', ':app:assembleSideload', ':app:verifySideloadGoogleMessagesLink'],
-  'Compile release with Google Messages link' => ['./gradlew', '--console=plain', '--dependency-verification=strict', '--info', '--stacktrace', android_jvm_arguments, '--max-workers=2', ':app:compileReleaseKotlin', '-PpeppyDistribution=play', '-PpeppyGoogleMessagesLink=true'],
-  'Verify release unit-test policies' => ['./gradlew', '--console=plain', '--dependency-verification=strict', '--info', ':app:testReleaseUnitTest', '--tests', 'dev.peppy.mobile.SmsCaptureReleasePolicyTest', '--tests', 'dev.peppy.mobile.mms.RestrictedAccessActionReleaseTest']
+  'Compile release with Google Messages link' => ['./gradlew', '--console=plain', '--dependency-verification=strict', '--info', '--stacktrace', android_jvm_arguments, '--max-workers=2', ':app:compileReleaseKotlin', '-PpeppyDistribution=play', '-PpeppyGoogleMessagesLink=true']
 }
+assert.call(android_ci_jobs.fetch('android-lint-and-assembly').fetch('steps').none? { |step| step.fetch('run', '').include?(':app:testReleaseUnitTest') }, 'the lint job must not run the release suite; it lives in android-release-unit-tests so the lint job stays within its 20-minute limit')
+release_test = android_ci_jobs.fetch('android-release-unit-tests').fetch('steps').find { |step| step['name'] == 'Run Android release unit tests' }
+assert.call(release_test && Shellwords.shellsplit(release_test.fetch('run')) == ['../../.github/scripts/run-with-jvm-watchdog.sh', '180', '1080', '--', './gradlew', '--console=plain', '--dependency-verification=strict', ':app:testReleaseUnitTest'] && release_test['working-directory'] == 'apps/android' && android_ci_jobs.fetch('android-release-unit-tests').fetch('timeout-minutes') == 30, 'the release unit-test job must run the default-off release suite with strict arguments under a 180 s stall / 1080 s cap in a 30-minute job')
 Dir.mktmpdir('android-lint-assembly-info') do |fixture|
   project = File.join(fixture, 'apps', 'android')
   FileUtils.mkdir_p(project)
@@ -361,7 +375,7 @@ gradle_restore_steps = android_ci_jobs.values.flat_map { |job| job.fetch('steps'
 gradle_save_jobs = android_ci_jobs.select { |_name, job| job.fetch('steps', []).any? { |step| step['uses']&.start_with?('actions/cache/save@') } }
 assert.call(gradle_save_jobs.keys == ['android-native-preparation'], 'only the dependency-warming producer may publish the immutable snapshot')
 gradle_dependency_cache = gradle_restore_steps.first.fetch('with')
-assert.call(gradle_restore_steps.length == 4 && gradle_restore_steps.all? { |step| step.fetch('with') == gradle_dependency_cache }, 'all Android lanes must restore the same dependency cache')
+assert.call(gradle_restore_steps.length == 6 && gradle_restore_steps.all? { |step| step.fetch('with') == gradle_dependency_cache }, 'all Android lanes must restore the same dependency cache')
 assert.call(gradle_dependency_cache.fetch('key').start_with?('gradle-dependencies-v1-') && gradle_dependency_cache.fetch('restore-keys') == 'gradle-dependencies-v1-${{ runner.os }}-', 'dependency cache must not fall back to the old incomplete build-plugin snapshot')
 assert.call(gradle_dependency_cache.fetch('path').lines.map(&:strip) == %w[~/.gradle/caches/modules-2 ~/.gradle/wrapper], 'shared cache must contain dependencies and wrapper only; directory exclusions are not effective with recursive tar')
 gradle_producer_steps = gradle_save_jobs.values.first.fetch('steps')
@@ -384,7 +398,7 @@ assert.call(resolver_script.include?('configuration.canBeResolved') && resolver_
 assert.call(gradle_save.fetch('if') == "${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/production' && steps.gradle-cache.outputs.cache-hit != 'true' }}" && gradle_stop.fetch('if') == gradle_save.fetch('if'), 'only successful production pushes with a missing exact snapshot may save')
 assert.call(gradle_save.dig('with', 'path') == gradle_dependency_cache.fetch('path') && gradle_save.dig('with', 'key') == '${{ steps.gradle-cache.outputs.cache-primary-key }}', 'cache producer must save exactly the dependency paths under the requested primary key')
 android_aggregate = android_ci_jobs.fetch('android-aggregate')
-assert.call(android_aggregate.fetch('if') == '${{ always() }}' && android_aggregate.fetch('needs').sort == %w[android-debug-unit-tests android-lint-and-assembly android-native-preparation android-sideload-unit-tests], 'Android aggregate must always require preparation and every consumer')
+assert.call(android_aggregate.fetch('if') == '${{ always() }}' && android_aggregate.fetch('needs').sort == %w[android-debug-unit-tests android-lint-and-assembly android-native-preparation android-release-unit-tests android-sideload-link-unit-tests android-sideload-unit-tests], 'Android aggregate must always require preparation and every consumer, including the sideload-link and release suites')
 ci_text = File.read(File.join(root, 'workflows', 'ci.yml'))
 assert.call(ci_jobs.key?('notify-hosted-production'), 'public CI must dispatch verified hosted production evidence')
 assert.call(!ci_text.include?('create-github-app-token'), 'public CI must not mint an App token')

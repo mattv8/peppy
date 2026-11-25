@@ -180,6 +180,9 @@ jobs:
         with:
           node-version-file: .node-version
       - run: infra/release/test-desktop-bundles.sh
+      - run: npm install --global corepack@0.36.0
+      - run: corepack enable && pnpm install --frozen-lockfile --filter @peppy/desktop
+      - run: node --test packages/mobile-design/test/icon-generation.test.mjs
 
   source-audit:
     timeout-minutes: 10
@@ -329,6 +332,10 @@ jobs:
       - run: pnpm --filter @peppy/desktop-ui typecheck
       - run: pnpm --filter @peppy/desktop-ui test
       - run: pnpm --filter @peppy/desktop test
+      - name: Run desktop App tests in shuffled order
+        run: |
+          echo "Vitest shuffle seed: $GITHUB_RUN_ID"
+          pnpm --filter @peppy/desktop test src/App.test.tsx --sequence.shuffle --sequence.seed="$GITHUB_RUN_ID"
       - run: pnpm --filter @peppy/desktop build
       - run: pnpm --filter @peppy/web typecheck
       - run: pnpm --filter @peppy/web test

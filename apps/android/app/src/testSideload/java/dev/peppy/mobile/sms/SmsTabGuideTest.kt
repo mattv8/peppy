@@ -14,10 +14,17 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
 import dev.peppy.mobile.gateway.SetupFinishTracker
+import dev.peppy.mobile.googlemessages.LinkEngine
+import dev.peppy.mobile.googlemessages.LinkHandle
+import dev.peppy.mobile.googlemessages.LinkHost
+import dev.peppy.mobile.googlemessages.LinkRuntime
+import dev.peppy.mobile.googlemessages.LinkRuntimeTestHooks
 import dev.peppy.mobile.testing.ComposeTestActivityRule
 import dev.peppy.mobile.ui.theme.PeppyTheme
 import kotlinx.coroutines.Dispatchers
+import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
@@ -42,6 +49,20 @@ private class SmsGuideContext(base: android.content.Context) : ContextWrapper(ba
 class SmsTabGuideTest {
     private val compose = createComposeRule(Dispatchers.Main)
     @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
+
+    // The SMS tab hosts the Google Messages link panel. With the link compiled in, the real engine would load the
+    // Android-only Go library, so the panel gets an engine that reports the link as unavailable.
+    @Before fun unavailableLinkEngine() {
+        LinkRuntimeTestHooks.engine = object : LinkEngine {
+            override val available = false
+            override fun open(state: ByteArray, host: LinkHost): LinkHandle = error("the link engine is unavailable")
+        }
+    }
+
+    @After fun resetLinkRuntime() {
+        LinkRuntime.resetForTest()
+        LinkRuntimeTestHooks.engine = null
+    }
 
     @Test fun `Sync details guide opens its exact URL and keeps failures separate from SMS action errors`() {
         val context = SmsGuideContext(ApplicationProvider.getApplicationContext())

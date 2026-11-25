@@ -109,6 +109,11 @@ fail!('Linux-only updater matrix must remain a singleton') unless JSON.parse(lin
 fail!('Windows scope must match full desktop scope') unless full_scope['desktop_windows'] == 'true' && linux_scope['desktop_windows'] == 'false' && changes.dig('outputs', 'desktop_windows') == '${{ steps.scope.outputs.desktop_windows }}'
 frontend = jobs.fetch('frontend')
 fail!('frontend must run whenever desktop validation is required') unless frontend['if'] == "needs.changes.outputs.desktop == 'true'"
+shuffle = frontend.fetch('steps').find { |step| step['name'] == 'Run desktop App tests in shuffled order' }
+fail!('frontend must run reproducibly seeded shuffled App tests') unless shuffle && shuffle['run'].include?('echo "Vitest shuffle seed: $GITHUB_RUN_ID"') && shuffle['run'].include?('pnpm --filter @peppy/desktop test src/App.test.tsx --sequence.shuffle --sequence.seed="$GITHUB_RUN_ID"')
+mac_tooling = jobs.fetch('release-macos-tooling')
+fail!('macOS tooling must run the icon generation test with desktop dependencies') unless mac_tooling['runs-on'] == 'macos-15' && mac_tooling.fetch('steps').any? { |step| step['run'] == 'corepack enable && pnpm install --frozen-lockfile --filter @peppy/desktop' } && mac_tooling.fetch('steps').any? { |step| step['run'] == 'node --test packages/mobile-design/test/icon-generation.test.mjs' }
+fail!('release tooling must run the TestFlight script tests') unless jobs.fetch('release-tooling').fetch('steps').any? { |step| step['run'] == 'bash infra/release/test-testflight.sh' }
 upload = frontend.fetch('steps').find { |step| step['uses']&.start_with?('actions/upload-artifact@') }
 fail!('frontend artifact must be SHA-bound and overwrite on reruns') unless upload&.dig('with', 'name') == 'desktop-dist-${{ github.sha }}' && upload.dig('with', 'overwrite') == true
 %w[desktop desktop-windows-build desktop-windows-check desktop-updater].each do |name|
