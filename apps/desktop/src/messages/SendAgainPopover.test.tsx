@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { conversationWireDefaults } from "../test-support/conversationWireDefaults";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GatewayView, MessageView, SendRecovery } from "@peppy/desktop-ui/bridge-contracts";
@@ -58,7 +59,7 @@ function renderHost(initial: HostOptions = {}) {
   const state: HostOptions & { version: number } = { messages: [original()], gateways: [phone()], serverOffline: false, onGoToLatest: vi.fn(), version: 0, ...initial };
   const build = () => {
     const messages = state.messages ?? [];
-    return <SendAgainHost conversation={{ id: "c1", name: "Ana", preview: "", unread: 0, messages }} gateways={state.gateways ?? []} routeLabel={routeLabel} serverOffline={state.serverOffline ?? false} writesPaused={state.writesPaused} onGoToLatest={state.onGoToLatest ?? (() => {})}>
+    return <SendAgainHost conversation={{ ...conversationWireDefaults, id: "c1", name: "Ana", preview: "", unread: 0, messages }} gateways={state.gateways ?? []} routeLabel={routeLabel} serverOffline={state.serverOffline ?? false} writesPaused={state.writesPaused} onGoToLatest={state.onGoToLatest ?? (() => {})}>
       {messages.map((message) => <SendRecoveryNotice key={`${message.id}-${state.version}`} message={message} />)}
     </SendAgainHost>;
   };
@@ -385,7 +386,7 @@ describe("SendAgainPopover: pending, in-flight guard and host", () => {
       const store = useContext(SendAgainStoreContext);
       return <output data-testid="transient-link">{store?.sentAgainFor("m1") ?? ""}</output>;
     };
-    const build = (message: MessageView) => <SendAgainHost conversation={{ id: "c", name: "Ana", preview: "", unread: 0, messages: [message] }} gateways={[phone()]} routeLabel={routeLabel} serverOffline={false} onGoToLatest={() => {}}>
+    const build = (message: MessageView) => <SendAgainHost conversation={{ ...conversationWireDefaults, id: "c", name: "Ana", preview: "", unread: 0, messages: [message] }} gateways={[phone()]} routeLabel={routeLabel} serverOffline={false} onGoToLatest={() => {}}>
       <SendRecoveryNotice message={message} /><Probe />
     </SendAgainHost>;
     const view = render(build(original()));

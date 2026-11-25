@@ -1,4 +1,5 @@
 import { vi } from "vitest";
+import { conversationWireDefaults } from "./conversationWireDefaults";
 import { bridge, type ContactBookView, type ConversationView, type DesktopSnapshot, type Draft, type DraftInput, type GatewayView, type SendDraftInput } from "../bridge/bridge";
 
 export type HostError = { code: string; message: string };
@@ -103,6 +104,7 @@ export function createHost() {
           (d) => !host.conversations.some((c) => c.id === d.conversationId),
         )
         .map((d) => ({
+          ...conversationWireDefaults,
           id: d.conversationId,
           name: d.recipientIds.join(", ") || "New message",
           preview: "Draft",

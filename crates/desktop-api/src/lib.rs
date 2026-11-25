@@ -48,6 +48,222 @@ mod send_again_flow_tests;
 #[cfg(test)]
 mod send_again_tests;
 
+#[cfg(test)]
+mod conversation_contract_goldens {
+    use super::*;
+    use crate::group::{GroupNoticeKindView, GroupNoticeView, GroupState, GroupView};
+    use crate::reactions::ReactionSupportDto;
+    use serde_json::json;
+
+    fn message() -> MessageView {
+        MessageView {
+            id: "m".into(),
+            revision: "1".into(),
+            sender: MessageSender::Other,
+            sender_address: None,
+            body: "hello".into(),
+            one_time_code: None,
+            timestamp: "2".into(),
+            status: None,
+            status_at: None,
+            group_hint: None,
+            attachments: vec![],
+            transport: None,
+            subject: None,
+            participants: None,
+            rcs_reported: false,
+            send_cancellation: None,
+            send_recovery: None,
+            sent_again: None,
+            reactions: None,
+            own_reaction_request: None,
+            reactable: None,
+        }
+    }
+
+    fn minimal() -> ConversationView {
+        ConversationView {
+            id: "c".into(),
+            name: "Chat".into(),
+            preview: "".into(),
+            unread: 0,
+            messages: vec![],
+            has_older_messages: None,
+            participants: None,
+            recipientless_draft: false,
+            draft_only: true,
+            pinned: false,
+            folder: ConversationFolder::Inbox,
+            folder_reason: None,
+            unblock: None,
+            can_unblock: false,
+            rcs_encryption: None,
+            rcs_history_gap: false,
+            group: None,
+            reaction_support: None,
+            reaction_gateway_id: None,
+        }
+    }
+
+    #[test]
+    fn conversation_json_goldens() {
+        assert_eq!(
+            serde_json::to_string(&minimal()).unwrap(),
+            r#"{"id":"c","name":"Chat","preview":"","unread":0,"messages":[],"recipientlessDraft":false,"draftOnly":true,"pinned":false,"folder":"inbox","canUnblock":false}"#
+        );
+        let full = ConversationView {
+            preview: "hello".into(),
+            unread: 2,
+            messages: vec![message()],
+            has_older_messages: Some(true),
+            participants: Some(vec!["+1".into()]),
+            recipientless_draft: true,
+            draft_only: false,
+            pinned: true,
+            folder: ConversationFolder::Spam,
+            folder_reason: Some(ConversationFolderReason::Blocked),
+            unblock: Some(SenderUnblockStatus::Pending),
+            can_unblock: true,
+            rcs_encryption: Some(true),
+            rcs_history_gap: true,
+            group: Some(GroupView {
+                name: Some("Group".into()),
+                members: vec!["+1".into()],
+                state: GroupState::Live,
+                member_revision: "3".into(),
+                can_create: true,
+                create_needs_confirmation: false,
+                notices: vec![GroupNoticeView {
+                    kind: GroupNoticeKindView::Added,
+                    name: Some("Group".into()),
+                    member: Some("+1".into()),
+                    at_ms: "4".into(),
+                }],
+            }),
+            reaction_support: Some(ReactionSupportDto::Native),
+            reaction_gateway_id: Some("g".into()),
+            ..minimal()
+        };
+        assert_eq!(
+            serde_json::to_string(&full).unwrap(),
+            r#"{"id":"c","name":"Chat","preview":"hello","unread":2,"messages":[{"id":"m","revision":"1","sender":"other","body":"hello","timestamp":"2","attachments":[]}],"hasOlderMessages":true,"participants":["+1"],"recipientlessDraft":true,"draftOnly":false,"pinned":true,"folder":"spam","folderReason":"blocked","unblock":"pending","canUnblock":true,"rcsEncryption":true,"rcsHistoryGap":true,"group":{"name":"Group","members":["+1"],"state":"live","memberRevision":"3","canCreate":true,"createNeedsConfirmation":false,"notices":[{"kind":"added","name":"Group","member":"+1","atMs":"4"}]},"reactionSupport":"native","reactionGatewayId":"g"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&HistoryPage {
+                conversation_id: "c".into(),
+                messages: vec![message()],
+                has_more: true,
+            })
+            .unwrap(),
+            r#"{"conversationId":"c","messages":[{"id":"m","revision":"1","sender":"other","body":"hello","timestamp":"2","attachments":[]}],"hasMore":true}"#
+        );
+    }
+
+    #[test]
+    fn conversation_closed_set_goldens() {
+        for (folder, expected) in [
+            (ConversationFolder::Inbox, "inbox"),
+            (ConversationFolder::Archived, "archived"),
+            (ConversationFolder::Spam, "spam"),
+        ] {
+            assert_eq!(serde_json::to_value(folder).unwrap(), json!(expected));
+        }
+        for (reason, expected) in [
+            (ConversationFolderReason::Marked, "marked"),
+            (ConversationFolderReason::Blocked, "blocked"),
+        ] {
+            assert_eq!(serde_json::to_value(reason).unwrap(), json!(expected));
+        }
+        for (status, expected) in [
+            (SenderUnblockStatus::Pending, "pending"),
+            (SenderUnblockStatus::Failed, "failed"),
+        ] {
+            assert_eq!(serde_json::to_value(status).unwrap(), json!(expected));
+        }
+        for (value, expected) in [
+            (ReactionSupportDto::Native, "native"),
+            (ReactionSupportDto::Text, "text"),
+            (ReactionSupportDto::NeedsPhoneUpdate, "needs_phone_update"),
+            (ReactionSupportDto::None, "none"),
+        ] {
+            let view = ConversationView {
+                reaction_support: Some(value),
+                ..minimal()
+            };
+            assert_eq!(
+                serde_json::to_value(view).unwrap()["reactionSupport"],
+                json!(expected)
+            );
+        }
+        for (state, expected) in [
+            (GroupState::Unlinked, "unlinked"),
+            (GroupState::Proving, "proving"),
+            (GroupState::Live, "live"),
+            (GroupState::Paused, "paused"),
+            (GroupState::Withdrawn, "withdrawn"),
+        ] {
+            let group = GroupView {
+                name: None,
+                members: vec![],
+                state,
+                member_revision: "0".into(),
+                can_create: false,
+                create_needs_confirmation: false,
+                notices: vec![],
+            };
+            assert_eq!(
+                serde_json::to_value(group).unwrap(),
+                json!({"members":[],"state":expected,"memberRevision":"0","canCreate":false,"createNeedsConfirmation":false,"notices":[]})
+            );
+        }
+        for (kind, expected) in [
+            (GroupNoticeKindView::Renamed, "renamed"),
+            (GroupNoticeKindView::Added, "added"),
+            (GroupNoticeKindView::Removed, "removed"),
+        ] {
+            let notice = GroupNoticeView {
+                kind,
+                name: None,
+                member: None,
+                at_ms: "0".into(),
+            };
+            assert_eq!(
+                serde_json::to_value(notice).unwrap(),
+                json!({"kind":expected,"atMs":"0"})
+            );
+        }
+    }
+
+    #[test]
+    fn core_enum_mirrors_match_wire() {
+        for value in [
+            ConversationFolder::Inbox,
+            ConversationFolder::Archived,
+            ConversationFolder::Spam,
+        ] {
+            assert_eq!(
+                serde_json::to_value(value).unwrap(),
+                serde_json::to_value(ConversationFolderDto::from(value)).unwrap()
+            );
+        }
+        for value in [
+            ConversationFolderReason::Marked,
+            ConversationFolderReason::Blocked,
+        ] {
+            assert_eq!(
+                serde_json::to_value(value).unwrap(),
+                serde_json::to_value(ConversationFolderReasonDto::from(value)).unwrap()
+            );
+        }
+        for value in [SenderUnblockStatus::Pending, SenderUnblockStatus::Failed] {
+            assert_eq!(
+                serde_json::to_value(value).unwrap(),
+                serde_json::to_value(SenderUnblockStatusDto::from(value)).unwrap()
+            );
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -393,47 +609,116 @@ mod gateway_wire_tests {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename = "ConversationFolder")]
+pub enum ConversationFolderDto {
+    Inbox,
+    Archived,
+    Spam,
+}
+
+impl From<ConversationFolder> for ConversationFolderDto {
+    fn from(value: ConversationFolder) -> Self {
+        match value {
+            ConversationFolder::Inbox => Self::Inbox,
+            ConversationFolder::Archived => Self::Archived,
+            ConversationFolder::Spam => Self::Spam,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename = "ConversationFolderReason")]
+pub enum ConversationFolderReasonDto {
+    Marked,
+    Blocked,
+}
+
+impl From<ConversationFolderReason> for ConversationFolderReasonDto {
+    fn from(value: ConversationFolderReason) -> Self {
+        match value {
+            ConversationFolderReason::Marked => Self::Marked,
+            ConversationFolderReason::Blocked => Self::Blocked,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename = "SenderUnblockStatus")]
+pub enum SenderUnblockStatusDto {
+    Pending,
+    Failed,
+}
+
+impl From<SenderUnblockStatus> for SenderUnblockStatusDto {
+    fn from(value: SenderUnblockStatus) -> Self {
+        match value {
+            SenderUnblockStatus::Pending => Self::Pending,
+            SenderUnblockStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+#[derive(Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationView {
     pub id: String,
     pub name: String,
     pub preview: String,
+    #[ts(type = "number")]
     pub unread: u64,
     pub messages: Vec<MessageView>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub has_older_messages: Option<bool>,
+    /// Native-provided reply addressees, excluding a confirmed self address.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub participants: Option<Vec<String>>,
     /// This row is the reusable recipientless composition, not an empty history.
+    /// Draft flags are authoritative host metadata; do not infer them from an unloaded message list.
     #[serde(default)]
     pub recipientless_draft: bool,
     /// This row exists only for local compose state and has no established history.
+    /// Draft flags are authoritative host metadata; do not infer them from an unloaded message list.
     #[serde(default)]
     pub draft_only: bool,
     pub pinned: bool,
+    /// Effective folder from core: an archived conversation reads as `inbox` once a newer message arrives.
+    #[ts(as = "ConversationFolderDto")]
     pub folder: ConversationFolder,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(as = "Option<ConversationFolderReasonDto>", optional)]
     pub folder_reason: Option<ConversationFolderReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(as = "Option<SenderUnblockStatusDto>", optional)]
     pub unblock: Option<SenderUnblockStatus>,
     pub can_unblock: bool,
+    /// RCS encryption is only what Google reports; absent RCS facts make no claim.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub rcs_encryption: Option<bool>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(as = "Option<bool>", optional)]
     pub rcs_history_gap: bool,
     /// Present only for a group conversation (a roster or an RCS group mapping).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub group: Option<GroupView>,
     /// Reaction route the conversation offers; absent for draft-only rows.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reaction_support: Option<&'static str>,
+    #[ts(optional)]
+    pub reaction_support: Option<reactions::ReactionSupportDto>,
     /// Gateway the reaction route uses; the UI reads its presence for the offline gate.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub reaction_gateway_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryPage {
     pub conversation_id: String,
@@ -1458,7 +1743,7 @@ mod tests {
             rcs_encryption: Some(true),
             rcs_history_gap: true,
             group: None,
-            reaction_support: Some("native"),
+            reaction_support: Some(reactions::ReactionSupportDto::Native),
             reaction_gateway_id: Some("gateway".into()),
         };
 

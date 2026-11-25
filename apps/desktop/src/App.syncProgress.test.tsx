@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { conversationWireDefaults } from "./test-support/conversationWireDefaults";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
@@ -135,7 +136,7 @@ describe("App sync progress banner", () => {
   });
 
   it("updates the thread list and progress while a recipientless draft is selected", async () => {
-    const draftConversation = { id: "draft-new", name: "New message", preview: "Draft", unread: 0, messages: [], draftOnly: true, recipientlessDraft: true };
+    const draftConversation = { ...conversationWireDefaults, id: "draft-new", name: "New message", preview: "Draft", unread: 0, messages: [], draftOnly: true, recipientlessDraft: true };
     snapshot = {
       ...snapshot,
       conversations: [draftConversation],
@@ -149,8 +150,8 @@ describe("App sync progress banner", () => {
     snapshot = {
       ...snapshot,
       conversations: [
-        { id: "new-aurora", name: "Aurora Incoming", preview: "Hello", unread: 0, messages: [] },
-        { id: "new-river", name: "River Incoming", preview: "Hello", unread: 0, messages: [] },
+        { ...conversationWireDefaults, id: "new-aurora", name: "Aurora Incoming", preview: "Hello", unread: 0, messages: [] },
+        { ...conversationWireDefaults, id: "new-river", name: "River Incoming", preview: "Hello", unread: 0, messages: [] },
         draftConversation,
       ],
       syncProgress: { phase: "receiving", receivedThrough: "0", processedThrough: "0", snapshotReceived: "1200", snapshotExpected: "108000" },

@@ -6,6 +6,7 @@ import * as desktopBridge from "../../desktop/src/bridge/bridge";
 import { installBrowserBridge as installDesktopBrowserBridge } from "../../desktop/src/bridge/bridge";
 import * as uiBridge from "./ui-bridge";
 import type { DesktopBridge, DesktopSnapshot } from "./ui-bridge";
+import { conversationWireDefaults } from "../../desktop/src/test-support/conversationWireDefaults";
 
 afterEach(() => cleanup());
 
@@ -47,7 +48,7 @@ describe("browser UI bridge", () => {
       connection: { state: "connected" },
       encryption: { state: "unlocked" },
       gateways: [{ id: "gateway-browser", name: "Phone", simId: "sim-browser", online: true, simulated: false, supportsSms: true, supportsMms: false, availability: "unknown", settingUp: false, wakeRoute: false }],
-      conversations: [{ id: "conversation-browser", name: "Browser chat", preview: "", unread: 0, messages: [] }],
+      conversations: [{ ...conversationWireDefaults, id: "conversation-browser", name: "Browser chat", preview: "", unread: 0, messages: [] }],
       activeConversationId: "conversation-browser",
       draft: { id: "draft-browser", conversationId: "conversation-browser", text: "", recipientIds: [], attachmentIds: [], gatewayId: "gateway-browser", simId: "sim-browser", revision: "1" },
       head: { enabled: false, capability: "unsupported" },
@@ -95,7 +96,7 @@ describe("browser UI bridge", () => {
       connection: { state: "connected" },
       encryption: { state: "unlocked" },
       gateways: [{ id: "gateway-browser", name: "Phone", simId: "sim-browser", online: true, simulated: false, supportsSms: true, supportsMms: false, availability: "unknown", settingUp: false, wakeRoute: false }],
-      conversations: [{ id: "conversation-browser", name: "Browser chat", preview: "", unread: 0, messages: [] }],
+      conversations: [{ ...conversationWireDefaults, id: "conversation-browser", name: "Browser chat", preview: "", unread: 0, messages: [] }],
       activeConversationId: "conversation-browser",
       draft: { id: "draft-browser", conversationId: "conversation-browser", text: "", recipientIds: [], attachmentIds: [], gatewayId: "gateway-browser", simId: "sim-browser", revision: "1" },
       head: { enabled: false, capability: "unsupported" },

@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { conversationWireDefaults } from "../test-support/conversationWireDefaults";
 import { describe, expect, it } from "vitest";
 import type { ContactBookView, ContactResolutionMap, ConversationView } from "../bridge/bridge";
 import { canCreateContactInBook, conversationContactAddress } from "./conversation-contact";
@@ -13,6 +14,7 @@ const writableBook: ContactBookView = {
 };
 
 const conversation = (overrides: Partial<ConversationView> = {}): ConversationView => ({
+  ...conversationWireDefaults,
   id: "conversation-1",
   name: "+18015551234",
   preview: "Hello",
