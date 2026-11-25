@@ -454,12 +454,6 @@ func TestOldRunCleanupDoesNotSuppressTerminalPersistenceAndReport(t *testing.T) 
 	fixture.configure(func(knobs *fixtureKnobs) { knobs.configEmail = fixtureSourceID })
 	link, host := openSafetyLink(t, nil)
 	setSafetyState(link, stateLinked, auth)
-	reportReached, releaseReport := make(chan struct{}), make(chan struct{})
-	t.Cleanup(func() { closeRound2Signal(releaseReport) })
-	link.completionOutputReady = func() {
-		close(reportReached)
-		<-releaseReport
-	}
 	readyReached, releaseReady := host.holdNextEvent("ready")
 	t.Cleanup(func() { closeRound2Signal(releaseReady) })
 	runDone := startSafetyRun(t, link)
@@ -493,6 +487,9 @@ func TestOldRunCleanupDoesNotSuppressTerminalPersistenceAndReport(t *testing.T) 
 		t.Fatalf("Run returned before terminal persistence: %v", err)
 	default:
 	}
+	if host.hasEvent("link", "relink_needed") {
+		t.Fatal("terminal report escaped before persistence")
+	}
 	closeRound2Signal(releasePersist)
 	if err := awaitSafetyResult(t, runDone, "retired Run"); err != nil {
 		t.Fatalf("Run error = %v", err)
@@ -500,15 +497,6 @@ func TestOldRunCleanupDoesNotSuppressTerminalPersistenceAndReport(t *testing.T) 
 	if err := recvWithin(t, persistDone, 5*time.Second); err != nil {
 		t.Fatalf("blocking persistence error = %v", err)
 	}
-	select {
-	case <-reportReached:
-	case <-time.After(5 * time.Second):
-		t.Fatal("terminal report did not reach post-persistence barrier")
-	}
-	if host.hasEvent("link", "relink_needed") {
-		t.Fatal("terminal report escaped its barrier")
-	}
-	closeRound2Signal(releaseReport)
 	host.awaitEvent(t, "link", "relink_needed")
 	processedBefore := host.countEvent("conn", "recovered")
 	link.queueEvent(&events.ListenRecovered{})

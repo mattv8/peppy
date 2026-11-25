@@ -131,6 +131,10 @@ func TestOldOutputEntersHostBeforeReplacementPairAdmission(t *testing.T) {
 func TestReplacementPairInvalidatesDelayedTerminalOutput(t *testing.T) {
 	link, host := openSafetyLink(t, nil)
 	setSafetyState(link, stateLinked, nil)
+	reached, release := host.holdNextEvent("recovered")
+	t.Cleanup(func() { closeRound2Signal(release) })
+	go link.emit("conn", "recovered", 0)
+	recvWithin(t, reached, 5*time.Second)
 	link.mu.Lock()
 	completion := link.commitTerminalLocked(link.generation, &events.AccountChange{})
 	link.mu.Unlock()
@@ -138,15 +142,15 @@ func TestReplacementPairInvalidatesDelayedTerminalOutput(t *testing.T) {
 		t.Fatal("terminal completion was not allocated")
 	}
 
-	completionReady := make(chan struct{})
-	releaseCompletion := make(chan struct{})
-	link.completionOutputReady = func() {
-		close(completionReady)
-		<-releaseCompletion
-	}
 	go link.completeTerminal(completion)
-	recvWithin(t, completion.done, 5*time.Second)
-	recvWithin(t, completionReady, 5*time.Second)
+	recvWithin(t, completion.outputQueued, 5*time.Second)
+	link.outputMu.Lock()
+	if len(link.outputQueue) != 1 || link.outputQueue[0].code != "signed_out" {
+		link.outputMu.Unlock()
+		t.Fatal("terminal report was not queued behind the held callback")
+	}
+	reportDone := link.outputQueue[0].done
+	link.outputMu.Unlock()
 
 	candidate := libgm.NewAuthData()
 	candidate.SetCookies(syntheticCookies())
@@ -162,14 +166,56 @@ func TestReplacementPairInvalidatesDelayedTerminalOutput(t *testing.T) {
 		defer link.mu.Unlock()
 		return link.state == statePairing
 	})
-	close(releaseCompletion)
-
-	recvWithin(t, completion.outputQueued, 5*time.Second)
+	closeRound2Signal(release)
+	recvWithin(t, reportDone, 5*time.Second)
 	if host.hasEvent("link", "signed_out") {
 		t.Fatal("delayed terminal output crossed replacement Pair admission")
 	}
 	link.Close()
 	recvWithin(t, pairDone, 5*time.Second)
+}
+
+func TestUnlinkInvalidatesTerminalReportBeforeEligibility(t *testing.T) {
+	link, host := openSafetyLink(t, nil)
+	setSafetyState(link, stateLinked, nil)
+	eventReached, releaseEvent := host.holdNextEvent("recovered")
+	t.Cleanup(func() { closeRound2Signal(releaseEvent) })
+	go link.emit("conn", "recovered", 0)
+	recvWithin(t, eventReached, 5*time.Second)
+	persistReached, releasePersist := host.holdNextPersist(stateSignedOut)
+	t.Cleanup(func() { closeRound2Signal(releasePersist) })
+	link.mu.Lock()
+	completion := link.commitTerminalLocked(link.generation, &events.AccountChange{})
+	link.mu.Unlock()
+	if completion == nil {
+		t.Fatal("terminal completion was not allocated")
+	}
+	go link.completeTerminal(completion)
+	recvWithin(t, persistReached, 5*time.Second)
+	unlinkDone := make(chan error, 1)
+	go func() { unlinkDone <- link.Unlink() }()
+	awaitSafety(t, "unlink invalidation", func() bool {
+		link.mu.Lock()
+		defer link.mu.Unlock()
+		return link.unlinking && link.stateRevision != completion.revision
+	})
+	closeRound2Signal(releasePersist)
+	recvWithin(t, completion.outputQueued, 5*time.Second)
+	link.outputMu.Lock()
+	for _, output := range link.outputQueue {
+		if output.kind == "link" && output.code == "signed_out" {
+			link.outputMu.Unlock()
+			t.Fatal("superseded terminal report was enqueued")
+		}
+	}
+	link.outputMu.Unlock()
+	closeRound2Signal(releaseEvent)
+	if err := recvWithin(t, unlinkDone, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if host.hasEvent("link", "signed_out") {
+		t.Fatal("superseded terminal report reached the host")
+	}
 }
 
 func TestAuthRevisionIsAllocatedWithSnapshotCapture(t *testing.T) {
