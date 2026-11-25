@@ -3061,8 +3061,16 @@ async fn send_draft(
     let operation = admit_update_operation(&state)?;
     let session = state.require_session_admitted(&operation).await?;
     let draft_id = input.id.clone();
+    let conversation_id = input.conversation_id.clone();
     let result = send_draft_for_window(&state, window.label(), session.clone(), input).await;
     let accepted = result.as_ref().is_ok_and(|sent| sent.accepted);
+    heads_runtime::send_settled(
+        window.app_handle(),
+        window.label(),
+        &conversation_id,
+        &session,
+        accepted,
+    );
     let cleared = blocking({
         let session = session.clone();
         move || {
