@@ -2,7 +2,7 @@
 
 # Browser assets are portable, but their build toolchain must run natively on
 # the BuildKit builder platform.
-FROM --platform=$BUILDPLATFORM rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS web-build
+FROM --platform=$BUILDPLATFORM rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd AS web-build
 ARG BUILDARCH
 ARG BUILDPLATFORM
 ARG EMSDK_VERSION=6.0.11
@@ -60,7 +60,7 @@ COPY infra/dev/copy-web-assets.sh /usr/local/bin/copy-web-assets
 COPY --from=web-build /src/apps/web/dist /web
 ENTRYPOINT ["/usr/local/bin/copy-web-assets"]
 
-FROM rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS build
+FROM rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd AS build
 ARG TARGETPLATFORM
 WORKDIR /src
 RUN apt-get update \
