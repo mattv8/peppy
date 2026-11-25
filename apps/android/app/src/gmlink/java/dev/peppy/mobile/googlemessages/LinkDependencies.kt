@@ -13,7 +13,8 @@ import uniffi.peppy_mobile_bindings.NativeClient
 internal data class LinkRuntimeDeps(
     val engine: () -> LinkEngine,
     val storeFactory: (Context) -> LinkStateStorage,
-    val rcsReceiveSink: (Context) -> RcsReceiveSink,
+    /** Replaces the receive coordinator each handle opens with; null keeps the handle's own. */
+    val rcsReceiveSink: RcsReceiveSink?,
     val typingReceiveSink: () -> TypingReceiveSink?,
     val callbackExecutor: Executor,
 ) {
@@ -21,7 +22,7 @@ internal data class LinkRuntimeDeps(
         val DEFAULTS = LinkRuntimeDeps(
             engine = { LinkEngines.current },
             storeFactory = { LinkStateStoreAdapter(LinkStateStore(it.applicationContext.noBackupFilesDir)) },
-            rcsReceiveSink = { RcsReceiveCoordinator(it.applicationContext) },
+            rcsReceiveSink = null,
             typingReceiveSink = { TypingReceiveSinkRegistry.sink },
             callbackExecutor = LinkRuntime.callbackExecutor,
         )

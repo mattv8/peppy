@@ -1,6 +1,7 @@
 package dev.peppy.mobile.googlemessages
 
 import android.content.Context
+import androidx.annotation.VisibleForTesting
 import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
@@ -23,6 +24,9 @@ object LinkRuntime {
     private var handleGeneration = 0L
     private var pairingGeneration = 0L
 
+    /** Pauses [handle] after it waits out a closing handle, before it takes the native lock and re-checks; null outside tests. */
+    @VisibleForTesting @Volatile internal var afterClosingCheckForTest: (() -> Unit)? = null
+
     val emoji = MutableStateFlow<String?>(null)
     val changes: StateFlow<Long> = changeCounter
     val pairingInProgress = AtomicBoolean(false)
@@ -30,14 +34,14 @@ object LinkRuntime {
     fun handle(context: Context): LinkOpenResult {
         while (true) {
             if (!awaitNoClosingHandle()) return LinkOpenResult.Unavailable
-            LinkRuntimeTestHooks.afterClosingCheck?.invoke()
+            afterClosingCheckForTest?.invoke()
             val opened = synchronized(nativeOperationLock) {
                 val closing = synchronized(this) {
                     cachedHandle?.let { return LinkOpenResult.Open(it) }
                     closingHandle != null
                 }
                 if (closing) null else {
-                    val engine = LinkRuntimeTestHooks.engine ?: LinkEngines.current
+                    val engine = linkRuntimeDeps(context).engine()
                     if (!engine.available) LinkOpenResult.Unavailable else {
                         val store = store(context)
                         val state = try { store.read() } catch (error: Exception) {
@@ -93,7 +97,6 @@ object LinkRuntime {
 
     internal fun recordPreStart(context: Context, attempt: Long): Boolean {
         if (!ownsPairingAttempt(attempt)) return false
-        LinkRuntimeTestHooks.beforePreStartPublication?.invoke()
         return LinkCoreBridge.recordPreStart(context.applicationContext, attempt) && ownsPairingAttempt(attempt)
     }
 
@@ -121,7 +124,6 @@ object LinkRuntime {
     }
 
     internal fun recordPanelObservation(context: Context, observation: LinkObservation, status: LinkStatus): Boolean {
-        LinkRuntimeTestHooks.beforePanelObservationRecord?.invoke()
         return LinkCoreBridge.recordObservation(
             observation.token,
             observation.lease,
@@ -137,7 +139,7 @@ object LinkRuntime {
             synchronized(this) {
                 if (!pairingInProgress.get() || pairingGeneration != attempt) return@synchronized null
                 cachedHandle?.let { return@synchronized LinkHandleLease(it, handleGeneration) }
-                val engine = LinkRuntimeTestHooks.engine ?: LinkEngines.current
+                val engine = linkRuntimeDeps(context).engine()
                 if (!engine.available) return@synchronized null
                 val store = store(context)
                 val state = runCatching { store.read() }.getOrNull() ?: return@synchronized null
@@ -256,8 +258,7 @@ object LinkRuntime {
     internal fun resetForTest() {
         GoogleMessagesLinkService.stopActiveWorker()
         if (!awaitNoClosingHandle()) return
-        LinkRuntimeTestHooks.beforePanelObservationRecord = null
-        LinkRuntimeTestHooks.beforePreStartPublication = null
+        afterClosingCheckForTest = null
         synchronized(nativeOperationLock) {
             val captured = synchronized(this) {
                 val current = cachedHandle
@@ -273,9 +274,7 @@ object LinkRuntime {
         }
     }
 
-    private fun store(context: Context): LinkStateStorage =
-        LinkRuntimeTestHooks.storeFactory?.invoke(context.applicationContext)
-            ?: LinkStateStoreAdapter(LinkStateStore(context.applicationContext.noBackupFilesDir))
+    private fun store(context: Context): LinkStateStorage = linkRuntimeDeps(context).storeFactory(context.applicationContext)
 
     private fun host(context: Context, store: LinkStateStorage, generation: Long, receiveCoordinator: RcsReceiveCoordinator) = object : LinkHost {
         override fun persistState(state: ByteArray) = store.write(state)
@@ -284,7 +283,7 @@ object LinkRuntime {
 
         override fun eventOwned(kind: String, code: String, value: Long, ownerGeneration: Long, ownerRevision: Long) {
             val safeCode = filterReasonCode(code)
-            callbackExecutor().execute {
+            callbackExecutor(context).execute {
                 if (!acceptsCallback(generation, ownerGeneration, ownerRevision)) return@execute
                 recordEvent(kind, safeCode, value)
                 GoogleMessagesLinkService.onLinkEvent(kind, safeCode)
@@ -295,21 +294,21 @@ object LinkRuntime {
         override fun rcsEvent(recordJson: String) = rcsEventOwned(recordJson, -1, -1, -1)
 
         override fun rcsEventOwned(recordJson: String, ownerGeneration: Long, ownerRevision: Long, streamEpoch: Long) {
-            callbackExecutor().execute {
+            callbackExecutor(context).execute {
                 if (!acceptsStreamCallback(generation, ownerGeneration, ownerRevision, streamEpoch)) return@execute
-                (LinkRuntimeTestHooks.rcsReceiveSink ?: receiveCoordinator).receive(recordJson)
+                (linkRuntimeDeps(context).rcsReceiveSink ?: receiveCoordinator).receive(recordJson)
             }
         }
 
         override fun typingEvent(recordJson: String) = typingEventOwned(recordJson, -1, -1, -1)
 
         override fun typingEventOwned(recordJson: String, ownerGeneration: Long, ownerRevision: Long, streamEpoch: Long) {
-            callbackExecutor().execute {
+            callbackExecutor(context).execute {
                 if (!acceptsStreamCallback(generation, ownerGeneration, ownerRevision, streamEpoch)) {
                     recordGoogleMessagesLinkEvent("typing", "inbound_fenced", 0)
                     return@execute
                 }
-                val sink = LinkRuntimeTestHooks.typingReceiveSink ?: TypingReceiveSinkRegistry.sink
+                val sink = linkRuntimeDeps(context).typingReceiveSink()
                 if (sink == null) recordGoogleMessagesLinkEvent("typing", "inbound_no_sink", 0)
                 else sink.receive(recordJson)
             }
@@ -319,7 +318,7 @@ object LinkRuntime {
 
         override fun showEmojiOwned(value: String, ownerGeneration: Long, ownerRevision: Long) {
             val callbackPairingGeneration = synchronized(this@LinkRuntime) { pairingGeneration }
-            callbackExecutor().execute {
+            callbackExecutor(context).execute {
                 if (!acceptsCallback(generation, ownerGeneration, ownerRevision)) return@execute
                 assignEmojiIfCurrent(generation, callbackPairingGeneration, value)
             }
@@ -355,7 +354,7 @@ object LinkRuntime {
         signalChange()
     }
 
-    private fun callbackExecutor(): Executor = LinkRuntimeTestHooks.callbackExecutor ?: callbackExecutor
+    private fun callbackExecutor(context: Context): Executor = linkRuntimeDeps(context).callbackExecutor
 
     private fun ownsLease(lease: LinkHandleLease): Boolean = synchronized(this) {
         lease.generation == handleGeneration && lease.handle === cachedHandle
@@ -407,21 +406,8 @@ internal fun filterReasonCode(code: String?): String =
 
 private val REASON_CODE = Regex("[a-z][a-z0-9_]{0,39}")
 
-internal object LinkRuntimeTestHooks {
-    @Volatile var engine: LinkEngine? = null
-    @Volatile var storeFactory: ((Context) -> LinkStateStorage)? = null
-    @Volatile var eventRecorder: ((String, String, Long) -> Unit)? = null
-    @Volatile var rcsReceiveSink: RcsReceiveSink? = null
-    @Volatile var typingReceiveSink: TypingReceiveSink? = null
-    @Volatile var callbackExecutor: Executor? = null
-    @Volatile var afterClosingCheck: (() -> Unit)? = null
-    @Volatile var beforePanelObservationRecord: (() -> Unit)? = null
-    @Volatile var beforePreStartPublication: (() -> Unit)? = null
-}
-
 internal object LinkRuntimeEventSink {
     fun record(kind: String, code: String, value: Long) {
         recordGoogleMessagesLinkEvent(kind, code, value)
-        LinkRuntimeTestHooks.eventRecorder?.invoke(kind, code, value)
     }
 }

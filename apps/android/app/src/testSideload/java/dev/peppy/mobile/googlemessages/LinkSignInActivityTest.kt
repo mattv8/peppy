@@ -9,6 +9,7 @@ import android.webkit.WebView
 import android.widget.Button
 import android.widget.TextView
 import dev.peppy.mobile.R
+import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.gateway.GatewayTestBase
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -31,16 +32,13 @@ import java.util.concurrent.atomic.AtomicInteger
 import uniffi.peppy_mobile_bindings.NativeRcsLinkState
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], application = LinkTestApplication::class)
 class LinkSignInActivityTest : GatewayTestBase() {
     @After
     fun reset() {
         LinkSignInActivityTestHooks.reset()
         LinkSignInRuntime.resetForTest()
         LinkRuntime.resetForTest()
-        LinkRuntimeTestHooks.engine = null
-        LinkRuntimeTestHooks.storeFactory = null
-        LinkRuntimeTestHooks.eventRecorder = null
         LinkCoreBridge.resetForTest()
     }
 
@@ -76,8 +74,8 @@ class LinkSignInActivityTest : GatewayTestBase() {
             cookieManagerRequests.incrementAndGet()
             CookieManager.getInstance()
         }
-        LinkRuntimeTestHooks.engine = availableEngine(LinkedHandle())
-        LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
+        LinkTestDeps.engine = availableEngine(LinkedHandle())
+        LinkTestDeps.storeFactory = { EmptyLinkStateStorage }
 
         val controller = Robolectric.buildActivity(LinkSignInActivity::class.java).setup()
         val activity = controller.get()
@@ -96,13 +94,13 @@ class LinkSignInActivityTest : GatewayTestBase() {
         val statusReadOnMain = AtomicBoolean()
         LinkSignInActivityTestHooks.startupExecutor = startup::capture
         LinkSignInActivityTestHooks.awaitSignInReady = { true }
-        LinkRuntimeTestHooks.engine = availableEngine(object : LinkedHandle() {
+        LinkTestDeps.engine = availableEngine(object : LinkedHandle() {
             override fun status(): String {
                 statusReadOnMain.set(Thread.currentThread() === Looper.getMainLooper().thread)
                 return super.status()
             }
         })
-        LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
+        LinkTestDeps.storeFactory = { EmptyLinkStateStorage }
 
         val controller = Robolectric.buildActivity(LinkSignInActivity::class.java).setup()
         startup.run()
@@ -117,10 +115,10 @@ class LinkSignInActivityTest : GatewayTestBase() {
         val startup = ControlledStartup()
         LinkSignInActivityTestHooks.startupExecutor = startup::capture
         LinkSignInActivityTestHooks.awaitSignInReady = { true }
-        LinkRuntimeTestHooks.engine = availableEngine(object : LinkedHandle() {
+        LinkTestDeps.engine = availableEngine(object : LinkedHandle() {
             override fun status() = "{\"state\":\"unlinked\"}"
         })
-        LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
+        LinkTestDeps.storeFactory = { EmptyLinkStateStorage }
 
         val controller = Robolectric.buildActivity(LinkSignInActivity::class.java).setup()
         val activity = controller.get()
@@ -269,24 +267,24 @@ class LinkSignInActivityTest : GatewayTestBase() {
         LinkSignInActivityTestHooks.startupExecutor = startup::capture
         LinkSignInActivityTestHooks.awaitSignInReady = { false }
         LinkSignInRuntimeTestHooks.pairingExecutor = pairing
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle.also { opens++ }
         }
-        LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
-        LinkRuntimeTestHooks.eventRecorder = { kind, code, _ -> diagnostics += "$kind/$code" }
-
+        LinkTestDeps.storeFactory = { EmptyLinkStateStorage }
         val controller = Robolectric.buildActivity(LinkSignInActivity::class.java).setup()
         val activity = controller.get()
-        queuePairing(activity)
-        LinkRuntime.resetLocalState(activity)
-        pairing.runAll()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, diagnostics::add, recordingThread = Thread.currentThread()) {
+            queuePairing(activity)
+            LinkRuntime.resetLocalState(activity)
+            pairing.runAll()
+        }
 
         // The reset's unlinked completion is durable; the retired pre-start never wrote unknown after it.
         assertEquals(NativeRcsLinkState.UNLINKED, persistedLinkState())
         assertEquals(0, opens)
         assertEquals(0, handle.pairCalls.get())
-        assertEquals(listOf("link/reset_local", "link/persist_failed"), diagnostics)
+        assertEquals(listOf(17, 16).map { "event=27 session=1 timestamp_ms=10 trace=0 29=$it" }, diagnostics.filter { it.startsWith("event=27 ") })
         controller.destroy()
     }
 
@@ -303,8 +301,8 @@ class LinkSignInActivityTest : GatewayTestBase() {
         LinkSignInActivityTestHooks.startupExecutor = startup::capture
         LinkSignInActivityTestHooks.awaitSignInReady = { false }
         LinkSignInRuntimeTestHooks.pairingExecutor = pairing
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { EmptyLinkStateStorage }
 
         val controller = Robolectric.buildActivity(LinkSignInActivity::class.java).setup()
         queuePairing(controller.get())
@@ -318,13 +316,14 @@ class LinkSignInActivityTest : GatewayTestBase() {
     fun `failed lifecycle fence prevents native pair and records persistence failure`() {
         val startup = ControlledStartup()
         val handle = PairCountingHandle()
-        val persistFailure = CountDownLatch(1)
+        val pairing = QueueExecutor()
+        val diagnostics = mutableListOf<String>()
         LinkSignInActivityTestHooks.startupExecutor = startup::capture
         LinkSignInActivityTestHooks.awaitSignInReady = { false }
         // No enrolled gateway: the real lifecycle write returns false, so pairing never reaches native pair.
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
-        LinkRuntimeTestHooks.eventRecorder = { _, code, _ -> if (code == "persist_failed") persistFailure.countDown() }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { EmptyLinkStateStorage }
+        LinkSignInRuntimeTestHooks.pairingExecutor = pairing
 
         val controller = Robolectric.buildActivity(LinkSignInActivity::class.java).setup()
         val activity = controller.get()
@@ -333,12 +332,15 @@ class LinkSignInActivityTest : GatewayTestBase() {
             isAccessible = true
             set(activity, FilteredCookies(emptyMap()))
         }
-        LinkSignInActivity::class.java.getDeclaredMethod("startPairing").apply {
-            isAccessible = true
-            invoke(activity)
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, diagnostics::add, recordingThread = Thread.currentThread()) {
+            LinkSignInActivity::class.java.getDeclaredMethod("startPairing").apply {
+                isAccessible = true
+                invoke(activity)
+            }
+            pairing.runAll()
         }
 
-        assertTrue(persistFailure.await(1, TimeUnit.SECONDS))
+        assertTrue(diagnostics.contains("event=27 session=1 timestamp_ms=10 trace=0 29=16"))
         awaitPairingCompletion()
         assertEquals(0, handle.pairCalls.get())
         controller.destroy()
@@ -353,11 +355,11 @@ class LinkSignInActivityTest : GatewayTestBase() {
         LinkSignInActivityTestHooks.startupExecutor = startup::capture
         LinkSignInActivityTestHooks.awaitSignInReady = { true }
         LinkSignInRuntimeTestHooks.pairingExecutor = pairing
-        LinkRuntimeTestHooks.engine = availableEngine(object : LinkedHandle() {
+        LinkTestDeps.engine = availableEngine(object : LinkedHandle() {
             override fun status() = """{"state":"unlinked"}"""
             override fun pair(cookiesJson: ByteArray) = onPair()
         })
-        LinkRuntimeTestHooks.storeFactory = { EmptyLinkStateStorage }
+        LinkTestDeps.storeFactory = { EmptyLinkStateStorage }
 
         val controller = Robolectric.buildActivity(LinkSignInActivity::class.java).setup()
         startup.run()
