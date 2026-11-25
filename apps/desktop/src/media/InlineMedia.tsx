@@ -38,6 +38,7 @@ export function InlineMedia({ attachment, requestOriginal, checkOriginal, releas
   const keyboardFocus = useRef(false);
   const keyboardInput = useRef(false);
   const touchOnly = useRef(false);
+  const pointerPressed = useRef(false);
   const mediaKind = attachment.mediaType.startsWith("video/") ? "video" : attachment.mediaType.startsWith("audio/") ? "audio" : undefined;
   const mediaDuration = duration(attachment.mediaMeta?.durationMs);
   const removedRemoteOnly = attachment.remoteState === "removed_by_storage_policy" && !attachment.localAvailable;
@@ -97,30 +98,42 @@ export function InlineMedia({ attachment, requestOriginal, checkOriginal, releas
     // Pointer focus does not pin the controls; keyboard focus does.
     const onKeyDown = () => { keyboardInput.current = true; };
     const onPointerDown = () => { keyboardInput.current = false; };
+    // A drag on the scrubber or volume slider can leave the video; keep the controls until the button is released.
+    const onPointerRelease = () => {
+      if (!pointerPressed.current) return;
+      pointerPressed.current = false;
+      showControls();
+    };
     updateHover();
     media?.addEventListener("change", updateHover);
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("pointerup", onPointerRelease, true);
+    window.addEventListener("pointercancel", onPointerRelease, true);
     return () => {
       clearTimeout(controlsTimer.current);
       playing.current = false;
       seeking.current = false;
       keyboardFocus.current = false;
+      pointerPressed.current = false;
       media?.removeEventListener("change", updateHover);
       window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("pointerup", onPointerRelease, true);
+      window.removeEventListener("pointercancel", onPointerRelease, true);
     };
   }, [url]);
+  const canHideControls = () => playing.current && !seeking.current && !pointerPressed.current && !keyboardFocus.current && !touchOnly.current;
   const showControls = () => {
     clearTimeout(controlsTimer.current);
     setControlsVisible(true);
-    if (playing.current && !seeking.current && !keyboardFocus.current && !touchOnly.current) {
+    if (canHideControls()) {
       controlsTimer.current = setTimeout(() => setControlsVisible(false), CONTROLS_IDLE_MS);
     }
   };
   const hideControls = () => {
     clearTimeout(controlsTimer.current);
-    if (playing.current && !seeking.current && !keyboardFocus.current && !touchOnly.current) setControlsVisible(false);
+    if (canHideControls()) setControlsVisible(false);
   };
   const handleVideoKeyDown = (event: KeyboardEvent<HTMLVideoElement>) => {
     if (event.currentTarget.controls || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
@@ -147,6 +160,7 @@ export function InlineMedia({ attachment, requestOriginal, checkOriginal, releas
     onPlay={() => { playing.current = true; showControls(); }}
     onPause={() => { playing.current = false; showControls(); }}
     onEnded={() => { playing.current = false; showControls(); }}
+    onPointerDown={() => { pointerPressed.current = true; keyboardFocus.current = false; showControls(); }}
     onPointerMove={showControls} onPointerEnter={showControls} onPointerLeave={hideControls}
     onClick={() => { if (!controlsVisible) showControls(); }}
     onFocus={() => { keyboardFocus.current = keyboardInput.current; showControls(); }}

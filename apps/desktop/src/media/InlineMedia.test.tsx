@@ -66,8 +66,35 @@ describe("inline video controls", () => {
     const video = await renderVideo();
     fireEvent.play(video);
     fireEvent.pointerDown(video);
+    fireEvent.pointerUp(window);
     fireEvent.focus(video);
     fireEvent.pointerLeave(video);
+    expect(video).not.toHaveAttribute("controls");
+  });
+
+  it("keeps controls while a drag that started on the video is held outside it", async () => {
+    const video = await renderVideo();
+    fireEvent.play(video);
+    fireEvent.pointerDown(video);
+    fireEvent.pointerLeave(video);
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(video).toHaveAttribute("controls");
+    fireEvent.pointerUp(window);
+    expect(video).toHaveAttribute("controls");
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(video).not.toHaveAttribute("controls");
+  });
+
+  it("stops pinning keyboard-focused controls once the pointer is used", async () => {
+    const video = await renderVideo();
+    fireEvent.play(video);
+    fireEvent.keyDown(window, { key: "Tab" });
+    fireEvent.focus(video);
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(video).toHaveAttribute("controls");
+    fireEvent.pointerDown(video);
+    fireEvent.pointerUp(window);
+    act(() => { vi.advanceTimersByTime(2000); });
     expect(video).not.toHaveAttribute("controls");
   });
 
