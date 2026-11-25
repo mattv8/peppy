@@ -21,6 +21,8 @@ import type {
   AttachmentRetentionStatusResult,
 } from "@peppy/generated/attachment-retention";
 import type { AccountAccessResult } from "@peppy/generated/account-access";
+import type { NotificationDismissalBlock } from "@peppy/generated/notification-dismissal";
+export type { NotificationDismissalBlock, NotificationDismissalBlockReason } from "@peppy/generated/notification-dismissal";
 import type { RcsStatusSnapshot } from "@peppy/generated/rcs-status";
 import type { GatewayPresence, GatewayView } from "@peppy/generated/gateway";
 export type { GatewayAvailability, GatewayPresence, GatewayView } from "@peppy/generated/gateway";
@@ -130,8 +132,6 @@ export type PublicCopy = { url: string; expiresInSeconds: number };
 export type NotificationTarget = { sourceDeviceId: string; notificationKey: string; lifetime: string };
 export type NotificationDismissOutcome = "recorded" | "alreadyRecorded" | "notDismissible" | "gone" | "muted";
 export type NotificationDismissResult = { target: NotificationTarget; outcome: NotificationDismissOutcome };
-export type NotificationDismissalBlockReason = "mirroringOff" | "notificationAccessOff" | "waitingForWifi" | "other";
-export type NotificationDismissalBlock = { sourceDeviceId: string; reason: NotificationDismissalBlockReason; observedAtMs: number };
 export type OneTimeCodeTarget = { kind: "message"; messageId: string } | { kind: "notification"; target: NotificationTarget };
 export type MirroredNotification = { target: NotificationTarget; packageName: string; appName: string; appIconPngBase64?: string; title: string; text: string; category?: string; postedAt: number; dismissible: boolean; seen: boolean; dismissalPending: boolean; oneTimeCode?: string };
 export type AppFilter = { sourceDeviceId: string; packageName: string; appName: string; muted: boolean };

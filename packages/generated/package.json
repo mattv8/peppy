@@ -6,6 +6,7 @@
   "exports": {
     "./local-search": "./src/local-search.ts",
     "./notification-activation": "./src/notification-activation.ts",
+    "./notification-dismissal": "./src/notification-dismissal.ts",
     "./launch-progress": "./src/launch-progress.ts",
     "./gateway": "./src/gateway.ts",
     "./attachment-retention": "./src/attachment-retention.ts",

@@ -5,7 +5,7 @@ use peppy_client_core::{
 };
 use serde::Serialize;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum NotificationDismissalBlockReason {
     MirroringOff,
@@ -26,11 +26,12 @@ impl From<CoreReason> for NotificationDismissalBlockReason {
 }
 
 /// A phone that cannot currently record dismissals, with the reason it reported.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationDismissalBlock {
     pub source_device_id: String,
     pub reason: NotificationDismissalBlockReason,
+    #[ts(type = "number")]
     pub observed_at_ms: i64,
 }
 
