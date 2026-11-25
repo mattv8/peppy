@@ -15,5 +15,5 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-jsonschema = { version = "0.30", default-features = false }
+jsonschema = { version = "0.61", default-features = false }
 serde_json.workspace = true
