@@ -10,7 +10,6 @@ import dev.peppy.mobile.googlemessages.live.LiveTypingListener
 import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.Executor
-import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -33,7 +32,6 @@ import uniffi.peppy_mobile_bindings.NativeTypingOrigin
 import uniffi.peppy_mobile_bindings.NativeTypingState
 import uniffi.peppy_mobile_bindings.gatewayPublishRcsEligibility
 import uniffi.peppy_mobile_bindings.gatewayVerifyRcsMapping
-import uniffi.peppy_mobile_bindings.rcsCanonicalizerRevision
 import uniffi.peppy_mobile_bindings.NativeRcsEligibilityPublication
 
 @RunWith(RobolectricTestRunner::class)
@@ -199,75 +197,13 @@ class TypingBridgeRealCoreTest : GatewayTestBase() {
     }
 
     private fun enableGatewayRouting(gateway: NativeClient, conversationId: String, now: Long) {
-        gateway.captureIncoming(NativeIncomingSms(conversationId, PEER, "", "typing-$conversationId", true))
+        gateway.captureIncoming(NativeIncomingSms(conversationId, LINK_TEST_PEER, "", "typing-$conversationId", true))
         gateway.recordRcsLinkLifecycle(NativeRcsLinkState.LINKED, true, true, true, now, now)
         assertEquals(
             NativeRcsMappingVerification.MAPPED,
-            gatewayVerifyRcsMapping(gateway, rcsObservation(now), now),
+            gatewayVerifyRcsMapping(gateway, rcsObservation("google-typing", 1, now), now),
         )
         gatewayPublishRcsEligibility(gateway, listOf(NativeRcsEligibilityPublication(conversationId)), now)
-    }
-
-    private fun rcsObservation(now: Long): String {
-        val outgoing = JSONObject()
-            .put("outgoing_id", "google-outgoing")
-            .put("sim_participant_id", "google-outgoing")
-            .put("own_identity_raw", OWN_NUMBER)
-            .put("sim_payload", JSONObject().put("two", 2).put("sim_number", 7))
-            .put("rcs_chats_enabled", true)
-        return JSONObject()
-            .put("google_conversation_id", "google-typing")
-            .put("google_candidate_count", 1)
-            .put("participants", JSONArray().put(JSONObject()
-                .put("identity", PEER)
-                .put("google_participant_id", "google-peer")
-                .put("identifier_type", 1)
-                .put("is_visible", true)
-                .put("is_me", false)))
-            .put("conversation_type", "Rcs")
-            .put("status", "eligible")
-            .put("send_mode", "Automatic")
-            .put("read_only", false)
-            .put("default_outgoing", true)
-            .put("selected_sim_id", "android-subscription-7")
-            .put("selected_sim_own_identity", OWN_NUMBER)
-            .put("carrier_binding", JSONObject()
-                .put("carrier_route_id", "android-subscription-7")
-                .put("android_subscription_id", 7)
-                .put("is_current_default_sms", true)
-                .put("own_number_raw", OWN_NUMBER)
-                .put("own_number_source", "SubscriptionManagerPhoneNumber")
-                .put("route_observed_at_ms", now)
-                .put("route_context_revision", 1)
-                .put("same_handset_evidence_id", "verified-handset"))
-            .put("outgoing", outgoing)
-            .put("native_evidence", JSONObject()
-                .put("lifetime", JSONObject()
-                    .put("runtime_id", "runtime")
-                    .put("run_generation", 1)
-                    .put("link_generation", 1)
-                    .put("session_generation", 1)
-                    .put("context_revision", 1))
-                .put("lookup_id", "lookup")
-                .put("lookup_complete", true)
-                .put("google_candidate_count", 1)
-                .put("settings_revision", 1)
-                .put("settings_provenance", "CurrentEvent")
-                .put("settings_observed_at_ms", now)
-                .put("settings_stream_epoch", 1)
-                .put("settings_currentness", "ContinuousVerifiedFeed")
-                .put("current_settings_sims", JSONArray().put(outgoing))
-                .put("settings_validated_at_ms", now)
-                .put("conversation_observed_at_ms", now))
-            .put("identity_region", "US")
-            .put("observed_at_ms", now)
-            .put("context_revision", 1)
-            .put("link_generation", 1)
-            .put("session_generation", 1)
-            .put("canonicalizer_revision", rcsCanonicalizerRevision().toLong())
-            .put("mapping_revision", 1)
-            .put("link_state", "Linked")
-            .toString()
     }
 
     private fun syncGatewayStateToDesktop(gateway: NativeClient, desktop: NativeClient) {
@@ -321,9 +257,7 @@ class TypingBridgeRealCoreTest : GatewayTestBase() {
     }
 
     private companion object {
-        const val PEER = "+12025550123"
         const val SEAL_STARTED = 1
-        const val OWN_NUMBER = "+12025550101"
         const val PUBLICATION = 1L
         const val DESKTOP_WALL_SKEW_MS = -1_250L
         const val REFRESH_INTERVAL_MS = 3_001UL

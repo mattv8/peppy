@@ -47,7 +47,6 @@ import dev.peppy.mobile.googlemessages.ui.GoogleMessagesLinkPanel
 import dev.peppy.mobile.googlemessages.ui.GoogleMessagesLinkPanelDetails
 import dev.peppy.mobile.R
 import dev.peppy.mobile.gateway.GatewayTestBase
-import dev.peppy.mobile.gateway.NativeGateway
 import dev.peppy.mobile.googlemessages.ui.GoogleMessagesLinkPanelHost
 import dev.peppy.mobile.testing.ComposeTestActivityRule
 import dev.peppy.mobile.ui.theme.PeppyTheme
@@ -65,8 +64,6 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
-import org.json.JSONArray
-import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
@@ -80,12 +77,6 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import uniffi.peppy_mobile_bindings.NativeRcsLinkState
 import uniffi.peppy_mobile_bindings.NativeIncomingSms
-import uniffi.peppy_mobile_bindings.NativeRcsEligibilityPublication
-import uniffi.peppy_mobile_bindings.NativeRcsLinkOwnershipClaimOutcome
-import uniffi.peppy_mobile_bindings.NativeRcsMappingVerification
-import uniffi.peppy_mobile_bindings.gatewayPublishRcsEligibility
-import uniffi.peppy_mobile_bindings.gatewayVerifyRcsMapping
-import uniffi.peppy_mobile_bindings.rcsCanonicalizerRevision
 
 /** Which composable surface a test renders: the card, the details page, or a card that opens details on Manage. */
 private enum class PanelSurface { Card, Details, Managed }
@@ -266,48 +257,10 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
         val client = enrollAndUnlock()
         val conversationId = UUID.randomUUID().toString()
         val googleId = "google-${UUID.randomUUID()}"
-        val peer = "+12025550123"
-        val own = "+12025550101"
         val now = System.currentTimeMillis()
-        client.captureIncoming(NativeIncomingSms(conversationId, peer, "", "link-$conversationId", true))
+        client.captureIncoming(NativeIncomingSms(conversationId, LINK_TEST_PEER, "", "link-$conversationId", true))
         client.recordRcsLinkLifecycle(NativeRcsLinkState.LINKED, true, true, true, now, now)
-        val outgoing = JSONObject().put("outgoing_id", "google-outgoing").put("sim_participant_id", "google-outgoing")
-            .put("own_identity_raw", own).put("sim_payload", JSONObject().put("two", 2).put("sim_number", 7))
-            .put("rcs_chats_enabled", true)
-        val observation = JSONObject()
-            .put("google_conversation_id", googleId).put("google_candidate_count", 1)
-            .put("participants", JSONArray().put(JSONObject().put("identity", peer).put("google_participant_id", "google-peer")
-                .put("identifier_type", 1).put("is_visible", true).put("is_me", false)))
-            .put("conversation_type", "Rcs").put("status", "eligible").put("send_mode", "Automatic")
-            .put("read_only", false).put("default_outgoing", true).put("selected_sim_id", "android-subscription-7")
-            .put("selected_sim_own_identity", own)
-            .put("carrier_binding", JSONObject().put("carrier_route_id", "android-subscription-7")
-                .put("android_subscription_id", 7).put("is_current_default_sms", true).put("own_number_raw", own)
-                .put("own_number_source", "SubscriptionManagerPhoneNumber").put("route_observed_at_ms", now)
-                .put("route_context_revision", 1).put("same_handset_evidence_id", "verified-handset"))
-            .put("outgoing", outgoing)
-            .put("native_evidence", JSONObject().put("lifetime", JSONObject().put("runtime_id", "runtime")
-                .put("run_generation", 1).put("link_generation", 1).put("session_generation", 1).put("context_revision", 1))
-                .put("lookup_id", "lookup").put("lookup_complete", true).put("google_candidate_count", 1)
-                .put("settings_revision", 1).put("settings_provenance", "CurrentEvent").put("settings_observed_at_ms", now)
-                .put("settings_stream_epoch", 1).put("settings_currentness", "ContinuousVerifiedFeed")
-                .put("current_settings_sims", JSONArray().put(outgoing)).put("settings_validated_at_ms", now)
-                .put("conversation_observed_at_ms", now))
-            .put("identity_region", "US").put("observed_at_ms", now).put("context_revision", 1)
-            .put("link_generation", 1).put("session_generation", 1)
-            .put("canonicalizer_revision", rcsCanonicalizerRevision().toLong())
-            .put("mapping_revision", 1).put("link_state", "Linked")
-        assertEquals(NativeRcsMappingVerification.MAPPED, gatewayVerifyRcsMapping(client, observation.toString(), now))
-        gatewayPublishRcsEligibility(client, listOf(NativeRcsEligibilityPublication(conversationId)), now)
-        val claim = JSONObject().put("conversationId", conversationId).put("googleConversationId", googleId)
-            .put("mappingRevision", 1).put("providerFloor", 0)
-            .put("expectedLifecycleGeneration", checkNotNull(client.gatewayRcsLinkLifecycleGeneration()).toLong())
-            .put("expectedLinkGeneration", 1).put("expectedSessionGeneration", 1).put("expectedContextRevision", 1)
-        val ownership = client.gatewayClaimRcsLinkOwnershipJson(claim.toString())
-        assertEquals(NativeRcsLinkOwnershipClaimOutcome.CLAIMED, ownership.outcome)
-        val detector = JSONObject().put("providerRowId", 11).put("providerThreadId", 2).put("providerType", 132)
-            .put("observedAtMs", now).put("observedGeneration", ownership.ownershipGeneration.toLong())
-        assertEquals("recorded", client.gatewayRecordRcsProviderDetectorJson(conversationId, ownership.ownershipGeneration, detector.toString()))
+        claimWithDetector(client, conversationId, googleId, mappingRevision = 1, providerRowId = 11, now = now)
         assertTrue(LinkCoreBridge.recordExplicitUnlinkCompleted(context))
         assertEquals(listOf(conversationId), client.gatewayRcsCutoverAlerts().conversationIds)
         panel("linked") {
@@ -919,7 +872,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
         compose.waitUntil { compose.onAllNodesWithTag("google-messages-link-relink").fetchSemanticsNodes().isNotEmpty() }
         LinkRuntime.resetLocalState(context)
         assertEquals(NativeRcsLinkState.UNLINKED, persistedLinkState())
-        val afterReset = requireNotNull(NativeGateway.open(context)?.gatewayRcsLinkLifecycleGeneration())
+        val afterReset = requireNotNull(persistedLinkGeneration())
         assertTrue(host.pairingTokens.isEmpty())
 
         confirm("google-messages-link-relink")
@@ -934,7 +887,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
         assertSame(replacement, lease.handle)
         assertTrue(lease.generation > 0)
         assertEquals(NativeRcsLinkState.UNAVAILABLE, persistedLinkState())
-        assertEquals(afterReset + 1uL, NativeGateway.open(context)?.gatewayRcsLinkLifecycleGeneration())
+        assertEquals(afterReset + 1uL, persistedLinkGeneration())
     }
 
     @Test fun `owner unlink fences a linked status observation delayed after its read`() {
@@ -1311,21 +1264,6 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
         compose.onNodeWithTag("google-messages-link-chip").fetchSemanticsNode()
         compose.onNodeWithText(context.getString(R.string.peppy_google_messages_link_status_needs_relink)).fetchSemanticsNode()
         check(compose.onAllNodesWithTag("google-messages-link-last-ok").fetchSemanticsNodes().isEmpty())
-    }
-
-    private fun persistedLinkState(): NativeRcsLinkState? =
-        NativeGateway.open(context)?.rcsLinkStatus(deviceId, System.currentTimeMillis())?.state
-
-    private class PausingWipeStore(
-        private val wipeEntered: CountDownLatch,
-        private val releaseWipe: CountDownLatch,
-    ) : LinkStateStorage {
-        override fun read() = ByteArray(0)
-        override fun write(state: ByteArray) = Unit
-        override fun wipe() {
-            wipeEntered.countDown()
-            assertTrue("wipe was never released", releaseWipe.await(5, TimeUnit.SECONDS))
-        }
     }
 
     /** Degraded linked card: the help line, last answer, the primary action and Manage are all present. */

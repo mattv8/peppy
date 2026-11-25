@@ -10,7 +10,6 @@ import android.widget.Button
 import android.widget.TextView
 import dev.peppy.mobile.R
 import dev.peppy.mobile.gateway.GatewayTestBase
-import dev.peppy.mobile.gateway.NativeGateway
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -394,9 +393,6 @@ class LinkSignInActivityTest : GatewayTestBase() {
             isAccessible = true
             get(activity)
         }
-
-    private fun persistedLinkState(): NativeRcsLinkState? =
-        NativeGateway.open(context)?.rcsLinkStatus(deviceId, System.currentTimeMillis())?.state
 
     private fun queuePairing(activity: LinkSignInActivity) {
         LinkSignInActivity::class.java.getDeclaredField("pendingCookies").apply {
