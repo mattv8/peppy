@@ -39,6 +39,14 @@ pub struct ReactionSupportView {
     pub gateway_id: Option<DeviceId>,
 }
 
+/// Routing facts for a conversation, read together from the local store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReactionRouting {
+    pub spam: bool,
+    pub support: ReactionSupportView,
+    pub stored_route: Option<GatewayRoute>,
+}
+
 /// This device's latest request for a message whose state is still open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnReactionState {
@@ -421,6 +429,28 @@ impl Client {
     ) -> Result<ReactionSupportView, Error> {
         let store = self.lock()?;
         support_view(&store.conn, store.active_epoch, conversation_id)
+    }
+
+    /// Reads the folder, reaction support and composer's route under one store lock.
+    pub fn reaction_routing(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<ReactionRouting, Error> {
+        let store = self.lock()?;
+        let id = conversation_id.to_string();
+        let spam = store.conn.query_row(
+            &format!("SELECT COALESCE((SELECT folder='spam' FROM conversation_folders WHERE conversation_id=({})),0)", crate::conversation_folders::winner_sql("?1")),
+            [&id],
+            |row| row.get(0),
+        )?;
+        let support = support_view(&store.conn, store.active_epoch, conversation_id)?;
+        let stored_route = crate::load_compose_draft(&store.conn, "conversation_id", &id)?
+            .and_then(|draft| draft.route);
+        Ok(ReactionRouting {
+            spam,
+            support,
+            stored_route,
+        })
     }
 
     /// Reacts to a message. `gateway_online` is the presence of the route's gateway as the
