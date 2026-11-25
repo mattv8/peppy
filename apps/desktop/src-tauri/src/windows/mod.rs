@@ -47,6 +47,8 @@ pub struct HeadSpec {
     pub label: String,
     pub unread: u64,
     pub typing: bool,
+    /// A send from this conversation failed and the panel has not been opened since.
+    pub send_failed: bool,
     pub position: HeadPosition,
 }
 

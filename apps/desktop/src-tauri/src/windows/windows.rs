@@ -97,6 +97,7 @@ struct Head {
     label: String,
     unread: u64,
     typing: bool,
+    send_failed: bool,
     // Tick count when the pill last became shown; drives the dot phase.
     typing_started_ms: u64,
     // Dot state last painted or scheduled for paint; the timer repaints only on change.
@@ -252,7 +253,7 @@ unsafe fn show_on_ui_thread(spec: &HeadSpec, callback: HeadCallback) -> Result<(
     }
     ensure_class()?;
     let (x, y, scale) = restore_position(&spec.position);
-    let title = accessible_title(&spec.label, spec.unread, spec.typing);
+    let title = accessible_title(&spec.label, spec.unread, spec.typing, spec.send_failed);
     let hwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
         PCWSTR(CLASS_NAME.as_ptr()),
@@ -281,6 +282,7 @@ unsafe fn show_on_ui_thread(spec: &HeadSpec, callback: HeadCallback) -> Result<(
         label: spec.label.clone(),
         unread: spec.unread,
         typing: spec.typing,
+        send_failed: spec.send_failed,
         typing_started_ms: GetTickCount64(),
         dot_frame: None,
         timer_running: false,
@@ -348,8 +350,9 @@ unsafe fn update_existing(
             .heads
             .get_mut(&key(hwnd))
             .ok_or("native head does not exist")?;
-        let before_tier = displayed_badge_tier(head.unread, head.typing);
+        let before_tier = displayed_badge_tier(head.unread, head.typing, head.send_failed);
         let before_typing = head.typing;
+        let before_send_failed = head.send_failed;
         head.generation = spec.generation;
         head.glyph = spec.glyph.clone();
         head.photo_bgra = photo_bgra(&spec.glyph);
@@ -357,6 +360,7 @@ unsafe fn update_existing(
         head.label = spec.label.clone();
         head.unread = spec.unread;
         head.typing = spec.typing;
+        head.send_failed = spec.send_failed;
         let started_typing = spec.typing && !before_typing;
         if started_typing {
             head.typing_started_ms = GetTickCount64();
@@ -364,8 +368,10 @@ unsafe fn update_existing(
         if before_typing != spec.typing {
             head.dot_frame = None;
         }
-        let changed = before_tier != displayed_badge_tier(head.unread, head.typing)
-            || before_typing != head.typing;
+        let changed = before_tier
+            != displayed_badge_tier(head.unread, head.typing, head.send_failed)
+            || before_typing != head.typing
+            || before_send_failed != head.send_failed;
         if let Some(callback) = replacement {
             head.callback = callback;
         }
@@ -386,7 +392,7 @@ unsafe fn update_existing(
     }
     let _ = InvalidateRect(Some(hwnd), None, true);
     // Typing toggles often; touch the title only when its text actually changed.
-    let title = accessible_title(&label, spec.unread, spec.typing);
+    let title = accessible_title(&label, spec.unread, spec.typing, spec.send_failed);
     let title_changed = with_head(hwnd, |head| {
         let changed = head.title != title;
         if changed {
@@ -660,18 +666,18 @@ unsafe fn apply_shape(hwnd: HWND, size: i32) -> bool {
     let scale = size as f64 / LOGICAL_SIZE;
     let circle_size = scaled(CIRCLE_DIAMETER, scale);
     let region = CreateEllipticRgn(0, 0, circle_size, circle_size);
-    let (unread, typing) = registry()
+    let (unread, typing, send_failed) = registry()
         .lock()
         .ok()
         .and_then(|state| {
             state
                 .heads
                 .get(&key(hwnd))
-                .map(|head| (head.unread, head.typing))
+                .map(|head| (head.unread, head.typing, head.send_failed))
         })
         .unwrap_or_default();
-    if displayed_badge_tier(unread, typing) > 0 {
-        let badge_rect = badge_rect(badge_slot_unread(unread, typing), scale);
+    if displayed_badge_tier(unread, typing, send_failed) > 0 {
+        let badge_rect = badge_rect(badge_slot_unread(unread, typing, send_failed), scale);
         let badge = CreateRoundRectRgn(
             badge_rect.left,
             badge_rect.top,
@@ -748,16 +754,30 @@ fn badge_text(unread: u64) -> String {
 }
 
 // While typing, the pill takes the 99+ slot, so the badge tier is 3.
-fn badge_slot_unread(unread: u64, typing: bool) -> u64 {
+fn badge_slot_unread(unread: u64, typing: bool, send_failed: bool) -> u64 {
     if typing {
         TYPING_PILL_UNREAD
+    } else if send_failed {
+        1
     } else {
         unread
     }
 }
 
-fn displayed_badge_tier(unread: u64, typing: bool) -> u8 {
-    badge_tier(badge_slot_unread(unread, typing))
+fn displayed_badge_tier(unread: u64, typing: bool, send_failed: bool) -> u8 {
+    badge_tier(badge_slot_unread(unread, typing, send_failed))
+}
+
+fn displayed_badge_text(unread: u64, typing: bool, send_failed: bool) -> Option<String> {
+    if typing {
+        None
+    } else if send_failed {
+        Some("!".to_owned())
+    } else if unread > 0 {
+        Some(badge_text(unread))
+    } else {
+        None
+    }
 }
 
 fn inset_rect(rect: RECT, by: i32) -> RECT {
@@ -1300,9 +1320,11 @@ unsafe fn paint(hwnd: HWND) {
     if head.typing {
         let frame = paint_typing_pill(hdc, &head, dpi_scale, has_photo);
         let _ = with_head(hwnd, |state| state.dot_frame = Some(frame));
-    } else if head.unread > 0 {
-        let unread = head.unread;
-        let mut badge_rect = badge_rect(unread, dpi_scale);
+    } else if let Some(text) = displayed_badge_text(head.unread, head.typing, head.send_failed) {
+        let mut badge_rect = badge_rect(
+            badge_slot_unread(head.unread, head.typing, head.send_failed),
+            dpi_scale,
+        );
         let badge = CreateRoundRectRgn(
             badge_rect.left,
             badge_rect.top,
@@ -1334,7 +1356,7 @@ unsafe fn paint(hwnd: HWND) {
             right: badge_rect.right - ring,
             bottom: badge_rect.bottom - ring,
         };
-        draw_centered_text(hdc, &badge_text(unread), &mut inner_rect, 10.0, dpi_scale);
+        draw_centered_text(hdc, &text, &mut inner_rect, 10.0, dpi_scale);
     }
     let _ = EndPaint(hwnd, &ps);
 }
@@ -1633,7 +1655,7 @@ fn finite_or_zero(value: f64) -> f64 {
         0.0
     }
 }
-fn accessible_title(label: &str, unread: u64, typing: bool) -> Vec<u16> {
+fn accessible_title(label: &str, unread: u64, typing: bool, send_failed: bool) -> Vec<u16> {
     let mut title = if label.is_empty() || label == "Conversation" {
         "Floating conversation".to_owned()
     } else {
@@ -1641,10 +1663,11 @@ fn accessible_title(label: &str, unread: u64, typing: bool) -> Vec<u16> {
     };
     if typing {
         title.push_str(", typing");
-        if unread > 0 {
-            title.push_str(&format!(", {unread} unread messages"));
-        }
-    } else {
+    }
+    if send_failed {
+        title.push_str(", send failed");
+    }
+    if unread > 0 || (!typing && !send_failed) {
         title.push_str(&format!(", {unread} unread messages"));
     }
     title.encode_utf16().chain(Some(0)).collect()
@@ -1707,20 +1730,21 @@ mod tests {
 
     #[test]
     fn generic_labels_omit_the_redundant_conversation_name_in_accessibility_title() {
-        let title = String::from_utf16_lossy(&super::accessible_title("", 3, false));
+        let title = String::from_utf16_lossy(&super::accessible_title("", 3, false, false));
         assert_eq!(
             title.trim_end_matches('\0'),
             "Floating conversation, 3 unread messages"
         );
-        let title = String::from_utf16_lossy(&super::accessible_title("Conversation", 3, false));
+        let title =
+            String::from_utf16_lossy(&super::accessible_title("Conversation", 3, false, false));
         assert_eq!(
             title.trim_end_matches('\0'),
             "Floating conversation, 3 unread messages"
         );
     }
 
-    fn title_text(label: &str, unread: u64, typing: bool) -> String {
-        let title = super::accessible_title(label, unread, typing);
+    fn title_text(label: &str, unread: u64, typing: bool, send_failed: bool) -> String {
+        let title = super::accessible_title(label, unread, typing, send_failed);
         String::from_utf16_lossy(&title)
             .trim_end_matches('\0')
             .to_owned()
@@ -1729,37 +1753,82 @@ mod tests {
     #[test]
     fn typing_title_names_the_state_before_the_unread_count() {
         assert_eq!(
-            title_text("Ada", 0, true),
+            title_text("Ada", 0, true, false),
             "Floating conversation Ada, typing"
         );
         assert_eq!(
-            title_text("Ada", 3, true),
+            title_text("Ada", 3, true, false),
             "Floating conversation Ada, typing, 3 unread messages"
         );
         assert_eq!(
-            title_text("", 3, true),
+            title_text("", 3, true, false),
             "Floating conversation, typing, 3 unread messages"
         );
         assert_eq!(
-            title_text("Ada", 3, false),
+            title_text("Ada", 3, false, false),
             "Floating conversation Ada, 3 unread messages"
         );
     }
 
     #[test]
     fn typing_takes_the_99_plus_slot_even_without_unread() {
-        assert_eq!(super::displayed_badge_tier(0, false), 0);
-        assert_eq!(super::displayed_badge_tier(5, false), 1);
-        assert_eq!(super::displayed_badge_tier(0, true), 3);
-        assert_eq!(super::displayed_badge_tier(5, true), 3);
+        assert_eq!(super::displayed_badge_tier(0, false, false), 0);
+        assert_eq!(super::displayed_badge_tier(5, false, false), 1);
+        assert_eq!(super::displayed_badge_tier(0, true, false), 3);
+        assert_eq!(super::displayed_badge_tier(5, true, false), 3);
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            let slot = super::badge_rect(super::badge_slot_unread(0, true), scale);
+            let slot = super::badge_rect(super::badge_slot_unread(0, true, false), scale);
             let pill = super::badge_rect(super::TYPING_PILL_UNREAD, scale);
             assert_eq!(
                 (slot.left, slot.top, slot.right, slot.bottom),
                 (pill.left, pill.top, pill.right, pill.bottom)
             );
         }
+    }
+
+    #[test]
+    fn failed_send_marker_uses_the_badge_slot_unless_typing() {
+        assert_eq!(super::displayed_badge_tier(0, false, true), 1);
+        assert_eq!(super::displayed_badge_tier(100, false, true), 1);
+        assert_eq!(super::displayed_badge_tier(100, true, true), 3);
+        assert_eq!(
+            super::displayed_badge_text(0, false, true).as_deref(),
+            Some("!")
+        );
+        assert_eq!(super::displayed_badge_text(100, true, true), None);
+        assert_eq!(
+            super::displayed_badge_text(100, false, false).as_deref(),
+            Some("99+")
+        );
+        assert_eq!(super::displayed_badge_text(0, false, false), None);
+    }
+
+    #[test]
+    fn failed_send_title_follows_typing_and_precedes_unread() {
+        assert_eq!(
+            title_text("Ada", 0, false, true),
+            "Floating conversation Ada, send failed"
+        );
+        assert_eq!(
+            title_text("Ada", 3, false, true),
+            "Floating conversation Ada, send failed, 3 unread messages"
+        );
+        assert_eq!(
+            title_text("Ada", 0, true, true),
+            "Floating conversation Ada, typing, send failed"
+        );
+        assert_eq!(
+            title_text("Ada", 3, true, true),
+            "Floating conversation Ada, typing, send failed, 3 unread messages"
+        );
+        assert_eq!(
+            title_text("Conversation", 0, false, true),
+            "Floating conversation, send failed"
+        );
+        assert_eq!(
+            title_text("Ada", 0, false, false),
+            "Floating conversation Ada, 0 unread messages"
+        );
     }
 
     #[test]

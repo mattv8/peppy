@@ -10,7 +10,7 @@ use crate::{
     },
     AppState, STATE_EVENT,
 };
-use peppy_client_core::ConversationId;
+use peppy_client_core::{ConversationId, Direction, SendState};
 use peppy_desktop_api::{
     avatar::{conversation_avatar, initials, palette_index, AvatarKind},
     images::avatar_rgba,
@@ -42,6 +42,7 @@ struct ActiveHead {
     color: [u8; 3],
     label: String,
     unread: u64,
+    failed_message: Option<String>,
 }
 
 const TYPING_MIN_VISIBLE: Duration = Duration::from_millis(600);
@@ -88,6 +89,7 @@ struct RuntimeState {
     session: Option<Arc<crate::session::Session>>,
     heads: HashMap<String, ActiveHead>,
     typing: TypingDisplays,
+    send_failures: SendFailures,
     generation: u64,
     refreshing: bool,
     queued: bool,
@@ -108,6 +110,7 @@ impl RuntimeState {
             session: None,
             heads: HashMap::new(),
             typing: TypingDisplays::default(),
+            send_failures: SendFailures::default(),
             generation,
             refreshing: false,
             queued: false,
@@ -152,6 +155,7 @@ fn adopt_active_head(
         color: head.color,
         label: head.label.clone(),
         unread: head.unread,
+        failed_message: head.failed_message.clone(),
     }
 }
 
@@ -287,8 +291,104 @@ impl TypingDisplays {
     }
 }
 
-/// The spec a native head draws, with the displayed typing flag from the map.
-fn head_spec(typing: &TypingDisplays, conversation_id: &str, head: &ActiveHead) -> HeadSpec {
+#[derive(Default)]
+struct SendFailures {
+    refused: HashSet<String>,
+    acknowledged: HashMap<String, String>,
+}
+
+impl SendFailures {
+    fn displayed(&self, id: &str, failed_message: Option<&str>) -> bool {
+        self.refused.contains(id)
+            || failed_message.is_some_and(|message| {
+                self.acknowledged.get(id).map(String::as_str) != Some(message)
+            })
+    }
+
+    fn refuse(&mut self, id: &str) -> bool {
+        self.refused.insert(id.to_owned())
+    }
+
+    fn accept(&mut self, id: &str) -> bool {
+        self.refused.remove(id)
+    }
+
+    fn settle(
+        &mut self,
+        id: &str,
+        current: bool,
+        accepted: bool,
+        hidden: bool,
+        panel: bool,
+    ) -> bool {
+        if !current || (!accepted && (!hidden || !panel)) {
+            return false;
+        }
+        if accepted {
+            self.accept(id)
+        } else {
+            self.refuse(id)
+        }
+    }
+
+    fn acknowledge(&mut self, id: &str, failed_message: Option<&str>) -> bool {
+        let changed = self.displayed(id, failed_message);
+        self.refused.remove(id);
+        if let Some(message) = failed_message {
+            self.acknowledged.insert(id.to_owned(), message.to_owned());
+        }
+        changed
+    }
+
+    fn forget(&mut self, id: &str) -> bool {
+        let refused = self.refused.remove(id);
+        let acknowledged = self.acknowledged.remove(id).is_some();
+        refused || acknowledged
+    }
+
+    fn remap(&mut self, from: &str, to: &str) -> bool {
+        if from == to {
+            return false;
+        }
+        let refused = self.refused.remove(from);
+        if refused {
+            self.refused.insert(to.to_owned());
+        }
+        let acknowledged = self.acknowledged.remove(from);
+        let changed = refused || acknowledged.is_some();
+        if let Some(message) = acknowledged {
+            self.acknowledged.entry(to.to_owned()).or_insert(message);
+        }
+        changed
+    }
+
+    fn clear(&mut self) -> bool {
+        let changed = !self.refused.is_empty() || !self.acknowledged.is_empty();
+        self.refused.clear();
+        self.acknowledged.clear();
+        changed
+    }
+}
+
+fn is_failed_send(direction: Direction, state: Option<SendState>) -> bool {
+    direction == Direction::Outgoing
+        && matches!(
+            state,
+            Some(
+                SendState::FailedBeforeSubmission
+                    | SendState::FailedConfirmed
+                    | SendState::OutcomeUnknown
+            )
+        )
+}
+
+/// The spec a native head draws, with displayed state from the maps.
+fn head_spec(
+    typing: &TypingDisplays,
+    failures: &SendFailures,
+    conversation_id: &str,
+    head: &ActiveHead,
+) -> HeadSpec {
     HeadSpec {
         conversation_id: conversation_id.to_owned(),
         generation: head.generation,
@@ -297,6 +397,7 @@ fn head_spec(typing: &TypingDisplays, conversation_id: &str, head: &ActiveHead) 
         label: head.label.clone(),
         unread: head.unread,
         typing: typing.displayed(conversation_id),
+        send_failed: failures.displayed(conversation_id, head.failed_message.as_deref()),
         position: head.position.clone(),
     }
 }
@@ -367,6 +468,7 @@ struct HeadData {
     glyph: HeadGlyph,
     label: String,
     unread: u64,
+    failed_message: Option<String>,
 }
 
 struct RawHead {
@@ -375,6 +477,7 @@ struct RawHead {
     participants: Option<Vec<String>>,
     recipientless: bool,
     unread: u64,
+    failed_message: Option<String>,
 }
 
 #[derive(Clone)]
@@ -649,12 +752,79 @@ fn push_typing_update(app: &AppHandle, token: RuntimeToken, conversation_id: Str
                 .heads
                 .get(&conversation_id)
                 .filter(|head| head.generation == token.generation)
-                .map(|head| head_spec(&state.typing, &conversation_id, head))
+                .map(|head| head_spec(&state.typing, &state.send_failures, &conversation_id, head))
         });
         if let Some(spec) = spec {
             let _ = windows::update_head(&handle, &spec);
         }
     });
+}
+
+fn acknowledge_failure(app: &AppHandle, token: &RuntimeToken, id: &str) {
+    let changed = runtime(app).state.lock().ok().is_some_and(|mut state| {
+        if !token_matches_state(app, &state, token) {
+            return false;
+        }
+        let failed = state
+            .heads
+            .get(id)
+            .and_then(|head| head.failed_message.clone());
+        state.send_failures.acknowledge(id, failed.as_deref())
+    });
+    if changed {
+        push_typing_update(app, token.clone(), id.to_owned());
+    }
+}
+
+pub(crate) fn send_settled(
+    app: &AppHandle,
+    label: &str,
+    conversation_id: &str,
+    originating_session: &Arc<crate::session::Session>,
+    accepted: bool,
+) {
+    let id = Some(conversation_id)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .or_else(|| tray::composer_conversation(label).map(|id| id.to_string()));
+    let Some(id) = id else { return };
+    let hidden = if accepted {
+        false
+    } else {
+        tray::composer_conversation(label).is_some()
+            && app
+                .get_webview_window(label)
+                .and_then(|window| window.is_visible().ok())
+                == Some(false)
+    };
+    let update = runtime(app).state.lock().ok().and_then(|mut state| {
+        if state.stopped {
+            return None;
+        }
+        let (Some(binding), Some(session)) = (state.binding.clone(), state.session.clone()) else {
+            return None;
+        };
+        let panel = state.heads.get(&id).is_some_and(|head| head.panel);
+        let changed = state.send_failures.settle(
+            &id,
+            same_session(&session, originating_session),
+            accepted,
+            hidden,
+            panel,
+        );
+        (changed && state.heads.contains_key(&id)).then_some(RuntimeToken {
+            binding,
+            session,
+            generation: state.generation,
+        })
+    });
+    if let Some(token) = update {
+        push_typing_update(app, token, id);
+    }
+}
+
+fn same_session<T>(current: &Arc<T>, originating: &Arc<T>) -> bool {
+    Arc::ptr_eq(current, originating)
 }
 
 /// Ends a linger after `delay` unless raw typing resumed or the runtime moved on.
@@ -893,6 +1063,13 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
     for (from, to) in redirects {
         let pin_failed = runtime(app).pins.remap(&binding, &from, &to).is_err();
         let recent_failed = app_state.recents.remap(&binding, &from, &to).is_err();
+        if !pin_failed {
+            let _ = runtime(app).state.lock().map(|mut state| {
+                if token_matches_state(app, &state, &token) {
+                    state.send_failures.remap(&from, &to);
+                }
+            });
+        }
         if pin_failed || recent_failed {
             protected.insert(from);
         }
@@ -979,6 +1156,15 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
                 .map(|head| (pin.conversation_id.clone(), (pin, head)))
         })
         .collect();
+    let visible: HashSet<String> = wanted
+        .keys()
+        .filter(|id| {
+            app.get_webview_window(&format!("{}{}", tray::COMPOSER_PREFIX, id))
+                .and_then(|window| window.is_visible().ok())
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
     let (to_hide, specs) = {
         let runtime = runtime(app);
         let Ok(mut state) = runtime.state.lock() else {
@@ -995,10 +1181,16 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
             .collect::<Vec<_>>();
         for id in &to_hide {
             state.heads.remove(id);
+            state.send_failures.forget(id);
         }
         let mut specs = Vec::with_capacity(wanted.len());
         for (id, (pin, head)) in wanted {
             let existing = state.heads.get(&id).cloned();
+            let acknowledged = existing.as_ref().is_some_and(|active| active.panel)
+                && visible.contains(&id)
+                && state
+                    .send_failures
+                    .acknowledge(&id, head.failed_message.as_deref());
             if let Some(active) = existing.as_ref() {
                 state
                     .typing
@@ -1014,9 +1206,13 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
                     || active.color != head.color
                     || active.label != head.label
                     || active.unread != head.unread
+                    || active.failed_message != head.failed_message
             });
-            if changed {
-                specs.push((head_spec(&state.typing, &id, &active), existing.is_some()));
+            if changed || acknowledged {
+                specs.push((
+                    head_spec(&state.typing, &state.send_failures, &id, &active),
+                    existing.is_some(),
+                ));
             }
             state.heads.insert(id, active);
         }
@@ -1039,6 +1235,11 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         let result = on_main_if_current(app, token.clone(), move |app| {
             if let Ok(state) = runtime(app).state.lock() {
                 spec.typing = state.typing.displayed(&spec.conversation_id);
+                if let Some(head) = state.heads.get(&spec.conversation_id) {
+                    spec.send_failed = state
+                        .send_failures
+                        .displayed(&spec.conversation_id, head.failed_message.as_deref());
+                }
             }
             if existed {
                 windows::update_head(app, &spec)
@@ -1108,10 +1309,15 @@ fn resolve_heads(
         if !wanted.contains(&id) {
             continue;
         }
-        let name = session
+        let latest = session
             .client
             .latest_message(conversation.conversation_id)
-            .map_err(core_error)?
+            .map_err(core_error)?;
+        let failed_message = latest
+            .as_ref()
+            .filter(|message| is_failed_send(message.payload.direction, message.send_state))
+            .map(|message| message.payload.record.message_id.to_string());
+        let name = latest
             .as_ref()
             .map(crate::dto::counterpart)
             .or_else(|| {
@@ -1132,6 +1338,7 @@ fn resolve_heads(
             participants,
             recipientless: false,
             unread: conversation.unread_count,
+            failed_message,
         });
         emitted_ids.insert(id);
     }
@@ -1147,6 +1354,7 @@ fn resolve_heads(
             participants: Some(draft.recipients.clone()),
             recipientless: draft.recipients.is_empty(),
             unread: 0,
+            failed_message: None,
         });
         emitted_ids.insert(id);
     }
@@ -1178,10 +1386,15 @@ fn resolve_one(
         .into_iter()
         .find(|item| item.conversation_id == conversation)
     {
-        let name = session
+        let latest = session
             .client
             .latest_message(conversation)
-            .map_err(core_error)?
+            .map_err(core_error)?;
+        let failed_message = latest
+            .as_ref()
+            .filter(|message| is_failed_send(message.payload.direction, message.send_state))
+            .map(|message| message.payload.record.message_id.to_string());
+        let name = latest
             .as_ref()
             .map(crate::dto::counterpart)
             .or_else(|| {
@@ -1204,6 +1417,7 @@ fn resolve_one(
                     .map(|context| context.recipients),
                 recipientless: false,
                 unread: found.unread_count,
+                failed_message,
             },
             photos,
             &tone_overrides,
@@ -1222,6 +1436,7 @@ fn resolve_one(
                 participants: Some(draft.recipients.clone()),
                 recipientless: draft.recipients.is_empty(),
                 unread: 0,
+                failed_message: None,
             },
             photos,
             &tone_overrides,
@@ -1344,6 +1559,7 @@ fn resolve_raw_head(
         glyph,
         label,
         unread: head.unread,
+        failed_message: head.failed_message,
     }
 }
 
@@ -1544,6 +1760,13 @@ fn begin_binding(
         Vec::new()
     };
     let typing_cleared = state.typing.reset_for_replacement(replaced);
+    let failures_cleared = if replaced {
+        let ids = state.heads.keys().cloned().collect::<Vec<_>>();
+        state.send_failures.clear();
+        ids
+    } else {
+        Vec::new()
+    };
     if binding_changed || session_changed {
         state.recent_entries = None;
     }
@@ -1558,6 +1781,9 @@ fn begin_binding(
         clear_photos(app);
     }
     for id in typing_cleared {
+        push_typing_update(app, token.clone(), id);
+    }
+    for id in failures_cleared {
         push_typing_update(app, token.clone(), id);
     }
     Ok((token, stale, binding_changed || session_changed))
@@ -1892,7 +2118,7 @@ async fn activate(
     };
     let id = conversation_id.to_owned();
     let recent_binding = token.binding.clone();
-    let result = on_main_if_current(app, token, move |app| {
+    let result = on_main_if_current(app, token.clone(), move |app| {
         let label = format!("{}{}", tray::COMPOSER_PREFIX, id);
         if app
             .get_webview_window(&label)
@@ -1936,12 +2162,18 @@ async fn activate(
     match result {
         Ok(Some(ActivationUi::Expand(Err(_)))) => false,
         Ok(Some(ActivationUi::Expand(Ok(())))) => {
+            acknowledge_failure(app, &token, conversation_id);
             app.state::<AppState>()
                 .record_recent(&recent_binding, conversation_id);
             let _ = app.emit(STATE_EVENT, ());
             true
         }
-        Ok(Some(ActivationUi::Collapse(Ok(())) | ActivationUi::Focus(Ok(())))) => {
+        Ok(Some(ActivationUi::Focus(Ok(())))) => {
+            acknowledge_failure(app, &token, conversation_id);
+            let _ = app.emit(STATE_EVENT, ());
+            true
+        }
+        Ok(Some(ActivationUi::Collapse(Ok(())))) => {
             let _ = app.emit(STATE_EVENT, ());
             true
         }
@@ -2058,15 +2290,26 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
                 color: head.color,
                 label: head.label,
                 unread: head.unread,
+                failed_message: head.failed_message,
             },
         );
-        head_spec(&state.typing, &head.id, &state.heads[&head.id])
+        head_spec(
+            &state.typing,
+            &state.send_failures,
+            &head.id,
+            &state.heads[&head.id],
+        )
     };
 
     let mut spec_for_ui = spec.clone();
     let native = on_main_if_current(app, token.clone(), move |app| {
         if let Ok(state) = runtime(app).state.lock() {
             spec_for_ui.typing = state.typing.displayed(&spec_for_ui.conversation_id);
+            if let Some(head) = state.heads.get(&spec_for_ui.conversation_id) {
+                spec_for_ui.send_failed = state
+                    .send_failures
+                    .displayed(&spec_for_ui.conversation_id, head.failed_message.as_deref());
+            }
         }
         windows::show_head(app, &spec_for_ui, callback(app))
     })
@@ -2146,6 +2389,7 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
             )),
         };
     }
+    acknowledge_failure(app, &token, &spec.conversation_id);
     app.state::<AppState>()
         .record_recent(&binding, &spec.conversation_id);
     update_tray_menu(app, Some(&token)).await;
@@ -2171,6 +2415,7 @@ fn restore_prior(app: &AppHandle, conversation_id: &str, prior: Option<ActiveHea
             state.heads.insert(conversation_id.to_owned(), prior);
         } else {
             state.heads.remove(conversation_id);
+            state.send_failures.forget(conversation_id);
         }
     }
 }
@@ -2202,6 +2447,7 @@ pub fn forget_deleted_conversation(
         .map_err(|message| BridgeError::new("heads", message))?;
     if let Ok(mut state) = runtime(app).state.lock() {
         state.heads.remove(conversation_id);
+        state.send_failures.forget(conversation_id);
     }
     Ok(())
 }
@@ -2269,6 +2515,7 @@ pub(crate) async fn dismiss_generation(
             .is_some_and(|head| head.generation == generation)
         {
             state.heads.remove(conversation_id);
+            state.send_failures.forget(conversation_id);
         }
     }
     let id = conversation_id.to_owned();
@@ -2543,6 +2790,7 @@ pub async fn reset(app: &AppHandle) -> BridgeResult<()> {
         state.generation = generation;
         state.heads.clear();
         state.typing.clear();
+        state.send_failures.clear();
         state.binding = None;
         state.session = None;
         state.queued = false;
@@ -2566,6 +2814,7 @@ pub fn clear_on_exit(app: &AppHandle) {
         state.queued = false;
         state.heads.clear();
         state.typing.clear();
+        state.send_failures.clear();
         state.binding = None;
         state.session = None;
         state.recent_entries = None;
@@ -2620,6 +2869,7 @@ fn clear_visible_state(state: &mut RuntimeState, generation: u64) -> Vec<String>
         .collect::<Vec<_>>();
     state.heads.clear();
     state.typing.clear();
+    state.send_failures.clear();
     state.binding = None;
     state.session = None;
     state.recent_entries = None;
@@ -2835,6 +3085,63 @@ fn tray_entries(mut entries: Vec<(String, String)>) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn originating_session_identity_fences_late_results() {
+        let original = Arc::new(());
+        let same = original.clone();
+        let replacement = Arc::new(());
+        assert!(same_session(&original, &same));
+        assert!(!same_session(&original, &replacement));
+        let mut failures = SendFailures::default();
+        assert!(!failures.settle("chat", false, false, true, true));
+        assert!(!failures.displayed("chat", None));
+        assert!(!failures.settle("chat", true, false, true, false));
+        assert!(!failures.settle("chat", true, false, false, true));
+        assert!(!failures.displayed("chat", None));
+        failures.refuse("chat");
+        assert!(!failures.settle("chat", false, true, false, true));
+        assert!(failures.displayed("chat", None));
+        assert!(failures.settle("chat", true, true, false, true));
+        assert!(!failures.displayed("chat", None));
+    }
+
+    #[test]
+    fn send_failures_acknowledge_and_track_new_messages() {
+        let mut failures = super::SendFailures::default();
+        assert!(failures.refuse("chat"));
+        assert!(failures.displayed("chat", None));
+        failures.acknowledge("chat", Some("first"));
+        assert!(!failures.displayed("chat", Some("first")));
+        assert!(failures.displayed("chat", Some("second")));
+        failures.refuse("chat");
+        failures.accept("chat");
+        assert!(failures.displayed("chat", Some("second")));
+        failures.remap("chat", "other");
+        assert!(!failures.displayed("other", Some("first")));
+        failures.forget("other");
+        assert!(failures.displayed("other", Some("first")));
+        failures.refuse("chat");
+        failures.clear();
+        assert!(!failures.displayed("chat", None));
+    }
+
+    #[test]
+    fn only_outgoing_failed_states_mark_the_latest_message() {
+        use peppy_client_core::{Direction, SendState};
+        for state in [
+            SendState::FailedBeforeSubmission,
+            SendState::FailedConfirmed,
+            SendState::OutcomeUnknown,
+        ] {
+            assert!(super::is_failed_send(Direction::Outgoing, Some(state)));
+            assert!(!super::is_failed_send(Direction::Incoming, Some(state)));
+        }
+        assert!(!super::is_failed_send(Direction::Outgoing, None));
+        assert!(!super::is_failed_send(
+            Direction::Outgoing,
+            Some(SendState::Sent)
+        ));
+    }
     use super::*;
 
     #[test]
@@ -3334,6 +3641,7 @@ mod tests {
                 color: [1, 2, 3],
                 label: "Ada".into(),
                 unread: 1,
+                failed_message: None,
             },
         );
         state
@@ -3503,6 +3811,7 @@ mod tests {
                 color: [1, 2, 3],
                 label: "Ada".into(),
                 unread: 1,
+                failed_message: None,
             },
         );
 
@@ -3562,6 +3871,7 @@ mod tests {
             color: [1, 2, 3],
             label: "Old".into(),
             unread: 1,
+            failed_message: None,
         };
         let adopted = adopt_active_head(
             Some(&existing),
@@ -3574,6 +3884,7 @@ mod tests {
                 color: [4, 5, 6],
                 label: "New".into(),
                 unread: 2,
+                failed_message: None,
             },
         );
         assert!(adopted.panel);
@@ -3596,6 +3907,7 @@ mod tests {
             color: [1, 2, 3],
             label: "Ada".into(),
             unread,
+            failed_message: None,
         }
     }
 
@@ -3733,8 +4045,8 @@ mod tests {
         );
         // refresh and popout both build their spec through head_spec, from the head they insert.
         let head = test_head(4, 0);
-        assert!(head_spec(&typing, "conversation", &head).typing);
-        assert!(!head_spec(&typing, "other", &head).typing);
+        assert!(head_spec(&typing, &SendFailures::default(), "conversation", &head).typing);
+        assert!(!head_spec(&typing, &SendFailures::default(), "other", &head).typing);
     }
 
     #[test]
@@ -3754,7 +4066,7 @@ mod tests {
         assert!(map.end_linger_on_unread_change("conversation", 2, 3));
         assert!(map.entries.is_empty());
         let updated = test_head(4, 3);
-        let spec = head_spec(&map, "conversation", &updated);
+        let spec = head_spec(&map, &SendFailures::default(), "conversation", &updated);
         assert!(!spec.typing);
         assert_eq!(spec.unread, 3);
         assert!(!map.end_linger_on_unread_change("conversation", 3, 4));

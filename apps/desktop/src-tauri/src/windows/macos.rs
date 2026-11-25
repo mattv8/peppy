@@ -183,13 +183,30 @@ fn typing_dot_frame(index: usize, y: f64) -> NSRect {
     )
 }
 
-fn head_label(label: &str, unread: u64, typing: bool) -> String {
+fn head_label(label: &str, unread: u64, typing: bool, send_failed: bool) -> String {
+    if send_failed {
+        let typing = if typing { ", typing" } else { "" };
+        let unread = if unread > 0 {
+            format!(", {unread} unread messages")
+        } else {
+            String::new()
+        };
+        return format!("{label}{typing}, send failed{unread}");
+    }
     if typing && unread == 0 {
         format!("{label}, typing")
     } else if typing {
         format!("{label}, typing, {unread} unread messages")
     } else {
         format!("{label}, {unread} unread messages")
+    }
+}
+
+fn badge_slot_unread(unread: u64, send_failed: bool) -> u64 {
+    if send_failed {
+        1
+    } else {
+        unread
     }
 }
 
@@ -200,14 +217,14 @@ fn badge_label_frame(width: f64, label_height: f64) -> NSRect {
     )
 }
 
-fn is_in_badge(point: NSPoint, unread: u64, typing: bool) -> bool {
-    if unread == 0 && !typing {
+fn is_in_badge(point: NSPoint, unread: u64, typing: bool, send_failed: bool) -> bool {
+    if unread == 0 && !typing && !send_failed {
         return false;
     }
     let frame = if typing {
         typing_pill_frame()
     } else {
-        badge_frame(unread)
+        badge_frame(badge_slot_unread(unread, send_failed))
     };
     point.x >= frame.origin.x
         && point.x <= frame.origin.x + frame.size.width
@@ -392,7 +409,12 @@ extern "C" fn accessibility_display_changed(_: &Object, _: Sel, _: id) {
 
 extern "C" fn head_hit_test(view: &Object, _: Sel, point: NSPoint) -> id {
     let in_badge = with_head(view, |head| {
-        is_in_badge(point, head.spec.unread, head.spec.typing)
+        is_in_badge(
+            point,
+            head.spec.unread,
+            head.spec.typing,
+            head.spec.send_failed,
+        )
     })
     .unwrap_or(false);
     if is_in_circle(point) || in_badge {
@@ -825,17 +847,20 @@ fn update_head_content(views: HeadViews, spec: &HeadSpec, previous_glyph: Option
             &spec.glyph,
         );
         apply_glyph(views, &spec.glyph, previous_glyph);
-        let text = if spec.unread >= 100 {
+        let slot_unread = badge_slot_unread(spec.unread, spec.send_failed);
+        let text = if spec.send_failed {
+            "!".to_owned()
+        } else if spec.unread >= 100 {
             "99+".to_owned()
         } else {
             spec.unread.to_string()
         };
         let _: () = msg_send![views.badge_label, setStringValue: ns_string(&text)];
-        let _: () = msg_send![views.badge, setFrame: badge_frame(spec.unread)];
+        let _: () = msg_send![views.badge, setFrame: badge_frame(slot_unread)];
         let _: () = msg_send![views.badge_label, sizeToFit];
         let natural_frame: NSRect = msg_send![views.badge_label, frame];
-        let _: () = msg_send![views.badge_label, setFrame: badge_label_frame(badge_width(spec.unread), natural_frame.size.height)];
-        let _: () = msg_send![views.badge, setHidden: if spec.unread == 0 || spec.typing { YES } else { NO }];
+        let _: () = msg_send![views.badge_label, setFrame: badge_label_frame(badge_width(slot_unread), natural_frame.size.height)];
+        let _: () = msg_send![views.badge, setHidden: if (spec.unread == 0 && !spec.send_failed) || spec.typing { YES } else { NO }];
         let was_hidden: BOOL = msg_send![views.typing_pill, isHidden];
         let pill_hidden = if spec.typing { NO } else { YES };
         let _: () = msg_send![views.typing_pill, setHidden: pill_hidden];
@@ -852,7 +877,12 @@ fn update_head_content(views: HeadViews, spec: &HeadSpec, previous_glyph: Option
                 let _: () = msg_send![dot, removeAllAnimations];
             }
         }
-        let label = ns_string(&head_label(&spec.label, spec.unread, spec.typing));
+        let label = ns_string(&head_label(
+            &spec.label,
+            spec.unread,
+            spec.typing,
+            spec.send_failed,
+        ));
         let _: () = msg_send![views.view, setAccessibilityLabel: label];
         let _: () = msg_send![views.view, setToolTip: label];
     }
@@ -1390,6 +1420,7 @@ pub fn show_head(app: &AppHandle, spec: &HeadSpec, events: HeadCallback) -> Resu
             head.spec.label = spec.label.clone();
             head.spec.unread = spec.unread;
             head.spec.typing = spec.typing;
+            head.spec.send_failed = spec.send_failed;
             head.spec.generation = spec.generation;
             head.events = events.clone();
             (
@@ -1439,6 +1470,7 @@ pub fn update_head(app: &AppHandle, spec: &HeadSpec) -> Result<(), String> {
             head.spec.label = spec.label.clone();
             head.spec.unread = spec.unread;
             head.spec.typing = spec.typing;
+            head.spec.send_failed = spec.send_failed;
             head.spec.generation = spec.generation;
             (head.views, head.spec.clone(), previous_glyph)
         })
@@ -1510,11 +1542,14 @@ mod tests {
                 badge.size.height
             )
         );
-        assert!(is_in_badge(NSPoint::new(53.0, 7.0), 0, true));
-        assert!(!is_in_badge(NSPoint::new(53.0, 7.0), 0, false));
+        assert!(is_in_badge(NSPoint::new(53.0, 7.0), 0, true, false));
+        assert!(!is_in_badge(NSPoint::new(53.0, 7.0), 0, false, false));
         // Inside the typing pill but outside the narrower one-digit count badge.
-        assert!(is_in_badge(NSPoint::new(29.0, 15.0), 1, true));
-        assert!(!is_in_badge(NSPoint::new(29.0, 15.0), 1, false));
+        assert!(is_in_badge(NSPoint::new(29.0, 15.0), 1, true, false));
+        assert!(!is_in_badge(NSPoint::new(29.0, 15.0), 1, false, false));
+        assert!(is_in_badge(NSPoint::new(41.0, 15.0), 0, false, true));
+        assert!(!is_in_badge(NSPoint::new(29.0, 15.0), 100, false, true));
+        assert!(is_in_badge(NSPoint::new(29.0, 15.0), 0, true, true));
         for index in 0..3 {
             for y in [
                 TYPING_DOT_REST_Y,
@@ -1536,13 +1571,32 @@ mod tests {
 
     #[test]
     fn typing_accessible_label_preserves_unread_wording() {
-        assert_eq!(head_label("Alice", 0, true), "Alice, typing");
+        assert_eq!(head_label("Alice", 0, true, false), "Alice, typing");
         assert_eq!(
-            head_label("Alice", 2, true),
+            head_label("Alice", 2, true, false),
             "Alice, typing, 2 unread messages"
         );
-        assert_eq!(head_label("Alice", 0, false), "Alice, 0 unread messages");
-        assert_eq!(head_label("Alice", 2, false), "Alice, 2 unread messages");
+        assert_eq!(
+            head_label("Alice", 0, false, false),
+            "Alice, 0 unread messages"
+        );
+        assert_eq!(
+            head_label("Alice", 2, false, false),
+            "Alice, 2 unread messages"
+        );
+        assert_eq!(head_label("Alice", 0, false, true), "Alice, send failed");
+        assert_eq!(
+            head_label("Alice", 2, false, true),
+            "Alice, send failed, 2 unread messages"
+        );
+        assert_eq!(
+            head_label("Alice", 0, true, true),
+            "Alice, typing, send failed"
+        );
+        assert_eq!(
+            head_label("Alice", 2, true, true),
+            "Alice, typing, send failed, 2 unread messages"
+        );
     }
 
     #[test]
@@ -1562,13 +1616,13 @@ mod tests {
             assert_eq!(frame.origin.y, 6.0);
             assert_eq!((frame.size.width, frame.size.height), (width, BADGE_HEIGHT));
             assert_eq!(frame.origin.x + frame.size.width / 2.0, 41.0);
-            assert!(is_in_badge(NSPoint::new(41.0, 15.0), unread, false));
+            assert!(is_in_badge(NSPoint::new(41.0, 15.0), unread, false, false));
         }
     }
 
     #[test]
     fn hidden_badge_is_not_clickable() {
-        assert!(!is_in_badge(NSPoint::new(41.0, 15.0), 0, false));
+        assert!(!is_in_badge(NSPoint::new(41.0, 15.0), 0, false, false));
     }
 
     #[test]
