@@ -14,7 +14,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
 import android.os.IBinder
-import android.os.SystemClock
+import androidx.annotation.VisibleForTesting
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
@@ -44,33 +44,6 @@ import uniffi.peppy_mobile_bindings.gatewayMarkRcsMediaUploading
 import uniffi.peppy_mobile_bindings.gatewayMarkRcsMediaReferenceReady
 import uniffi.peppy_mobile_bindings.gatewayRecordRcsMediaOutcome
 import uniffi.peppy_mobile_bindings.rcsCanonicalizerRevision
-
-internal data class ServiceTestHooks(
-    val elapsedRealtime: () -> Long = SystemClock::elapsedRealtime,
-    val sleeper: (Long) -> Unit = Thread::sleep,
-    val notificationExecutor: Executor = DEFAULT_NOTIFICATION_EXECUTOR,
-    val closeExecutor: Executor = DEFAULT_CLOSE_EXECUTOR,
-    val notificationPublished: (GoogleMessagesLinkService) -> Unit = {},
-    val afterStatusRead: () -> Unit = {},
-    val beforeRun: () -> Unit = {},
-    val workerFinished: () -> Unit = {},
-    val receiveSweepExecutor: Executor = DEFAULT_RCS_RECEIVE_EXECUTOR,
-    val receiveSweep: (LinkHandleLease, AtomicBoolean) -> Unit = LinkRuntime::resumeRcsReceive,
-    val invalidateSweepMemo: (LinkHandleLease) -> Unit = LinkRuntime::invalidateRcsSweepMemo,
-    val beforeEligibilityEnumeration: () -> Unit = {},
-    val currentTimeMillis: () -> Long = System::currentTimeMillis,
-    val bootstrapExecutor: Executor = DEFAULT_RCS_BOOTSTRAP_EXECUTOR,
-    val eligibilityExecutor: Executor = DEFAULT_RCS_ELIGIBILITY_EXECUTOR,
-    val bootstrapFactory: (Context, LinkHandleLease, () -> Boolean) -> RcsLinkBootstrap = { context, lease, current ->
-        RcsLinkBootstrap(context, lease, current)
-    },
-    val typingBridgeFactory: (Context) -> TypingBridge = ::TypingBridge,
-    val typingSession: (Context) -> TypingCredentials? = { context ->
-        NativeGateway.session(context)?.let { TypingCredentials(it.origin, it.bearerToken, it.deviceId, it.generation) }
-    },
-    val typingExecutor: Executor = DEFAULT_TYPING_EXECUTOR,
-    val peersPresent: () -> Boolean? = RemoteMessagingRuntime::peersPresent,
-)
 
 internal val DEFAULT_NOTIFICATION_EXECUTOR = Executors.newSingleThreadExecutor()
 internal val DEFAULT_CLOSE_EXECUTOR = Executors.newSingleThreadExecutor()
@@ -107,6 +80,7 @@ class GoogleMessagesLinkService : Service() {
     private lateinit var mediaFiles: RcsMediaPrivateFiles
     private lateinit var mediaQueue: RcsMediaTransferQueue
     private lateinit var typingBridge: TypingBridge
+    private lateinit var deps: LinkServiceDeps
     private var typingRetirementListener: (() -> Unit)? = null
     @Volatile private var typingStoppedForPeers = false
     private val runtimePeersListener: () -> Unit = { requestLiveTypingUpdate() }
@@ -141,6 +115,7 @@ class GoogleMessagesLinkService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        deps = linkServiceDeps(this)
         createNotificationChannel(this)
         // Created before this service becomes the active target, so targeted requests never see it uninitialized.
         targetedBootstrap = RcsTargetedBootstrapDrain(
@@ -198,7 +173,7 @@ class GoogleMessagesLinkService : Service() {
                         runPendingGroupCreates(client, retire)
                         if (checked) retire()
                         revocationCheckedCandidates(
-                            read = { gatewayPendingRcsMediaCommands(client, testHooks.currentTimeMillis()) },
+                            read = { gatewayPendingRcsMediaCommands(client, deps.currentTimeMillis()) },
                             retire = retire,
                         )
                     }
@@ -230,7 +205,7 @@ class GoogleMessagesLinkService : Service() {
             current = { isCurrent(lifecycleGeneration) },
             executor = NATIVE_RCS_SEND_EXECUTOR,
         )
-        typingBridge = testHooks.typingBridgeFactory(applicationContext)
+        typingBridge = deps.typingBridgeFactory(applicationContext)
         TypingReceiveSinkRegistry.sink = typingBridge
         lifecycleGeneration = replaceActive(this)
         RemoteMessagingRuntime.peersListener = runtimePeersListener
@@ -337,7 +312,7 @@ class GoogleMessagesLinkService : Service() {
 
     private fun runMediaRcsSend(command: RcsNativeCommand) {
         val lease = LinkRuntime.handleLease(this) ?: return
-        val now = testHooks.currentTimeMillis
+        val now = deps.currentTimeMillis
         val client = NativeGateway.open(applicationContext) ?: return
         val native = gatewayNextRcsMediaAttachment(client, command.commandId, now()) ?: return
         val attachment = RcsMediaAttachment(
@@ -375,7 +350,7 @@ class GoogleMessagesLinkService : Service() {
 
     private fun runNativeRcsSend(command: RcsNativeCommand, attachmentIndex: UInt, onRefusalRecorded: () -> Unit = {}): RcsNativeSendOutcome {
         val lease = LinkRuntime.handleLease(this) ?: return RcsNativeSendOutcome.REFUSED
-        val clock = RcsNativeClock(testHooks.currentTimeMillis)
+        val clock = RcsNativeClock(deps.currentTimeMillis)
         val outcome = RcsNativeSendCoordinator(
             RcsNativeGoAdapter(lease), RcsNativeCoreAdapter(applicationContext, clock, attachmentIndex),
             RcsNativeAndroidRouteReader(applicationContext, clock), clock, rcsCanonicalizerRevision().toInt(),
@@ -390,7 +365,7 @@ class GoogleMessagesLinkService : Service() {
         runCatching {
 			val client = NativeGateway.open(applicationContext) ?: return
             val publisher = eligibilityPublisher ?: RcsEligibilityPublisher(
-                GeneratedRcsEligibilityPublisherPort(client),
+                deps.eligibilityPortFactory(client),
                 current = { isCurrent(lifecycleGeneration) },
             ).also { eligibilityPublisher = it }
             publisher.publish(listOf(conversationId))
@@ -400,10 +375,9 @@ class GoogleMessagesLinkService : Service() {
     private fun publishNativeRcsEligibility() {
         if (!nativeRcsEnabled()) return
         runCatching {
-			testHooks.beforeEligibilityEnumeration()
             val client = NativeGateway.open(applicationContext) ?: return
             val publisher = eligibilityPublisher ?: RcsEligibilityPublisher(
-                GeneratedRcsEligibilityPublisherPort(client),
+                deps.eligibilityPortFactory(client),
                 current = { isCurrent(lifecycleGeneration) },
             ).also { eligibilityPublisher = it }
             publisher.publish(client.gatewayRcsLinkOwnedConversations().map { it.conversationId })
@@ -422,7 +396,7 @@ class GoogleMessagesLinkService : Service() {
         }
         if (!schedule) return
         try {
-            testHooks.eligibilityExecutor.execute(::drainNativeRcsEligibility)
+            deps.eligibilityExecutor.execute(::drainNativeRcsEligibility)
         } catch (_: RuntimeException) {
             synchronized(eligibilityLock) { eligibilityScheduled = false }
             recordGoogleMessagesLinkEvent("link", "rcs_eligibility_failed", 0)
@@ -458,7 +432,7 @@ class GoogleMessagesLinkService : Service() {
         }
         if (!schedule) return
         try {
-            testHooks.bootstrapExecutor.execute(::drainRcsReadiness)
+            deps.bootstrapExecutor.execute(::drainRcsReadiness)
         } catch (_: RuntimeException) {
             synchronized(readinessLock) { readinessScheduled = false }
             recordGoogleMessagesLinkEvent("link", "rcs_bootstrap_failed", 0)
@@ -505,7 +479,7 @@ class GoogleMessagesLinkService : Service() {
             return
         }
         reconcileRcsGroups(bootstrapLease)
-        val now = testHooks.currentTimeMillis()
+        val now = deps.currentTimeMillis()
         if (now - lastBootstrapAtMs >= FULL_BOOTSTRAP_INTERVAL_MS && bootstrap.run() == RcsBootstrapResult.COMPLETE) {
             lastBootstrapAtMs = now
         }
@@ -598,7 +572,7 @@ class GoogleMessagesLinkService : Service() {
                 recordGoogleMessagesLinkEvent("readiness", reason, 0L)
                 if (response.contains("\"code\":\"ok\"") && !response.contains("\"index\":\"reused\"") &&
                     !response.contains("\"index\":\"adopted\"")) {
-                    testHooks.invalidateSweepMemo(activeLease)
+                    deps.invalidateSweepMemo(activeLease)
                 }
             }
         }
@@ -621,7 +595,7 @@ class GoogleMessagesLinkService : Service() {
         return synchronized(lock) {
             if (bootstrapLease !== lease) {
                 bootstrapLease = lease
-                bootstrap = testHooks.bootstrapFactory(applicationContext, lease) {
+                bootstrap = deps.bootstrapFactory(applicationContext, lease) {
                     isCurrent(generation) && LinkRuntime.ownsObservationLease(lease)
                 }
             }
@@ -650,18 +624,16 @@ class GoogleMessagesLinkService : Service() {
                     }
                 }
             }
-            testHooks.workerFinished()
         }
     }
 
     private fun waitForLinkedRun() {
-        val waitStartedAt = testHooks.elapsedRealtime()
+        val waitStartedAt = deps.elapsedRealtime()
         val lease = acquireWorkerLease() ?: return
         val handle = lease.handle
         while (isCurrent(lifecycleGeneration)) {
             val token = LinkCoreBridge.observationToken()
             val status = runCatching { LinkStatus.parse(handle.status()) }.getOrElse { return }
-            testHooks.afterStatusRead()
             if (!LinkCoreBridge.recordObservation(token, lease, applicationContext, status)) return
             publishStatus(status)
             when (nextServiceAction(status, LinkRuntime.pairingInProgress.get(), status.running)) {
@@ -670,7 +642,7 @@ class GoogleMessagesLinkService : Service() {
                     return
                 }
                 ServiceAction.WAIT -> {
-                    if (testHooks.elapsedRealtime() - waitStartedAt >= MAX_PAIRING_WAIT_MS) return
+                    if (deps.elapsedRealtime() - waitStartedAt >= MAX_PAIRING_WAIT_MS) return
                     if (!sleepInterruptibly(PAIRING_WAIT_MS)) return
                 }
                 ServiceAction.RUN -> return runWithRetry(lease)
@@ -728,7 +700,7 @@ class GoogleMessagesLinkService : Service() {
         }
         if (!schedule) return
         try {
-            testHooks.receiveSweepExecutor.execute(::drainReceiveSweeps)
+            deps.receiveSweepExecutor.execute(::drainReceiveSweeps)
         } catch (_: RuntimeException) {
             synchronized(receiveSweepLock) {
                 pendingReceiveSweep?.cancelled?.set(true)
@@ -753,7 +725,7 @@ class GoogleMessagesLinkService : Service() {
                 next
             }
             if (receiveSweepCurrent(request)) {
-                runCatching { testHooks.receiveSweep(request.lease, request.cancelled) }
+                runCatching { deps.receiveSweep(request.lease, request.cancelled) }
                     .onFailure { recordGoogleMessagesLinkEvent("link", "rcs_receive_sweep_failed", 0) }
                 // Reactions run after receive so facts from this sweep are ingested before requests act on them.
                 reactionWork.start()
@@ -784,7 +756,6 @@ class GoogleMessagesLinkService : Service() {
             if (beforeRun.state != "linked") return
             requestLiveTypingUpdate(beforeRun)
             publishStatus(beforeRun)
-            testHooks.beforeRun()
             val runGeneration = beginReceiveRun(lease)
             val failure = runCatching { handle.run() }.exceptionOrNull()
             finishReceiveRun(lease, runGeneration)
@@ -806,7 +777,7 @@ class GoogleMessagesLinkService : Service() {
     }
 
     private fun sleepInterruptibly(delayMs: Long): Boolean = try {
-        testHooks.sleeper(delayMs)
+        deps.sleeper(delayMs)
         !cancelled
     } catch (_: InterruptedException) {
         false
@@ -829,19 +800,24 @@ class GoogleMessagesLinkService : Service() {
         }
         captured?.let { lease ->
             LinkRuntime.detachHandleForServiceStop(lease)?.let { handle ->
-                testHooks.closeExecutor.execute { LinkRuntime.closeDetachedHandle(handle) }
+                deps.closeExecutor.execute { LinkRuntime.closeDetachedHandle(handle) }
             }
         }
     }
 
-    private fun joinWorker() {
-        val current = synchronized(lock) { worker }
-        if (current != null && current !== Thread.currentThread()) runCatching { current.join(SERVICE_STOP_JOIN_MS) }
+    /**
+     * Waits a bounded time for the current worker to exit. Returns true when there was no worker, or when the
+     * worker is no longer alive after the wait; false means it was still running when the bounded wait ended.
+     */
+    @VisibleForTesting internal fun joinWorker(): Boolean {
+        val current = synchronized(lock) { worker } ?: return true
+        if (current !== Thread.currentThread()) runCatching { current.join(SERVICE_STOP_JOIN_MS) }
+        return !current.isAlive
     }
 
     private fun refreshNotificationAfterEvent() {
         val generation = lifecycleGeneration
-        testHooks.notificationExecutor.execute {
+        deps.notificationExecutor.execute {
             runCatching {
                 if (!isCurrent(generation)) return@runCatching
                 val lease = synchronized(lock) { workerLease }
@@ -868,7 +844,7 @@ class GoogleMessagesLinkService : Service() {
 
     private fun publishStatus(status: LinkStatus) {
         val generation = lifecycleGeneration
-        testHooks.notificationExecutor.execute {
+        deps.notificationExecutor.execute {
             publishStatusNow(status, generation)
             publishReactionCapability(status)
         }
@@ -898,7 +874,6 @@ class GoogleMessagesLinkService : Service() {
             if (lastNotification == key) return
             lastNotification = key
             if (!isCurrent(generation) || foregroundUpdatesFenced) return
-            testHooks.notificationPublished(this)
             ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(status), foregroundServiceType())
         }
     }
@@ -911,7 +886,6 @@ class GoogleMessagesLinkService : Service() {
             if (!isCurrent(generation)) return
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
             if (!isCurrent(generation)) return
-            testHooks.notificationPublished(this)
             postAttentionNotification(status)
         }
     }
@@ -923,7 +897,7 @@ class GoogleMessagesLinkService : Service() {
     private fun requestLiveTypingUpdate(status: LinkStatus? = null) {
         if (!nativeRcsEnabled()) return
         val generation = lifecycleGeneration
-        testHooks.typingExecutor.execute {
+        deps.typingExecutor.execute {
             if (!isCurrent(generation)) return@execute
             val current = status ?: LinkRuntime.handleLease(this)?.let { lease ->
                 runCatching { LinkStatus.parse(lease.handle.status()) }.getOrNull()
@@ -933,8 +907,8 @@ class GoogleMessagesLinkService : Service() {
                 typingBridge.stop()
                 return@execute
             }
-            val credentials = testHooks.typingSession(applicationContext)
-            val peers = testHooks.peersPresent()
+            val credentials = deps.typingSession(applicationContext)
+            val peers = deps.peersPresent()
             if (!isCurrent(generation)) return@execute
             when {
                 credentials == null -> typingBridge.stop()
@@ -988,7 +962,6 @@ class GoogleMessagesLinkService : Service() {
         @Volatile private var active: GoogleMessagesLinkService? = null
         @Volatile private var serviceGeneration = 0L
         private val activeLock = Any()
-        internal var testHooks = ServiceTestHooks()
         @Volatile internal var nativeRcsSendExecutorEnabledForTest: Boolean? = null
         internal fun nativeRcsEnabled(): Boolean = nativeRcsSendExecutorEnabledForTest ?: NATIVE_RCS_ENABLED
         /** The phone can execute reaction jobs only while native RCS is on and the link is running. */

@@ -15,12 +15,18 @@ internal class LinkTestApplication : Application(), LinkDependenciesOverride {
 }
 
 /**
- * Replaces runtime collaborators for the current test by rewriting the test Application's [LinkRuntimeDeps].
+ * Replaces the link collaborators for the current test by rewriting the test Application's runtime, service,
+ * sign-in and restart deps ([LinkRuntimeDeps], [LinkServiceDeps], [LinkSignInDeps], [LinkRestartDeps]).
  * Robolectric creates a new Application for every test, so nothing set here outlives the test.
  * The properties are write-only; read the Application's deps to inspect them.
  */
 internal object LinkTestDeps {
     private val app: LinkTestApplication get() = ApplicationProvider.getApplicationContext()
+
+    /** Replaces the link service collaborators; set before the service is created, which reads them once. Null restores the defaults. */
+    var service: LinkServiceDeps?
+        get() = null
+        set(value) { app.service = value ?: LinkServiceDeps.DEFAULTS }
 
     var engine: LinkEngine?
         get() = null

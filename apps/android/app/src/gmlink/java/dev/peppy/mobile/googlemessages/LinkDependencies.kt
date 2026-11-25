@@ -50,12 +50,24 @@ internal data class LinkServiceDeps(
 ) {
     companion object {
         val DEFAULTS = LinkServiceDeps(
-            SystemClock::elapsedRealtime, Thread::sleep, DEFAULT_NOTIFICATION_EXECUTOR, DEFAULT_CLOSE_EXECUTOR,
-            DEFAULT_RCS_RECEIVE_EXECUTOR, LinkRuntime::resumeRcsReceive, LinkRuntime::invalidateRcsSweepMemo,
-            System::currentTimeMillis, DEFAULT_RCS_BOOTSTRAP_EXECUTOR, DEFAULT_RCS_ELIGIBILITY_EXECUTOR,
-            ::RcsLinkBootstrap, ::GeneratedRcsEligibilityPublisherPort, ::TypingBridge,
-            { context -> NativeGateway.session(context)?.let { TypingCredentials(it.origin, it.bearerToken, it.deviceId, it.generation) } },
-            DEFAULT_TYPING_EXECUTOR, RemoteMessagingRuntime::peersPresent,
+            elapsedRealtime = SystemClock::elapsedRealtime,
+            sleeper = Thread::sleep,
+            notificationExecutor = DEFAULT_NOTIFICATION_EXECUTOR,
+            closeExecutor = DEFAULT_CLOSE_EXECUTOR,
+            receiveSweepExecutor = DEFAULT_RCS_RECEIVE_EXECUTOR,
+            receiveSweep = LinkRuntime::resumeRcsReceive,
+            invalidateSweepMemo = LinkRuntime::invalidateRcsSweepMemo,
+            currentTimeMillis = System::currentTimeMillis,
+            bootstrapExecutor = DEFAULT_RCS_BOOTSTRAP_EXECUTOR,
+            eligibilityExecutor = DEFAULT_RCS_ELIGIBILITY_EXECUTOR,
+            bootstrapFactory = ::RcsLinkBootstrap,
+            eligibilityPortFactory = ::GeneratedRcsEligibilityPublisherPort,
+            typingBridgeFactory = ::TypingBridge,
+            typingSession = { context ->
+                NativeGateway.session(context)?.let { TypingCredentials(it.origin, it.bearerToken, it.deviceId, it.generation) }
+            },
+            typingExecutor = DEFAULT_TYPING_EXECUTOR,
+            peersPresent = RemoteMessagingRuntime::peersPresent,
         )
     }
 }

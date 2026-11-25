@@ -1,6 +1,12 @@
 package dev.peppy.mobile.googlemessages
 
+import android.Manifest
+import android.app.Application
+import android.app.Notification
+import android.app.NotificationManager
 import androidx.test.core.app.ApplicationProvider
+import java.util.UUID
+import dev.peppy.mobile.R
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.gateway.GatewayTestBase
 import dev.peppy.mobile.gateway.NativeGateway
@@ -17,6 +23,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.Rule
@@ -25,12 +32,15 @@ import org.junit.runner.Description
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ServiceController
 import org.robolectric.annotation.Config
 import dev.peppy.mobile.RemoteMessagingRuntime
 import dev.peppy.mobile.googlemessages.live.LiveTypingCredentials
 import dev.peppy.mobile.googlemessages.live.LiveTypingListener
+import uniffi.peppy_mobile_bindings.NativeIncomingSms
 import uniffi.peppy_mobile_bindings.NativeLiveClock
+import uniffi.peppy_mobile_bindings.NativeRcsEligibilityPublication
 import uniffi.peppy_mobile_bindings.NativeRcsReactionEntry
 import uniffi.peppy_mobile_bindings.NativeLiveEnableContext
 import uniffi.peppy_mobile_bindings.NativeLiveOutbound
@@ -82,7 +92,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         GoogleMessagesLinkService.stopActiveWorker()
         LinkRuntime.resetForTest()
         LinkCoreBridge.resetForTest()
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks()
+        LinkTestDeps.service = null
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = null
         RemoteMessagingRuntime.peersListener = null
     }
@@ -93,7 +103,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         val executor = QueueExecutor()
         val sweeps = AtomicInteger()
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             receiveSweepExecutor = executor,
             receiveSweep = { _, _ -> sweeps.incrementAndGet() },
         )
@@ -136,7 +146,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
             enabled = { true },
         )
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             receiveSweepExecutor = Executor(Runnable::run),
             bootstrapExecutor = Executor(Runnable::run),
             bootstrapFactory = { _, _, _ -> emptyBootstrap() },
@@ -162,7 +172,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         val executor = QueueExecutor()
         val sweeps = AtomicInteger()
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             sleeper = {},
             receiveSweepExecutor = executor,
             bootstrapExecutor = Executor(Runnable::run),
@@ -190,7 +200,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         val executor = QueueExecutor()
         val sweeps = AtomicInteger()
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             sleeper = {},
             receiveSweepExecutor = executor,
             bootstrapExecutor = Executor(Runnable::run),
@@ -220,7 +230,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         val maximumActive = AtomicInteger()
         val sweeps = AtomicInteger()
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             receiveSweepExecutor = Executor(Runnable::run),
             bootstrapExecutor = Executor(Runnable::run),
             bootstrapFactory = { _, _, _ -> emptyBootstrap() },
@@ -248,7 +258,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         val executor = QueueExecutor()
         val sweeps = AtomicInteger()
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = false
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             receiveSweepExecutor = executor,
             receiveSweep = { _, _ -> sweeps.incrementAndGet() },
         )
@@ -265,29 +275,15 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
     }
 
     @Test
-    fun `cancel before run entry closes the handle and native run rejects admission`() {
+    fun `cancel while native run is entered closes the handle and run rejects admission`() {
         val handle = FenceHandle()
-        val beforeRun = CountDownLatch(1)
-        val interruptObserved = CountDownLatch(1)
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(beforeRun = {
-            beforeRun.countDown()
-            var closed = false
-            while (!closed) {
-                try {
-                    handle.closeCalled.await()
-                    closed = true
-                } catch (_: InterruptedException) {
-                    interruptObserved.countDown()
-                }
-            }
-        })
         installEngine(handle)
         val controller = startService()
-        assertTrue(beforeRun.await(1, TimeUnit.SECONDS))
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
 
         controller.destroy()
 
-        assertTrue(interruptObserved.await(1, TimeUnit.SECONDS))
+        assertTrue(handle.interruptObserved.await(1, TimeUnit.SECONDS))
         assertTrue(handle.closeCalled.await(1, TimeUnit.SECONDS))
         assertTrue(handle.closed)
         assertTrue(handle.runRejected.await(1, TimeUnit.SECONDS))
@@ -372,17 +368,15 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         val handle = StatusHandle(PAIRING_STATUS)
         installEngine(handle)
         var elapsed = 0L
-        val finished = CountDownLatch(1)
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             elapsedRealtime = { elapsed },
             sleeper = { elapsed += 30_000L },
-            workerFinished = { finished.countDown() },
         )
         val attempt = LinkRuntime.tryBeginPairing()!!
 
         val controller = startService()
 
-        assertTrue(finished.await(1, TimeUnit.SECONDS))
+        awaitWorkerExit(controller.get())
         assertEquals(390_000L, elapsed)
         assertTrue(LinkRuntime.endPairing(attempt))
         controller.destroy()
@@ -393,57 +387,50 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         val handle = RetryHandle()
         installEngine(handle)
         val delays = mutableListOf<Long>()
-        val finished = CountDownLatch(1)
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             sleeper = { delay ->
                 delays += delay
                 if (delays.size == 1) GoogleMessagesLinkService.onLinkEvent("conn", "ready")
             },
-            workerFinished = { finished.countDown() },
         )
 
         val controller = startService()
 
-        assertTrue(finished.await(1, TimeUnit.SECONDS))
+        awaitWorkerExit(controller.get())
         assertEquals(listOf(30_000L, 30_000L), delays)
         assertEquals(3, handle.runCalls.get())
         controller.destroy()
     }
 
     @Test
-    fun `destroyed service refresh cannot publish after a held status read`() {
-        val oldHandle = HeldRefreshHandle()
-        val newHandle = BlockingRunHandle()
-        installEngine(oldHandle, newHandle)
-        val publishes = mutableListOf<GoogleMessagesLinkService>()
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
-            notificationExecutor = Executor(Runnable::run),
-            notificationPublished = { service -> synchronized(publishes) { publishes += service } },
-        )
-        val oldController = startService()
-        val oldService = oldController.get()
-        assertTrue(oldHandle.runEntered.await(1, TimeUnit.SECONDS))
-        val beforeRefresh = synchronized(publishes) { publishes.count { it === oldService } }
+    fun `destroyed service queued refresh cannot publish a foreground update`() {
+        val handle = MutableStatusRunHandle()
+        val executor = QueueExecutor()
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(notificationExecutor = executor)
+        installEngine(handle)
+        val controller = startService()
+        val service = controller.get()
+        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
 
-        val refresh = Thread { GoogleMessagesLinkService.onLinkEvent("conn", "ready") }.also { it.start() }
-        assertTrue(oldHandle.refreshStatusEntered.await(1, TimeUnit.SECONDS))
-        val newController = startService()
-        assertTrue(newHandle.runEntered.await(1, TimeUnit.SECONDS))
-        oldHandle.allowRefreshStatus.countDown()
-        assertTrue(oldHandle.refreshStatusReturned.await(1, TimeUnit.SECONDS))
-        refresh.join(1_000)
+        // The worker's linked publish and this ready refresh are both queued behind the executor.
+        handle.status = READY_STATUS
+        GoogleMessagesLinkService.onLinkEvent("conn", "ready")
+        controller.destroy()
+        val foregroundAfterDestroy = shadowOf(service).lastForegroundNotification
+        val postedAfterDestroy = shadowOf(notificationManager()).allNotifications.size
 
-        assertEquals(beforeRefresh, synchronized(publishes) { publishes.count { it === oldService } })
-        oldController.destroy()
-        newController.destroy()
-        oldHandle.allowRunReturn.countDown()
-        newHandle.allowRunReturn.countDown()
+        executor.runAll()
+
+        // Stale queued publishes must not post a new foreground notification or any notification.
+        assertSame(foregroundAfterDestroy, shadowOf(service).lastForegroundNotification)
+        assertEquals(postedAfterDestroy, shadowOf(notificationManager()).allNotifications.size)
+        handle.allowRunReturn.countDown()
     }
 
     @Test
     fun `event notification refresh is submitted to the serialized executor`() {
         val executor = QueueExecutor()
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(notificationExecutor = executor)
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(notificationExecutor = executor)
         installEngine(StatusHandle(UNLINKED_STATUS))
         val controller = Robolectric.buildService(GoogleMessagesLinkService::class.java).create()
 
@@ -455,7 +442,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
 
     @Test fun `diagnostic callbacks never schedule typing readiness or notification work`() {
         val executor = QueueExecutor()
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             notificationExecutor = executor, typingExecutor = executor,
             bootstrapExecutor = executor, eligibilityExecutor = executor,
         )
@@ -471,7 +458,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
     @Test
     fun `link events record refreshed capability facts while Run blocks`() {
         val handle = MutableStatusRunHandle()
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(notificationExecutor = Executor(Runnable::run))
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(notificationExecutor = Executor(Runnable::run))
         installEngine(handle)
         val controller = startService()
         assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
@@ -488,13 +475,14 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
     }
 
     @Test fun `ready records lifecycle before proactive eligibility enumeration`() {
+        seedOwnedConversation()
         val handle = MutableStatusRunHandle()
         val observedStatus = AtomicReference<NativeRcsLinkStatus?>()
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        val port = CountingEligibilityPort { observedStatus.set(persistedLinkStatus()) }
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             notificationExecutor = Executor(Runnable::run),
-            beforeEligibilityEnumeration = {
-                observedStatus.set(persistedLinkStatus())
-            },
+            bootstrapExecutor = QueueExecutor(),
+            eligibilityPortFactory = { port },
         )
         installEngine(handle)
         val controller = startService()
@@ -503,6 +491,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         handle.status = READY_STATUS
         GoogleMessagesLinkService.onLinkEvent("conn", "ready")
 
+        assertEquals(1, port.publishes.get())
         val status = checkNotNull(observedStatus.get())
         assertEquals(NativeRcsLinkState.LINKED, status.state)
         assertTrue(status.health)
@@ -512,11 +501,13 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
     }
 
     @Test fun `ready and recovered publish eligibility for linked mapped conversations`() {
+        seedOwnedConversation()
         val handle = MutableStatusRunHandle()
-        val enumerations = AtomicInteger()
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        val port = CountingEligibilityPort()
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             notificationExecutor = Executor(Runnable::run),
-            beforeEligibilityEnumeration = { enumerations.incrementAndGet() },
+            bootstrapExecutor = QueueExecutor(),
+            eligibilityPortFactory = { port },
         )
         installEngine(handle)
         val controller = startService()
@@ -526,19 +517,21 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         GoogleMessagesLinkService.onLinkEvent("conn", "ready")
         GoogleMessagesLinkService.onLinkEvent("conn", "recovered")
 
-        assertEquals(2, enumerations.get())
+        assertEquals(2, port.publishes.get())
         controller.destroy()
         handle.allowRunReturn.countDown()
     }
 
     @Test fun `index stale records lifecycle and queues eligibility publication`() {
+        seedOwnedConversation()
         val handle = MutableStatusRunHandle()
         val executor = QueueExecutor()
-        val enumerations = AtomicInteger()
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        val port = CountingEligibilityPort()
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             eligibilityExecutor = executor,
             notificationExecutor = Executor(Runnable::run),
-            beforeEligibilityEnumeration = { enumerations.incrementAndGet() },
+            bootstrapExecutor = QueueExecutor(),
+            eligibilityPortFactory = { port },
         )
         installEngine(handle)
         val controller = startService()
@@ -553,7 +546,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         assertTrue(status.phoneResponsive)
         assertEquals(1, executor.size)
         executor.runAll()
-        assertEquals(1, enumerations.get())
+        assertEquals(1, port.publishes.get())
         controller.destroy()
         handle.allowRunReturn.countDown()
     }
@@ -563,11 +556,11 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         assertNull(NativeGateway.open(context))
         val handle = StatusHandle(READY_STATUS)
         val executor = QueueExecutor()
-        val enumerations = AtomicInteger()
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        val port = CountingEligibilityPort()
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             eligibilityExecutor = executor,
             notificationExecutor = Executor(Runnable::run),
-            beforeEligibilityEnumeration = { enumerations.incrementAndGet() },
+            eligibilityPortFactory = { port },
         )
         installEngine(handle)
         val controller = Robolectric.buildService(GoogleMessagesLinkService::class.java).create()
@@ -575,18 +568,21 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         GoogleMessagesLinkService.onLinkEvent("index", "stale")
 
         assertEquals(0, executor.size)
-        assertEquals(0, enumerations.get())
+        // Unenrolled core has no owned conversations, so the port can only show no publication, not the enumeration.
+        assertEquals(0, port.publishes.get())
         controller.destroy()
     }
 
     @Test fun `conversation updates continue to coalesce eligibility publication`() {
+        seedOwnedConversation()
         val handle = MutableStatusRunHandle()
         val executor = QueueExecutor()
-        val enumerations = AtomicInteger()
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        val port = CountingEligibilityPort()
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             eligibilityExecutor = executor,
             notificationExecutor = Executor(Runnable::run),
-            beforeEligibilityEnumeration = { enumerations.incrementAndGet() },
+            bootstrapExecutor = QueueExecutor(),
+            eligibilityPortFactory = { port },
         )
         installEngine(handle)
         val controller = startService()
@@ -598,7 +594,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
 
         assertEquals(1, executor.size)
         executor.runAll()
-        assertEquals(1, enumerations.get())
+        assertEquals(1, port.publishes.get())
         controller.destroy()
         handle.allowRunReturn.countDown()
     }
@@ -607,7 +603,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         val handle = RefreshTrackingHandle(listOf("ok", "ok"))
         val executor = QueueExecutor()
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             bootstrapExecutor = executor,
             bootstrapFactory = { _, _, _ -> emptyBootstrap() },
         )
@@ -634,7 +630,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         }
         val executor = QueueExecutor()
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             bootstrapExecutor = executor,
             bootstrapFactory = { _, _, _ -> emptyBootstrap() },
         )
@@ -657,7 +653,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         }
         val executor = QueueExecutor()
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             bootstrapExecutor = executor,
             bootstrapFactory = { _, _, _ -> emptyBootstrap() },
             receiveSweepExecutor = Executor(Runnable::run),
@@ -693,7 +689,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         val handle = RefreshTrackingHandle(listOf("stale", "ok"), events)
         val executor = QueueExecutor()
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             bootstrapExecutor = executor,
             bootstrapFactory = { _, _, _ -> emptyBootstrap(events) },
             receiveSweepExecutor = Executor(Runnable::run),
@@ -717,16 +713,14 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
     @Test
     fun `Run event overflow records the fixed diagnostic code`() {
         val events = java.util.Collections.synchronizedList(mutableListOf<String>())
-        val finished = CountDownLatch(1)
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             sleeper = { throw InterruptedException() },
-            workerFinished = { finished.countDown() },
         )
         installEngine(OverflowHandle())
 
         SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, events::add) {
             val controller = startService()
-            assertTrue(finished.await(1, TimeUnit.SECONDS))
+            awaitWorkerExit(controller.get())
             assertTrue(events.contains("event=27 session=1 timestamp_ms=10 trace=0 29=18"))
             controller.destroy()
         }
@@ -734,42 +728,36 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
 
     @Test
     fun `terminal notification is detached and published before destroy`() {
+        grantNotificationPermission()
         val executor = QueueExecutor()
-        val published = CountDownLatch(1)
-        val finished = CountDownLatch(1)
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
-            notificationExecutor = executor,
-            notificationPublished = { published.countDown() },
-            workerFinished = { finished.countDown() },
-        )
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(notificationExecutor = executor)
         installEngine(StatusHandle(NEEDS_RELINK_STATUS))
 
         val controller = startService()
 
-        assertTrue(finished.await(1, TimeUnit.SECONDS))
+        awaitWorkerExit(controller.get())
+        // Attention is posted synchronously by the worker, before destroy can intervene.
+        assertAttentionPosted()
         controller.destroy()
-        assertTrue(published.await(1, TimeUnit.SECONDS))
     }
 
     @Test
     fun `terminal attention fences queued foreground updates`() {
+        grantNotificationPermission()
         val executor = QueueExecutor()
-        val finished = CountDownLatch(1)
-        var publications = 0
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
-            notificationExecutor = executor,
-            notificationPublished = { publications++ },
-            workerFinished = { finished.countDown() },
-        )
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(notificationExecutor = executor)
         installEngine(StatusHandle(NEEDS_RELINK_STATUS))
 
         val controller = startService()
+        val service = controller.get()
 
-        assertTrue(finished.await(1, TimeUnit.SECONDS))
-        // The first foreground promotion bypasses the queued refresh executor.
-        assertEquals(2, publications)
+        awaitWorkerExit(service)
+        val attention = assertAttentionPosted()
+        val foreground = shadowOf(service).lastForegroundNotification
         executor.runAll()
-        assertEquals(2, publications)
+        // The queued refresh is fenced: neither the foreground notification nor the attention post changes.
+        assertSame(foreground, shadowOf(service).lastForegroundNotification)
+        assertSame(attention, attentionPost())
         controller.destroy()
     }
 
@@ -778,8 +766,6 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
     fun `failed lifecycle fence prevents native link open`() {
         assertNull(NativeGateway.open(context))
         var opens = 0
-        val finished = CountDownLatch(1)
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(workerFinished = { finished.countDown() })
         LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = StatusHandle(UNLINKED_STATUS).also { opens++ }
@@ -788,26 +774,24 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
 
         val controller = startService()
 
-        assertTrue(finished.await(1, TimeUnit.SECONDS))
+        awaitWorkerExit(controller.get())
         assertEquals(0, opens)
         controller.destroy()
     }
 
     @Test
     fun `pairing service observation does not record unlinked`() {
-        val finished = CountDownLatch(1)
         var elapsed = 0L
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             elapsedRealtime = { elapsed },
             sleeper = { elapsed += it },
-            workerFinished = { finished.countDown() },
         )
         installEngine(StatusHandle(UNLINKED_STATUS))
         val pairing = LinkRuntime.tryBeginPairing()!!
 
         val controller = startService()
 
-        assertTrue(finished.await(1, TimeUnit.SECONDS))
+        awaitWorkerExit(controller.get())
         // Prestart writes unknown as UNAVAILABLE; UNLINKED means the guard failed.
         assertEquals(NativeRcsLinkState.UNAVAILABLE, persistedLinkState())
         assertTrue(LinkRuntime.endPairing(pairing))
@@ -818,50 +802,55 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
     fun `unlinked status read before a completed pairing fence is not recorded`() {
         val statusRead = CountDownLatch(1)
         val allowSubmission = CountDownLatch(1)
-        val finished = CountDownLatch(1)
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
-            afterStatusRead = {
-                statusRead.countDown()
-                allowSubmission.await()
-            },
-            workerFinished = { finished.countDown() },
-        )
-        installEngine(StatusHandle(UNLINKED_STATUS))
+        installEngine(GatedFirstStatusHandle(statusRead, allowSubmission))
 
         val controller = startService()
-
-        assertTrue(statusRead.await(1, TimeUnit.SECONDS))
-        val pairing = LinkRuntime.tryBeginPairing()!!
-        assertTrue(LinkCoreBridge.recordPreStart(androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()))
-        assertTrue(LinkRuntime.endPairing(pairing))
-        allowSubmission.countDown()
-        assertTrue(finished.await(1, TimeUnit.SECONDS))
-        // Prestart writes unknown as UNAVAILABLE; UNLINKED means the guard failed.
-        assertEquals(NativeRcsLinkState.UNAVAILABLE, persistedLinkState())
-        controller.destroy()
+        val service = controller.get()
+        try {
+            assertTrue(statusRead.await(1, TimeUnit.SECONDS))
+            val pairing = LinkRuntime.tryBeginPairing()!!
+            assertTrue(LinkCoreBridge.recordPreStart(ApplicationProvider.getApplicationContext<android.content.Context>()))
+            assertTrue(LinkRuntime.endPairing(pairing))
+            allowSubmission.countDown()
+            awaitWorkerExit(service)
+            // Prestart writes unknown as UNAVAILABLE; UNLINKED means the guard failed.
+            assertEquals(NativeRcsLinkState.UNAVAILABLE, persistedLinkState())
+        } finally {
+            allowSubmission.countDown()
+            controller.destroy()
+        }
     }
 
     @Test
-    fun `terminal after run is recorded before destroy can suppress notification`() {
+    fun `destroy preserves an in-flight terminal lifecycle write and suppresses attention`() {
         listOf(NEEDS_RELINK_STATUS, SIGNED_OUT_STATUS).forEach { terminalStatus ->
             val recordEntered = CountDownLatch(1)
             val releaseRecord = CountDownLatch(1)
-            val workerFinished = CountDownLatch(1)
             val notificationExecutor = QueueExecutor()
-            var publications = 0
+            grantNotificationPermission()
+            // Positive control: without destroy, the same terminal run reaches and posts attention.
+            LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(notificationExecutor = QueueExecutor())
+            installEngine(TerminalAfterRunHandle(terminalStatus))
+            val control = startService()
+            awaitWorkerExit(control.get())
+            assertAttentionPosted()
+            control.destroy()
+            notificationManager().cancelAll()
+            LinkRuntime.resetForTest()
+            LinkCoreBridge.resetForTest()
+
             LinkCoreBridge.beforeLifecycleWriteForTest = { status ->
                 if (status.state == LinkStatus.parse(terminalStatus).state) {
                     recordEntered.countDown()
-                    check(releaseRecord.await(10, TimeUnit.SECONDS))
+                    awaitReleaseIgnoringInterrupts(releaseRecord)
                 }
             }
-            GoogleMessagesLinkService.testHooks = ServiceTestHooks(
-                notificationExecutor = notificationExecutor,
-                notificationPublished = { publications++ },
-                workerFinished = { workerFinished.countDown() },
-            )
+            LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(notificationExecutor = notificationExecutor)
             installEngine(TerminalAfterRunHandle(terminalStatus))
             val controller = startService()
+            val service = controller.get()
+            // The content-free promotion is synchronous; read it before destroy, which clears the shadow's state.
+            val promotion = shadowOf(service).lastForegroundNotification
             var destroyed = false
             try {
                 assertTrue(recordEntered.await(1, TimeUnit.SECONDS))
@@ -870,14 +859,16 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
                 destroyed = true
                 releaseRecord.countDown()
 
-                assertTrue(workerFinished.await(5, TimeUnit.SECONDS))
+                assertTrue("worker did not exit", service.joinWorker())
                 synchronized(LinkCoreBridge) { /* Wait for the in-flight lifecycle write. */ }
                 assertEquals(
                     if (LinkStatus.parse(terminalStatus).state == "needs_relink") NativeRcsLinkState.NEEDS_RELINK else NativeRcsLinkState.SIGNED_OUT,
                     persistedLinkState(),
                 )
-                // The initial content-free foreground promotion is synchronous.
-                assertEquals(1, publications)
+                // The initial content-free foreground promotion was posted before destroy.
+                assertNotNull(promotion)
+                // Destroy suppresses attention for the terminal status recorded after the run.
+                assertNull(attentionPost())
                 LinkRuntime.resetForTest()
                 LinkCoreBridge.resetForTest()
             } finally {
@@ -1142,7 +1133,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
     ) {
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = nativeRcs
         val direct = Executor(Runnable::run)
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             notificationExecutor = direct,
             eligibilityExecutor = direct,
             bootstrapExecutor = direct,
@@ -1208,7 +1199,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         }
         val executor = QueueExecutor()
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = true
-        GoogleMessagesLinkService.testHooks = ServiceTestHooks(
+        LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(
             bootstrapExecutor = executor,
             bootstrapFactory = { _, _, _ -> emptyBootstrap() },
             receiveSweepExecutor = Executor(Runnable::run),
@@ -1230,6 +1221,69 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
     private fun startService() = Robolectric.buildService(GoogleMessagesLinkService::class.java)
         .create()
         .startCommand(0, 1)
+
+    /**
+     * Waits a bounded time for a worker that ends on its own. A natural exit ends with stopSelf, so the
+     * service shadow records it; a cancelled exit is not asserted here.
+     */
+    private fun awaitWorkerExit(service: GoogleMessagesLinkService) {
+        assertTrue("worker did not exit", service.joinWorker())
+        assertTrue("worker did not finish on its own", shadowOf(service).isStoppedBySelf)
+    }
+
+    private fun grantNotificationPermission() {
+        shadowOf(ApplicationProvider.getApplicationContext<Application>()).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    private fun notificationManager(): NotificationManager =
+        ApplicationProvider.getApplicationContext<Application>().getSystemService(NotificationManager::class.java)
+
+    /**
+     * The attention notification is the auto-cancel post at the service id. The detached foreground
+     * notification stays posted at that id but is ongoing, so the flag tells them apart.
+     */
+    private fun attentionPost(): Notification? =
+        shadowOf(notificationManager()).getNotification(null, GoogleMessagesLinkService.NOTIFICATION_ID)
+            ?.takeIf { it.flags and Notification.FLAG_AUTO_CANCEL != 0 }
+
+    /**
+     * Waits for [release] without honouring interrupts. Destroy interrupts the worker while it is parked in the
+     * lifecycle write; the write must still land, so the test observes what happens after the record.
+     */
+    private fun awaitReleaseIgnoringInterrupts(release: CountDownLatch) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (release.count > 0 && System.nanoTime() < deadline) Thread.onSpinWait()
+        check(release.count == 0L) { "lifecycle write was never released" }
+    }
+
+    /** Asserts the attention notification is posted, with its attention text. */
+    private fun assertAttentionPosted(): Notification {
+        val attention = checkNotNull(attentionPost()) { "no attention notification posted" }
+        val expected = ApplicationProvider.getApplicationContext<Application>().getString(R.string.peppy_google_messages_link_notif_text_attention)
+        assertEquals(expected, attention.extras.getCharSequence(Notification.EXTRA_TEXT).toString())
+        return attention
+    }
+
+    /** Seeds one owned conversation through the real core, so each enumeration calls [CountingEligibilityPort.publish]. */
+    private fun seedOwnedConversation() {
+        val client = checkNotNull(NativeGateway.open(context))
+        val conversationId = UUID.randomUUID().toString()
+        val googleConversationId = "google-${UUID.randomUUID()}"
+        val now = System.currentTimeMillis()
+        client.captureIncoming(NativeIncomingSms(conversationId, LINK_TEST_PEER, "", "link-$conversationId", true))
+        client.recordRcsLinkLifecycle(NativeRcsLinkState.LINKED, true, true, true, now, now)
+        claimWithDetector(client, conversationId, googleConversationId, mappingRevision = 1, providerRowId = 11, now = now)
+    }
+
+    /** Counts publications; [onPublish] observes the core at the moment an enumeration publishes. */
+    private class CountingEligibilityPort(private val onPublish: () -> Unit = {}) : RcsEligibilityPublisherPort {
+        val publishes = AtomicInteger()
+        override fun publish(publications: List<NativeRcsEligibilityPublication>, nowMs: Long): UInt {
+            publishes.incrementAndGet()
+            onPublish()
+            return publications.size.toUInt()
+        }
+    }
 
     private fun installEngine(vararg handles: LinkHandle) {
         val next = ArrayDeque(handles.toList())
@@ -1261,18 +1315,48 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
 
     private class FenceHandle : StatusHandle(LINKED_STATUS) {
         val closeCalled = CountDownLatch(1)
+        val runEntered = CountDownLatch(1)
+        val interruptObserved = CountDownLatch(1)
         val runRejected = CountDownLatch(1)
         val runCalls = AtomicInteger()
         override fun close() {
             super.close()
             closeCalled.countDown()
         }
+        /** Holds the native run until close, absorbing the cancellation interrupt, then rejects admission. */
         override fun run() {
             runCalls.incrementAndGet()
+            runEntered.countDown()
+            awaitCloseAbsorbingInterrupts()
             if (closed) {
                 runRejected.countDown()
                 throw Exception("link_closed")
             }
+        }
+        private fun awaitCloseAbsorbingInterrupts() {
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (closeCalled.count > 0 && System.nanoTime() < deadline) {
+                try {
+                    closeCalled.await(deadline - System.nanoTime(), TimeUnit.NANOSECONDS)
+                } catch (_: InterruptedException) {
+                    interruptObserved.countDown()
+                }
+            }
+        }
+    }
+
+    /** Blocks the first status read until released; that read still reports [UNLINKED_STATUS]. */
+    private class GatedFirstStatusHandle(
+        private val statusRead: CountDownLatch,
+        private val allowSubmission: CountDownLatch,
+    ) : StatusHandle(UNLINKED_STATUS) {
+        private val statusCalls = AtomicInteger()
+        override fun status(): String {
+            if (statusCalls.incrementAndGet() == 1) {
+                statusRead.countDown()
+                allowSubmission.await(10, TimeUnit.SECONDS)
+            }
+            return UNLINKED_STATUS
         }
     }
 
@@ -1402,27 +1486,6 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
 
     private class OverflowHandle : StatusHandle(LINKED_STATUS) {
         override fun run(): Unit = throw Exception("event_overflow")
-    }
-
-    private class HeldRefreshHandle : StatusHandle(LINKED_STATUS) {
-        val runEntered = CountDownLatch(1)
-        val allowRunReturn = CountDownLatch(1)
-        val refreshStatusEntered = CountDownLatch(1)
-        val allowRefreshStatus = CountDownLatch(1)
-        val refreshStatusReturned = CountDownLatch(1)
-        private val statusCalls = AtomicInteger()
-        override fun status(): String {
-            if (statusCalls.incrementAndGet() >= 3) {
-                refreshStatusEntered.countDown()
-                allowRefreshStatus.await()
-                refreshStatusReturned.countDown()
-            }
-            return LINKED_STATUS
-        }
-        override fun run() {
-            runEntered.countDown()
-            allowRunReturn.await()
-        }
     }
 
     private class QueueExecutor : Executor {
