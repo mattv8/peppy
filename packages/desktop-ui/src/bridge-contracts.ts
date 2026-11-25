@@ -28,6 +28,8 @@ import type { GatewayPresence, GatewayView } from "@peppy/generated/gateway";
 export type { GatewayAvailability, GatewayPresence, GatewayView } from "@peppy/generated/gateway";
 import type { AttachmentView, AttachmentState, DraftAttachmentState, MediaMetadataView, MessageStatus, MessageView, RcsAttachmentState, RcsSendStatus, ReactionActorView, ReactionRoute, MessageReactionView, OwnReactionRequestView, SendCancellationView, SendRecoveryKind, SendRecoveryView } from "@peppy/generated/message";
 export type { AttachmentState, AttachmentView, DraftAttachmentState, MediaMetadataView, MessageReactionView, MessageStatus, MessageView, OwnReactionRequestView, RcsAttachmentState, RcsSendStatus, ReactionActorView, ReactionRoute, SendCancellationView, SendRecoveryKind } from "@peppy/generated/message";
+import type { DraftView } from "@peppy/generated/draft";
+export type { DraftConflictView, DraftSyncView } from "@peppy/generated/draft";
 /** Message-family wire types, generated from desktop-api. `SendRecovery` is the name the UI uses for `SendRecoveryView`. */
 export type SendRecovery = SendRecoveryView;
 import type { McpAuthorizationDecision, McpAuthorizationView, McpDeviceStatus, McpGrantView, McpScope, WebhookCreated, WebhookInput, WebhookList, WebhookSecret, WebhookTestResult, WebhookView } from "@peppy/generated/mcp";
@@ -97,10 +99,9 @@ export type ConversationView = { id: string; name: string; preview: string; unre
 /** Effective folder from core: an archived conversation reads as `inbox` once a newer message arrives. */
 export type ConversationFolder = "inbox" | "archived" | "spam";
 export type HistoryPage = { conversationId: string; messages: MessageView[]; hasMore: boolean };
-export type DraftConflictView = { branchId: string; text: string; attachmentIds: string[]; recipientIds: string[]; gatewayId?: string; simId?: string };
-export type DraftSyncView = { state: "local-only" | "saving" | "saved-local" | "syncing" | "synced" | "paused" | "failed"; expiresAt: string | null; conflicts: DraftConflictView[]; notice: "restored-after-expiry" | "kept-after-sent" | "updated-from-other-device" | null; sendRequiresConnection: boolean };
 export type SendResultView = { accepted: boolean; status: MessageStatus; reason?: "members_changed" | "update_required" | "withdrawn" | "create_unconfirmed" | "create_not_rcs" | string; refusedAttachmentIds?: string[]; revision?: string; parts?: number; group?: { members: string[]; memberRevision: string } };
-export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string; groupName?: string; /** Authoritative host views for the draft's attachments. */ attachments?: AttachmentView[]; sync?: DraftSyncView };
+/** Attachments are authoritative host views for the draft. */
+export type Draft = DraftView;
 export type PastedImage = { bytes: ArrayBuffer; name: string; mediaType: string };
 /** Successful pasted attachments plus per-file failures. Hosts never discard successful files because another file failed. */
 export type PreparedPastedAttachments = { views: AttachmentView[]; failures: string[] };

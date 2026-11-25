@@ -60,7 +60,6 @@ describe("draftSyncNeedsAttention", () => {
     ["has no draft", undefined, false, "idle", false],
     ["is synced", draft(), false, "idle", false],
     ["is syncing", draft({ state: "syncing" }), false, "idle", false],
-    ["is saving remotely", draft({ state: "saving" }), false, "idle", false],
     ["is saved locally", draft({ state: "saved-local" }), false, "idle", false],
     ["is local only", draft({ state: "local-only" }), false, "idle", false],
     ["has a failed local save", draft(), false, "failed", true],
