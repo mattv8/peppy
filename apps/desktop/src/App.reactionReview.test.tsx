@@ -15,7 +15,7 @@ function stubLayout() {
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
     if (this.id === "message-list") return rectOf(0, 800, 0, 400);
     if (this.id === "composer-area") return rectOf(700, 780, 0, 400);
-    if (this.getAttribute("data-message-id") || this.getAttribute("data-reaction-message") || this.hasAttribute("data-media-message-content")) return rectOf(200, 260, 16, 300);
+    if (this.getAttribute("data-message-id") || this.getAttribute("data-reaction-message") || this.hasAttribute("data-media-message-content") || this.hasAttribute("data-media-frame")) return rectOf(200, 260, 16, 300);
     return rectOf(0, 0, 0, 0);
   });
 }
