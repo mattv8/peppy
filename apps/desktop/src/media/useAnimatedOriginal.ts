@@ -4,7 +4,8 @@ import { useMediaActions } from "./MediaActionsContext";
 import { originalPending } from "./mediaState";
 import { useReducedMotion } from "./useReducedMotion";
 
-const MAX_ANIMATED = 4;
+// Reserve the web bridge's other two media URLs for a video and the viewer.
+const MAX_ANIMATED = 2;
 const MAX_BYTES = 8 * 1024 * 1024;
 let slots = 0;
 const subscribers = new Set<() => void>();
@@ -14,12 +15,13 @@ function freeSlot() {
   subscribers.forEach((notify) => notify());
 }
 
-export function useAnimatedOriginal(rootRef: RefObject<HTMLDivElement | null>, attachment: GalleryAttachment, enabled: boolean): string | undefined {
+export function useAnimatedOriginal(rootRef: RefObject<HTMLDivElement | null>, attachment: GalleryAttachment, enabled: boolean): { url: string | undefined; onError: () => void } {
   const actions = useMediaActions();
   const reduced = useReducedMotion();
   const [visible, setVisible] = useState(typeof IntersectionObserver === "undefined");
   const [loaded, setLoaded] = useState<{ key: string; url: string }>();
   const [slotVersion, setSlotVersion] = useState(0);
+  const [errorVersion, setErrorVersion] = useState(0);
   const failed = useRef<string | undefined>(undefined);
   const waiting = useRef(false);
   const key = `${attachment.id}\0${attachment.state}`;
@@ -38,7 +40,10 @@ export function useAnimatedOriginal(rootRef: RefObject<HTMLDivElement | null>, a
     const root = rootRef.current;
     if (!eligible || !root || typeof IntersectionObserver === "undefined") return;
     setVisible(false);
-    const observer = new IntersectionObserver((entries) => setVisible(entries.some((entry) => entry.isIntersecting)), { rootMargin: "200px" });
+    const observer = new IntersectionObserver((entries) => {
+      const entry = entries.at(-1);
+      if (entry) setVisible(entry.isIntersecting);
+    }, { rootMargin: "200px" });
     observer.observe(root);
     return () => observer.disconnect();
   }, [rootRef, attachment.id, eligible]);
@@ -88,7 +93,15 @@ export function useAnimatedOriginal(rootRef: RefObject<HTMLDivElement | null>, a
         releaseSlot();
       }
     };
-  }, [attachment.id, eligible, key, loadOriginal, releaseMedia, visible, slotVersion]);
+  }, [attachment.id, eligible, key, loadOriginal, releaseMedia, visible, slotVersion, errorVersion]);
 
-  return eligible && visible && loaded?.key === key ? loaded.url : undefined;
+  const url = eligible && visible && loaded?.key === key && failed.current !== key ? loaded.url : undefined;
+  return {
+    url,
+    onError: () => {
+      if (!url) return;
+      failed.current = key;
+      setErrorVersion((version) => version + 1);
+    },
+  };
 }
