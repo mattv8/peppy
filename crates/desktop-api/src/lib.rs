@@ -776,7 +776,7 @@ pub struct MediaPageAroundView {
     pub older_cursor: Option<MediaCursorView>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftView {
     pub id: String,
@@ -785,16 +785,21 @@ pub struct DraftView {
     pub recipient_ids: Vec<String>,
     pub attachment_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub attachments: Option<Vec<AttachmentView>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub gateway_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub sim_id: Option<String>,
     pub revision: String,
     /// Group name for a draft to two or more members.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub group_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub sync: Option<DraftSyncView>,
 }
 
@@ -813,17 +818,36 @@ impl std::fmt::Debug for DraftView {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum DraftSyncStateView {
+    LocalOnly,
+    SavedLocal,
+    Syncing,
+    Synced,
+    Paused,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum DraftNoticeView {
+    RestoredAfterExpiry,
+    KeptAfterSent,
+    UpdatedFromOtherDevice,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftSyncView {
-    pub state: &'static str,
+    pub state: DraftSyncStateView,
     pub expires_at: Option<String>,
     pub conflicts: Vec<DraftConflictView>,
-    pub notice: Option<&'static str>,
+    pub notice: Option<DraftNoticeView>,
     pub send_requires_connection: bool,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftConflictView {
     pub branch_id: String,
@@ -831,8 +855,10 @@ pub struct DraftConflictView {
     pub attachment_ids: Vec<String>,
     pub recipient_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub gateway_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub sim_id: Option<String>,
 }
 
@@ -1176,12 +1202,12 @@ pub fn draft_view_with_sync(client: &Client, draft: &ComposeDraft) -> Result<Dra
     let mut view = draft_view(draft);
     let status = client.draft_sync_status(draft.draft_id)?;
     let state = match status.state {
-        peppy_client_core::DraftSyncState::LocalOnly => "local-only",
-        peppy_client_core::DraftSyncState::SavedLocal => "saved-local",
-        peppy_client_core::DraftSyncState::Syncing => "syncing",
-        peppy_client_core::DraftSyncState::Synced => "synced",
-        peppy_client_core::DraftSyncState::Paused => "paused",
-        peppy_client_core::DraftSyncState::Failed => "failed",
+        peppy_client_core::DraftSyncState::LocalOnly => DraftSyncStateView::LocalOnly,
+        peppy_client_core::DraftSyncState::SavedLocal => DraftSyncStateView::SavedLocal,
+        peppy_client_core::DraftSyncState::Syncing => DraftSyncStateView::Syncing,
+        peppy_client_core::DraftSyncState::Synced => DraftSyncStateView::Synced,
+        peppy_client_core::DraftSyncState::Paused => DraftSyncStateView::Paused,
+        peppy_client_core::DraftSyncState::Failed => DraftSyncStateView::Failed,
     };
     view.sync = Some(DraftSyncView {
         state,
@@ -1220,9 +1246,13 @@ pub fn draft_view_with_sync(client: &Client, draft: &ComposeDraft) -> Result<Dra
             })
             .collect(),
         notice: status.notice.map(|notice| match notice {
-            peppy_client_core::DraftNotice::RestoredAfterExpiry => "restored-after-expiry",
-            peppy_client_core::DraftNotice::KeptAfterSent => "kept-after-sent",
-            peppy_client_core::DraftNotice::UpdatedFromOtherDevice => "updated-from-other-device",
+            peppy_client_core::DraftNotice::RestoredAfterExpiry => {
+                DraftNoticeView::RestoredAfterExpiry
+            }
+            peppy_client_core::DraftNotice::KeptAfterSent => DraftNoticeView::KeptAfterSent,
+            peppy_client_core::DraftNotice::UpdatedFromOtherDevice => {
+                DraftNoticeView::UpdatedFromOtherDevice
+            }
         }),
         send_requires_connection: status.send_requires_connection,
     });
@@ -1237,6 +1267,153 @@ mod tests {
         SourceSequence,
     };
     use serde_json::json;
+
+    #[test]
+    fn draft_json_goldens() {
+        let conflict = DraftConflictView {
+            branch_id: "branch".into(),
+            text: "other".into(),
+            attachment_ids: vec!["attachment".into()],
+            recipient_ids: vec!["recipient".into()],
+            gateway_id: Some("gateway".into()),
+            sim_id: Some("sim".into()),
+        };
+        let draft = DraftView {
+            id: "draft".into(),
+            conversation_id: "conversation".into(),
+            text: "hello".into(),
+            recipient_ids: vec!["recipient".into()],
+            attachment_ids: vec!["attachment".into()],
+            attachments: Some(vec![AttachmentView {
+                id: "attachment".into(),
+                name: "photo".into(),
+                media_type: "image/png".into(),
+                byte_size: 5,
+                state: AttachmentStateDto::Ready,
+                error: None,
+                preview_url: None,
+                transfer: None,
+                retryable: None,
+                media_hold: None,
+                media_meta: None,
+                remote_state: None,
+                local_available: None,
+                draft_state: Some(DraftAttachmentState::Local),
+                index: None,
+                rcs_state: None,
+                rcs_send_status: None,
+            }]),
+            gateway_id: Some("gateway".into()),
+            sim_id: Some("sim".into()),
+            revision: "42".into(),
+            group_name: Some("group".into()),
+            sync: Some(DraftSyncView {
+                state: DraftSyncStateView::Synced,
+                expires_at: Some("2030-01-01T00:00:00Z".into()),
+                conflicts: vec![conflict],
+                notice: Some(DraftNoticeView::KeptAfterSent),
+                send_requires_connection: true,
+            }),
+        };
+        assert_eq!(
+            serde_json::to_string(&draft).unwrap(),
+            r#"{"id":"draft","conversationId":"conversation","text":"hello","recipientIds":["recipient"],"attachmentIds":["attachment"],"attachments":[{"id":"attachment","name":"photo","mediaType":"image/png","byteSize":5,"state":"ready","draftState":"local"}],"gatewayId":"gateway","simId":"sim","revision":"42","groupName":"group","sync":{"state":"synced","expiresAt":"2030-01-01T00:00:00Z","conflicts":[{"branchId":"branch","text":"other","attachmentIds":["attachment"],"recipientIds":["recipient"],"gatewayId":"gateway","simId":"sim"}],"notice":"kept-after-sent","sendRequiresConnection":true}}"#
+        );
+        let minimal = DraftView {
+            id: "draft".into(),
+            conversation_id: "conversation".into(),
+            text: String::new(),
+            recipient_ids: vec![],
+            attachment_ids: vec![],
+            attachments: None,
+            gateway_id: None,
+            sim_id: None,
+            revision: "0".into(),
+            group_name: None,
+            sync: Some(DraftSyncView {
+                state: DraftSyncStateView::LocalOnly,
+                expires_at: None,
+                conflicts: vec![],
+                notice: None,
+                send_requires_connection: false,
+            }),
+        };
+        assert_eq!(
+            serde_json::to_string(&minimal).unwrap(),
+            r#"{"id":"draft","conversationId":"conversation","text":"","recipientIds":[],"attachmentIds":[],"revision":"0","sync":{"state":"local-only","expiresAt":null,"conflicts":[],"notice":null,"sendRequiresConnection":false}}"#
+        );
+        let without_sync = DraftView {
+            sync: None,
+            ..minimal
+        };
+        assert_eq!(
+            serde_json::to_string(&without_sync).unwrap(),
+            r#"{"id":"draft","conversationId":"conversation","text":"","recipientIds":[],"attachmentIds":[],"revision":"0"}"#
+        );
+        let conflict = DraftConflictView {
+            branch_id: "branch".into(),
+            text: String::new(),
+            attachment_ids: vec![],
+            recipient_ids: vec![],
+            gateway_id: None,
+            sim_id: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&conflict).unwrap(),
+            r#"{"branchId":"branch","text":"","attachmentIds":[],"recipientIds":[]}"#
+        );
+    }
+
+    #[test]
+    fn draft_sync_string_goldens() {
+        for (state, expected) in [
+            (DraftSyncStateView::LocalOnly, "local-only"),
+            (DraftSyncStateView::SavedLocal, "saved-local"),
+            (DraftSyncStateView::Syncing, "syncing"),
+            (DraftSyncStateView::Synced, "synced"),
+            (DraftSyncStateView::Paused, "paused"),
+            (DraftSyncStateView::Failed, "failed"),
+        ] {
+            let sync = DraftSyncView {
+                state,
+                expires_at: None,
+                conflicts: vec![],
+                notice: None,
+                send_requires_connection: false,
+            };
+            assert_eq!(
+                serde_json::to_string(&sync).unwrap(),
+                format!(
+                    r#"{{"state":"{expected}","expiresAt":null,"conflicts":[],"notice":null,"sendRequiresConnection":false}}"#
+                )
+            );
+        }
+        for (notice, expected) in [
+            (
+                DraftNoticeView::RestoredAfterExpiry,
+                "restored-after-expiry",
+            ),
+            (DraftNoticeView::KeptAfterSent, "kept-after-sent"),
+            (
+                DraftNoticeView::UpdatedFromOtherDevice,
+                "updated-from-other-device",
+            ),
+        ] {
+            let sync = DraftSyncView {
+                state: DraftSyncStateView::Synced,
+                expires_at: None,
+                conflicts: vec![],
+                notice: Some(notice),
+                send_requires_connection: false,
+            };
+            assert_eq!(
+                serde_json::to_string(&sync).unwrap(),
+                format!(
+                    r#"{{"state":"synced","expiresAt":null,"conflicts":[],"notice":"{expected}","sendRequiresConnection":false}}"#
+                )
+            );
+        }
+    }
 
     #[test]
     fn draft_conversion_keeps_camel_case_omissions_and_decimal_revision() {
