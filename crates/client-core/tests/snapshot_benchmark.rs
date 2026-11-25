@@ -437,12 +437,14 @@ fn run_benchmark(mode: Mode) {
 }
 
 #[test]
+// The 100k-record import takes minutes; run in release before changing snapshot import.
 #[ignore = "benchmark: run in release with --ignored --nocapture"]
 fn snapshot_benchmark_full_import() {
     run_benchmark(Mode::Full);
 }
 
 #[test]
+// The 100k-record import takes minutes; run in release before changing iOS manifest resync.
 #[ignore = "benchmark: run in release with --ignored --nocapture"]
 fn snapshot_benchmark_manifest_import() {
     run_benchmark(Mode::Manifest);

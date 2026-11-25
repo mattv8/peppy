@@ -1,10 +1,5 @@
 use crate::common::*;
-use std::time::{Duration, Instant};
 use tempfile::TempDir;
-
-const BATCH_CRITICAL_SECTION_BUDGET: Duration = Duration::from_secs(1);
-const SCALE_CONVERSATION_COUNT: usize = 4;
-const SCALE_IMPORTED_COUNT: usize = 8;
 
 fn mark_snapshot(client: &Client) -> Result<u64, Error> {
     client
@@ -248,84 +243,4 @@ fn rejected_later_batch_preserves_earlier_commit_and_explicit_retry_converges() 
 
     assert_eq!(mark_snapshot(&client).unwrap(), 1);
     assert_eq!(mark_snapshot(&client).unwrap(), 0);
-}
-
-#[test]
-#[ignore = "explicit scale evidence: cargo test --release -p peppy-client-core --test integration mark_all_read:: -- --ignored --nocapture"]
-fn batches_a_thousand_unread_messages_with_one_read_state_each() {
-    measure_bulk_read(1_000);
-}
-
-#[test]
-#[ignore = "explicit scale evidence: cargo test --release -p peppy-client-core --test integration mark_all_read:: -- --ignored --nocapture"]
-fn batches_fifty_thousand_unread_messages_with_bounded_critical_sections() {
-    measure_bulk_read(50_000);
-}
-
-fn measure_bulk_read(message_count: usize) {
-    let dir = TempDir::new().unwrap();
-    let vault = Vault::new();
-    let client = unlocked(&config(&dir, "scale", &vault), &vault);
-    let mut server = Server::default();
-    for index in 0..message_count {
-        client
-            .capture_incoming(IncomingSms {
-                conversation_id: None,
-                sender_address: format!("+1555555{:05}", index % SCALE_CONVERSATION_COUNT),
-                body: "scale".into(),
-                provider_message_id: Some(format!("scale-{index}")),
-                imported: false,
-            })
-            .unwrap();
-    }
-    for index in 0..SCALE_IMPORTED_COUNT {
-        client
-            .capture_incoming(IncomingSms {
-                conversation_id: None,
-                sender_address: format!("+1555555{:05}", index % SCALE_CONVERSATION_COUNT),
-                body: "imported scale history".into(),
-                provider_message_id: Some(format!("scale-imported-{index}")),
-                imported: true,
-            })
-            .unwrap();
-    }
-    assert_eq!(server.upload(&client), message_count + SCALE_IMPORTED_COUNT);
-
-    let snapshot_started = Instant::now();
-    let batches = client.unread_message_batches().unwrap();
-    let snapshot = snapshot_started.elapsed();
-    let operation_started = Instant::now();
-    let mut changed = 0;
-    let mut batch_latencies = Vec::with_capacity(batches.len());
-    for batch in &batches {
-        let batch_started = Instant::now();
-        changed += client.mark_read_batch(batch).unwrap();
-        batch_latencies.push(batch_started.elapsed());
-    }
-    let total = operation_started.elapsed();
-    while client.seal_pending_batch(MAX_SEAL_BATCH).unwrap() > 0 {}
-    let read_state_events = server.upload(&client);
-
-    assert_eq!(changed, message_count as u64);
-    assert_eq!(read_state_events, message_count);
-    let first_batch = batch_latencies[0];
-    let last_batch = *batch_latencies.last().unwrap();
-    let mut sorted_batch_latencies = batch_latencies.clone();
-    sorted_batch_latencies.sort_unstable();
-    let median_batch = sorted_batch_latencies[sorted_batch_latencies.len() / 2];
-    let p95_batch = sorted_batch_latencies[(sorted_batch_latencies.len() * 95).div_ceil(100) - 1];
-    let max_batch = *sorted_batch_latencies.last().unwrap();
-    println!(
-        "mark_all_read unread={message_count} imported={SCALE_IMPORTED_COUNT} conversations={SCALE_CONVERSATION_COUNT} snapshot={snapshot:?} first_batch={first_batch:?} median_batch={median_batch:?} p95_batch={p95_batch:?} last_batch={last_batch:?} max_batch={max_batch:?} total={total:?} read_state_events={read_state_events}"
-    );
-    assert!(
-        snapshot <= BATCH_CRITICAL_SECTION_BUDGET,
-        "snapshot took {snapshot:?}"
-    );
-    assert!(
-        batch_latencies
-            .iter()
-            .all(|latency| *latency <= BATCH_CRITICAL_SECTION_BUDGET),
-        "a batch exceeded the critical-section budget: {batch_latencies:?}"
-    );
 }

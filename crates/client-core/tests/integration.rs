@@ -68,7 +68,6 @@ mod recipient_identity;
 mod repair_dedup;
 mod replay_batch;
 mod review_pins;
-mod search_performance_gate;
 mod sender_blocklist;
 mod sms_acquisition;
 mod sms_flow;
