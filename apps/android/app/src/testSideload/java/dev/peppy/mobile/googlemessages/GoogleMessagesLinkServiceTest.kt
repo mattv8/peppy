@@ -1,11 +1,14 @@
 package dev.peppy.mobile.googlemessages
 
 import androidx.test.core.app.ApplicationProvider
+import dev.peppy.mobile.gateway.GatewayTestBase
+import dev.peppy.mobile.gateway.NativeGateway
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Before
@@ -15,6 +18,9 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.Rule
+import org.junit.rules.TestWatcher
+import org.junit.runner.Description
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
@@ -34,10 +40,22 @@ import uniffi.peppy_mobile_bindings.NativeRcsIngestOutcome
 import uniffi.peppy_mobile_bindings.NativeRcsObservationProvenance
 import uniffi.peppy_mobile_bindings.NativeRcsReceiveContext
 import uniffi.peppy_mobile_bindings.NativeRcsReceiveOwner
+import uniffi.peppy_mobile_bindings.NativeRcsLinkState
+import uniffi.peppy_mobile_bindings.NativeRcsLinkStatus
+
+@Target(AnnotationTarget.FUNCTION)
+@Retention(AnnotationRetention.RUNTIME)
+private annotation class Unenrolled
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
-class GoogleMessagesLinkServiceTest {
+class GoogleMessagesLinkServiceTest : GatewayTestBase() {
+    private var unenrolled = false
+    @get:Rule val enrollmentRule = object : TestWatcher() {
+        override fun starting(description: Description) {
+            unenrolled = description.getAnnotation(Unenrolled::class.java) != null
+        }
+    }
     @Test fun `journaled command wake starts media discovery without service restart`() {
         installEngine(StatusHandle(UNLINKED_STATUS))
         val controller = Robolectric.buildService(GoogleMessagesLinkService::class.java).create()
@@ -55,7 +73,7 @@ class GoogleMessagesLinkServiceTest {
     }
     @Before
     fun setUp() {
-        LinkCoreBridge.recorder = { _, _ -> true }
+        if (!unenrolled) enrollAndUnlock()
     }
 
     @After
@@ -444,8 +462,6 @@ class GoogleMessagesLinkServiceTest {
     @Test
     fun `link events record refreshed capability facts while Run blocks`() {
         val handle = MutableStatusRunHandle()
-        val recorded = mutableListOf<LinkStatus>()
-        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status }; true }
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(notificationExecutor = Executor(Runnable::run))
         installEngine(handle)
         val controller = startService()
@@ -454,20 +470,21 @@ class GoogleMessagesLinkServiceTest {
         handle.status = READY_STATUS
         GoogleMessagesLinkService.onLinkEvent("conn", "ready")
 
-        assertTrue(synchronized(recorded) { READY_STATUS_PARSED in recorded })
+        val status = checkNotNull(persistedLinkStatus())
+        assertEquals(NativeRcsLinkState.LINKED, status.state)
+        assertTrue(status.health)
+        assertTrue(status.phoneResponsive)
         controller.destroy()
         handle.allowRunReturn.countDown()
     }
 
     @Test fun `ready records lifecycle before proactive eligibility enumeration`() {
         val handle = MutableStatusRunHandle()
-        val recorded = mutableListOf<LinkStatus>()
-        val lifecycleWasRecorded = AtomicBoolean(false)
-        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status }; true }
+        val observedStatus = AtomicReference<NativeRcsLinkStatus?>()
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(
             notificationExecutor = Executor(Runnable::run),
             beforeEligibilityEnumeration = {
-                lifecycleWasRecorded.set(synchronized(recorded) { READY_STATUS_PARSED in recorded })
+                observedStatus.set(persistedLinkStatus())
             },
         )
         installEngine(handle)
@@ -477,7 +494,10 @@ class GoogleMessagesLinkServiceTest {
         handle.status = READY_STATUS
         GoogleMessagesLinkService.onLinkEvent("conn", "ready")
 
-        assertTrue(lifecycleWasRecorded.get())
+        val status = checkNotNull(observedStatus.get())
+        assertEquals(NativeRcsLinkState.LINKED, status.state)
+        assertTrue(status.health)
+        assertTrue(status.phoneResponsive)
         controller.destroy()
         handle.allowRunReturn.countDown()
     }
@@ -505,9 +525,7 @@ class GoogleMessagesLinkServiceTest {
     @Test fun `index stale records lifecycle and queues eligibility publication`() {
         val handle = MutableStatusRunHandle()
         val executor = QueueExecutor()
-        val recorded = mutableListOf<LinkStatus>()
         val enumerations = AtomicInteger()
-        LinkCoreBridge.recorder = { _, status -> synchronized(recorded) { recorded += status }; true }
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(
             eligibilityExecutor = executor,
             notificationExecutor = Executor(Runnable::run),
@@ -520,7 +538,10 @@ class GoogleMessagesLinkServiceTest {
         handle.status = READY_STATUS
         GoogleMessagesLinkService.onLinkEvent("index", "stale")
 
-        assertTrue(synchronized(recorded) { READY_STATUS_PARSED in recorded })
+        val status = checkNotNull(persistedLinkStatus())
+        assertEquals(NativeRcsLinkState.LINKED, status.state)
+        assertTrue(status.health)
+        assertTrue(status.phoneResponsive)
         assertEquals(1, executor.size)
         executor.runAll()
         assertEquals(1, enumerations.get())
@@ -528,29 +549,25 @@ class GoogleMessagesLinkServiceTest {
         handle.allowRunReturn.countDown()
     }
 
+    @Unenrolled
     @Test fun `refused lifecycle prevents index stale eligibility publication`() {
-        val handle = MutableStatusRunHandle()
+        assertNull(NativeGateway.open(context))
+        val handle = StatusHandle(READY_STATUS)
         val executor = QueueExecutor()
         val enumerations = AtomicInteger()
-        val refuseLifecycle = AtomicBoolean(false)
-        LinkCoreBridge.recorder = { _, _ -> !refuseLifecycle.get() }
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(
             eligibilityExecutor = executor,
             notificationExecutor = Executor(Runnable::run),
             beforeEligibilityEnumeration = { enumerations.incrementAndGet() },
         )
         installEngine(handle)
-        val controller = startService()
-        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
-
-        refuseLifecycle.set(true)
-        handle.status = READY_STATUS
+        val controller = Robolectric.buildService(GoogleMessagesLinkService::class.java).create()
+        assertNotNull(LinkRuntime.handleLease(context))
         GoogleMessagesLinkService.onLinkEvent("index", "stale")
 
         assertEquals(0, executor.size)
         assertEquals(0, enumerations.get())
         controller.destroy()
-        handle.allowRunReturn.countDown()
     }
 
     @Test fun `conversation updates continue to coalesce eligibility publication`() {
@@ -747,11 +764,12 @@ class GoogleMessagesLinkServiceTest {
         controller.destroy()
     }
 
+    @Unenrolled
     @Test
     fun `failed lifecycle fence prevents native link open`() {
+        assertNull(NativeGateway.open(context))
         var opens = 0
         val finished = CountDownLatch(1)
-        LinkCoreBridge.recorder = { _, _ -> false }
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(workerFinished = { finished.countDown() })
         LinkRuntimeTestHooks.engine = object : LinkEngine {
             override val available = true
@@ -768,10 +786,8 @@ class GoogleMessagesLinkServiceTest {
 
     @Test
     fun `pairing service observation does not record unlinked`() {
-        val recordedStates = mutableListOf<String>()
         val finished = CountDownLatch(1)
         var elapsed = 0L
-        LinkCoreBridge.recorder = { _, status -> synchronized(recordedStates) { recordedStates += status.state }; true }
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(
             elapsedRealtime = { elapsed },
             sleeper = { elapsed += it },
@@ -783,7 +799,8 @@ class GoogleMessagesLinkServiceTest {
         val controller = startService()
 
         assertTrue(finished.await(1, TimeUnit.SECONDS))
-        assertFalse(synchronized(recordedStates) { "unlinked" in recordedStates })
+        // Prestart writes unknown as UNAVAILABLE; UNLINKED means the guard failed.
+        assertEquals(NativeRcsLinkState.UNAVAILABLE, persistedLinkState())
         assertTrue(LinkRuntime.endPairing(pairing))
         controller.destroy()
     }
@@ -793,8 +810,6 @@ class GoogleMessagesLinkServiceTest {
         val statusRead = CountDownLatch(1)
         val allowSubmission = CountDownLatch(1)
         val finished = CountDownLatch(1)
-        val recordedStates = mutableListOf<String>()
-        LinkCoreBridge.recorder = { _, status -> synchronized(recordedStates) { recordedStates += status.state }; true }
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(
             afterStatusRead = {
                 statusRead.countDown()
@@ -812,7 +827,8 @@ class GoogleMessagesLinkServiceTest {
         assertTrue(LinkRuntime.endPairing(pairing))
         allowSubmission.countDown()
         assertTrue(finished.await(1, TimeUnit.SECONDS))
-        assertFalse(synchronized(recordedStates) { "unlinked" in recordedStates })
+        // Prestart writes unknown as UNAVAILABLE; UNLINKED means the guard failed.
+        assertEquals(NativeRcsLinkState.UNAVAILABLE, persistedLinkState())
         controller.destroy()
     }
 
@@ -1426,6 +1442,5 @@ class GoogleMessagesLinkServiceTest {
         const val NEEDS_RELINK_STATUS = """{"seq":1,"state":"needs_relink","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""
         const val SIGNED_OUT_STATUS = """{"seq":1,"state":"signed_out","running":false,"healthy":false,"phone_responding":false,"last_ok_ms":0,"stop_code":""}"""
         const val READY_STATUS = """{"seq":2,"state":"linked","running":true,"healthy":true,"phone_responding":true,"last_ok_ms":1,"stop_code":""}"""
-        val READY_STATUS_PARSED = LinkStatus.parse(READY_STATUS)
     }
 }

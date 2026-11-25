@@ -12,6 +12,7 @@ import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeRcsEligibilityPublication
 import uniffi.peppy_mobile_bindings.NativeRcsLinkOwnershipClaimOutcome
 import uniffi.peppy_mobile_bindings.NativeRcsLinkState
+import uniffi.peppy_mobile_bindings.NativeRcsLinkStatus
 import uniffi.peppy_mobile_bindings.NativeRcsMappingVerification
 import uniffi.peppy_mobile_bindings.gatewayPublishRcsEligibility
 import uniffi.peppy_mobile_bindings.gatewayVerifyRcsMapping
@@ -21,7 +22,10 @@ internal const val LINK_TEST_PEER = "+12025550123"
 private const val OWN_NUMBER = "+12025550101"
 
 internal fun GatewayTestBase.persistedLinkState(): NativeRcsLinkState? =
-    NativeGateway.open(context)?.rcsLinkStatus(deviceId, System.currentTimeMillis())?.state
+    persistedLinkStatus()?.state
+
+internal fun GatewayTestBase.persistedLinkStatus(): NativeRcsLinkStatus? =
+    NativeGateway.open(context)?.rcsLinkStatus(deviceId, System.currentTimeMillis())
 
 internal fun GatewayTestBase.persistedLinkGeneration(): ULong? =
     NativeGateway.open(context)?.gatewayRcsLinkLifecycleGeneration()
