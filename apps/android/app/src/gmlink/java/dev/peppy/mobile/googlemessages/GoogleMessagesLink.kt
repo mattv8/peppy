@@ -41,10 +41,10 @@ object GoogleMessagesLink {
         GoogleMessagesLinkPanelDetails(onBack, onChanged, notice, onNoticeChange, dismissedSeq, onDismissedSeqChange, notificationAsked, onNotificationAskedChange)
     }
 
-    fun available(context: Context): Boolean = GoogleMessagesLinkTestHooks.available ?: LinkEngines.current.available
+    fun available(context: Context): Boolean = linkRuntimeDeps(context).engine().available
 
     /** Reads link state without changing it; may open the cached native handle. */
-    fun linked(context: Context): Boolean = GoogleMessagesLinkTestHooks.linked ?: runCatching {
+    fun linked(context: Context): Boolean = runCatching {
         val handle = (LinkRuntime.handle(context.applicationContext) as? LinkOpenResult.Open)?.handle
             ?: return@runCatching false
         LinkStatus.parse(handle.status()).state in setOf("linked", "needs_relink", "signed_out")
@@ -89,9 +89,4 @@ object GoogleMessagesLink {
     internal fun wipeStaleWebViewData(context: Context): Boolean = runCatching {
         WebViewDataFiles.deleteStaleData(File(context.applicationInfo.dataDir), context.cacheDir)
     }.getOrDefault(false)
-}
-
-internal object GoogleMessagesLinkTestHooks {
-    @Volatile var available: Boolean? = null
-    @Volatile var linked: Boolean? = null
 }

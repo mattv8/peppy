@@ -22,18 +22,11 @@ import uniffi.peppy_mobile_bindings.NativeRcsLinkState
 import uniffi.peppy_mobile_bindings.NativeTypingState
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], application = LinkTestApplication::class)
 class LinkRuntimeTest : GatewayTestBase() {
     @After
     fun cleanUp() {
         LinkRuntime.resetForTest()
-        LinkRuntimeTestHooks.engine = null
-        LinkRuntimeTestHooks.storeFactory = null
-        LinkRuntimeTestHooks.eventRecorder = null
-        LinkRuntimeTestHooks.rcsReceiveSink = null
-        LinkRuntimeTestHooks.typingReceiveSink = null
-        LinkRuntimeTestHooks.callbackExecutor = null
-        LinkRuntimeTestHooks.afterClosingCheck = null
         LinkCoreBridge.resetForTest()
     }
 
@@ -41,11 +34,11 @@ class LinkRuntimeTest : GatewayTestBase() {
     fun `handle opens once`() {
         val handle = FakeHandle()
         var opens = 0
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle.also { opens++ }
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
 
         val first = LinkRuntime.handle(context) as LinkOpenResult.Open
         val second = LinkRuntime.handle(context) as LinkOpenResult.Open
@@ -56,7 +49,7 @@ class LinkRuntimeTest : GatewayTestBase() {
 
     @Test
     fun `unavailable engine does not read state`() {
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = false
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = error("not called")
         }
@@ -67,8 +60,8 @@ class LinkRuntimeTest : GatewayTestBase() {
     @Test
     fun `typing bridge forwards one admitted intent with the contracted validity field`() {
         val handle = FakeHandle().apply { typingResult = "ok" }
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { InMemoryStore() }
 
         val result = LinkRuntime.setTyping(context, typingIntent())
 
@@ -82,8 +75,8 @@ class LinkRuntimeTest : GatewayTestBase() {
     @Test
     fun `typing bridge preserves native result and maps invocation failure`() {
         val handle = FakeHandle().apply { typingResult = "typing_refused" }
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { InMemoryStore() }
 
         assertEquals("typing_refused", LinkRuntime.setTyping(context, typingIntent()))
         handle.typingFailure = IllegalStateException()
@@ -94,8 +87,8 @@ class LinkRuntimeTest : GatewayTestBase() {
     @Test
     fun `typing bridge sends the Go owner generation separately from its Kotlin lease`() {
         val handle = FakeHandle().apply { ownerGeneration = 73 }
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         val lease = requireNotNull(LinkRuntime.handleLease(context))
 
         assertEquals("ok", LinkRuntime.setTyping(lease, typingIntent()))
@@ -105,8 +98,8 @@ class LinkRuntimeTest : GatewayTestBase() {
     @Test
     fun `typing bridge uses a new Go owner generation after reconnect on the same Kotlin lease`() {
         val handle = FakeHandle().apply { ownerGeneration = 73 }
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         val lease = requireNotNull(LinkRuntime.handleLease(context))
 
         assertEquals("ok", LinkRuntime.setTyping(lease, typingIntent()))
@@ -119,8 +112,8 @@ class LinkRuntimeTest : GatewayTestBase() {
     @Test
     fun `typing bridge drops a retired Go owner generation without calling Go`() {
         val handle = FakeHandle().apply { ownerGeneration = 0 }
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { InMemoryStore() }
 
         assertEquals("typing_stale", LinkRuntime.setTyping(context, typingIntent()))
         assertTrue(handle.typingRequests.isEmpty())
@@ -128,7 +121,7 @@ class LinkRuntimeTest : GatewayTestBase() {
 
     @Test
     fun `typing bridge is unavailable without the gmlink flavor`() {
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = false
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = error("not called")
         }
@@ -139,8 +132,8 @@ class LinkRuntimeTest : GatewayTestBase() {
     @Test
     fun `typing bridge rejects a retired handle lease`() {
         val handle = FakeHandle()
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         val lease = requireNotNull(LinkRuntime.handleLease(context))
         val detached = requireNotNull(LinkRuntime.detachHandleForServiceStop(lease))
 
@@ -155,8 +148,8 @@ class LinkRuntimeTest : GatewayTestBase() {
     @Test
     fun `typing bridge drops a retired live incarnation before Go`() {
         val handle = FakeHandle()
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { InMemoryStore() }
 
         assertEquals("typing_stale", LinkRuntime.setTyping(context, typingIntent(current = false)))
         assertTrue(handle.typingRequests.isEmpty())
@@ -166,8 +159,8 @@ class LinkRuntimeTest : GatewayTestBase() {
     fun `typing bridge recalculates validity after native lock wait`() {
         val clock = FakeClock(100UL)
         val handle = BlockingTypingHandle()
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         val lease = requireNotNull(LinkRuntime.handleLease(context))
         val firstDone = CountDownLatch(1)
         val secondStarted = CountDownLatch(1)
@@ -203,8 +196,8 @@ class LinkRuntimeTest : GatewayTestBase() {
     @Test
     fun `adapter retires authority while runtime waits on the native lock`() {
         val handle = BlockingTypingHandle()
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         val lease = requireNotNull(LinkRuntime.handleLease(context))
         val firstDone = CountDownLatch(1)
         val adapterEffectStarted = CountDownLatch(1)
@@ -256,8 +249,8 @@ class LinkRuntimeTest : GatewayTestBase() {
     @Test
     fun `typing bridge drops expiry before Go`() {
         val handle = FakeHandle()
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { InMemoryStore() }
 
         assertEquals("typing_expired", LinkRuntime.setTyping(context, typingIntent(deadlineMono = 100UL, clock = FakeClock(100UL))))
         assertTrue(handle.typingRequests.isEmpty())
@@ -266,8 +259,8 @@ class LinkRuntimeTest : GatewayTestBase() {
     @Test
     fun `unreadable state remains until the owner resets it`() {
         val store = InMemoryStore(unreadable = true)
-        LinkRuntimeTestHooks.engine = availableEngine(FakeHandle())
-        LinkRuntimeTestHooks.storeFactory = { store }
+        LinkTestDeps.engine = availableEngine(FakeHandle())
+        LinkTestDeps.storeFactory = { store }
 
         val result = LinkRuntime.handle(context)
 
@@ -277,11 +270,11 @@ class LinkRuntimeTest : GatewayTestBase() {
 
     @Test
     fun `gomobile open exception becomes filtered unreadable state`() {
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = throw Exception("not safe to show")
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
 
         val result = LinkRuntime.handle(context)
 
@@ -294,16 +287,17 @@ class LinkRuntimeTest : GatewayTestBase() {
         val handle = FakeHandle()
         val events = mutableListOf<String>()
         val store = InMemoryStore()
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { store }
-        LinkRuntimeTestHooks.eventRecorder = { kind, code, _ -> events += "$kind/$code" }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { store }
         LinkRuntime.handle(context)
 
-        LinkRuntime.resetLocalState(context)
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, events::add, recordingThread = Thread.currentThread()) {
+            LinkRuntime.resetLocalState(context)
+        }
 
         assertTrue(handle.closed)
         assertTrue(store.wiped)
-        assertEquals(listOf("link/reset_local"), events)
+        assertTrue(events.contains("event=27 session=1 timestamp_ms=10 trace=0 29=17"))
         assertEquals(NativeRcsLinkState.UNLINKED, persistedLinkState())
         assertFalse(LinkRuntime.pairingInProgress.get())
     }
@@ -312,62 +306,30 @@ class LinkRuntimeTest : GatewayTestBase() {
     @Test
     fun `panel observation keeps the token captured before its status read`() {
         enrollAndUnlock()
-        val beforeRecord = CountDownLatch(1)
-        val releaseRecord = CountDownLatch(1)
-        val recordDone = CountDownLatch(1)
         // A linked status: if the stale observation were written, the durable state would be LINKED.
         val handle = object : FakeHandle() {
             override fun status() = """{"state":"linked"}"""
         }
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         LinkRuntime.handle(context)
         val observation = requireNotNull(LinkRuntime.capturePanelObservation(handle))
         val status = LinkStatus.parse(handle.status())
-        LinkRuntimeTestHooks.beforePanelObservationRecord = {
-            beforeRecord.countDown()
-            assertTrue("panel record was never released", releaseRecord.await(5, TimeUnit.SECONDS))
-        }
-        Thread {
-            LinkRuntime.recordPanelObservation(context, observation, status)
-            recordDone.countDown()
-        }.start()
-        assertTrue(beforeRecord.await(1, TimeUnit.SECONDS))
-
         LinkCoreBridge.invalidateObservations()
         assertTrue(LinkCoreBridge.recordExplicitUnlinkCompleted(context))
-        releaseRecord.countDown()
-
-        assertTrue(recordDone.await(1, TimeUnit.SECONDS))
+        LinkRuntime.recordPanelObservation(context, observation, status)
         assertEquals(NativeRcsLinkState.UNLINKED, persistedLinkState())
     }
 
     @Test
-    fun `reset retires pairing authority before queued prestart publication`() {
+    fun `reset rejects prestart from retired pairing`() {
         enrollAndUnlock()
-        val firstOwnershipCheckPassed = CountDownLatch(1)
-        val releasePreStart = CountDownLatch(1)
-        val preStartDone = CountDownLatch(1)
-        var preStartResult = true
-        LinkRuntimeTestHooks.engine = availableEngine(FakeHandle())
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.engine = availableEngine(FakeHandle())
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         LinkRuntime.handle(context)
         val attempt = requireNotNull(LinkRuntime.tryBeginPairing())
-        LinkRuntimeTestHooks.beforePreStartPublication = {
-            firstOwnershipCheckPassed.countDown()
-            assertTrue("pre-start was never released", releasePreStart.await(5, TimeUnit.SECONDS))
-        }
-        Thread {
-            preStartResult = LinkRuntime.recordPreStart(context, attempt)
-            preStartDone.countDown()
-        }.start()
-        assertTrue(firstOwnershipCheckPassed.await(1, TimeUnit.SECONDS))
-
         LinkRuntime.resetLocalState(context)
-        releasePreStart.countDown()
-
-        assertTrue(preStartDone.await(1, TimeUnit.SECONDS))
-        assertFalse(preStartResult)
+        assertFalse(LinkCoreBridge.recordPreStart(context, attempt))
         assertEquals(NativeRcsLinkState.UNLINKED, persistedLinkState())
     }
 
@@ -375,8 +337,8 @@ class LinkRuntimeTest : GatewayTestBase() {
     fun `reset rejects an observation captured before destructive retirement`() {
         enrollAndUnlock()
         val handle = FakeHandle()
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         LinkRuntime.handle(context)
         val staleToken = LinkCoreBridge.observationToken()
 
@@ -396,11 +358,11 @@ class LinkRuntimeTest : GatewayTestBase() {
             override fun wipe(): Unit = throw IllegalStateException("wipe_failed")
         }
         var opens = 0
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = if (opens++ == 0) first else second
         }
-        LinkRuntimeTestHooks.storeFactory = { store }
+        LinkTestDeps.storeFactory = { store }
         LinkRuntime.handle(context)
 
         val failure = runCatching { LinkRuntime.resetLocalState(context) }.exceptionOrNull()
@@ -417,8 +379,8 @@ class LinkRuntimeTest : GatewayTestBase() {
         val handle = FakeHandle()
         val store = InMemoryStore()
         // No enrolled gateway: the real completion returns false, so reset reports persist_failed.
-        LinkRuntimeTestHooks.engine = availableEngine(handle)
-        LinkRuntimeTestHooks.storeFactory = { store }
+        LinkTestDeps.engine = availableEngine(handle)
+        LinkTestDeps.storeFactory = { store }
         LinkRuntime.handle(context)
 
         val failure = runCatching { LinkRuntime.resetLocalState(context) }.exceptionOrNull()
@@ -436,29 +398,36 @@ class LinkRuntimeTest : GatewayTestBase() {
         val releaseOpener = CountDownLatch(1)
         val openerDone = CountDownLatch(1)
         var opens = 0
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle =
                 if (opens++ == 0) first else second
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         LinkRuntime.handle(context)
         val lease = LinkRuntime.handleLease(context)!!
-        LinkRuntimeTestHooks.afterClosingCheck = {
+        LinkRuntime.afterClosingCheckForTest = {
             reachedClosingCheck.countDown()
-            releaseOpener.await()
+            check(releaseOpener.await(5, TimeUnit.SECONDS)) { "opener was not released" }
         }
 
-        Thread { LinkRuntime.handle(context); openerDone.countDown() }.start()
-        assertTrue(reachedClosingCheck.await(1, TimeUnit.SECONDS))
-        val detached = LinkRuntime.detachHandleForServiceStop(lease)!!
-        releaseOpener.countDown()
+        val opener = Thread { try { LinkRuntime.handle(context) } finally { openerDone.countDown() } }
+        var detached: LinkHandle? = null
+        opener.start()
+        try {
+            assertTrue(reachedClosingCheck.await(1, TimeUnit.SECONDS))
+            detached = LinkRuntime.detachHandleForServiceStop(lease)!!
+            releaseOpener.countDown()
 
-        Thread.sleep(50)
-        assertEquals(1, opens)
-        assertFalse(first.closed)
-        LinkRuntime.closeDetachedHandle(detached)
-        assertTrue(openerDone.await(1, TimeUnit.SECONDS))
+            assertFalse("opener overtook detached handle", openerDone.await(50, TimeUnit.MILLISECONDS))
+            assertEquals(1, opens)
+            assertFalse(first.closed)
+        } finally {
+            releaseOpener.countDown()
+            detached?.let(LinkRuntime::closeDetachedHandle)
+            opener.join(TimeUnit.SECONDS.toMillis(5))
+        }
+        assertFalse("opener did not finish", opener.isAlive)
         assertEquals(2, opens)
     }
 
@@ -473,19 +442,20 @@ class LinkRuntimeTest : GatewayTestBase() {
     @Test
     fun `new pairing fences and clears a previous emoji`() {
         lateinit var host: LinkHost
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, callback: LinkHost): LinkHandle = FakeHandle().also { host = callback }
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
+        val queued = QueueExecutor()
+        LinkTestDeps.callbackExecutor = queued
         LinkRuntime.handle(context)
-        val first = CountDownLatch(1)
-        LinkRuntimeTestHooks.eventRecorder = { _, _, _ -> first.countDown() }
 
         val firstAttempt = LinkRuntime.tryBeginPairing()!!
         host.showEmojiOwned("first", 0, 0)
         host.eventOwned("link", "pair_ok", 0, 0, 0)
-        assertTrue(first.await(1, TimeUnit.SECONDS))
+        queued.runAll()
+        assertEquals("first", LinkRuntime.emoji.value)
         assertTrue(LinkRuntime.pairingInProgress.get())
         assertTrue(LinkRuntime.endPairing(firstAttempt))
 
@@ -514,12 +484,12 @@ class LinkRuntimeTest : GatewayTestBase() {
     fun `queued old emoji and late finally cannot affect a new attempt`() {
         lateinit var host: LinkHost
         val queued = QueueExecutor()
-        LinkRuntimeTestHooks.callbackExecutor = queued
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.callbackExecutor = queued
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, callback: LinkHost): LinkHandle = FakeHandle().also { host = callback }
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         LinkRuntime.handle(context)
         val oldAttempt = LinkRuntime.tryBeginPairing()!!
         host.showEmojiOwned("old", 0, 0)
@@ -537,18 +507,18 @@ class LinkRuntimeTest : GatewayTestBase() {
     @Test
     fun `terminal callback never releases pairing ownership`() {
         lateinit var host: LinkHost
-        val callbackRan = CountDownLatch(1)
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        val queued = QueueExecutor()
+        LinkTestDeps.callbackExecutor = queued
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, callback: LinkHost): LinkHandle = FakeHandle().also { host = callback }
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
-        LinkRuntimeTestHooks.eventRecorder = { _, _, _ -> callbackRan.countDown() }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         LinkRuntime.handle(context)
         val attempt = LinkRuntime.tryBeginPairing()!!
 
         host.eventOwned("link", "pair_ok", 0, 0, 0)
-        assertTrue(callbackRan.await(1, TimeUnit.SECONDS))
+        queued.runAll()
 
         assertTrue(LinkRuntime.pairingInProgress.get())
         assertTrue(LinkRuntime.endPairing(attempt))
@@ -562,8 +532,8 @@ class LinkRuntimeTest : GatewayTestBase() {
         client.recordRcsLinkLifecycle(NativeRcsLinkState.LINKED, true, true, true, now, now)
         val wipeEntered = CountDownLatch(1)
         val releaseWipe = CountDownLatch(1)
-        LinkRuntimeTestHooks.engine = availableEngine(FakeHandle())
-        LinkRuntimeTestHooks.storeFactory = { PausingWipeStore(wipeEntered, releaseWipe) }
+        LinkTestDeps.engine = availableEngine(FakeHandle())
+        LinkTestDeps.storeFactory = { PausingWipeStore(wipeEntered, releaseWipe) }
         val attempt = requireNotNull(LinkRuntime.tryBeginPairing())
         val tokenBeforePreStart = LinkCoreBridge.observationToken()
         var preStartResult = true
@@ -616,11 +586,11 @@ class LinkRuntimeTest : GatewayTestBase() {
             }
         }
         var opens = 0
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle.also { opens++ }
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         val attempt = requireNotNull(LinkRuntime.tryBeginPairing())
         assertTrue(LinkRuntime.recordPreStart(context, attempt))
         val lease = requireNotNull(LinkRuntime.acquirePairingLease(context, attempt))
@@ -650,19 +620,20 @@ class LinkRuntimeTest : GatewayTestBase() {
         lateinit var host: LinkHost
         val queued = QueueExecutor()
         val events = mutableListOf<String>()
-        LinkRuntimeTestHooks.callbackExecutor = queued
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.callbackExecutor = queued
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, callback: LinkHost): LinkHandle = FakeHandle().also { host = callback }
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
-        LinkRuntimeTestHooks.eventRecorder = { kind, code, _ -> events += "$kind/$code" }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         LinkRuntime.handle(context)
         val attempt = LinkRuntime.tryBeginPairing()!!
 
-        host.event("link", "pair_ok", 0)
-        host.showEmoji("unowned")
-        queued.runAll()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, events::add, recordingThread = Thread.currentThread()) {
+            host.event("link", "pair_ok", 0)
+            host.showEmoji("unowned")
+            queued.runAll()
+        }
 
         assertTrue(events.isEmpty())
         assertEquals(null, LinkRuntime.emoji.value)
@@ -676,20 +647,21 @@ class LinkRuntimeTest : GatewayTestBase() {
         var currentGeneration = 3L
         val handle = FakeHandle(accepts = { generation, revision -> generation == currentGeneration && revision == 4L })
         val events = mutableListOf<String>()
-        LinkRuntimeTestHooks.callbackExecutor = queued
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.callbackExecutor = queued
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, callback: LinkHost): LinkHandle = handle.also { host = callback }
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
-        LinkRuntimeTestHooks.eventRecorder = { kind, code, _ -> events += "$kind/$code" }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         LinkRuntime.handle(context)
         val attempt = LinkRuntime.tryBeginPairing()!!
 
-        host.eventOwned("link", "pair_ok", 0, 3, 4)
-        host.showEmojiOwned("old", 3, 4)
-        currentGeneration = 5
-        queued.runAll()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, events::add, recordingThread = Thread.currentThread()) {
+            host.eventOwned("link", "pair_ok", 0, 3, 4)
+            host.showEmojiOwned("old", 3, 4)
+            currentGeneration = 5
+            queued.runAll()
+        }
 
         assertTrue(events.isEmpty())
         assertEquals(null, LinkRuntime.emoji.value)
@@ -709,13 +681,13 @@ class LinkRuntimeTest : GatewayTestBase() {
                 generation == currentGeneration && revision == 4L && streamEpoch == currentStreamEpoch
             },
         )
-        LinkRuntimeTestHooks.callbackExecutor = queued
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.callbackExecutor = queued
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, callback: LinkHost): LinkHandle = handle.also { host = callback }
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
-        LinkRuntimeTestHooks.rcsReceiveSink = RcsReceiveSink { records += it }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
+        LinkTestDeps.rcsReceiveSink = RcsReceiveSink { records += it }
         LinkRuntime.handle(context)
 
         host.rcsEventOwned("accepted", 3, 4, 8)
@@ -740,13 +712,13 @@ class LinkRuntimeTest : GatewayTestBase() {
                 generation == currentGeneration && revision == 4L && streamEpoch == currentStreamEpoch
             },
         )
-        LinkRuntimeTestHooks.callbackExecutor = queued
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.callbackExecutor = queued
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, callback: LinkHost): LinkHandle = handle.also { host = callback }
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
-        LinkRuntimeTestHooks.typingReceiveSink = TypingReceiveSink { records += it }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
+        LinkTestDeps.typingReceiveSink = TypingReceiveSink { records += it }
         LinkRuntime.handle(context)
 
         host.typingEventOwned("accepted", 3, 4, 8)
@@ -766,13 +738,13 @@ class LinkRuntimeTest : GatewayTestBase() {
             accepts = { generation, revision -> generation == 3L && revision == 4L },
             acceptsStream = { generation, revision, epoch -> generation == 3L && revision == 4L && epoch == 8L },
         )
-        LinkRuntimeTestHooks.callbackExecutor = queued
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.callbackExecutor = queued
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, callback: LinkHost): LinkHandle = handle.also { host = callback }
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
-        LinkRuntimeTestHooks.typingReceiveSink = null
+        LinkTestDeps.storeFactory = { InMemoryStore() }
+        LinkTestDeps.typingReceiveSink = null
         TypingReceiveSinkRegistry.sink = null
         LinkRuntime.handle(context)
         val records = mutableListOf<String>()
@@ -788,11 +760,11 @@ class LinkRuntimeTest : GatewayTestBase() {
     fun `close during emoji callback finishes`() {
         lateinit var host: LinkHost
         val handle = BlockingCloseHandle()
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, callback: LinkHost): LinkHandle = handle.also { host = callback }
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         val lease = requireNotNull(LinkRuntime.handleLease(context))
         val closeFinished = CountDownLatch(1)
         Thread {

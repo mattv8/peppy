@@ -18,7 +18,7 @@ import uniffi.peppy_mobile_bindings.NativeRcsLinkState
 import uniffi.peppy_mobile_bindings.NativeRcsLinkStatus
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], application = LinkTestApplication::class)
 class LinkRestartReceiverTest : GatewayTestBase() {
     private lateinit var client: NativeClient
 
@@ -30,8 +30,6 @@ class LinkRestartReceiverTest : GatewayTestBase() {
     fun cleanUp() {
         LinkRestartReceiver.testHooks = RestartReceiverTestHooks()
         LinkRuntime.resetForTest()
-        LinkRuntimeTestHooks.engine = null
-        LinkRuntimeTestHooks.storeFactory = null
         LinkCoreBridge.resetForTest()
     }
 
@@ -84,8 +82,8 @@ class LinkRestartReceiverTest : GatewayTestBase() {
     @Test
     fun `unavailable engine reconciles an authoritative empty state without starting the service`() {
         var atRead: LifecycleSnapshot? = null
-        LinkRuntimeTestHooks.engine = unavailableEngine()
-        LinkRuntimeTestHooks.storeFactory = { ObservedStore { atRead = lifecycleSnapshot() } }
+        LinkTestDeps.engine = unavailableEngine()
+        LinkTestDeps.storeFactory = { ObservedStore { atRead = lifecycleSnapshot() } }
         var starts = 0
         LinkRestartReceiver.testHooks = RestartReceiverTestHooks(
             executor = Executor(Runnable::run),
@@ -102,8 +100,8 @@ class LinkRestartReceiverTest : GatewayTestBase() {
     @Test
     fun `unavailable engine leaves an unreadable prior state fail closed`() {
         var atRead: LifecycleSnapshot? = null
-        LinkRuntimeTestHooks.engine = unavailableEngine()
-        LinkRuntimeTestHooks.storeFactory = {
+        LinkTestDeps.engine = unavailableEngine()
+        LinkTestDeps.storeFactory = {
             ObservedStore {
                 atRead = lifecycleSnapshot()
                 throw IllegalStateException("link_state_unreadable")
@@ -181,11 +179,11 @@ class LinkRestartReceiverTest : GatewayTestBase() {
     private data class LifecycleSnapshot(val status: NativeRcsLinkStatus?, val generation: ULong?)
 
     private fun installHandle(handle: LinkHandle) {
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
         }
-        LinkRuntimeTestHooks.storeFactory = { EmptyStore }
+        LinkTestDeps.storeFactory = { EmptyStore }
     }
 
     private fun unavailableEngine() = object : LinkEngine {

@@ -153,7 +153,7 @@ private fun ManagedLinkPanel(host: GoogleMessagesLinkPanelHost?) {
 }
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], application = LinkTestApplication::class)
 class GoogleMessagesLinkPanelTest : GatewayTestBase() {
     // Queue IO completions until the test clock drains them on the main looper.
     // The legacy rule uses an unconfined dispatcher even when given Dispatchers.Main.
@@ -164,20 +164,17 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
         // Finish queued operation cleanup before disposing its scheduler and resetting shared hooks.
         compose.waitUntil(5_000) { !LinkOperationLock.inProgress.value && !LinkRuntime.pairingInProgress.get() }
         LinkRuntime.resetForTest()
-        LinkRuntimeTestHooks.engine = null
-        LinkRuntimeTestHooks.storeFactory = null
         LinkCoreBridge.resetForTest()
-        GoogleMessagesLinkTestHooks.available = null
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         GoogleMessagesLink.clearCutoverMayHaveMissedMessages(context)
     }
 
     @Test fun `unavailable engine renders nothing`() {
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = false
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = error("unavailable")
         }
-        GoogleMessagesLinkTestHooks.available = false
+        LinkTestDeps.available = false
         compose.setContent { PeppyTheme { GoogleMessagesLinkPanel {} } }
         check(compose.onAllNodesWithTag("google-messages-link-card").fetchSemanticsNodes().isEmpty())
     }
@@ -276,7 +273,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
     @Test fun `dismissing a local notice does not record the stop code as dismissed`() {
         val host = FakePanelHost(FakeHandle("linked").apply { stopCode = "persist_failed" })
         val dismissedChanges = mutableListOf<Long?>()
-        GoogleMessagesLinkTestHooks.available = true
+        LinkTestDeps.available = true
         compose.setContent {
             PeppyTheme {
                 GoogleMessagesLinkPanel(host, onChanged = {}, notice = "unlinked_done", onDismissedSeqChange = { dismissedChanges += it })
@@ -290,7 +287,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
     @Test fun `dismissing the stop-code notice records its status sequence as dismissed`() {
         val host = FakePanelHost(FakeHandle("linked").apply { stopCode = "persist_failed" })
         val dismissedChanges = mutableListOf<Long?>()
-        GoogleMessagesLinkTestHooks.available = true
+        LinkTestDeps.available = true
         compose.setContent {
             PeppyTheme {
                 GoogleMessagesLinkPanel(host, onChanged = {}, onDismissedSeqChange = { dismissedChanges += it })
@@ -358,12 +355,12 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
     }
 
     @Test fun `unreadable state offers reset only`() {
-        GoogleMessagesLinkTestHooks.available = true
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.available = true
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = error("unreadable")
         }
-        LinkRuntimeTestHooks.storeFactory = { object : LinkStateStorage {
+        LinkTestDeps.storeFactory = { object : LinkStateStorage {
             override fun read(): ByteArray = throw IllegalStateException("unreadable")
             override fun write(state: ByteArray) = Unit
             override fun wipe() = Unit
@@ -431,7 +428,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
         val host = FakePanelHost(FakeHandle("unlinked"), notificationsGranted = false)
         val restoration = StateRestorationTester(compose)
         var owner: LifecycleOwner = resumedOwner()
-        GoogleMessagesLinkTestHooks.available = true
+        LinkTestDeps.available = true
         restoration.setContent {
             CompositionLocalProvider(LocalLifecycleOwner provides owner) {
                 PeppyTheme { GoogleMessagesLinkPanel(host, onChanged = {}) }
@@ -461,7 +458,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
         val host = FakePanelHost(FakeHandle("needs_relink"), notificationsGranted = false)
         val restoration = StateRestorationTester(compose)
         var owner: LifecycleOwner = resumedOwner()
-        GoogleMessagesLinkTestHooks.available = true
+        LinkTestDeps.available = true
         restoration.setContent {
             CompositionLocalProvider(LocalLifecycleOwner provides owner) {
                 PeppyTheme { GoogleMessagesLinkPanel(host, onChanged = {}) }
@@ -490,7 +487,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
         val owner = object : LifecycleOwner {
             override val lifecycle = LifecycleRegistry(this).apply { currentState = Lifecycle.State.RESUMED }
         }
-        GoogleMessagesLinkTestHooks.available = true
+        LinkTestDeps.available = true
         compose.setContent {
             CompositionLocalProvider(LocalLifecycleOwner provides owner) {
                 PeppyTheme { GoogleMessagesLinkPanel(host, onChanged = {}) }
@@ -583,7 +580,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
             unlinkAction = { state = "unlinked"; stopCode = "unlink_remote_failed" }
         }
         val host = FakePanelHost(handle)
-        GoogleMessagesLinkTestHooks.available = true
+        LinkTestDeps.available = true
         try {
             compose.setContent {
                 LaunchedEffect(Unit) {
@@ -696,7 +693,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
             },
         )
         val visible = mutableStateOf(true)
-        GoogleMessagesLinkTestHooks.available = true
+        LinkTestDeps.available = true
         compose.setContent {
             PeppyTheme {
                 if (visible.value) GoogleMessagesLinkPanel(host, onChanged = {})
@@ -775,11 +772,11 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
         val acquireEntered = CountDownLatch(1)
         val releaseAcquire = CountDownLatch(1)
         val handle = FakeHandle("needs_relink")
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         val host = FakePanelHost(handle).apply {
             acquirePairingLease = { token ->
                 LinkRuntime.acquirePairingLease(context, token).also {
@@ -812,11 +809,11 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
         val handle = object : FakeHandle("needs_relink") {
             override fun close() { handleClosed.countDown() }
         }
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
         }
-        LinkRuntimeTestHooks.storeFactory = { PausingWipeStore(wipeEntered, releaseWipe) }
+        LinkTestDeps.storeFactory = { PausingWipeStore(wipeEntered, releaseWipe) }
         val host = FakePanelHost(handle).apply {
             acquirePairingLease = { token -> LinkRuntime.acquirePairingLease(context, token) }
             recordTokenPreStart = { token -> LinkRuntime.recordPreStart(context, token) }
@@ -856,11 +853,11 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
         enrollAndUnlock()
         val retired = FakeHandle("needs_relink")
         val replacement = FakeHandle("unlinked")
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = replacement
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         val admitted = AtomicReference<Pair<Long, LinkHandleLease>>()
         val host = FakePanelHost(retired).apply {
             acquirePairingLease = { token ->
@@ -924,12 +921,12 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
             override fun pair(cookiesJson: ByteArray) { pairCalls++ }
             override fun run() { runCalls++ }
         }
-        GoogleMessagesLinkTestHooks.available = true
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.available = true
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
 
         compose.setContent { PeppyTheme { GoogleMessagesLinkPanel {} } }
         compose.waitUntil(5_000) { persistedLinkState() == NativeRcsLinkState.NEEDS_RELINK }
@@ -1056,7 +1053,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
         val firstHost = FakePanelHost(firstHandle)
         val secondHost = FakePanelHost(FakeHandle("needs_relink"))
         val activeHost = mutableStateOf(firstHost)
-        GoogleMessagesLinkTestHooks.available = true
+        LinkTestDeps.available = true
         compose.setContent {
             PeppyTheme {
                 key(activeHost.value) {
@@ -1089,7 +1086,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
             }
         }
         val visible = mutableStateOf(true)
-        GoogleMessagesLinkTestHooks.available = true
+        LinkTestDeps.available = true
         compose.setContent {
             PeppyTheme {
                 if (visible.value) GoogleMessagesLinkPanel(host, onChanged = {})
@@ -1165,7 +1162,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
     @Config(sdk = [35], qualifiers = "w320dp-h480dp")
     fun `large text keeps actions reachable and exposes merged live regions`() {
         val host = FakePanelHost(FakeHandle("linked"), notificationsGranted = true)
-        GoogleMessagesLinkTestHooks.available = true
+        LinkTestDeps.available = true
         compose.setContent {
             val density = LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density, 2f)) {
@@ -1199,7 +1196,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
     @Config(sdk = [35], qualifiers = "w412dp-h1600dp")
     fun `details guide opens its exact URL and announces a retryable failure`() {
         val host = FakePanelHost(FakeHandle("linked"), notificationsGranted = true)
-        GoogleMessagesLinkTestHooks.available = true
+        LinkTestDeps.available = true
         lateinit var context: GoogleMessagesGuideContext
         compose.setContent {
             val baseContext = LocalContext.current
@@ -1278,7 +1275,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
 
     /** Renders the card in a narrow container. The defaults are 2x font scale in 280 dp, the narrowest width the card supports. */
     private fun showNarrowLargeTextCard(host: FakePanelHost, notice: String? = null, fontScale: Float = 2f, containerWidth: Dp = 280.dp) {
-        GoogleMessagesLinkTestHooks.available = true
+        LinkTestDeps.available = true
         compose.setContent {
             val density = LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale)) {
@@ -1328,8 +1325,8 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
         statusJson: String = """{"seq":1,"state":"$state","running":true,"healthy":true,"phone_responding":true,"last_ok_ms":0,"stop_code":""}""",
         assertion: () -> Unit,
     ) {
-        GoogleMessagesLinkTestHooks.available = true
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.available = true
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(stateBytes: ByteArray, host: LinkHost): LinkHandle = object : LinkHandle {
                 override fun pair(cookiesJson: ByteArray) = Unit
@@ -1342,7 +1339,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
                 override fun status() = statusJson
             }
         }
-        LinkRuntimeTestHooks.storeFactory = { InMemoryStore() }
+        LinkTestDeps.storeFactory = { InMemoryStore() }
         compose.setContent { PeppyTheme { LinkPanelSurface(surface, null) } }
         val readinessTag = if (surface == PanelSurface.Details) "google-messages-link-status" else "google-messages-link-chip"
         compose.waitUntil { compose.onAllNodesWithTag(readinessTag).fetchSemanticsNodes().isNotEmpty() }
@@ -1350,7 +1347,7 @@ class GoogleMessagesLinkPanelTest : GatewayTestBase() {
     }
 
     private fun showPanel(host: FakePanelHost, surface: PanelSurface = PanelSurface.Card, readinessTag: String? = null) {
-        GoogleMessagesLinkTestHooks.available = true
+        LinkTestDeps.available = true
         compose.setContent {
             PeppyTheme {
                 Column(Modifier.verticalScroll(rememberScrollState())) {

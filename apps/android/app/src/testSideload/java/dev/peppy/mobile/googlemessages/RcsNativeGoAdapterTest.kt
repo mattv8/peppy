@@ -17,19 +17,17 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], application = LinkTestApplication::class)
 class RcsNativeGoAdapterTest {
     private val context: Context = ApplicationProvider.getApplicationContext()
 
     @Before fun setUp() {
         LinkRuntime.resetForTest()
-        LinkRuntimeTestHooks.engine = null
-        LinkRuntimeTestHooks.storeFactory = { MemoryStore }
+        LinkTestDeps.engine = null
+        LinkTestDeps.storeFactory = { MemoryStore }
     }
 
     @After fun tearDown() {
-        LinkRuntimeTestHooks.engine = null
-        LinkRuntimeTestHooks.storeFactory = null
         LinkRuntime.resetForTest()
     }
 
@@ -336,7 +334,7 @@ class RcsNativeGoAdapterTest {
     }
 
     private fun lease(handle: FakeHandle): LinkHandleLease {
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = handle
         }

@@ -1,6 +1,7 @@
 package dev.peppy.mobile.googlemessages
 
 import androidx.test.core.app.ApplicationProvider
+import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.gateway.GatewayTestBase
 import dev.peppy.mobile.gateway.NativeGateway
 import java.util.concurrent.CountDownLatch
@@ -48,7 +49,7 @@ import uniffi.peppy_mobile_bindings.NativeRcsLinkStatus
 private annotation class Unenrolled
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], application = LinkTestApplication::class)
 class GoogleMessagesLinkServiceTest : GatewayTestBase() {
     private var unenrolled = false
     @get:Rule val enrollmentRule = object : TestWatcher() {
@@ -80,9 +81,6 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
     fun cleanUp() {
         GoogleMessagesLinkService.stopActiveWorker()
         LinkRuntime.resetForTest()
-        LinkRuntimeTestHooks.engine = null
-        LinkRuntimeTestHooks.storeFactory = null
-        LinkRuntimeTestHooks.eventRecorder = null
         LinkCoreBridge.resetForTest()
         GoogleMessagesLinkService.testHooks = ServiceTestHooks()
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = null
@@ -718,20 +716,20 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
 
     @Test
     fun `Run event overflow records the fixed diagnostic code`() {
-        val events = mutableListOf<Pair<String, String>>()
+        val events = java.util.Collections.synchronizedList(mutableListOf<String>())
         val finished = CountDownLatch(1)
-        LinkRuntimeTestHooks.eventRecorder = { kind, code, _ -> events += kind to code }
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(
             sleeper = { throw InterruptedException() },
             workerFinished = { finished.countDown() },
         )
         installEngine(OverflowHandle())
 
-        val controller = startService()
-
-        assertTrue(finished.await(1, TimeUnit.SECONDS))
-        assertTrue(events.contains("link" to "event_overflow"))
-        controller.destroy()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 0L }, events::add) {
+            val controller = startService()
+            assertTrue(finished.await(1, TimeUnit.SECONDS))
+            assertTrue(events.contains("event=27 session=1 timestamp_ms=10 trace=0 29=18"))
+            controller.destroy()
+        }
     }
 
     @Test
@@ -782,11 +780,11 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         var opens = 0
         val finished = CountDownLatch(1)
         GoogleMessagesLinkService.testHooks = ServiceTestHooks(workerFinished = { finished.countDown() })
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = StatusHandle(UNLINKED_STATUS).also { opens++ }
         }
-        LinkRuntimeTestHooks.storeFactory = { EmptyStore }
+        LinkTestDeps.storeFactory = { EmptyStore }
 
         val controller = startService()
 
@@ -893,7 +891,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
     fun `destroy returns while worker is blocked opening native handle`() {
         val openEntered = CountDownLatch(1)
         val releaseOpen = CountDownLatch(1)
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle {
                 openEntered.countDown()
@@ -901,7 +899,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
                 return StatusHandle(UNLINKED_STATUS)
             }
         }
-        LinkRuntimeTestHooks.storeFactory = { EmptyStore }
+        LinkTestDeps.storeFactory = { EmptyStore }
         val controller = startService()
         assertTrue(openEntered.await(1, TimeUnit.SECONDS))
 
@@ -1235,11 +1233,11 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
 
     private fun installEngine(vararg handles: LinkHandle) {
         val next = ArrayDeque(handles.toList())
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost): LinkHandle = next.removeFirst()
         }
-        LinkRuntimeTestHooks.storeFactory = { EmptyStore }
+        LinkTestDeps.storeFactory = { EmptyStore }
     }
 
     private object EmptyStore : LinkStateStorage {

@@ -28,14 +28,9 @@ object GoogleMessagesLink {
         onNotificationAskedChange: (Boolean) -> Unit,
     ) = Unit
 
-    fun available(context: Context): Boolean = GoogleMessagesLinkTestHooks.available ?: false
+    fun available(context: Context): Boolean = false
 
-    fun linked(context: Context): Boolean = GoogleMessagesLinkTestHooks.linked ?: false
+    fun linked(context: Context): Boolean = false
 
     fun onAppStart(context: Context) = Unit
-}
-
-internal object GoogleMessagesLinkTestHooks {
-    @Volatile var available: Boolean? = null
-    @Volatile var linked: Boolean? = null
 }

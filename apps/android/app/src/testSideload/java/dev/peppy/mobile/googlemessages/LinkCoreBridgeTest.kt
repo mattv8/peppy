@@ -31,7 +31,7 @@ import uniffi.peppy_mobile_bindings.NativeRcsLinkState
  * asserted through the same core and WorkManager the app uses.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], application = LinkTestApplication::class)
 class LinkCoreBridgeTest : GatewayTestBase() {
     private val workers = mutableListOf<Thread>()
 
@@ -289,7 +289,7 @@ class LinkCoreBridgeTest : GatewayTestBase() {
     }
 
     private fun observationLease(): LinkHandleLease {
-        LinkRuntimeTestHooks.engine = object : LinkEngine {
+        LinkTestDeps.engine = object : LinkEngine {
             override val available = true
             override fun open(state: ByteArray, host: LinkHost) = object : LinkHandle {
                 override fun pair(cookiesJson: ByteArray) = Unit
@@ -302,7 +302,7 @@ class LinkCoreBridgeTest : GatewayTestBase() {
                 override fun status() = "{}"
             }
         }
-        LinkRuntimeTestHooks.storeFactory = { object : LinkStateStorage {
+        LinkTestDeps.storeFactory = { object : LinkStateStorage {
             override fun read() = ByteArray(0)
             override fun write(state: ByteArray) = Unit
             override fun wipe() = Unit
