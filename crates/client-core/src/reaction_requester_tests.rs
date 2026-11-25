@@ -9,6 +9,112 @@ use unicode_segmentation::UnicodeSegmentation;
 
 const SIM: &str = "sim-1";
 
+#[test]
+fn reaction_routing_matches_conversation_and_draft() {
+    let fixture = Fixture::new();
+    let conversation = ConversationId::new();
+    seed_message(
+        &fixture,
+        Transport::Sms,
+        Direction::Incoming,
+        "hi",
+        conversation,
+    );
+    let listed = fixture
+        .client
+        .list_conversations()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.conversation_id == conversation)
+        .unwrap();
+    let routing = fixture.client.reaction_routing(conversation).unwrap();
+    assert_eq!(routing.spam, listed.folder == ConversationFolder::Spam);
+    assert_eq!(routing.support.support, listed.reaction_support);
+    assert_eq!(routing.support.gateway_id, listed.reaction_gateway_id);
+    assert_eq!(routing.stored_route, None);
+}
+
+#[test]
+fn reaction_routing_matches_folder_support_and_stored_route() {
+    let fixture = Fixture::new();
+    let gateway = DeviceId::new();
+    let native = native_conversation(&fixture, gateway, true);
+    let update = ConversationId::new();
+    grant_eligibility(&fixture, DeviceId::new(), update);
+    let text = ConversationId::new();
+    for (conversation, transport) in [
+        (native, Transport::Rcs),
+        (update, Transport::Rcs),
+        (text, Transport::Sms),
+    ] {
+        seed_message(&fixture, transport, Direction::Incoming, "hi", conversation);
+    }
+    let draft = DraftId::new();
+    let stored = route(gateway);
+    let route_json = serde_json::to_string(&stored).unwrap();
+    {
+        let store = fixture.client.lock().unwrap();
+        store.conn.execute("INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision) VALUES(?,?,'','[]','[]',?,1)", params![draft.to_string(), text.to_string(), route_json]).unwrap();
+    }
+    for folder in [ConversationFolder::Spam, ConversationFolder::Archived] {
+        fixture
+            .client
+            .set_conversation_folder(text, folder)
+            .unwrap();
+        for conversation in [native, update, text] {
+            let row = fixture
+                .client
+                .list_conversations()
+                .unwrap()
+                .into_iter()
+                .find(|row| row.conversation_id == conversation)
+                .unwrap();
+            let draft_route = fixture
+                .client
+                .compose_drafts()
+                .unwrap()
+                .into_iter()
+                .find(|draft| draft.conversation_id == conversation)
+                .and_then(|draft| draft.route);
+            let routing = fixture.client.reaction_routing(conversation).unwrap();
+            assert_eq!(routing.spam, row.folder == ConversationFolder::Spam);
+            assert_eq!(routing.support.support, row.reaction_support);
+            assert_eq!(routing.support.gateway_id, row.reaction_gateway_id);
+            assert_eq!(routing.stored_route, draft_route);
+        }
+    }
+}
+
+#[test]
+fn reaction_routing_matches_merged_conversation_folder() {
+    let fixture = Fixture::new();
+    let source = ConversationId::new();
+    let target = ConversationId::new();
+    let message = seed_message(&fixture, Transport::Sms, Direction::Incoming, "hi", source);
+    fixture
+        .client
+        .set_conversation_folder(source, ConversationFolder::Spam)
+        .unwrap();
+    fixture.execute(&format!(
+        "INSERT INTO conversation_merges(source_id,target_id) VALUES('{source}','{target}')"
+    ));
+    fixture.execute(&format!(
+        "UPDATE messages SET effective_conversation_id='{target}' WHERE id='{message}'"
+    ));
+    let row = fixture
+        .client
+        .list_conversations()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.conversation_id == target)
+        .unwrap();
+    let routing = fixture.client.reaction_routing(target).unwrap();
+    assert!(routing.spam);
+    assert_eq!(routing.spam, row.folder == ConversationFolder::Spam);
+    assert_eq!(routing.support.support, row.reaction_support);
+    assert_eq!(routing.stored_route, None);
+}
+
 /// An RCS conversation whose gateway reports the capability for the active epoch.
 fn native_conversation(fixture: &Fixture, gateway: DeviceId, supported: bool) -> ConversationId {
     let conversation = ConversationId::new();

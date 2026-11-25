@@ -84,8 +84,8 @@ mod send_cancellation_decoder_recovery_tests;
 #[cfg(test)]
 mod send_cancellation_validation_tests;
 pub use reactions::{
-    OwnReactionRequest, OwnReactionState, RcsReactionEntry, ReactionRoute, ReactionSubmit,
-    ReactionSupport, ReactionSupportView, SubmitRefusal, compose_reaction_text,
+    OwnReactionRequest, OwnReactionState, RcsReactionEntry, ReactionRoute, ReactionRouting,
+    ReactionSubmit, ReactionSupport, ReactionSupportView, SubmitRefusal, compose_reaction_text,
 };
 use reactions::{reaction_refusal_code, store_message_reactions};
 #[cfg(test)]

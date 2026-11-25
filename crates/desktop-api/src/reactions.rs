@@ -260,19 +260,35 @@ pub fn conversation_reactions(
     gateways: &[GatewayView],
     stored_route: Option<&GatewayRoute>,
 ) -> ConversationReactions {
-    if conversation.folder == ConversationFolder::Spam {
+    routing_for(
+        conversation.folder == ConversationFolder::Spam,
+        conversation.reaction_support,
+        conversation.reaction_gateway_id,
+        gateways,
+        stored_route,
+    )
+}
+
+fn routing_for(
+    spam: bool,
+    support: ReactionSupport,
+    gateway: Option<peppy_client_core::DeviceId>,
+    gateways: &[GatewayView],
+    stored_route: Option<&GatewayRoute>,
+) -> ConversationReactions {
+    if spam {
         return ConversationReactions::none();
     }
-    match conversation.reaction_support {
+    match support {
         ReactionSupport::Native | ReactionSupport::NeedsPhoneUpdate => {
-            let gateway_id = conversation.reaction_gateway_id.map(|id| id.to_string());
+            let gateway_id = gateway.map(|id| id.to_string());
             let gateway_online = gateway_id.as_ref().is_some_and(|id| {
                 gateways
                     .iter()
                     .any(|gateway| gateway.id == *id && gateway.online)
             });
             ConversationReactions {
-                support: support_wire(conversation.reaction_support),
+                support: support_wire(support),
                 gateway_id,
                 gateway_online,
                 text_route: None,
@@ -294,19 +310,14 @@ pub fn react(
     let message = client.message_by_id(message_id)?.ok_or(Error::NotFound)?;
     let source = message.payload.record.conversation_id;
     let conversation_id = client.conversation_redirect(source)?.unwrap_or(source);
-    let conversation = client
-        .list_conversations()?
-        .into_iter()
-        .find(|conversation| conversation.conversation_id == conversation_id);
-    let stored = client
-        .compose_drafts()?
-        .into_iter()
-        .find(|draft| draft.conversation_id == conversation_id)
-        .and_then(|draft| draft.route);
-    let routing = match conversation {
-        Some(conversation) => conversation_reactions(&conversation, gateways, stored.as_ref()),
-        None => ConversationReactions::none(),
-    };
+    let facts = client.reaction_routing(conversation_id)?;
+    let routing = routing_for(
+        facts.spam,
+        facts.support.support,
+        facts.support.gateway_id,
+        gateways,
+        facts.stored_route.as_ref(),
+    );
     if message.reactable.is_some() && routing.support == ReactionSupportDto::None {
         return Ok(unsupported());
     }
@@ -399,6 +410,34 @@ mod tests {
         GatewayRoute::Carrier {
             gateway_device_id: gateway.parse().unwrap(),
             subscription_id: sim.into(),
+        }
+    }
+
+    #[test]
+    fn routing_for_matches_conversation_routing() {
+        let id = GATEWAY.parse().unwrap();
+        let stored = carrier(GATEWAY, "sim-1");
+        for folder in [ConversationFolder::Inbox, ConversationFolder::Spam] {
+            for support in [
+                ReactionSupport::Native,
+                ReactionSupport::NeedsPhoneUpdate,
+                ReactionSupport::Text,
+            ] {
+                for online in [false, true] {
+                    let row = conversation(support, Some(id), folder);
+                    let gateways = [gateway(GATEWAY, "sim-1", online)];
+                    assert_eq!(
+                        conversation_reactions(&row, &gateways, Some(&stored)),
+                        routing_for(
+                            folder == ConversationFolder::Spam,
+                            support,
+                            Some(id),
+                            &gateways,
+                            Some(&stored)
+                        )
+                    );
+                }
+            }
         }
     }
 
