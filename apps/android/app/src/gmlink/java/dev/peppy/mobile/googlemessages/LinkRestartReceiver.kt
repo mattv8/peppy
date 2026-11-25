@@ -12,7 +12,7 @@ internal data class RestartReceiverTestHooks(
     val pendingFinished: () -> Unit = {},
 )
 
-private val RESTART_EXECUTOR = Executors.newSingleThreadExecutor()
+internal val RESTART_EXECUTOR = Executors.newSingleThreadExecutor()
 
 class LinkRestartReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {

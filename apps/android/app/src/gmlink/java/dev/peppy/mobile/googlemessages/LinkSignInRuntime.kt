@@ -7,7 +7,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 internal object LinkSignInRuntime {
     private val lock = Any()
-    private val pairingExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    internal val pairingExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private var lease: Lease? = null
     private var signInBlocked = false
 
