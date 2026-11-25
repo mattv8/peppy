@@ -305,38 +305,49 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         val mainCallReturned = CountDownLatch(1)
         val returnedBeforeRelease = AtomicBoolean(false)
         val blockRecorder = AtomicBoolean(false)
-        LinkCoreBridge.recorder = { _, _ ->
+        LinkCoreBridge.beforeLifecycleWriteForTest = {
             if (blockRecorder.get()) {
                 recorderEntered.countDown()
-                releaseRecorder.await()
+                check(releaseRecorder.await(10, TimeUnit.SECONDS))
             }
-            true
         }
         installEngine(handle)
         val controller = startService()
-        assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
-        blockRecorder.set(true)
-        val firstAttempt = checkNotNull(LinkRuntime.tryBeginPairing())
-        val preStart = Thread { LinkRuntime.recordPreStart(controller.get(), firstAttempt) }.also { it.start() }
-        assertTrue(recorderEntered.await(1, TimeUnit.SECONDS))
-        assertTrue(LinkRuntime.endPairing(firstAttempt))
-        val releaseAfterObservation = Thread {
-            assertTrue(mainCallStarted.await(1, TimeUnit.SECONDS))
-            returnedBeforeRelease.set(mainCallReturned.await(250, TimeUnit.MILLISECONDS))
+        var preStart: Thread? = null
+        var destroyed = false
+        try {
+            assertTrue(handle.runEntered.await(1, TimeUnit.SECONDS))
+            blockRecorder.set(true)
+            val firstAttempt = checkNotNull(LinkRuntime.tryBeginPairing())
+            val preStartThread = Thread { LinkRuntime.recordPreStart(controller.get(), firstAttempt) }.also { it.start() }
+            preStart = preStartThread
+            assertTrue(recorderEntered.await(1, TimeUnit.SECONDS))
+            assertTrue(LinkRuntime.endPairing(firstAttempt))
+            val releaseAfterObservation = Thread {
+                assertTrue(mainCallStarted.await(1, TimeUnit.SECONDS))
+                returnedBeforeRelease.set(mainCallReturned.await(250, TimeUnit.MILLISECONDS))
+                releaseRecorder.countDown()
+            }.also { it.start() }
+
+            mainCallStarted.countDown()
+            controller.destroy()
+            destroyed = true
+            val nextAttempt = LinkRuntime.tryBeginPairing()
+            mainCallReturned.countDown()
+
+            releaseAfterObservation.join(1_000)
+            preStartThread.join(1_000)
+            assertFalse(preStartThread.isAlive)
+            assertEquals(NativeRcsLinkState.UNAVAILABLE, persistedLinkState())
+            assertTrue("main-looper destruction and admission waited for lifecycle persistence", returnedBeforeRelease.get())
+            assertTrue(nextAttempt != null)
+            nextAttempt?.let { LinkRuntime.endPairing(it) }
+        } finally {
             releaseRecorder.countDown()
-        }.also { it.start() }
-
-        mainCallStarted.countDown()
-        controller.destroy()
-        val nextAttempt = LinkRuntime.tryBeginPairing()
-        mainCallReturned.countDown()
-
-        releaseAfterObservation.join(1_000)
-        preStart.join(1_000)
-        assertTrue("main-looper destruction and admission waited for lifecycle persistence", returnedBeforeRelease.get())
-        assertTrue(nextAttempt != null)
-        nextAttempt?.let { LinkRuntime.endPairing(it) }
-        handle.allowRunReturn.countDown()
+            handle.allowRunReturn.countDown()
+            if (!destroyed) controller.destroy()
+            preStart?.join(1_000)
+        }
     }
 
     @Test
@@ -837,33 +848,44 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         listOf(NEEDS_RELINK_STATUS, SIGNED_OUT_STATUS).forEach { terminalStatus ->
             val recordEntered = CountDownLatch(1)
             val releaseRecord = CountDownLatch(1)
-            val terminalRecorded = CountDownLatch(1)
+            val workerFinished = CountDownLatch(1)
             val notificationExecutor = QueueExecutor()
             var publications = 0
-            LinkCoreBridge.recorder = { _, status ->
+            LinkCoreBridge.beforeLifecycleWriteForTest = { status ->
                 if (status.state == LinkStatus.parse(terminalStatus).state) {
-                    terminalRecorded.countDown()
                     recordEntered.countDown()
-                    releaseRecord.await()
+                    check(releaseRecord.await(10, TimeUnit.SECONDS))
                 }
-                true
             }
             GoogleMessagesLinkService.testHooks = ServiceTestHooks(
                 notificationExecutor = notificationExecutor,
                 notificationPublished = { publications++ },
+                workerFinished = { workerFinished.countDown() },
             )
             installEngine(TerminalAfterRunHandle(terminalStatus))
             val controller = startService()
-            assertTrue(recordEntered.await(1, TimeUnit.SECONDS))
+            var destroyed = false
+            try {
+                assertTrue(recordEntered.await(1, TimeUnit.SECONDS))
 
-            controller.destroy()
-            releaseRecord.countDown()
+                controller.destroy()
+                destroyed = true
+                releaseRecord.countDown()
 
-            assertTrue(terminalRecorded.await(1, TimeUnit.SECONDS))
-            // The initial content-free foreground promotion is synchronous.
-            assertEquals(1, publications)
-            LinkRuntime.resetForTest()
-            LinkCoreBridge.resetForTest()
+                assertTrue(workerFinished.await(5, TimeUnit.SECONDS))
+                synchronized(LinkCoreBridge) { /* Wait for the in-flight lifecycle write. */ }
+                assertEquals(
+                    if (LinkStatus.parse(terminalStatus).state == "needs_relink") NativeRcsLinkState.NEEDS_RELINK else NativeRcsLinkState.SIGNED_OUT,
+                    persistedLinkState(),
+                )
+                // The initial content-free foreground promotion is synchronous.
+                assertEquals(1, publications)
+                LinkRuntime.resetForTest()
+                LinkCoreBridge.resetForTest()
+            } finally {
+                releaseRecord.countDown()
+                if (!destroyed) controller.destroy()
+            }
         }
     }
 

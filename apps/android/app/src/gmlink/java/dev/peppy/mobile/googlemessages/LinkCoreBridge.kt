@@ -1,6 +1,7 @@
 package dev.peppy.mobile.googlemessages
 
 import android.content.Context
+import androidx.annotation.VisibleForTesting
 import dev.peppy.mobile.GatewayWork
 import dev.peppy.mobile.GatewayEnqueueCause
 import dev.peppy.mobile.diagnostics.recordGoogleMessagesLinkEvent
@@ -13,8 +14,7 @@ import uniffi.peppy_mobile_bindings.gatewayRecordRcsExplicitUnlinkCompleted
 
 /** Records content-free link lifecycle on a worker thread before linked status is surfaced. */
 internal object LinkCoreBridge {
-    @Volatile var recorder: ((Context, LinkStatus) -> Boolean)? = null
-    @Volatile internal var explicitUnlinkCompleter: ((Context, Long) -> Unit)? = null
+    @VisibleForTesting @Volatile internal var beforeLifecycleWriteForTest: ((LinkStatus) -> Unit)? = null
     private var lastFacts: LinkCapabilityFacts? = null
     private var lastRecordedAt = 0L
     private val observationGeneration = AtomicLong(0L)
@@ -45,11 +45,9 @@ internal object LinkCoreBridge {
             lastFacts = status.facts()
             lastRecordedAt = observedAtMs
             runCatching {
-                explicitUnlinkCompleter?.invoke(context, observedAtMs) ?: if (recorder != null) Unit else {
-                    NativeGateway.open(context.applicationContext)?.let { client ->
-                        gatewayRecordRcsExplicitUnlinkCompleted(client, observedAtMs, System.currentTimeMillis())
-                    } ?: throw IllegalStateException("gateway_unavailable")
-                }
+                NativeGateway.open(context.applicationContext)?.let { client ->
+                    gatewayRecordRcsExplicitUnlinkCompleted(client, observedAtMs, System.currentTimeMillis())
+                } ?: throw IllegalStateException("gateway_unavailable")
             }.onSuccess {
                 sweepOwnerUnlinkCutoverNow(context.applicationContext)
             }.onFailure {
@@ -61,7 +59,6 @@ internal object LinkCoreBridge {
     fun recordPreStart(context: Context, pairingAttempt: Long? = null): Boolean {
         if (pairingAttempt != null && !LinkRuntime.ownsPairingAttempt(pairingAttempt)) return false
         invalidateObservations()
-        LinkCoreBridgeTestHooks.preStartFenceBegun?.invoke()
         return lifecycleExecutor.submit<Boolean> {
             synchronized(this) {
                 if (pairingAttempt != null && !LinkRuntime.ownsPairingAttempt(pairingAttempt)) return@synchronized false
@@ -98,8 +95,7 @@ internal object LinkCoreBridge {
     }
 
     private fun cutoverAlertIds(context: Context): Set<String>? = runCatching {
-        LinkCoreBridgeTestHooks.cutoverAlertIds?.invoke()
-            ?: NativeGateway.open(context.applicationContext)?.gatewayRcsCutoverAlerts()?.conversationIds?.toSet()
+        NativeGateway.open(context.applicationContext)?.gatewayRcsCutoverAlerts()?.conversationIds?.toSet()
             ?: emptySet()
     }.getOrNull()
 
@@ -107,7 +103,6 @@ internal object LinkCoreBridge {
 
     fun recordObservation(token: Long, lease: LinkHandleLease, context: Context, status: LinkStatus): Boolean {
         return lifecycleExecutor.submit<Boolean> {
-            LinkCoreBridgeTestHooks.beforeObservationValidation?.invoke()
             var linkReturned = false
             val recorded = synchronized(this) {
                 if (LinkRuntime.pairingInProgress.get() || token != observationGeneration.get() || !LinkRuntime.ownsObservationLease(lease)) return@synchronized true
@@ -125,21 +120,15 @@ internal object LinkCoreBridge {
     }
 
     internal fun resetForTest() = synchronized(this) {
-        recorder = null
-        explicitUnlinkCompleter = null
+        beforeLifecycleWriteForTest = null
         lastFacts = null
         lastRecordedAt = 0L
         observationGeneration.set(0L)
-        LinkCoreBridgeTestHooks.beforeObservationValidation = null
-        LinkCoreBridgeTestHooks.preStartFenceBegun = null
-        LinkCoreBridgeTestHooks.cutoverAlertIds = null
-        LinkCoreBridgeTestHooks.enqueueGatewayPass = null
     }
 
     fun record(context: Context, status: LinkStatus): Boolean = record(context, status, System.currentTimeMillis())
 
     private fun record(context: Context, status: LinkStatus, now: Long): Boolean {
-        recorder?.let { return it(context, status) }
         val state = when (status.state) {
             "linked" -> NativeRcsLinkState.LINKED
             "unlinked" -> NativeRcsLinkState.UNLINKED
@@ -148,6 +137,7 @@ internal object LinkCoreBridge {
             else -> NativeRcsLinkState.UNAVAILABLE
         }
         return runCatching {
+            beforeLifecycleWriteForTest?.invoke(status)
             NativeGateway.open(context.applicationContext)?.recordRcsLinkLifecycle(
                 state,
                 status.state != "unknown",
@@ -169,7 +159,7 @@ internal object LinkCoreBridge {
 
     private fun enqueueGatewayPass(context: Context) {
         runCatching {
-            LinkCoreBridgeTestHooks.enqueueGatewayPass?.invoke() ?: GatewayWork.enqueueAfterCapture(context.applicationContext, GatewayEnqueueCause.RCS_LINK)
+            GatewayWork.enqueueAfterCapture(context.applicationContext, GatewayEnqueueCause.RCS_LINK)
         }
     }
 
@@ -206,10 +196,3 @@ internal object LinkCoreBridge {
 
 private data class LinkCapabilityFacts(val state: String, val running: Boolean, val healthy: Boolean, val phoneResponding: Boolean, val stopCode: String)
 private fun LinkStatus.facts() = LinkCapabilityFacts(state, running, healthy, phoneResponding, stopCode)
-
-internal object LinkCoreBridgeTestHooks {
-    @Volatile var beforeObservationValidation: (() -> Unit)? = null
-    @Volatile var preStartFenceBegun: (() -> Unit)? = null
-    @Volatile var cutoverAlertIds: (() -> Set<String>)? = null
-    @Volatile var enqueueGatewayPass: (() -> Unit)? = null
-}

@@ -235,6 +235,20 @@ class LinkCoreBridgeTest : GatewayTestBase() {
         assertEquals(1, activeGatewayWork())
     }
 
+    @Test
+    fun `observation deduplicates unchanged facts but writes changed facts`() {
+        enrollAndUnlock()
+        val lease = observationLease()
+        val token = LinkCoreBridge.observationToken()
+        val status = linked()
+        assertTrue(LinkCoreBridge.recordObservation(token, lease, context, status))
+        val revision = checkNotNull(persistedLinkStatus()).capabilityRevision
+        assertTrue(LinkCoreBridge.recordObservation(token, lease, context, status))
+        assertEquals(revision, checkNotNull(persistedLinkStatus()).capabilityRevision)
+        assertTrue(LinkCoreBridge.recordObservation(token, lease, context, status.copy(healthy = false)))
+        assertEquals(revision + 1uL, checkNotNull(persistedLinkStatus()).capabilityRevision)
+    }
+
     private fun worker(block: () -> Unit): Thread = Thread(block).also { workers += it }
 
     private fun linked() = LinkStatus(0, "linked", true, true, true, 1, "")
