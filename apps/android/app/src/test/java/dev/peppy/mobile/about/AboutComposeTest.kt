@@ -1,5 +1,6 @@
 package dev.peppy.mobile.about
 
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.layout.Column
@@ -8,15 +9,17 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.hasTestTag
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -30,8 +33,14 @@ import dev.peppy.mobile.gateway.GatewayStatus
 import dev.peppy.mobile.testing.ComposeTestActivityRule
 import dev.peppy.mobile.ui.LocalPageChromeHost
 import dev.peppy.mobile.ui.PageChromeHost
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -43,6 +52,7 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class AboutComposeTest {
+    // Queue IO completions instead of resuming recomposition inline on the worker.
     private val compose = createComposeRule()
     @get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeTestActivityRule()).around(compose)
     private lateinit var activity: ComponentActivity
@@ -178,6 +188,63 @@ class AboutComposeTest {
         compose.waitUntil { compose.onAllNodesWithTag("license-text").fetchSemanticsNodes().isNotEmpty() }
         compose.runOnIdle { phase = 2 }
         compose.waitUntil { compose.onAllNodesWithTag("license-error").fetchSemanticsNodes().isNotEmpty() }
+    }
+
+    @Test fun backgroundLicenseCompletionResumesOnMainLooper() {
+        // Gate both the real screen loader and a continuation probe in the same effect context.
+        val entered = CountDownLatch(2)
+        val release = CountDownLatch(1)
+        val resumed = CountDownLatch(1)
+        val resumedLooper = AtomicReference<Looper?>()
+        val recomposedLooper = AtomicReference<Looper?>()
+        val completed = mutableStateOf(false)
+        val notices = object : ThirdPartyNotices by FakeNotices() {
+            override fun notice(): String {
+                entered.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+                return "notices"
+            }
+
+            override fun entries(): List<ThirdPartyNoticeEntry> {
+                // LicensesScreen asks for entries only after its IO-backed notice has loaded.
+                recomposedLooper.set(Looper.myLooper())
+                return listOf(ThirdPartyNoticeEntry("MIT.txt", null))
+            }
+        }
+        try {
+            compose.setContent {
+                LaunchedEffect(Unit) {
+                    withContext(Dispatchers.IO) { notices.notice() }
+                    resumedLooper.set(Looper.myLooper())
+                    completed.value = true
+                    resumed.countDown()
+                }
+                if (completed.value) {
+                    assertSame("recomposition looper", Looper.getMainLooper(), Looper.myLooper())
+                }
+                MaterialTheme { LicensesScreen(notices, {}, {}) }
+            }
+            compose.waitUntil(5_000) { entered.count == 0L }
+            compose.onNodeWithTag("licenses-loading").fetchSemanticsNode()
+            compose.mainClock.autoAdvance = false
+            release.countDown()
+            compose.waitUntil(5_000) {
+                compose.mainClock.advanceTimeByFrame()
+                resumed.count == 0L
+            }
+            assertSame("effect continuation looper", Looper.getMainLooper(), resumedLooper.get())
+            compose.mainClock.autoAdvance = true
+            compose.waitUntil {
+                compose.onAllNodesWithTag("license-row-MIT").fetchSemanticsNodes().isNotEmpty()
+            }
+            assertSame("license loader recomposition looper", Looper.getMainLooper(), recomposedLooper.get())
+            compose.onNodeWithTag("licenses-notice").assert(
+                SemanticsMatcher.expectValue(SemanticsProperties.Text, listOf(androidx.compose.ui.text.AnnotatedString("notices"))),
+            )
+        } finally {
+            release.countDown()
+            compose.mainClock.autoAdvance = true
+        }
     }
 
     @Test fun licenseTextRepeatsTitleAsHeading() {
