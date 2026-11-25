@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { MEDIA_SYNC_RETRY_MS } from "./MediaTile";
 import { MediaGrid } from "./MediaGrid";
 import { MediaActionsProvider } from "./MediaActionsContext";
@@ -47,6 +47,44 @@ describe("MediaGrid", () => {
   it("uses the supplied renderer for media captions", () => {
     render(<MediaGrid messages={[message("1", "Read https://peppy.pro/docs")]} onOpen={vi.fn()} renderCaption={(value) => <MessageText text={value.body} />} />);
     expect(screen.getByRole("link", { name: "https://peppy.pro/docs" })).toHaveAttribute("href", "https://peppy.pro/docs");
+  });
+
+  it("wraps bare single media, actions and badges but not its caption", () => {
+    const view = render(<MediaGrid messages={[message("1", "hello")]} onOpen={vi.fn()} renderMessageAction={() => <button data-message-cancel>Cancel</button>} renderBadges={() => <span data-test-badges />} />);
+    const article = view.container.querySelector("article")!;
+    const frame = article.querySelector("[data-media-frame]")!;
+    expect(article).toHaveAttribute("data-media-bare");
+    expect(article).not.toHaveAttribute("data-chromeless");
+    expect(frame).toContainElement(article.querySelector("[data-media-tile]"));
+    expect(frame).toContainElement(article.querySelector("[data-message-cancel]"));
+    expect(frame).toContainElement(article.querySelector("[data-test-badges]"));
+    expect(frame).not.toContainElement(article.querySelector("[data-media-caption]"));
+    expect(article.closest(".message-row")).toHaveClass("self");
+    expect(article.querySelector("[data-message-caption]")).toHaveTextContent("hello");
+  });
+
+  it("uses a toned incoming caption and renders subject-only captions", () => {
+    const incoming = { ...message("1"), sender: "other" as const, subject: "topic" };
+    const view = render(<MediaGrid messages={[incoming]} onOpen={vi.fn()} captionStyle={() => ({ "--peppy-tone": "red" } as CSSProperties)} />);
+    const caption = view.container.querySelector("[data-media-caption]")!;
+    expect(caption).toHaveTextContent("Subject: topic");
+    expect(caption.firstElementChild).toHaveAttribute("data-peppy-tone");
+    expect((caption.firstElementChild as HTMLElement).style.getPropertyValue("--peppy-tone")).toBe("red");
+  });
+
+  it("omits empty captions and preserves bubble chrome while pending", () => {
+    const view = render(<MediaGrid messages={[message("1")]} onOpen={vi.fn()} isMessagePending={() => true} renderMessageAction={() => <span>Waiting</span>} />);
+    expect(view.container.querySelector("article")).not.toHaveAttribute("data-media-bare");
+    expect(view.container.querySelector("[data-media-frame]")).toBeNull();
+    expect(view.container.querySelector("[data-media-caption]")).toBeNull();
+    expect(screen.getByText("Waiting")).toBeInTheDocument();
+  });
+
+  it("wraps a carousel in a bare frame", () => {
+    const view = render(<MediaGrid messages={[message("1"), message("2")]} onOpen={vi.fn()} />);
+    expect(view.container.querySelector("article")).toHaveAttribute("data-media-bare");
+    expect(view.container.querySelector("[data-media-frame] [data-media-carousel]")).toBeInTheDocument();
+    expect(view.container.querySelector("[data-media-caption]")).toBeNull();
   });
 
   it("renders a single tile without carousel controls", () => {

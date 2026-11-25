@@ -53,7 +53,7 @@
 @media (forced-colors: active) { [data-reaction-target]::after { outline-color: Highlight; } }
  @media (prefers-reduced-motion: reduce) { #message-reaction-bar { animation: none; } }
  /* The overlay badge sits on its photo: only the photo element that holds one becomes its containing block (overlay placement). */
- [data-media-message-content]:has(> .reaction-badges-overlay), [data-media-slide]:has(> .reaction-badges-overlay) { position: relative; }
+ [data-media-frame]:has(> .reaction-badges-overlay), [data-media-slide]:has(> .reaction-badges-overlay) { position: relative; }
  #message-reaction-bar button { box-sizing: border-box; border-bottom: 2px solid transparent; font-size: 18px; line-height: 1; font-family: var(--peppy-font-body), "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; }
  [data-reaction-ok]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
  @media (forced-colors: active) { [data-reaction-ok]:focus-visible { outline-color: Highlight; } }

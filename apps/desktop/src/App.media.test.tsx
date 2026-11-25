@@ -133,6 +133,8 @@ describe("App media wiring", () => {
     expect(article).not.toHaveClass("self");
     expect(article).not.toHaveAttribute("data-peppy-tone");
     expect(article).toHaveStyle("--video-ar: 1080 / 1920");
+    expect(caption).toHaveAttribute("data-media-caption", "video-only");
+    expect(caption.querySelector(".media-caption-bubble")).toBeInTheDocument();
     expect(caption).toHaveTextContent("Watch this");
     expect(inlineMedia.compareDocumentPosition(caption) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
@@ -173,7 +175,8 @@ describe("App media wiring", () => {
     await screen.findByRole("button", { name: "Play video: subject-clip.mp4" });
     const article = document.querySelector<HTMLElement>('article[data-message-id="subject-video"]')!;
     const caption = article.querySelector("[data-message-caption]")!;
-    const subject = article.querySelector(".message-subject")!;
+    const subject = article.querySelector<HTMLElement>(".message-subject")!;
+    expect(caption).toContainElement(subject);
     expect(caption.compareDocumentPosition(subject) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(subject.querySelector("bdi")?.textContent).toBe(bidiSubject);
   });
@@ -411,7 +414,9 @@ describe("App media wiring", () => {
     const captionLink = screen.getByRole("link", { name: captionUrl });
     expect(bodyLink).toHaveAttribute("href", bodyUrl);
     expect(captionLink).toHaveAttribute("href", captionUrl);
-    expect(screen.getByText(`Subject: Reference ${subjectUrl}`).querySelector("a")).toBeNull();
+    const subject = document.querySelector('[data-media-caption="linked-caption"] .message-subject')!;
+    expect(subject).toHaveTextContent(`Subject: Reference ${subjectUrl}`);
+    expect(subject.querySelector("a")).toBeNull();
     if (hostKind === "native") {
       fireEvent.click(bodyLink);
       fireEvent.click(captionLink);

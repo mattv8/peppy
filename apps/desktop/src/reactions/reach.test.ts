@@ -46,6 +46,14 @@ describe("measureReach", () => {
     expect(measureReach(element)).toEqual({ top: 16, bottom: 16 });
   });
 
+  it("measures photo reach against the frame and keeps its caption clear", () => {
+    const element = anchor('<div data-media-frame></div><div data-message-caption>caption</div>');
+    element.setAttribute("data-media-message-content", "");
+    rect(element.firstElementChild!, 100, 180);
+    rect(element.lastElementChild!, 182, 220);
+    expect(measureReach(element)).toEqual({ top: 16, bottom: 0 });
+  });
+
   it("limits chromeless reach to keep a caption clear", () => {
     const element = anchor("<span data-message-caption>caption</span>");
     element.className = "message-bubble";

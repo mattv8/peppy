@@ -873,17 +873,6 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
 }
 .message-bubble.self .message-subject { color: var(--peppy-accent-text); }
 .message-bubble[data-peppy-tone] .message-subject { color: inherit; }
-.message-bubble[data-chromeless] [data-message-caption] {
-  max-width: 100%;
-  margin: 6px 0 2px;
-  color: var(--peppy-text-primary);
-  text-align: start;
-}
-.message-bubble[data-chromeless] .message-subject {
-  margin-top: 2px;
-  color: var(--peppy-text-secondary);
-  font-size: 11px;
-}
 @media (forced-colors: active) {
   .message-bubble[data-peppy-tone] { background: Canvas; color: CanvasText; border-color: CanvasText; }
   .message-sender-label { color: CanvasText; }
@@ -1749,3 +1738,18 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
 @media (forced-colors: active) { .recipient-group-name input { border-color: CanvasText; } }
 [data-rcs-attachment-slot] { min-width: 0; max-width: 100%; }
 [data-rcs-attachment-slot]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: -2px; }
+
+.message-bubble[data-media-bare] { position: relative; display: flex; flex-direction: column; align-items: flex-start; width: fit-content; padding: 0; border: 0; background: none; box-shadow: none; border-radius: 0; color: var(--peppy-text-primary); }
+.message-row.self .message-bubble[data-media-bare] { align-items: flex-end; }
+[data-media-frame] { position: relative; min-width: 0; max-width: 100%; }
+.message-bubble[data-media-bare] > [data-media-message-action]:not(:empty) { margin-top: 2px; font-size: 12px; line-height: 1.5; color: var(--peppy-text-secondary); max-width: 100%; text-align: start; }
+[data-media-frame] > [data-media-message-action]:has(> [data-message-cancel]) { display: contents; position: static; min-block-size: 0; padding: 0; }
+.message-bubble[data-media-bare]:has(> [data-message-cancel]), .message-bubble[data-chromeless]:has(> [data-message-cancel]) { min-block-size: 0; padding: 0; position: relative; }
+[data-media-frame] [data-message-cancel], .message-bubble[data-chromeless] > [data-message-cancel] { z-index: 3; inset-block-start: 6px; border: 1px solid rgba(255,255,255,.18); background: rgba(0,0,0,.55); color: #fff; }
+[data-media-frame] [data-message-cancel] { inset-inline-start: auto; left: 6px; inset-inline-end: auto; }
+.message-bubble[data-chromeless] > [data-message-cancel] { right: 6px; inset-inline-end: 6px; }
+[data-media-frame] [data-message-cancel]:hover:not(:disabled), .message-bubble[data-chromeless] > [data-message-cancel]:hover:not(:disabled) { background: rgba(0,0,0,.75); }
+[data-media-frame] [data-message-cancel]:active:not(:disabled), .message-bubble[data-chromeless] > [data-message-cancel]:active:not(:disabled) { background: rgba(0,0,0,.85); }
+[data-media-frame] [data-message-cancel]:focus-visible, .message-bubble[data-chromeless] > [data-message-cancel]:focus-visible { outline: 2px solid #fff; outline-offset: 1px; box-shadow: 0 0 0 4px var(--peppy-focus-ring); }
+@media (pointer: coarse) { [data-media-frame] [data-message-cancel] { left: 4px; } .message-bubble[data-chromeless] > [data-message-cancel] { right: 4px; inset-inline-end: 4px; } }
+@media (forced-colors: active) { [data-message-cancel] { background: ButtonFace; color: ButtonText; border: 1px solid ButtonText; } [data-media-frame] [data-message-cancel]:focus-visible, .message-bubble[data-chromeless] > [data-message-cancel]:focus-visible { outline-color: Highlight; } }
