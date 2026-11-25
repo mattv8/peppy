@@ -78,8 +78,7 @@ describe("useSeenBadges", () => {
     expect(input.onSeen).toHaveBeenLastCalledWith(["new"]);
   });
 
-  it.each(["disabled", "unfocused", "hidden", "live gate"])("does not record when %s", (gate) => {
-    if (gate === "unfocused") vi.mocked(document.hasFocus).mockReturnValue(false);
+  it.each(["disabled", "hidden", "live gate"])("does not record when %s", (gate) => {
     if (gate === "hidden") vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
     let allowed = true;
     const { node, input } = setup({ enabled: gate !== "disabled", canRecord: () => allowed });
@@ -88,12 +87,45 @@ describe("useSeenBadges", () => {
     expect(input.onSeen).not.toHaveBeenCalled();
   });
 
-  it.each(["focus", "visibilitychange"])("reobserves on %s without trusting a cached intersection", (event) => {
-    const { node, input } = setup();
+  it("lets the caller allow observation while unfocused", () => {
     vi.mocked(document.hasFocus).mockReturnValue(false);
+    const { node, input } = setup();
+    act(() => latestObserver().emit(node, 1));
+    expect(input.onSeen).toHaveBeenCalledExactlyOnceWith(["old"]);
+  });
+
+  it("debounces scroll reobservation and cleans up the timer and listener", () => {
+    vi.useFakeTimers();
+    const { node, input, unmount } = setup();
+    const old = latestObserver();
+    act(() => {
+      input.root!.dispatchEvent(new Event("scroll"));
+      vi.advanceTimersByTime(100);
+      input.root!.dispatchEvent(new Event("scroll"));
+      vi.advanceTimersByTime(149);
+    });
+    expect(latestObserver()).toBe(old);
+    act(() => vi.advanceTimersByTime(1));
+    expect(latestObserver()).not.toBe(old);
+    act(() => old.emit(node, 1));
+    expect(input.onSeen).not.toHaveBeenCalled();
+    const count = ControlledObserver.instances.length;
+    act(() => input.root!.dispatchEvent(new Event("scroll")));
+    unmount();
+    act(() => {
+      input.root!.dispatchEvent(new Event("scroll"));
+      vi.runAllTimers();
+    });
+    expect(ControlledObserver.instances).toHaveLength(count);
+    vi.useRealTimers();
+  });
+
+  it.each(["focus", "visibilitychange"])("reobserves on %s without trusting a cached intersection", (event) => {
+    let allowed = false;
+    const { node, input } = setup({ canRecord: () => allowed });
     const old = latestObserver();
     act(() => old.emit(node, 1));
-    vi.mocked(document.hasFocus).mockReturnValue(true);
+    allowed = true;
     act(() => (event === "focus" ? window : document).dispatchEvent(new Event(event)));
     expect(latestObserver()).not.toBe(old);
     act(() => old.emit(node, 1));
