@@ -111,7 +111,10 @@ recipient-rail boundaries, pane resizing, and saved layouts when restyling.
   window managers work; `AppTitlebar` reserves their 76px slot with a non-interactive spacer
   (`nativeWindowControls`). Composer windows, head panels, Windows and Linux stay app-drawn.
   Close paths use `closeAfterSave` or the native `CloseRequested` lifecycle, and a draft
-  flush failure keeps the window open. The detached
+  flush failure keeps the window open. A close, collapse, or quit first waits up to 6
+  seconds (`CLOSE_SEND_WAIT_MS`) for an in-flight send to settle. A refused send keeps
+  the window open with only its composer "Not sent" notice. A send still running at the
+  bound keeps the window open with a warning banner, not a draft-save error. The detached
   composer is not a second main window.
 
 ## Icons and compose
