@@ -1110,11 +1110,15 @@ impl Client {
         draft_id: DraftId,
     ) -> Result<Vec<(AttachmentId, DraftAttachmentState)>, Error> {
         let store = self.lock()?;
-        let ids: String = store.conn.query_row(
-            "SELECT attachment_ids FROM compose_drafts WHERE draft_id=?",
-            [draft_id.to_string()],
-            |r| r.get(0),
-        )?;
+        let ids: String = store
+            .conn
+            .query_row(
+                "SELECT attachment_ids FROM compose_drafts WHERE draft_id=?",
+                [draft_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(Error::NotFound)?;
         let ids: Vec<AttachmentId> = serde_json::from_str(&ids).map_err(|_| Error::Database)?;
         let sync_enabled = sync_row(&store.conn, draft_id)?
             .is_some_and(|row| !matches!(row.state.as_str(), "local_only" | "paused"));

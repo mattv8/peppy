@@ -3,6 +3,33 @@ use peppy_crypto::{
     KeyPurpose, derive_draft_purpose_key, derive_purpose_key, derive_root_key, encrypt,
 };
 
+#[test]
+fn discarded_draft_attachment_states_are_not_found() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "receiver", &vault), &vault);
+    let draft_id = client.create_compose_draft(None).unwrap().draft_id;
+    client
+        .apply_draft_changes(
+            vec![RemoteDraftChange::Terminal {
+                draft_id,
+                reason: DraftTerminalReasonCore::Discarded,
+                command_id: None,
+            }],
+            "1",
+        )
+        .unwrap();
+    assert!(
+        !client
+            .compose_drafts()
+            .unwrap()
+            .iter()
+            .any(|draft| draft.draft_id == draft_id)
+    );
+    let states = client.draft_attachment_states(draft_id);
+    assert!(matches!(states, Err(Error::NotFound)), "{states:?}");
+}
+
 fn draft_aad(vault_id: VaultId, draft_id: DraftId, revision_id: uuid::Uuid) -> Vec<u8> {
     [
         b"peppy.draft.v1\0".as_slice(),

@@ -1603,10 +1603,21 @@ impl Session {
         &self,
         draft: &peppy_client_core::ComposeDraft,
     ) -> BridgeResult<DraftView> {
-        let states = self
-            .client
-            .draft_attachment_states(draft.draft_id)
-            .map_err(core_error)?;
+        self.draft_view_if_present(draft)?
+            .ok_or_else(|| core_error(peppy_client_core::Error::NotFound))
+    }
+
+    /// The snapshot reads the draft list and view under separate store locks, so the sync worker
+    /// can delete a draft between those reads.
+    pub(crate) fn draft_view_if_present(
+        &self,
+        draft: &peppy_client_core::ComposeDraft,
+    ) -> BridgeResult<Option<DraftView>> {
+        let states = match self.client.draft_attachment_states(draft.draft_id) {
+            Ok(states) => states,
+            Err(peppy_client_core::Error::NotFound) => return Ok(None),
+            Err(error) => return Err(core_error(error)),
+        };
         let states: HashMap<_, _> = states.into_iter().collect();
         let errors = self
             .transfer_errors
@@ -1634,7 +1645,7 @@ impl Session {
         let mut view =
             peppy_desktop_api::draft_view_with_sync(&self.client, draft).map_err(core_error)?;
         view.attachments = Some(attachments);
-        Ok(view)
+        Ok(Some(view))
     }
 
     pub fn discard_draft(
@@ -2630,8 +2641,9 @@ impl Session {
         }
         let draft = active
             .and_then(|id| drafts_by_conversation.get(&id).copied())
-            .map(|draft| self.draft_view(draft))
-            .transpose()?;
+            .map(|draft| self.draft_view_if_present(draft))
+            .transpose()?
+            .flatten();
         let pending = self.client.pending_outbox_count().map_err(core_error)? as u64;
         let quarantine = self.client.quarantine_count().map_err(core_error)? as u64;
         let notification_snapshot = self.client.notification_snapshot().map_err(core_error)?;
@@ -3175,6 +3187,31 @@ mod tests {
         ] {
             assert_eq!(draft_attachment_state_label(state), label);
         }
+    }
+
+    #[test]
+    fn discarded_draft_view_is_absent_or_not_found() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = crate::tests::open(&fixture, &fixture.binding, &[]);
+        crate::tests::unlock(&session, &fixture);
+        let saved = session
+            .save_draft(&input("new", "", "text", &[], "0"))
+            .unwrap();
+        let draft_id = saved.id.parse().unwrap();
+        let stale = session.client.compose_draft(draft_id).unwrap().unwrap();
+        session
+            .client
+            .apply_draft_changes(
+                vec![peppy_client_core::RemoteDraftChange::Terminal {
+                    draft_id,
+                    reason: peppy_client_core::DraftTerminalReasonCore::Discarded,
+                    command_id: None,
+                }],
+                "1",
+            )
+            .unwrap();
+        assert!(matches!(session.draft_view_if_present(&stale), Ok(None)));
+        assert_eq!(session.draft_view(&stale).unwrap_err().code, "not-found");
     }
 
     #[test]
