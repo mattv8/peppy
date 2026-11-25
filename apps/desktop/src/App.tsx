@@ -238,7 +238,7 @@ import {
   type CancelledSendRestore,
 } from "./drafts/cancelledSendRestore";
 import { DraftNotice } from "./drafts/DraftNotice";
-import { CLOSE_SEND_WAIT_MS, createInFlightSend, waitForSend } from "./drafts/sendSettlement";
+import { CLOSE_SEND_WAIT_MS, closeWaitOutcome, createInFlightSend, waitForSend, type CloseWaitReason } from "./drafts/sendSettlement";
 import { DraftSyncStatus } from "./drafts/DraftSyncStatus";
 import type { DraftResolutionResult } from "./drafts/DraftConflictReviewDialog";
 import { selectDraftNotice, type DraftNoticeCandidate } from "./drafts/draftNoticeModel";
@@ -254,8 +254,9 @@ type RefreshRequest = {
 };
 
 type ActionNotice = Omit<AppNotice, "source">;
-type CloseOutcome = SaveOutcome | { ok: false; reason: "send-unsent" | "still-sending" };
-const CLOSE_SEND_NOTICES = { "still-sending": "Your message is still sending. You can close this window again once it finishes." };
+type CloseOutcome = SaveOutcome | { ok: false; reason: CloseWaitReason };
+type CloseNotices = Record<Exclude<CloseWaitReason, "send-unsent">, string> & { "send-unsent"?: string };
+const CLOSE_SEND_NOTICES: CloseNotices = { "still-sending": "Your message is still sending. You can close this window again once it finishes.", "reaction-still-sending": "Your reaction is still sending. You can close this window again once it finishes.", "reaction-unsent": "Your reaction wasn't sent, so the window stayed open. You can close it again now." };
 type ComposerFeedback = { key: string; message: string; severity: AppNotice["severity"]; kind?: "attachment-feedback" };
 type LocalCancellationState = "requested" | "too-late" | "unknown" | "failed";
 type CancellationState = NonNullable<MessageView["sendCancellation"]>["state"];
@@ -5144,14 +5145,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   /** Closing never discards an unsaved draft: a failed save keeps the window open. */
   const flushForClose = async (mode: "close" | "collapse"): Promise<CloseOutcome> => {
     const inFlightSend = inFlightSendRef.current;
-    if (inFlightSend) {
-      if (mode === "collapse") {
+    if (mode === "collapse") {
+      if (inFlightSend) {
         const outcome = await waitForSend(inFlightSend.submitted, CLOSE_SEND_WAIT_MS);
         if (outcome !== true) return { ok: false, reason: outcome === false ? "send-unsent" : "still-sending" };
-      } else {
-        const outcome = await waitForSend(inFlightSend.settled, CLOSE_SEND_WAIT_MS);
-        if (outcome !== "sent") return { ok: false, reason: outcome === "unsent" ? "send-unsent" : "still-sending" };
       }
+    } else {
+      const reason = await closeWaitOutcome(inFlightSend?.settled, pendingReactionStore.inFlight(), CLOSE_SEND_WAIT_MS);
+      if (reason) return { ok: false, reason };
     }
     const reviewedKeys = new Set<string>();
     for (;;) {
@@ -5163,7 +5164,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       store.acknowledgeReview(outcome.key);
     }
   };
-  const showFlushFailure = (outcome: Extract<CloseOutcome, { ok: false }>, prefix: string, sendNotices: { "still-sending": string; "send-unsent"?: string } = CLOSE_SEND_NOTICES) => {
+  const showFlushFailure = (outcome: Extract<CloseOutcome, { ok: false }>, prefix: string, sendNotices: CloseNotices = CLOSE_SEND_NOTICES) => {
     if ("reason" in outcome) {
       const notice = sendNotices[outcome.reason];
       if (notice) setNotice(notice, "warning");
@@ -5440,7 +5441,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   const lockSync = lock ? async () => {
     const saved = await flushForClose("close");
     if (!saved.ok) {
-      showFlushFailure(saved, "Not locked: the draft could not be saved", { "still-sending": "Not locked: your message is still sending. Try again once it finishes.", "send-unsent": "Not locked: your message was not sent." });
+      showFlushFailure(saved, "Not locked: the draft could not be saved", { "still-sending": "Not locked: your message is still sending. Try again once it finishes.", "send-unsent": "Not locked: your message was not sent.", "reaction-still-sending": "Not locked: your reaction is still sending. Try again once it finishes.", "reaction-unsent": "Not locked: your reaction was not sent." });
       return;
     }
     try {

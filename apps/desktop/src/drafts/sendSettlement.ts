@@ -20,3 +20,19 @@ export async function waitForSend<T>(settled: Promise<T>, timeoutMs: number): Pr
     clearTimeout(timer);
   }
 }
+
+/** Why a close cannot go ahead yet, in order of precedence. */
+export type CloseWaitReason = "still-sending" | "reaction-still-sending" | "send-unsent" | "reaction-unsent";
+
+export async function closeWaitOutcome(send: Promise<SendSettlement> | undefined, reactions: Promise<SendSettlement>[], timeoutMs: number): Promise<CloseWaitReason | undefined> {
+  const sendResult: { value: SendSettlement | undefined } = { value: send ? undefined : "sent" };
+  const reactionResults: (SendSettlement | undefined)[] = reactions.map(() => undefined);
+  const waits = reactions.map((reaction, index) => reaction.then((result) => { reactionResults[index] = result; }));
+  if (send) waits.push(send.then((result) => { sendResult.value = result; }));
+  await waitForSend(Promise.all(waits), timeoutMs);
+  if (!sendResult.value) return "still-sending";
+  if (reactionResults.some((result) => !result)) return "reaction-still-sending";
+  if (sendResult.value === "unsent") return "send-unsent";
+  if (reactionResults.includes("unsent")) return "reaction-unsent";
+  return undefined;
+}
