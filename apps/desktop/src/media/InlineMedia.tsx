@@ -123,6 +123,7 @@ export function InlineMedia({ attachment, requestOriginal, checkOriginal, releas
     if (playing.current && !seeking.current && !keyboardFocus.current && !touchOnly.current) setControlsVisible(false);
   };
   const handleVideoKeyDown = (event: KeyboardEvent<HTMLVideoElement>) => {
+    if (event.currentTarget.controls || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key !== " " && event.key.toLowerCase() !== "k") return;
     event.preventDefault();
     if (event.currentTarget.paused) void event.currentTarget.play().catch(() => {});
