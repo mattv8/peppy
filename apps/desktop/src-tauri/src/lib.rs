@@ -6190,6 +6190,9 @@ fn set_notification_context(
     let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     state.notifications.set_context(view, conversation_id);
+    if let Some(conversation_id) = state.notifications.viewed_conversation() {
+        heads_runtime::conversation_viewed(window.app_handle(), &conversation_id);
+    }
     Ok(())
 }
 
@@ -7231,6 +7234,15 @@ pub fn run() {
                         sync::wake_draft_sync_if_pending(session).await;
                     }
                 });
+            }
+            if matches!(event, WindowEvent::Focused(true)) && window.label() == tray::MAIN {
+                let viewed = window
+                    .app_handle()
+                    .try_state::<AppState>()
+                    .and_then(|state| state.notifications.viewed_conversation());
+                if let Some(conversation_id) = viewed {
+                    heads_runtime::conversation_viewed(window.app_handle(), &conversation_id);
+                }
             }
             if matches!(event, WindowEvent::Destroyed) {
                 window_chrome::forget_material(window.label());

@@ -297,7 +297,35 @@ struct SendFailures {
     acknowledged: HashMap<String, String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewingScope {
+    Panel,
+    MainWindow,
+}
+
+fn viewing_scope(
+    panel_visible: bool,
+    collapse_pending: bool,
+    main_viewing: bool,
+) -> Option<ViewingScope> {
+    if panel_visible && !collapse_pending {
+        Some(ViewingScope::Panel)
+    } else if main_viewing {
+        Some(ViewingScope::MainWindow)
+    } else {
+        None
+    }
+}
+
 impl SendFailures {
+    fn seed(&mut self, id: &str, message: Option<&str>) {
+        if let Some(message) = message {
+            self.acknowledged
+                .entry(id.to_owned())
+                .or_insert_with(|| message.to_owned());
+        }
+    }
+
     fn displayed(&self, id: &str, failed_message: Option<&str>) -> bool {
         self.refused.contains(id)
             || failed_message.is_some_and(|message| {
@@ -338,6 +366,26 @@ impl SendFailures {
             self.acknowledged.insert(id.to_owned(), message.to_owned());
         }
         changed
+    }
+
+    fn acknowledge_main(&mut self, id: &str, failed_message: Option<&str>) -> bool {
+        let before = self.displayed(id, failed_message);
+        if let Some(message) = failed_message {
+            self.acknowledged.insert(id.to_owned(), message.to_owned());
+        }
+        before != self.displayed(id, failed_message)
+    }
+
+    fn acknowledge_for_scope(
+        &mut self,
+        id: &str,
+        failed_message: Option<&str>,
+        scope: ViewingScope,
+    ) -> bool {
+        match scope {
+            ViewingScope::Panel => self.acknowledge(id, failed_message),
+            ViewingScope::MainWindow => self.acknowledge_main(id, failed_message),
+        }
     }
 
     fn forget(&mut self, id: &str) -> bool {
@@ -425,6 +473,7 @@ enum RuntimeAction {
 
 pub struct HeadRuntime {
     pins: PinStore,
+    failure_persistence: Mutex<()>,
     layouts: HeadLayoutStore,
     state: Mutex<RuntimeState>,
     actions: mpsc::UnboundedSender<RuntimeAction>,
@@ -515,6 +564,7 @@ pub fn install(app: &AppHandle) -> BridgeResult<()> {
     let (actions, mut receiver) = mpsc::unbounded_channel();
     app.manage(HeadRuntime {
         pins: PinStore::new(&root),
+        failure_persistence: Mutex::new(()),
         layouts: HeadLayoutStore::new(&root),
         state: Mutex::new(RuntimeState::new(generation)),
         actions,
@@ -760,19 +810,53 @@ fn push_typing_update(app: &AppHandle, token: RuntimeToken, conversation_id: Str
     });
 }
 
-fn acknowledge_failure(app: &AppHandle, token: &RuntimeToken, id: &str) {
-    let changed = runtime(app).state.lock().ok().is_some_and(|mut state| {
+fn persist_acknowledgement(app: &AppHandle, token: &RuntimeToken, id: &str) {
+    let rt = runtime(app);
+    let Ok(_guard) = rt.failure_persistence.lock() else {
+        return;
+    };
+    let message = {
+        let Ok(state) = rt.state.lock() else { return };
+        if !token_matches_state(app, &state, token)
+            || !state
+                .session
+                .as_ref()
+                .is_some_and(|session| Arc::ptr_eq(session, &token.session))
+        {
+            return;
+        }
+        state.send_failures.acknowledged.get(id).cloned()
+    };
+    let Some(message) = message else { return };
+    let _ = rt
+        .pins
+        .set_acknowledged_failure(&token.binding, id, Some(&message));
+}
+
+fn acknowledge_failure(app: &AppHandle, token: &RuntimeToken, id: &str, scope: ViewingScope) {
+    let result = runtime(app).state.lock().ok().and_then(|mut state| {
         if !token_matches_state(app, &state, token) {
-            return false;
+            return None;
         }
         let failed = state
             .heads
             .get(id)
             .and_then(|head| head.failed_message.clone());
-        state.send_failures.acknowledge(id, failed.as_deref())
+        let persist = failed
+            .as_ref()
+            .is_some_and(|message| state.send_failures.acknowledged.get(id) != Some(message));
+        let changed = state
+            .send_failures
+            .acknowledge_for_scope(id, failed.as_deref(), scope);
+        Some((changed, persist))
     });
-    if changed {
-        push_typing_update(app, token.clone(), id.to_owned());
+    if let Some((changed, persist)) = result {
+        if persist {
+            persist_acknowledgement(app, token, id);
+        }
+        if changed {
+            push_typing_update(app, token.clone(), id.to_owned());
+        }
     }
 }
 
@@ -792,10 +876,11 @@ pub(crate) fn send_settled(
         false
     } else {
         tray::composer_conversation(label).is_some()
-            && app
-                .get_webview_window(label)
-                .and_then(|window| window.is_visible().ok())
-                == Some(false)
+            && (crate::lifecycle::collapse_pending(app, label)
+                || app
+                    .get_webview_window(label)
+                    .and_then(|window| window.is_visible().ok())
+                    == Some(false))
     };
     let update = runtime(app).state.lock().ok().and_then(|mut state| {
         if state.stopped {
@@ -821,6 +906,29 @@ pub(crate) fn send_settled(
     if let Some(token) = update {
         push_typing_update(app, token, id);
     }
+}
+
+/// The main window switched to this conversation.
+pub(crate) fn conversation_viewed(app: &AppHandle, conversation_id: &str) {
+    if !main_window_focused(app) || app.try_state::<HeadRuntime>().is_none() {
+        return;
+    }
+    let token = runtime(app).state.lock().ok().and_then(|state| {
+        Some(RuntimeToken {
+            binding: state.binding.clone()?,
+            session: state.session.clone()?,
+            generation: state.generation,
+        })
+    });
+    if let Some(token) = token {
+        acknowledge_failure(app, &token, conversation_id, ViewingScope::MainWindow);
+    }
+}
+
+fn main_window_focused(app: &AppHandle) -> bool {
+    app.get_webview_window(tray::MAIN).is_some_and(|window| {
+        window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false)
+    })
 }
 
 fn same_session<T>(current: &Arc<T>, originating: &Arc<T>) -> bool {
@@ -1165,7 +1273,17 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
         })
         .cloned()
         .collect();
-    let (to_hide, specs) = {
+    let collapsing: HashSet<String> = wanted
+        .keys()
+        .filter(|id| {
+            crate::lifecycle::collapse_pending(app, &format!("{}{}", tray::COMPOSER_PREFIX, id))
+        })
+        .cloned()
+        .collect();
+    let viewed = main_window_focused(app)
+        .then(|| app_state.notifications.viewed_conversation())
+        .flatten();
+    let (to_hide, specs, acknowledgements) = {
         let runtime = runtime(app);
         let Ok(mut state) = runtime.state.lock() else {
             return;
@@ -1184,13 +1302,36 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
             state.send_failures.forget(id);
         }
         let mut specs = Vec::with_capacity(wanted.len());
+        let mut acknowledgements = Vec::new();
         for (id, (pin, head)) in wanted {
             let existing = state.heads.get(&id).cloned();
-            let acknowledged = existing.as_ref().is_some_and(|active| active.panel)
-                && visible.contains(&id)
-                && state
+            let previous_failed = existing.as_ref().is_some_and(|active| {
+                state
                     .send_failures
-                    .acknowledge(&id, head.failed_message.as_deref());
+                    .displayed(&id, active.failed_message.as_deref())
+            });
+            state
+                .send_failures
+                .seed(&id, pin.acknowledged_failure.as_deref());
+            let scope = viewing_scope(
+                existing.as_ref().is_some_and(|active| active.panel) && visible.contains(&id),
+                collapsing.contains(&id),
+                viewed.as_deref() == Some(&id),
+            );
+            let acknowledged = if let Some(scope) = scope {
+                if let Some(message) = head.failed_message.as_ref() {
+                    if state.send_failures.acknowledged.get(&id) != Some(message) {
+                        acknowledgements.push(id.clone());
+                    }
+                }
+                state.send_failures.acknowledge_for_scope(
+                    &id,
+                    head.failed_message.as_deref(),
+                    scope,
+                )
+            } else {
+                false
+            };
             if let Some(active) = existing.as_ref() {
                 state
                     .typing
@@ -1201,13 +1342,16 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
                 .map(|active| active.position.clone())
                 .unwrap_or(pin.position);
             let active = adopt_active_head(existing.as_ref(), position, token.generation, &head);
+            let send_failed = state
+                .send_failures
+                .displayed(&id, active.failed_message.as_deref());
             let changed = existing.as_ref().is_none_or(|active| {
                 active.glyph != head.glyph
                     || active.color != head.color
                     || active.label != head.label
                     || active.unread != head.unread
                     || active.failed_message != head.failed_message
-            });
+            }) || previous_failed != send_failed;
             if changed || acknowledged {
                 specs.push((
                     head_spec(&state.typing, &state.send_failures, &id, &active),
@@ -1216,9 +1360,12 @@ async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGua
             }
             state.heads.insert(id, active);
         }
-        (to_hide, specs)
+        (to_hide, specs, acknowledgements)
     };
 
+    for id in acknowledgements {
+        persist_acknowledgement(app, &token, &id);
+    }
     for id in to_hide {
         let hide_id = id.clone();
         let _ = on_main_if_current(app, token.clone(), move |app| {
@@ -2162,14 +2309,14 @@ async fn activate(
     match result {
         Ok(Some(ActivationUi::Expand(Err(_)))) => false,
         Ok(Some(ActivationUi::Expand(Ok(())))) => {
-            acknowledge_failure(app, &token, conversation_id);
+            acknowledge_failure(app, &token, conversation_id, ViewingScope::Panel);
             app.state::<AppState>()
                 .record_recent(&recent_binding, conversation_id);
             let _ = app.emit(STATE_EVENT, ());
             true
         }
         Ok(Some(ActivationUi::Focus(Ok(())))) => {
-            acknowledge_failure(app, &token, conversation_id);
+            acknowledge_failure(app, &token, conversation_id, ViewingScope::Panel);
             let _ = app.emit(STATE_EVENT, ());
             true
         }
@@ -2278,6 +2425,16 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
                 "The active account changed.",
             ));
         }
+        let failed_message = head.failed_message.clone();
+        state.send_failures.seed(
+            &head.id,
+            persisted
+                .as_ref()
+                .and_then(|pin| pin.acknowledged_failure.as_deref()),
+        );
+        state
+            .send_failures
+            .acknowledge(&head.id, failed_message.as_deref());
         state.heads.insert(
             head.id.clone(),
             ActiveHead {
@@ -2300,6 +2457,7 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
             &state.heads[&head.id],
         )
     };
+    persist_acknowledgement(app, &token, &spec.conversation_id);
 
     let mut spec_for_ui = spec.clone();
     let native = on_main_if_current(app, token.clone(), move |app| {
@@ -2346,6 +2504,7 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
             Pin {
                 conversation_id: spec.conversation_id.clone(),
                 position: spec.position.clone(),
+                acknowledged_failure: None,
             },
         ) {
             if prior.is_none() {
@@ -2362,6 +2521,7 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
             restore_prior(app, &spec.conversation_id, prior);
             return Err(BridgeError::new("heads", message));
         }
+        persist_acknowledgement(app, &token, &spec.conversation_id);
     }
 
     let id = spec.conversation_id.clone();
@@ -2389,7 +2549,6 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
             )),
         };
     }
-    acknowledge_failure(app, &token, &spec.conversation_id);
     app.state::<AppState>()
         .record_recent(&binding, &spec.conversation_id);
     update_tray_menu(app, Some(&token)).await;
@@ -3086,6 +3245,46 @@ fn tray_entries(mut entries: Vec<(String, String)>) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn main_acknowledgement_keeps_refusals_and_panel_acknowledgement_clears_them() {
+        let mut failures = SendFailures::default();
+        failures.refuse("chat");
+        failures.acknowledge_main("chat", Some("message"));
+        assert!(failures.displayed("chat", Some("message")));
+        failures.accept("chat");
+        assert!(!failures.displayed("chat", Some("message")));
+        failures.refuse("chat");
+        failures.acknowledge("chat", Some("message"));
+        assert!(!failures.displayed("chat", Some("message")));
+    }
+
+    #[test]
+    fn collapse_pending_is_not_a_viewed_panel() {
+        let mut failures = SendFailures::default();
+        failures.refuse("chat");
+        let scope = viewing_scope(true, true, false);
+        assert_eq!(scope, None);
+        if let Some(scope) = scope {
+            failures.acknowledge_for_scope("chat", None, scope);
+        }
+        assert!(failures.displayed("chat", None));
+        assert_eq!(
+            viewing_scope(true, true, true),
+            Some(ViewingScope::MainWindow)
+        );
+        assert_eq!(viewing_scope(true, false, true), Some(ViewingScope::Panel));
+        assert_eq!(viewing_scope(false, false, false), None);
+    }
+
+    #[test]
+    fn persisted_acknowledgement_does_not_override_memory() {
+        let mut failures = SendFailures::default();
+        failures.seed("chat", Some("first"));
+        failures.seed("chat", Some("second"));
+        assert!(!failures.displayed("chat", Some("first")));
+        assert!(failures.displayed("chat", Some("second")));
+    }
+
+    #[test]
     fn originating_session_identity_fences_late_results() {
         let original = Arc::new(());
         let same = original.clone();
@@ -3657,6 +3856,7 @@ mod tests {
             binding,
             Pin {
                 conversation_id: conversation_id.into(),
+                acknowledged_failure: None,
                 position: position(),
             },
         )

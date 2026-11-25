@@ -21,6 +21,8 @@ const MAX_PIN_FILE_BYTES: u64 = 1024 * 1024;
 pub struct Pin {
     pub conversation_id: String,
     pub position: HeadPosition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged_failure: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -145,6 +147,15 @@ impl PinStore {
             *pins = sanitize(std::mem::take(pins));
             if from != to && pins.iter().any(|pin| pin.conversation_id == from) {
                 if pins.iter().any(|pin| pin.conversation_id == to) {
+                    let acknowledged = pins
+                        .iter()
+                        .find(|pin| pin.conversation_id == from)
+                        .and_then(|pin| pin.acknowledged_failure.clone());
+                    if let Some(target) = pins.iter_mut().find(|pin| pin.conversation_id == to) {
+                        if target.acknowledged_failure.is_none() {
+                            target.acknowledged_failure = acknowledged;
+                        }
+                    }
                     pins.retain(|pin| pin.conversation_id != from);
                 } else if let Some(pin) = pins.iter_mut().find(|pin| pin.conversation_id == from) {
                     pin.conversation_id = to.to_owned();
@@ -155,7 +166,7 @@ impl PinStore {
         Ok(())
     }
 
-    pub fn upsert(&self, binding: &Binding, pin: Pin) -> Result<bool, String> {
+    pub fn upsert(&self, binding: &Binding, mut pin: Pin) -> Result<bool, String> {
         if !valid_pin(&pin) {
             return Err("The floating conversation position is invalid.".into());
         }
@@ -171,6 +182,9 @@ impl PinStore {
             .iter_mut()
             .find(|item| item.conversation_id == pin.conversation_id)
         {
+            if pin.acknowledged_failure.is_none() {
+                pin.acknowledged_failure = existing.acknowledged_failure.clone();
+            }
             *existing = pin;
             self.write(&file)?;
             return Ok(false);
@@ -179,6 +193,38 @@ impl PinStore {
             return Err("You can pin at most eight floating conversations.".into());
         }
         pins.push(pin);
+        self.write(&file)?;
+        Ok(true)
+    }
+
+    pub fn set_acknowledged_failure(
+        &self,
+        binding: &Binding,
+        conversation_id: &str,
+        message: Option<&str>,
+    ) -> Result<bool, String> {
+        if message.is_some_and(|id| uuid::Uuid::parse_str(id).is_err()) {
+            return Err("The failed message ID is invalid.".into());
+        }
+        let _transaction = self
+            .transaction
+            .lock()
+            .map_err(|_| "Could not save floating conversations.")?;
+        let mut file = self.read()?;
+        let Some(pins) = file.bindings.get_mut(&binding_key(binding)) else {
+            return Ok(false);
+        };
+        *pins = sanitize(std::mem::take(pins));
+        let Some(pin) = pins
+            .iter_mut()
+            .find(|pin| pin.conversation_id == conversation_id)
+        else {
+            return Ok(false);
+        };
+        if pin.acknowledged_failure.as_deref() == message {
+            return Ok(false);
+        }
+        pin.acknowledged_failure = message.map(str::to_owned);
         self.write(&file)?;
         Ok(true)
     }
@@ -467,6 +513,16 @@ fn parse_layout_file(bytes: &[u8]) -> Result<LayoutFile, String> {
 fn sanitize(pins: Vec<Pin>) -> Vec<Pin> {
     let mut seen = HashSet::new();
     pins.into_iter()
+        .map(|mut pin| {
+            if pin
+                .acknowledged_failure
+                .as_ref()
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_err())
+            {
+                pin.acknowledged_failure = None;
+            }
+            pin
+        })
         .filter(|pin| valid_pin(pin) && seen.insert(pin.conversation_id.clone()))
         .take(MAX_HEADS)
         .collect()
@@ -570,12 +626,71 @@ mod tests {
     fn pin(id: &str) -> Pin {
         Pin {
             conversation_id: id.into(),
+            acknowledged_failure: None,
             position: HeadPosition {
                 monitor: None,
                 x: 4.0,
                 y: 8.0,
             },
         }
+    }
+
+    #[test]
+    fn acknowledged_failure_persists_and_survives_upsert_and_remap() {
+        let root = tempdir().unwrap();
+        let store = PinStore::new(root.path());
+        let binding = binding("one");
+        let id = uuid::Uuid::new_v4().to_string();
+        let target = uuid::Uuid::new_v4().to_string();
+        let message = uuid::Uuid::new_v4().to_string();
+        assert!(!store
+            .set_acknowledged_failure(&binding, &id, Some(&message))
+            .unwrap());
+        store.upsert(&binding, pin(&id)).unwrap();
+        assert!(store
+            .set_acknowledged_failure(&binding, &id, Some(&message))
+            .unwrap());
+        assert!(!store
+            .set_acknowledged_failure(&binding, &id, Some(&message))
+            .unwrap());
+        store.upsert(&binding, pin(&id)).unwrap();
+        store.remap(&binding, &id, &target).unwrap();
+        assert_eq!(
+            PinStore::new(root.path()).pins(&binding).unwrap()[0]
+                .acknowledged_failure
+                .as_deref(),
+            Some(message.as_str())
+        );
+        let source = uuid::Uuid::new_v4().to_string();
+        store.upsert(&binding, pin(&source)).unwrap();
+        store
+            .set_acknowledged_failure(&binding, &source, Some(&message))
+            .unwrap();
+        store
+            .set_acknowledged_failure(&binding, &target, None)
+            .unwrap();
+        store.remap(&binding, &source, &target).unwrap();
+        assert_eq!(
+            store.pins(&binding).unwrap()[0]
+                .acknowledged_failure
+                .as_deref(),
+            Some(message.as_str())
+        );
+    }
+
+    #[test]
+    fn legacy_and_invalid_acknowledgements_keep_the_pin() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut value = serde_json::to_value(pin(&id)).unwrap();
+        assert!(value.get("acknowledgedFailure").is_none());
+        let legacy = serde_json::json!({"bindings": {"binding": [value.clone()]}});
+        let parsed = parse_pin_file(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(parsed.bindings["binding"][0].acknowledged_failure, None);
+        value["acknowledgedFailure"] = "not-a-uuid".into();
+        let file = serde_json::json!({"bindings": {"binding": [value]}});
+        let parsed = parse_pin_file(&serde_json::to_vec(&file).unwrap()).unwrap();
+        assert_eq!(parsed.bindings["binding"].len(), 1);
+        assert_eq!(parsed.bindings["binding"][0].acknowledged_failure, None);
     }
 
     #[test]
@@ -627,6 +742,7 @@ mod tests {
         let store = PinStore::new(root.path());
         let invalid = Pin {
             conversation_id: uuid::Uuid::new_v4().to_string(),
+            acknowledged_failure: None,
             position: HeadPosition {
                 monitor: Some("x".repeat(513)),
                 x: f64::NAN,
