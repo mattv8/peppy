@@ -74,5 +74,13 @@ internal object LinkTestDeps {
         get() = null
         set(value) { app.signIn = app.signIn.copy(pairingExecutor = value ?: LinkSignInDeps.DEFAULTS.pairingExecutor) }
 
+    var restartExecutor: Executor?
+        get() = null
+        set(value) { app.restart = app.restart.copy(executor = value ?: LinkRestartDeps.DEFAULTS.executor) }
+
+    var startService: ((Context) -> Unit)?
+        get() = null
+        set(value) { app.restart = app.restart.copy(startService = value ?: LinkRestartDeps.DEFAULTS.startService) }
+
     private class AvailabilityEngine(private val delegate: LinkEngine, override val available: Boolean) : LinkEngine by delegate
 }

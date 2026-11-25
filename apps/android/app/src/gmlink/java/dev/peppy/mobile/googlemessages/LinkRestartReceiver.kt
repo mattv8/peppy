@@ -3,14 +3,7 @@ package dev.peppy.mobile.googlemessages
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import java.util.concurrent.Executor
 import java.util.concurrent.Executors
-
-internal data class RestartReceiverTestHooks(
-    val executor: Executor = RESTART_EXECUTOR,
-    val startService: (Context) -> Unit = GoogleMessagesLinkService::start,
-    val pendingFinished: () -> Unit = {},
-)
 
 internal val RESTART_EXECUTOR = Executors.newSingleThreadExecutor()
 
@@ -18,6 +11,7 @@ class LinkRestartReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action !in RESTART_ACTIONS) return
         val pendingResult = goAsync()
+        val deps = linkRestartDeps(context)
         val work = Runnable {
             try {
                 val applicationContext = context.applicationContext
@@ -31,7 +25,7 @@ class LinkRestartReceiver : BroadcastReceiver() {
                             LinkCoreBridge.recordObservation(token, lease, applicationContext, status) &&
                             status.state == "linked"
                         ) {
-                            testHooks.startService(applicationContext)
+                            deps.startService(applicationContext)
                         }
                     }
                     LinkOpenResult.Unavailable -> LinkRuntime.reconcileEmptyState(applicationContext)
@@ -41,19 +35,16 @@ class LinkRestartReceiver : BroadcastReceiver() {
                 // A sealed-state or gomobile failure must not leave the broadcast pending.
             } finally {
                 pendingResult.finish()
-                testHooks.pendingFinished()
             }
         }
         try {
-            testHooks.executor.execute(work)
+            deps.executor.execute(work)
         } catch (_: RuntimeException) {
             pendingResult.finish()
-            testHooks.pendingFinished()
         }
     }
 
     companion object {
-        internal var testHooks = RestartReceiverTestHooks()
         private val RESTART_ACTIONS = setOf(Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED)
     }
 }
