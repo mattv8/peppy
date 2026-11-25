@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import dev.peppy.mobile.gateway.GatewayTestBase
 import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 import org.junit.After
 import org.junit.Before
 import org.junit.Assert.assertEquals
@@ -13,6 +14,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadow.api.Shadow
+import org.robolectric.shadows.ShadowBroadcastPendingResult
 import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeRcsLinkState
 import uniffi.peppy_mobile_bindings.NativeRcsLinkStatus
@@ -28,7 +31,6 @@ class LinkRestartReceiverTest : GatewayTestBase() {
 
     @After
     fun cleanUp() {
-        LinkRestartReceiver.testHooks = RestartReceiverTestHooks()
         LinkRuntime.resetForTest()
         LinkCoreBridge.resetForTest()
     }
@@ -37,36 +39,28 @@ class LinkRestartReceiverTest : GatewayTestBase() {
     fun `boot completed linked state starts service and finishes pending result`() {
         installHandle(StatusHandle(LINKED_STATUS))
         val starts = mutableListOf<Context>()
-        var finishes = 0
-        LinkRestartReceiver.testHooks = RestartReceiverTestHooks(
-            executor = Executor(Runnable::run),
-            startService = { starts += it },
-            pendingFinished = { finishes += 1 },
-        )
-        val receiver = receiverWithPendingResult()
+        LinkTestDeps.restartExecutor = Executor(Runnable::run)
+        LinkTestDeps.startService = { starts += it }
+        val pending = newPendingResult()
 
-        receiver.onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
+        receiverWithPendingResult(pending).onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
 
         assertEquals(1, starts.size)
-        assertEquals(1, finishes)
+        assertTrue(isFinished(pending))
     }
 
     @Test
     fun `package replaced unlinked state does not start service and finishes pending result`() {
         installHandle(StatusHandle(UNLINKED_STATUS))
         var starts = 0
-        var finishes = 0
-        LinkRestartReceiver.testHooks = RestartReceiverTestHooks(
-            executor = Executor(Runnable::run),
-            startService = { starts += 1 },
-            pendingFinished = { finishes += 1 },
-        )
-        val receiver = receiverWithPendingResult()
+        LinkTestDeps.restartExecutor = Executor(Runnable::run)
+        LinkTestDeps.startService = { starts += 1 }
+        val pending = newPendingResult()
 
-        receiver.onReceive(context, Intent(Intent.ACTION_MY_PACKAGE_REPLACED))
+        receiverWithPendingResult(pending).onReceive(context, Intent(Intent.ACTION_MY_PACKAGE_REPLACED))
 
         assertEquals(0, starts)
-        assertEquals(1, finishes)
+        assertTrue(isFinished(pending))
     }
 
     @Test
@@ -85,10 +79,8 @@ class LinkRestartReceiverTest : GatewayTestBase() {
         LinkTestDeps.engine = unavailableEngine()
         LinkTestDeps.storeFactory = { ObservedStore { atRead = lifecycleSnapshot() } }
         var starts = 0
-        LinkRestartReceiver.testHooks = RestartReceiverTestHooks(
-            executor = Executor(Runnable::run),
-            startService = { starts += 1 },
-        )
+        LinkTestDeps.restartExecutor = Executor(Runnable::run)
+        LinkTestDeps.startService = { starts += 1 }
 
         receiverWithPendingResult().onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
 
@@ -108,7 +100,8 @@ class LinkRestartReceiverTest : GatewayTestBase() {
             }
         }
         var starts = 0
-        LinkRestartReceiver.testHooks = RestartReceiverTestHooks(executor = Executor(Runnable::run), startService = { starts += 1 })
+        LinkTestDeps.restartExecutor = Executor(Runnable::run)
+        LinkTestDeps.startService = { starts += 1 }
 
         receiverWithPendingResult().onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
 
@@ -120,7 +113,7 @@ class LinkRestartReceiverTest : GatewayTestBase() {
     @Test
     fun `restart advances the observation generation before reading status`() {
         installHandle(StatusHandle(UNLINKED_STATUS))
-        LinkRestartReceiver.testHooks = RestartReceiverTestHooks(executor = Executor(Runnable::run))
+        LinkTestDeps.restartExecutor = Executor(Runnable::run)
         val token = LinkCoreBridge.observationToken()
 
         receiverWithPendingResult().onReceive(context, Intent(Intent.ACTION_MY_PACKAGE_REPLACED))
@@ -133,36 +126,42 @@ class LinkRestartReceiverTest : GatewayTestBase() {
     @Test
     fun `status exception for each restart broadcast still finishes pending result`() {
         installHandle(StatusHandle(LINKED_STATUS, failStatus = true))
-        var finishes = 0
-        LinkRestartReceiver.testHooks = RestartReceiverTestHooks(
-            executor = Executor(Runnable::run),
-            pendingFinished = { finishes += 1 },
-        )
-
-        listOf(Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED).forEach { action ->
-            receiverWithPendingResult().onReceive(context, Intent(action))
+        LinkTestDeps.restartExecutor = Executor(Runnable::run)
+        val pendings = listOf(Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED).map { action ->
+            newPendingResult().also { pending -> receiverWithPendingResult(pending).onReceive(context, Intent(action)) }
         }
 
-        assertEquals(2, finishes)
+        assertTrue(pendings.all { isFinished(it) })
+    }
+
+    @Test
+    fun `rejected restart executor finishes pending result without starting service`() {
+        installHandle(StatusHandle(LINKED_STATUS))
+        var starts = 0
+        LinkTestDeps.restartExecutor = Executor { throw RejectedExecutionException("restart_rejected") }
+        LinkTestDeps.startService = { starts += 1 }
+        val pending = newPendingResult()
+
+        receiverWithPendingResult(pending).onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
+
+        assertEquals(0, starts)
+        assertTrue(isFinished(pending))
     }
 
     private fun assertTerminalRestart(terminalState: String, expected: NativeRcsLinkState) {
         var atRead: LifecycleSnapshot? = null
         var starts = 0
-        var finishes = 0
         installHandle(StatusHandle("{\"state\":\"$terminalState\"}") { atRead = lifecycleSnapshot() })
-        LinkRestartReceiver.testHooks = RestartReceiverTestHooks(
-            executor = Executor(Runnable::run),
-            startService = { starts += 1 },
-            pendingFinished = { finishes += 1 },
-        )
+        LinkTestDeps.restartExecutor = Executor(Runnable::run)
+        LinkTestDeps.startService = { starts += 1 }
+        val pending = newPendingResult()
 
-        receiverWithPendingResult().onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
+        receiverWithPendingResult(pending).onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
 
         assertLifecycle(atRead, NativeRcsLinkState.UNAVAILABLE, 1uL, false)
         assertLifecycle(lifecycleSnapshot(), expected, 2uL, true)
         assertEquals(0, starts)
-        assertEquals(1, finishes)
+        assertTrue(isFinished(pending))
     }
 
     private fun lifecycleSnapshot() = LifecycleSnapshot(
@@ -191,17 +190,23 @@ class LinkRestartReceiverTest : GatewayTestBase() {
         override fun open(state: ByteArray, host: LinkHost): LinkHandle = error("not called")
     }
 
-    private fun receiverWithPendingResult(): LinkRestartReceiver = LinkRestartReceiver().also { receiver ->
-        val pending = BroadcastReceiver.PendingResult::class.java.declaredConstructors
+    private fun receiverWithPendingResult(pending: BroadcastReceiver.PendingResult = newPendingResult()): LinkRestartReceiver =
+        LinkRestartReceiver().also { receiver ->
+            BroadcastReceiver::class.java
+                .getDeclaredMethod("setPendingResult", BroadcastReceiver.PendingResult::class.java)
+                .invoke(receiver, pending)
+        }
+
+    private fun newPendingResult(): BroadcastReceiver.PendingResult {
+        val constructor = BroadcastReceiver.PendingResult::class.java.declaredConstructors
             .single { it.parameterCount == 9 }
-            .let { constructor ->
-                constructor.isAccessible = true
-                constructor.newInstance(0, null, null, 0, true, false, null, 0, 0)
-            }
-        BroadcastReceiver::class.java
-            .getDeclaredMethod("setPendingResult", BroadcastReceiver.PendingResult::class.java)
-            .invoke(receiver, pending)
+        constructor.isAccessible = true
+        return constructor.newInstance(0, null, null, 0, true, false, null, 0, 0) as BroadcastReceiver.PendingResult
     }
+
+    /** True once the real PendingResult.finish() has run; Robolectric's shadow completes this future there. */
+    private fun isFinished(pending: BroadcastReceiver.PendingResult): Boolean =
+        Shadow.extract<ShadowBroadcastPendingResult>(pending).getFuture().isDone
 
     private object EmptyStore : LinkStateStorage {
         override fun read(): ByteArray = ByteArray(0)
