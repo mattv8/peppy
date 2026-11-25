@@ -95,6 +95,7 @@ pub struct Completion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailureKind {
     Rejected,
+    SendUnfinished,
     TimedOut,
     EmitFailed,
     ApplyFailed,
@@ -114,6 +115,9 @@ impl Failure {
     fn message(&self) -> &'static str {
         match self.kind {
             FailureKind::Rejected => "Draft saving failed. Peppy remains available.",
+            FailureKind::SendUnfinished => {
+                "A message is still sending or was not sent. Check it, then try again."
+            }
             FailureKind::TimedOut => "Draft saving timed out. Peppy remains available.",
             FailureKind::EmitFailed => "A window closed before Peppy could request draft saving.",
             FailureKind::ApplyFailed => "The requested window action could not be completed.",
@@ -202,6 +206,7 @@ impl Coordinator {
         label: &str,
         ok: bool,
         now: Instant,
+        reason: Option<&str>,
     ) -> Result<Progress, &'static str> {
         let pending = self
             .pending
@@ -221,7 +226,14 @@ impl Coordinator {
         }
         if !ok {
             let failure = self
-                .take_failure(FailureKind::Rejected, Some(label.to_owned()))
+                .take_failure(
+                    if reason == Some("send") {
+                        FailureKind::SendUnfinished
+                    } else {
+                        FailureKind::Rejected
+                    },
+                    Some(label.to_owned()),
+                )
                 .expect("the checked request is pending");
             return Ok(Progress::Failed(failure));
         }
@@ -818,6 +830,7 @@ pub fn acknowledge(
     label: &str,
     id: &str,
     ok: bool,
+    reason: Option<&str>,
 ) -> crate::error::BridgeResult<()> {
     let progress = {
         let state = app.state::<crate::AppState>();
@@ -826,7 +839,7 @@ pub fn acknowledge(
             .lock()
             .map_err(|_| crate::error::BridgeError::host_state())?;
         coordinator
-            .acknowledge_at(id, label, ok, Instant::now())
+            .acknowledge_at(id, label, ok, Instant::now(), reason)
             .map_err(|message| crate::error::BridgeError::new("lifecycle", message))?
     };
     match progress {
@@ -921,6 +934,16 @@ fn finish_quit(app: &tauri::AppHandle) {
     });
 }
 
+fn failure_dialog(failure: &Failure) -> Option<(&'static str, &'static str)> {
+    if failure.kind == FailureKind::SendUnfinished {
+        if matches!(failure.operation, Operation::Window(_)) {
+            return None;
+        }
+        return Some(("Peppy stayed open", failure.message()));
+    }
+    Some(("Drafts were not closed", failure.message()))
+}
+
 fn restore_after_failure(app: &tauri::AppHandle, failure: &Failure) {
     if failure.operation == Operation::Update {
         let _ = release_topology(app, &failure.request_id);
@@ -947,7 +970,9 @@ fn restore_after_failure(app: &tauri::AppHandle, failure: &Failure) {
         crate::tray::show_main(app);
     }
     emit_finished(app, &failure.labels, &failure.request_id, false);
-    crate::dialogs::inform(app, "Drafts were not closed", failure.message());
+    if let Some((title, message)) = failure_dialog(failure) {
+        crate::dialogs::inform(app, title, message);
+    }
     let _ = app.emit(crate::STATE_EVENT, ());
 }
 
@@ -962,6 +987,104 @@ mod tests {
 
     fn at(milliseconds: u64) -> Instant {
         Instant::now() + Duration::from_millis(milliseconds)
+    }
+
+    #[test]
+    fn failure_dialog_distinguishes_send_failures() {
+        for operation in [
+            Operation::Window(Action::Close),
+            Operation::Quit,
+            Operation::Switch,
+        ] {
+            for kind in [
+                FailureKind::Rejected,
+                FailureKind::SendUnfinished,
+                FailureKind::TimedOut,
+                FailureKind::EmitFailed,
+                FailureKind::ApplyFailed,
+            ] {
+                let failure = Failure {
+                    operation,
+                    request_id: String::new(),
+                    labels: BTreeSet::new(),
+                    restore_labels: BTreeSet::new(),
+                    failed_label: None,
+                    kind,
+                };
+                let expected = if kind == FailureKind::SendUnfinished {
+                    if matches!(operation, Operation::Window(_)) {
+                        None
+                    } else {
+                        Some((
+                            "Peppy stayed open",
+                            "A message is still sending or was not sent. Check it, then try again.",
+                        ))
+                    }
+                } else {
+                    Some(("Drafts were not closed", failure.message()))
+                };
+                assert_eq!(failure_dialog(&failure), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn collapse_pending_only_tracks_unanswered_collapse_targets() {
+        let now = at(0);
+        let mut coordinator = Coordinator::default();
+        assert!(!coordinator.collapse_pending("main"));
+        let started = coordinator
+            .begin_at(
+                Operation::Window(Action::Collapse),
+                ["main".to_owned(), "panel".to_owned()],
+                TIMEOUT,
+                now,
+            )
+            .unwrap();
+        assert!(coordinator.collapse_pending("main"));
+        assert!(coordinator.collapse_pending("panel"));
+        assert!(!coordinator.collapse_pending("other"));
+        assert_eq!(
+            coordinator
+                .acknowledge_at(&started.request.id, "main", true, now, None)
+                .unwrap(),
+            Progress::Pending
+        );
+        assert!(!coordinator.collapse_pending("main"));
+        assert!(coordinator.collapse_pending("panel"));
+        coordinator.cancel(&started.request.id, FailureKind::Rejected, None);
+        let started = coordinator
+            .begin_at(
+                Operation::Window(Action::Close),
+                ["main".to_owned()],
+                TIMEOUT,
+                now,
+            )
+            .unwrap();
+        assert!(!coordinator.collapse_pending("main"));
+        coordinator.cancel(&started.request.id, FailureKind::Rejected, None);
+    }
+
+    #[test]
+    fn negative_acknowledgement_classifies_send_reason() {
+        for (reason, kind) in [
+            (Some("send"), FailureKind::SendUnfinished),
+            (Some("other"), FailureKind::Rejected),
+            (None, FailureKind::Rejected),
+        ] {
+            let now = at(0);
+            let mut coordinator = Coordinator::default();
+            let started = coordinator
+                .begin_at(Operation::Quit, ["main".to_owned()], TIMEOUT, now)
+                .unwrap();
+            let Progress::Failed(failure) = coordinator
+                .acknowledge_at(&started.request.id, "main", false, now, reason)
+                .unwrap()
+            else {
+                panic!("expected failure")
+            };
+            assert_eq!(failure.kind, kind);
+        }
     }
 
     #[tokio::test]
@@ -979,7 +1102,7 @@ mod tests {
 
         assert_eq!(
             coordinator
-                .acknowledge_at(&started.request.id, "composer-b", true, now)
+                .acknowledge_at(&started.request.id, "composer-b", true, now, None)
                 .unwrap(),
             Progress::Pending
         );
@@ -988,7 +1111,7 @@ mod tests {
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
         );
         let Progress::Complete(completion) = coordinator
-            .acknowledge_at(&started.request.id, "composer-a", true, now)
+            .acknowledge_at(&started.request.id, "composer-a", true, now, None)
             .unwrap()
         else {
             panic!("the final acknowledgement must complete the transaction");
@@ -1015,7 +1138,7 @@ mod tests {
             .unwrap();
 
         let Progress::Failed(failure) = coordinator
-            .acknowledge_at(&started.request.id, "composer-a", false, now)
+            .acknowledge_at(&started.request.id, "composer-a", false, now, None)
             .unwrap()
         else {
             panic!("a negative acknowledgement must abort the transaction");
@@ -1045,6 +1168,7 @@ mod tests {
                 "main",
                 true,
                 now + Duration::from_millis(11),
+                None,
             )
             .unwrap()
         else {
@@ -1082,7 +1206,7 @@ mod tests {
         assert!(coordinator.is_pending());
         assert_eq!(
             coordinator
-                .acknowledge_at(&second.request.id, "main", true, now)
+                .acknowledge_at(&second.request.id, "main", true, now, None)
                 .unwrap(),
             Progress::Complete(Completion {
                 operation: Operation::Quit,
@@ -1112,19 +1236,19 @@ mod tests {
             )
             .is_err());
         assert!(coordinator
-            .acknowledge_at("old", "main", true, now)
+            .acknowledge_at("old", "main", true, now, None)
             .is_err());
         assert!(coordinator
-            .acknowledge_at(&started.request.id, "unknown", true, now)
+            .acknowledge_at(&started.request.id, "unknown", true, now, None)
             .is_err());
         assert_eq!(
             coordinator
-                .acknowledge_at(&started.request.id, "main", true, now)
+                .acknowledge_at(&started.request.id, "main", true, now, None)
                 .unwrap(),
             Progress::Pending
         );
         assert!(coordinator
-            .acknowledge_at(&started.request.id, "main", true, now)
+            .acknowledge_at(&started.request.id, "main", true, now, None)
             .is_err());
     }
 
@@ -1166,12 +1290,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             coordinator
-                .acknowledge_at(&started.request.id, "main", true, now)
+                .acknowledge_at(&started.request.id, "main", true, now, None)
                 .unwrap(),
             Progress::Pending
         );
         let Progress::Failed(failure) = coordinator
-            .acknowledge_at(&started.request.id, "composer-a", false, now)
+            .acknowledge_at(&started.request.id, "composer-a", false, now, None)
             .unwrap()
         else {
             panic!("negative acknowledgement must fail");
@@ -1271,12 +1395,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             coordinator
-                .acknowledge_at(&started.request.id, "main", true, now)
+                .acknowledge_at(&started.request.id, "main", true, now, None)
                 .unwrap(),
             Progress::Pending
         );
         let Progress::Failed(failure) = coordinator
-            .acknowledge_at(&started.request.id, "composer-a", false, now)
+            .acknowledge_at(&started.request.id, "composer-a", false, now, None)
             .unwrap()
         else {
             panic!("a negative update draft acknowledgement must abort preparation");
@@ -1305,7 +1429,7 @@ mod tests {
         assert!(!coordinator.update_flush_pending("unknown"));
         assert_eq!(
             coordinator
-                .acknowledge_at(&started.request.id, "main", true, now)
+                .acknowledge_at(&started.request.id, "main", true, now, None)
                 .unwrap(),
             Progress::Pending
         );

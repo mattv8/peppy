@@ -383,6 +383,11 @@ describe("bridge subscriptions", () => {
     expect(invokeMock).toHaveBeenCalledWith("rename_device", { deviceId: "device-id", name: "Phone" });
   });
 
+  it("passes lifecycle send failure reasons to the native command", async () => {
+    await tauriBridge.acknowledge_lifecycle("request", false, "send");
+    expect(invokeMock).toHaveBeenCalledWith("acknowledge_lifecycle", { id: "request", ok: false, reason: "send" });
+  });
+
   it("renames a fixture device and rejects missing devices", async () => {
     const roster = await fixtureBridge.list_devices();
     const device = roster.devices.find(item => !item.revoked)!;

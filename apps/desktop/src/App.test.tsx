@@ -4360,7 +4360,7 @@ describe("draft durability", () => {
     await waitFor(() => expect(bridge.send_draft).toHaveBeenCalled());
     await act(async () => lifecycle?.({ id: "refused-collapse", action: "close" }));
     await act(async () => pending.resolve({ accepted: false, status: "failed-before-submit", reason: "Carrier refused the message." }));
-    await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("refused-collapse", false));
+    await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("refused-collapse", false, "send"));
     expect(await screen.findByText("Not sent: Carrier refused the message.")).toBeInTheDocument();
     expect(message()).toHaveValue("refused collapse");
     expect(screen.queryByText(/window stayed open/)).not.toBeInTheDocument();
@@ -4381,7 +4381,7 @@ describe("draft durability", () => {
     try {
       await act(async () => lifecycle?.({ id: "slow-collapse", action: "close" }));
       await act(async () => vi.advanceTimersByTimeAsync(6000));
-      await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("slow-collapse", false));
+      await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("slow-collapse", false, "send"));
       expect(screen.getByText(/Your message is still sending/)).toBeInTheDocument();
       expect(document.querySelector("[data-draft-notice='save-failed']")).toBeNull();
       await act(async () => pending.resolve());
