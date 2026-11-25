@@ -822,6 +822,21 @@ describe("DraftStore authoritative coordination", () => {
     expect(persist).not.toHaveBeenCalled();
   });
 
+  it("skips held slots only when requested and still reports other failures", async () => {
+    const store = new DraftStore(async input => {
+      if (input.conversationId === "conversation-two") throw { message: "disk full", code: "io" };
+      return draft(input);
+    }, events);
+    store.adopt("conversation-one", draft());
+    store.hold("conversation-one");
+    void store.edit("conversation-one", { text: "held edit" });
+    await expect(store.flushAll({ skipHeld: true })).resolves.toEqual({ ok: true });
+    await expect(store.flushAll()).resolves.toMatchObject({ ok: false, key: "conversation-one" });
+    store.adopt("conversation-two", draft({ id: "two", conversationId: "conversation-two" }));
+    void store.edit("conversation-two", { text: "failing" });
+    await expect(store.flushAll({ skipHeld: true })).resolves.toEqual({ ok: false, error: "disk full", key: "conversation-two" });
+  });
+
   it("returns a real save failure from flushAll after an earlier review requirement", async () => {
     const remote = draft({ recipientIds: ["+15550002"], revision: "2" });
     const store = new DraftStore(async input => {

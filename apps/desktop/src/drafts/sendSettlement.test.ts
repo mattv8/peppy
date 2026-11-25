@@ -1,5 +1,25 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { waitForSend } from "./sendSettlement";
+import { createInFlightSend, waitForSend } from "./sendSettlement";
+
+describe("createInFlightSend", () => {
+  it("reports submission and preserves the first settlement", async () => {
+    const send = createInFlightSend();
+    send.submit();
+    send.settle("sent");
+    send.settle("unsent");
+    await expect(send.submitted).resolves.toBe(true);
+    await expect(send.settled).resolves.toBe("sent");
+    await expect(waitForSend(send.submitted, 6000)).resolves.toBe(true);
+  });
+
+  it("reports no submission when settled first", async () => {
+    const send = createInFlightSend();
+    send.settle("unsent");
+    send.submit();
+    await expect(send.submitted).resolves.toBe(false);
+    await expect(send.settled).resolves.toBe("unsent");
+  });
+});
 
 describe("waitForSend", () => {
   afterEach(() => vi.useRealTimers());
