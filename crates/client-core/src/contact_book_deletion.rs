@@ -51,6 +51,8 @@ const BOOK_STATE_SQL: &[&str] = &[
     "DELETE FROM contact_resolution_projection WHERE book_id=?1",
     "DELETE FROM contact_resolution_state WHERE book_id=?1",
     "DELETE FROM inherited_contact_books WHERE book_id=?1",
+    "DELETE FROM contact_takeover_candidates WHERE book_id=?1",
+    "DELETE FROM contact_takeover_indexed WHERE book_id=?1",
 ];
 
 /// Whether a deletion names `own_device` as the book owner. Such a deletion is quarantined: this

@@ -125,18 +125,33 @@ pub(crate) fn source_for(
     Ok(json!({"source_key": source_key, "field_sources": field_sources, "provenance": provenance}))
 }
 
+/// Whether an unmapped source key may take the identity of an inherited predecessor contact
+/// (`contact_takeover::adopt`) instead of a newly minted one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Adoption {
+    /// What the provider holds was observed: a scan or a platform capture.
+    Allow,
+    /// The entry is the outcome of a requested write, whose contact is already decided.
+    Never,
+}
+
 /// Maps one platform entry `{source_key, fields, provenance?}` to a core contact DTO in
 /// the caller's transaction (minting stable contact and field ids on first sight).
 pub(crate) fn platform_contact(
     tx: &Connection,
     book_id: &str,
     source: &Value,
+    adoption: Adoption,
 ) -> Result<(String, Value), Error> {
     object_keys(source, &["source_key", "fields", "provenance"])?;
     let source_key = req(source, "source_key")?.to_owned();
     migrate_legacy_key(tx, book_id, &source_key, source.get("provenance"))?;
+    let fields = source.get("fields").ok_or_else(invalid)?;
+    if adoption == Adoption::Allow {
+        crate::contact_takeover::adopt(tx, book_id, &source_key, fields)?;
+    }
     let id = map_contact(tx, book_id, &source_key)?;
-    let fields = clean_fields(tx, book_id, &id, source.get("fields").ok_or_else(invalid)?)?;
+    let fields = clean_fields(tx, book_id, &id, fields)?;
     let mut contact = fields.as_object().ok_or_else(invalid)?.clone();
     contact.insert("id".to_owned(), json!(id));
     contact.insert("book_id".to_owned(), json!(book_id));
@@ -450,7 +465,7 @@ pub(crate) fn capture(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Resu
     let mut keys = Vec::with_capacity(incoming.len());
     let mut contacts = Vec::with_capacity(incoming.len());
     for source in incoming {
-        let (source_key, contact) = platform_contact(&tx, &book_id, source)?;
+        let (source_key, contact) = platform_contact(&tx, &book_id, source, Adoption::Allow)?;
         keys.push(source_key);
         contacts.push(contact);
     }

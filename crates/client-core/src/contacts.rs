@@ -5,6 +5,7 @@
 //! enqueued, and core alone mints contact revisions (from a content digest) so peers can
 //! gate replays. Edit requests are authorized only by the owner device: the remote edit
 //! policy, conflict checks and deletion caps are enforced here, never in native code.
+use crate::contact_source::Adoption;
 use crate::{Ctx, Error, PrivatePayload, enqueue};
 use peppy_protocol::EnvelopePurpose;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -169,7 +170,7 @@ fn short_text(v: Option<&Value>, max: usize) -> bool {
 }
 
 /// Deterministic JSON text with sorted object keys, independent of serde_json features.
-fn canonical(v: &Value, out: &mut String) {
+pub(crate) fn canonical(v: &Value, out: &mut String) {
     match v {
         Value::Object(map) => {
             let mut keys = map.keys().collect::<Vec<_>>();
@@ -198,7 +199,7 @@ fn canonical(v: &Value, out: &mut String) {
         other => out.push_str(&other.to_string()),
     }
 }
-fn digest(body: &Value) -> String {
+pub(crate) fn digest(body: &Value) -> String {
     let mut text = String::new();
     canonical(body, &mut text);
     Sha256::digest(text.as_bytes())
@@ -571,7 +572,7 @@ fn tombstone_owned(
     id: &str,
     deleted_at: i64,
 ) -> Result<Option<Value>, Error> {
-    tombstone_owned_with(conn, ctx, book_id, id, deleted_at, true)
+    tombstone_owned_with(conn, ctx, book_id, id, deleted_at, true, None)
 }
 
 /// `tombstone_owned` without sealing, for a caller that seals a large batch in its transaction.
@@ -582,7 +583,22 @@ pub(crate) fn tombstone_owned_unsealed(
     id: &str,
     deleted_at: i64,
 ) -> Result<Option<Value>, Error> {
-    tombstone_owned_with(conn, ctx, book_id, id, deleted_at, false)
+    tombstone_owned_with(conn, ctx, book_id, id, deleted_at, false, None)
+}
+
+/// Removes a contact that `kept_id` duplicates, without sealing. The tombstone is linked to the
+/// kept contact in the same revision, so no device ever offers it for restore. It carries no
+/// photo: nothing restores it, and a removal that references a photo this device only received
+/// would wait in the outbox until that photo is downloaded.
+pub(crate) fn tombstone_owned_merged_unsealed(
+    conn: &Connection,
+    ctx: &Ctx<'_>,
+    book_id: &str,
+    id: &str,
+    kept_id: &str,
+    deleted_at: i64,
+) -> Result<Option<Value>, Error> {
+    tombstone_owned_with(conn, ctx, book_id, id, deleted_at, false, Some(kept_id))
 }
 
 fn tombstone_owned_with(
@@ -592,6 +608,7 @@ fn tombstone_owned_with(
     id: &str,
     deleted_at: i64,
     seal: bool,
+    restored_to: Option<&str>,
 ) -> Result<Option<Value>, Error> {
     let Some((rev, body)): Option<(i64, String)> = conn
         .query_row(
@@ -606,6 +623,9 @@ fn tombstone_owned_with(
     let rev = rev.checked_add(1).ok_or(Error::Database)?;
     let mut body: Value = serde_json::from_str(&body).map_err(|_| Error::Database)?;
     body["revision"] = Value::String(rev.to_string());
+    if let Some(kept_id) = restored_to {
+        link_duplicate(&mut body, kept_id);
+    }
     let book = book_body(conn, book_id)?;
     conn.execute(
         "UPDATE contacts SET revision=?,body=?,deleted_at=?,publication_owner=?,publication_generation=? WHERE book_id=? AND id=?",
@@ -641,6 +661,15 @@ fn tombstone_owned_with(
     Ok(Some(tombstone))
 }
 
+/// Marks a tombstone body as a duplicate of the live contact `kept_id` (see
+/// `tombstone_owned_merged_unsealed`).
+fn link_duplicate(tombstone_body: &mut Value, kept_id: &str) {
+    tombstone_body["restored_to"] = json!(kept_id);
+    if let Some(fields) = tombstone_body.as_object_mut() {
+        fields.remove("photo");
+    }
+}
+
 /// Links a deleted contact to the new identity that restored it and republishes the
 /// tombstone (revision bumped) so every device hides it from restore lists.
 fn mark_restored(
@@ -649,6 +678,31 @@ fn mark_restored(
     book_id: &str,
     old_id: &str,
     new_id: &str,
+) -> Result<(), Error> {
+    relink_tombstone(conn, ctx, book_id, old_id, |body| {
+        body["restored_to"] = json!(new_id);
+    })
+}
+
+/// Links an already removed contact to the live contact `kept_id` that duplicates it, like
+/// `tombstone_owned_merged_unsealed` does for a live one.
+pub(crate) fn mark_merged(
+    conn: &Connection,
+    ctx: &Ctx<'_>,
+    book_id: &str,
+    id: &str,
+    kept_id: &str,
+) -> Result<(), Error> {
+    relink_tombstone(conn, ctx, book_id, id, |body| link_duplicate(body, kept_id))
+}
+
+/// Republishes the tombstone of `old_id` at a new revision after `link` changed its body.
+fn relink_tombstone(
+    conn: &Connection,
+    ctx: &Ctx<'_>,
+    book_id: &str,
+    old_id: &str,
+    link: impl FnOnce(&mut Value),
 ) -> Result<(), Error> {
     let Some((rev, body, deleted_at)): Option<(i64, String, i64)> = conn
         .query_row(
@@ -663,7 +717,7 @@ fn mark_restored(
     let rev = rev.checked_add(1).ok_or(Error::Database)?;
     let mut body: Value = serde_json::from_str(&body).map_err(|_| Error::Database)?;
     body["revision"] = Value::String(rev.to_string());
-    body["restored_to"] = json!(new_id);
+    link(&mut body);
     let book = book_body(conn, book_id)?;
     conn.execute(
         "UPDATE contacts SET revision=?,body=?,publication_owner=?,publication_generation=? WHERE book_id=? AND id=?",
@@ -1075,7 +1129,7 @@ pub(crate) fn observe_scan(
     let (book, _) = owned_book(&tx, ctx, &book_id)?;
     refuse_replaced(&book)?;
     // Either the legacy contact DTO or a platform `source` entry mapped by core.
-    let contact = observed_contact(&tx, &v, "contact", "source", &book_id)?;
+    let contact = observed_contact(&tx, &v, "contact", "source", &book_id, Adoption::Allow)?;
     let (id, body, provenance) = native_contact(&contact, &book_id)?;
     tx.execute(
         "INSERT OR IGNORE INTO contact_scan_members(scan_id,contact_id) VALUES(?,?)",
@@ -1087,7 +1141,9 @@ pub(crate) fn observe_scan(
 }
 
 /// Any finish is terminal. Only a complete, full, authoritative scan at the current
-/// generation infers removals, and only up to `max(10, 5%)` per scan; more is held.
+/// generation infers removals, and only up to `max(10, 5%)` per scan; more is held. The first
+/// such scan of an inherited book also merges the predecessor's copies of observed contacts
+/// (`contact_takeover::reconcile`), reported as `merged` and `relinked`.
 pub(crate) fn finish_scan(
     conn: &mut Connection,
     ctx: &Ctx<'_>,
@@ -1107,7 +1163,7 @@ pub(crate) fn finish_scan(
         .optional()?
         .ok_or(Error::NotFound)?;
     if finished {
-        return Ok(json!({"status":"finished","already_finished":true,"deletions_applied":false,"deleted":0,"held":0}).to_string());
+        return Ok(json!({"status":"finished","already_finished":true,"deletions_applied":false,"deleted":0,"held":0,"merged":0,"relinked":0}).to_string());
     }
     let (_, current_generation) = owned_book(&tx, ctx, &book_id)?;
     let mut hold_id = None;
@@ -1117,6 +1173,7 @@ pub(crate) fn finish_scan(
     )?;
     let safe = complete && access == "full" && authoritative && current_generation == generation;
     let (mut deleted, mut held) = (0usize, 0usize);
+    let mut reconciled = crate::contact_takeover::Reconciled::default();
     if safe {
         crate::device_succession::complete_takeover_scan(&tx, &book_id)?;
         // A newer complete authoritative scan supersedes every earlier pending hold.
@@ -1134,10 +1191,13 @@ pub(crate) fn finish_scan(
         } else {
             "SELECT id FROM contacts WHERE book_id=?1 AND deleted_at IS NULL AND id NOT IN (SELECT contact_id FROM contact_scan_members WHERE scan_id=?2) ORDER BY id"
         };
-        let missing = tx
+        let mut missing = tx
             .prepare(query)?
             .query_map(params![book_id, scan], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
+        // A predecessor's copy of a contact this scan observed is not a removal: it leaves
+        // `missing` here, before the deletion policy counts what the phone no longer has.
+        reconciled = crate::contact_takeover::reconcile(&tx, ctx, &book_id, scan, &mut missing)?;
         let total: i64 = tx.query_row(
             "SELECT COUNT(*) FROM contacts WHERE book_id=? AND deleted_at IS NULL",
             [&book_id],
@@ -1185,8 +1245,7 @@ pub(crate) fn finish_scan(
         },
     )?;
     tx.commit()?;
-    let mut out =
-        json!({"status":"finished","deletions_applied":deleted > 0,"deleted":deleted,"held":held});
+    let mut out = json!({"status":"finished","deletions_applied":deleted > 0,"deleted":deleted,"held":held,"merged":reconciled.merged,"relinked":reconciled.relinked});
     if let Some(hold_id) = hold_id {
         out["state"] = json!("awaiting_approval");
         out["hold_id"] = json!(hold_id);
@@ -2084,7 +2143,15 @@ pub(crate) fn reconcile(
             finalize(&tx, ctx, id, &book_id, "applied", None, tombstone)?
         }
         "applied" => {
-            let mut observed = observed_contact(&tx, &v, "observed", "observed_source", &book_id)?;
+            // The request already names the contact a write concerns, so nothing is adopted.
+            let mut observed = observed_contact(
+                &tx,
+                &v,
+                "observed",
+                "observed_source",
+                &book_id,
+                Adoption::Never,
+            )?;
             let claim = restore_claim(&tx, &book_id, id)?;
             if let Some(new_id) = claim.get("contact_id").and_then(Value::as_str) {
                 // A restore never revives the old id: the legacy DTO takes the claimed new
@@ -2212,10 +2279,13 @@ fn observed_contact(
     legacy: &str,
     platform: &str,
     book_id: &str,
+    adoption: Adoption,
 ) -> Result<Value, Error> {
     match (v.get(legacy), v.get(platform)) {
         (Some(contact), None) => Ok(contact.clone()),
-        (None, Some(source)) => Ok(crate::contact_source::platform_contact(tx, book_id, source)?.1),
+        (None, Some(source)) => {
+            Ok(crate::contact_source::platform_contact(tx, book_id, source, adoption)?.1)
+        }
         _ => Err(invalid()),
     }
 }

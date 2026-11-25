@@ -24,6 +24,13 @@ pub(crate) fn initialize(conn: &Connection) -> Result<(), Error> {
             [],
         )?;
     }
+    // Set once the predecessor's contact identities were reconciled with the successor's
+    // (`contact_takeover`). A takeover completed by an earlier build has it unset.
+    crate::add_column_if_missing(
+        conn,
+        "inherited_contact_books",
+        "reconciled INTEGER NOT NULL DEFAULT 0",
+    )?;
     Ok(())
 }
 

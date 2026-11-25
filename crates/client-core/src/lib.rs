@@ -24,6 +24,7 @@ mod compose_create;
 mod contact_book_deletion;
 pub use contact_book_deletion::CompletionReplayNeed;
 mod contact_book_supersession;
+mod contact_identity;
 mod contact_media;
 mod contact_photos;
 mod contact_queries;
@@ -32,6 +33,7 @@ mod contact_search;
 mod contact_source;
 mod contact_state;
 mod contact_sync_requests;
+mod contact_takeover;
 mod contacts;
 mod conversation_folders;
 mod conversation_match;
@@ -2844,7 +2846,10 @@ impl Client {
     /// the usual restore data), its open requests are closed, and it is published retired with
     /// `superseded_by`. Hosts call it once per contacts pass, before `contact_book_selection`.
     /// Requires unlocked keys. Returns `{"schema_version":1,"retired":[{"book_id","replaced_by",
-    /// "contacts_removed"}]}`, with an empty list when nothing is eligible.
+    /// "contacts_removed"}],"reopened":[book_id]}`, with empty lists when nothing is eligible.
+    /// `reopened` lists inherited books whose takeover is open again, once, because an earlier
+    /// build completed it with a second identity for every contact; the takeover full scan the
+    /// host then runs merges them (see `contact_takeover`).
     pub fn retire_superseded_contact_books(&self) -> Result<String, Error> {
         let mut store = self.lock()?;
         ensure_recovery_complete(&store)?;
@@ -11505,6 +11510,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     message_history_capture::initialize(conn)?;
     contact_resolution::initialize(conn)?;
     contact_source::initialize(conn)?;
+    contact_takeover::initialize(conn)?;
     contact_state::initialize(conn)?;
     contact_media::initialize(conn)?;
     snapshot_projection::initialize(conn)?;
