@@ -127,7 +127,7 @@ export function MediaTile({ attachment, message, variant, onOpen, label, prefetc
   const removedWithLocalCopy = attachment.remoteState === "removed_by_storage_policy" && attachment.localAvailable;
   const isVideo = attachment.mediaType.startsWith("video/");
   const rcsPlaceholder = rcsPlaceholderState(attachment);
-  const animatedUrl = useAnimatedOriginal(rootRef, attachment, variant !== "cell" && state === "ready" && !rcsPlaceholder);
+  const animated = useAnimatedOriginal(rootRef, attachment, variant !== "cell" && state === "ready" && !rcsPlaceholder);
   const placeholderCopy = rcsPlaceholder ? rcsPlaceholderCopy(rcsPlaceholder) : undefined;
   const canAct = !removedRemoteOnly && canOpen(shown, hydration.exhausted);
   // A held original with a visible preview can still be copied natively; the menu then offers Copy only.
@@ -214,7 +214,7 @@ export function MediaTile({ attachment, message, variant, onOpen, label, prefetc
       {!suppressHeldControl && <span id={noteId} data-original-sync-note className="tile-held-note" aria-live="off">{heldNote}</span>}
     </> : state === "failed" ? <><div className="tile-body tile-failed" role="img" aria-label={accessibleLabel} {...bodyProps}><ImageOff size={20} aria-hidden="true" /></div>{actions && <button type="button" className="tile-retry" onClick={() => actions.retry(attachment)}><RotateCw size={14} aria-hidden="true" />Retry</button>}</> : <button ref={mergedBodyRef} type="button" className="tile-body" aria-label={accessibleLabel} onClick={onOpen} onKeyDown={handleKeyDown} onContextMenu={(event) => { if (!actions || !canAct) return; event.preventDefault(); openMenu(event.clientX, event.clientY); }} {...bodyProps}>
       {imageUrl && <img loading="lazy" decoding="async" src={imageUrl} alt="" aria-hidden="true" />}
-      {animatedUrl && <img key={animatedUrl} data-gif-animated src={animatedUrl} alt="" aria-hidden="true" onLoad={(event) => { event.currentTarget.dataset.revealed = "true"; }} />}
+      {animated.url && <img key={animated.url} data-gif-animated src={animated.url} alt="" aria-hidden="true" onLoad={(event) => { event.currentTarget.dataset.revealed = "true"; }} onError={animated.onError} />}
       {state === "loading" && <Loader2 className="tile-loading-icon" size={20} aria-hidden="true" />}
       {state === "unavailable" && <span className="tile-unavailable"><ImageOff size={20} aria-hidden="true" />Preview unavailable</span>}
     </button>}
