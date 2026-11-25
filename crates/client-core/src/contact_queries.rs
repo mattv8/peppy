@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const RESULT_LIMIT: i64 = 200;
-const TOMBSTONE_TTL_SECONDS: i64 = 90 * 24 * 60 * 60; // 90 days
+pub(crate) const TOMBSTONE_TTL_SECONDS: i64 = 90 * 24 * 60 * 60; // 90 days
 
 fn invalid() -> Error {
     Error::InvalidRequest("invalid contact request")

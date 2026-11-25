@@ -15,8 +15,10 @@ use serde_json::{Value, json};
 pub(crate) const BOOK_REPLACED: &str = "book_replaced";
 
 /// Retires every superseded book of this device. Requires unlocked keys. Returns
-/// `{"schema_version":1,"retired":[{"book_id","replaced_by","contacts_removed"}]}`; the list is
-/// empty when nothing is eligible.
+/// `{"schema_version":1,"retired":[{"book_id","replaced_by","contacts_removed"}],"reopened":[book_id]}`;
+/// both lists are empty when nothing is eligible. `reopened` names inherited books whose takeover
+/// is open again so their contact identities get reconciled (`contact_takeover`): hosts run this
+/// at the start of every contacts pass, before they select the book.
 pub(crate) fn retire(conn: &mut Connection, ctx: &Ctx<'_>) -> Result<String, Error> {
     contacts::require_unlocked(ctx)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -42,8 +44,9 @@ pub(crate) fn retire(conn: &mut Connection, ctx: &Ctx<'_>) -> Result<String, Err
             break;
         }
     }
+    let reopened = crate::contact_takeover::reopen_unreconciled(&tx, ctx)?;
     tx.commit()?;
-    Ok(json!({"schema_version": 1, "retired": retired}).to_string())
+    Ok(json!({"schema_version": 1, "retired": retired, "reopened": reopened}).to_string())
 }
 
 /// The selected inherited book and the books it supersedes, when retirement may run: the same

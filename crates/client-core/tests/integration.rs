@@ -18,6 +18,7 @@ mod contact_resolution;
 mod contact_source;
 mod contact_source_photo;
 mod contact_sync_requests;
+mod contact_takeover;
 mod contacts_flow;
 mod contacts_sort;
 mod conversation_folders;
