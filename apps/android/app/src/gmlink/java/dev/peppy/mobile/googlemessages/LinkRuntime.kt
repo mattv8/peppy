@@ -14,7 +14,7 @@ internal data class LinkHandleLease(val handle: LinkHandle, val generation: Long
 internal data class LinkObservation(val token: Long, val lease: LinkHandleLease)
 
 object LinkRuntime {
-    private val callbackExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    internal val callbackExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val nativeOperationLock = Any()
     private val changeCounter = MutableStateFlow(0L)
     private var cachedHandle: LinkHandle? = null
@@ -396,7 +396,7 @@ internal interface LinkStateStorage {
     fun wipe()
 }
 
-private class LinkStateStoreAdapter(private val store: LinkStateStore) : LinkStateStorage {
+internal class LinkStateStoreAdapter(private val store: LinkStateStore) : LinkStateStorage {
     override fun read(): ByteArray = store.read()
     override fun write(state: ByteArray) = store.write(state)
     override fun wipe() = store.wipe()

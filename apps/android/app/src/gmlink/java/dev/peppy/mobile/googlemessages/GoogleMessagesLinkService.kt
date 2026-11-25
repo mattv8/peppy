@@ -72,12 +72,12 @@ internal data class ServiceTestHooks(
     val peersPresent: () -> Boolean? = RemoteMessagingRuntime::peersPresent,
 )
 
-private val DEFAULT_NOTIFICATION_EXECUTOR = Executors.newSingleThreadExecutor()
-private val DEFAULT_CLOSE_EXECUTOR = Executors.newSingleThreadExecutor()
-private val DEFAULT_RCS_RECEIVE_EXECUTOR = Executors.newSingleThreadExecutor()
-private val DEFAULT_RCS_BOOTSTRAP_EXECUTOR = Executors.newSingleThreadExecutor()
-private val DEFAULT_RCS_ELIGIBILITY_EXECUTOR = Executors.newSingleThreadExecutor()
-private val DEFAULT_TYPING_EXECUTOR = Executors.newSingleThreadExecutor()
+internal val DEFAULT_NOTIFICATION_EXECUTOR = Executors.newSingleThreadExecutor()
+internal val DEFAULT_CLOSE_EXECUTOR = Executors.newSingleThreadExecutor()
+internal val DEFAULT_RCS_RECEIVE_EXECUTOR = Executors.newSingleThreadExecutor()
+internal val DEFAULT_RCS_BOOTSTRAP_EXECUTOR = Executors.newSingleThreadExecutor()
+internal val DEFAULT_RCS_ELIGIBILITY_EXECUTOR = Executors.newSingleThreadExecutor()
+internal val DEFAULT_TYPING_EXECUTOR = Executors.newSingleThreadExecutor()
 
 private data class ReceiveSweepRequest(
     val serviceGeneration: Long,
