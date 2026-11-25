@@ -71,6 +71,8 @@ mod rcs_snapshot_tests;
 mod recents;
 #[cfg(test)]
 mod recents_command_tests;
+#[cfg(test)]
+mod revision_fixture_tests;
 mod search_history;
 mod secure_store;
 #[cfg(test)]
