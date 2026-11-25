@@ -262,6 +262,7 @@ jobs:
       - run: cargo run --locked -p peppy-desktop-api --bin generate-notification-activation-contracts -- --check
       - run: cargo run --locked -p peppy-desktop-api --bin generate-message-contracts -- --check
       - run: cargo run --locked -p peppy-desktop-api --bin generate-gateway-contracts -- --check
+      - run: cargo run --locked -p peppy-tauri-command-manifest -- --check
       - run: cargo run --locked -p peppy-hosted-api --bin export-web-schema -- --check
       - run: cargo run --locked -p peppy-hosted-api --bin generate-mcp-contracts -- --check
       - run: cargo install cargo-deny --version 0.20.2 --locked
