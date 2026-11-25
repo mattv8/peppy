@@ -22,6 +22,11 @@ fn rust_sources(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+/// Reads a source file with LF line endings. A Windows checkout converts them to CRLF.
+fn read_source(path: impl AsRef<Path>) -> String {
+    fs::read_to_string(path).unwrap().replace("\r\n", "\n")
+}
+
 fn literal_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let remainder = source
         .split_once(marker)
@@ -295,7 +300,7 @@ fn bridge_error_codes_match_fixture() {
     let mut codes = BTreeSet::new();
     let mut nonliteral = BTreeMap::new();
     for path in files {
-        let source = fs::read_to_string(&path).unwrap();
+        let source = read_source(&path);
         let relative = path.strip_prefix(&src).unwrap().to_str().unwrap();
         check_test_only_occurrences(&path, &source);
         let ranges = test_ranges(&source);
@@ -349,14 +354,14 @@ fn bridge_error_codes_match_fixture() {
     .collect();
     assert_eq!(nonliteral, expected, "review every nonliteral call site");
 
-    let error = fs::read_to_string(src.join("error.rs")).unwrap();
+    let error = read_source(src.join("error.rs"));
     for method in ["pub fn host_state()", "pub fn no_session()"] {
         let body = error.split_once(method).unwrap().1;
         codes.insert(literal_after(body, "Self::new(").to_owned());
     }
-    let sync = fs::read_to_string(src.join("sync.rs")).unwrap();
+    let sync = read_source(src.join("sync.rs"));
     codes.insert(literal_after(&sync, "const SNAPSHOT_TOO_LARGE_CODE: &str =").to_owned());
-    let enrollment = fs::read_to_string(src.join("enrollment.rs")).unwrap();
+    let enrollment = read_source(src.join("enrollment.rs"));
     let mapping = enrollment
         .split_once("fn known_claim_error_code(")
         .unwrap()
@@ -368,7 +373,7 @@ fn bridge_error_codes_match_fixture() {
         codes.insert(literal_after(&mapping[tail..], "=> Some(").to_owned());
     }
     codes.insert("server-rejected".to_owned());
-    let mcp = fs::read_to_string(src.join("mcp.rs")).unwrap();
+    let mcp = read_source(src.join("mcp.rs"));
     let mapping = mcp
         .split_once("const WEBHOOK_ERRORS:")
         .unwrap()
@@ -389,7 +394,7 @@ fn bridge_error_codes_match_fixture() {
         "contacts.rs",
         "contact_error.rs",
     ] {
-        let source = fs::read_to_string(root.join("crates/desktop-api/src").join(file)).unwrap();
+        let source = read_source(root.join("crates/desktop-api/src").join(file));
         check_test_only_occurrences(Path::new(file), &source);
         let uncommented = without_line_comments(&source);
         let ranges = test_ranges(&uncommented);
