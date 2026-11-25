@@ -3,7 +3,6 @@ package dev.peppy.mobile.googlemessages
 import android.app.NotificationManager
 import dev.peppy.mobile.diagnostics.SyncDiagnostics
 import dev.peppy.mobile.gateway.GatewayTestBase
-import dev.peppy.mobile.gateway.NativeGateway
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -828,26 +827,11 @@ class LinkRuntimeTest : GatewayTestBase() {
         }
     }
 
-    private fun persistedLinkState(): NativeRcsLinkState? =
-        NativeGateway.open(context)?.rcsLinkStatus(deviceId, System.currentTimeMillis())?.state
-
     /** Polls a condition for at most five seconds; the caller asserts the result. */
     private fun awaitCondition(condition: () -> Boolean): Boolean {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
         while (!condition() && System.nanoTime() < deadline) Thread.yield()
         return condition()
-    }
-
-    private class PausingWipeStore(
-        private val wipeEntered: CountDownLatch,
-        private val releaseWipe: CountDownLatch,
-    ) : LinkStateStorage {
-        override fun read() = ByteArray(0)
-        override fun write(state: ByteArray) = Unit
-        override fun wipe() {
-            wipeEntered.countDown()
-            assertTrue("wipe was never released", releaseWipe.await(5, TimeUnit.SECONDS))
-        }
     }
 
     private class QueueExecutor : Executor {
