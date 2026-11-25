@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InlineMedia } from "./InlineMedia";
 import { stubMatchMedia } from "../test-support/browserStubs";
@@ -40,6 +40,7 @@ describe("inline video controls", () => {
     expect(video).toHaveAttribute("controls");
     fireEvent.play(video);
     fireEvent.ended(video);
+    act(() => { vi.advanceTimersByTime(2000); });
     expect(video).toHaveAttribute("controls");
   });
 
@@ -61,14 +62,22 @@ describe("inline video controls", () => {
     expect(video).not.toHaveAttribute("controls");
   });
 
-  it("keeps controls visible on touch-only devices and clears timers on unmount", async () => {
+  it("does not pin controls on pointer focus", async () => {
+    const video = await renderVideo();
+    fireEvent.play(video);
+    fireEvent.pointerDown(video);
+    fireEvent.focus(video);
+    fireEvent.pointerLeave(video);
+    expect(video).not.toHaveAttribute("controls");
+  });
+
+  it("keeps controls visible on touch-only devices", async () => {
     const video = await renderVideo(true);
     fireEvent.play(video);
     fireEvent.pointerLeave(video);
+    expect(video).toHaveAttribute("controls");
     act(() => { vi.advanceTimersByTime(2000); });
     expect(video).toHaveAttribute("controls");
-    cleanup();
-    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("clears an active idle timer on unmount", async () => {
@@ -79,15 +88,42 @@ describe("inline video controls", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("toggles playback with Space and k", async () => {
+  it("uses Space and k only when native controls are hidden", async () => {
     const video = await renderVideo() as HTMLVideoElement;
     const play = vi.spyOn(video, "play").mockResolvedValue();
     const pause = vi.spyOn(video, "pause").mockImplementation(() => {});
-    fireEvent.keyDown(video, { key: " " });
+    for (const key of [" ", "k"]) {
+      const event = createEvent.keyDown(video, { key });
+      fireEvent(video, event);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(play).not.toHaveBeenCalled();
+    expect(pause).not.toHaveBeenCalled();
+    fireEvent.blur(video);
+    fireEvent.play(video);
+    fireEvent.pointerLeave(video);
+    const space = createEvent.keyDown(video, { key: " " });
+    fireEvent(video, space);
+    expect(space.defaultPrevented).toBe(true);
     expect(play).toHaveBeenCalledOnce();
     Object.defineProperty(video, "paused", { configurable: true, value: false });
-    fireEvent.keyDown(video, { key: "k" });
+    fireEvent.blur(video);
+    fireEvent.pointerLeave(video);
+    const k = createEvent.keyDown(video, { key: "k" });
+    fireEvent(video, k);
+    expect(k.defaultPrevented).toBe(true);
     expect(pause).toHaveBeenCalledOnce();
+  });
+
+  it.each([{ repeat: true }, { ctrlKey: true }, { metaKey: true }, { altKey: true }])("ignores repeated and modified playback keys: %o", async (options) => {
+    const video = await renderVideo() as HTMLVideoElement;
+    const play = vi.spyOn(video, "play").mockResolvedValue();
+    fireEvent.play(video);
+    fireEvent.pointerLeave(video);
+    const event = createEvent.keyDown(video, { key: " ", ...options });
+    fireEvent(video, event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(play).not.toHaveBeenCalled();
   });
 });
 

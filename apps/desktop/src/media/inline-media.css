@@ -14,7 +14,7 @@
   color: var(--peppy-text-primary);
 }
 
-video[data-inline-media] { display: block; height: auto; object-fit: contain; background: #000; }
+video[data-inline-media] { display: block; height: auto; max-height: var(--video-max-h); object-fit: contain; background: #000; }
 video[data-inline-media][data-controls-idle] { cursor: none; }
 video[data-inline-media][data-media-kind="video"]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: -2px; }
 audio[data-media-kind="audio"] { width: min(100%, 420px); }
