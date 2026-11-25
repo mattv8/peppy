@@ -59,7 +59,12 @@ pub type BridgeResult<T> = Result<T, BridgeError>;
 /// Maps client-core errors to stable UI codes. Every core message is a static string, so
 /// forwarding `InvalidRequest` text cannot leak secrets.
 pub fn core_error(error: CoreError) -> BridgeError {
+    let fault = peppy_client_core::take_database_fault();
     match error {
+        CoreError::Database => {
+            crate::diagnostics::record_database_fault(fault);
+            BridgeError::new("core", CoreError::Database.to_string())
+        }
         CoreError::WrongPassphrase | CoreError::InvalidPassphrase => {
             BridgeError::new("unlock-failed", "The passphrase did not unlock this vault. No local data was changed.")
         }
@@ -136,6 +141,70 @@ pub fn core_error(error: CoreError) -> BridgeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sqlite_open_failure() -> CoreError {
+        let directory = tempfile::tempdir().unwrap();
+        let config = peppy_client_core::ClientConfig {
+            database_path: directory.path().to_owned(),
+            vault_id: peppy_client_core::VaultId::new(),
+            device_id: peppy_client_core::DeviceId::new(),
+        };
+        match peppy_client_core::Client::open(
+            config,
+            peppy_client_core::DatabaseKey::new(&[0; 32]).unwrap(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("opening a directory as SQLite should fail"),
+        }
+    }
+
+    #[test]
+    fn database_error_records_last_sqlite_fault_without_changing_message() {
+        use crate::diagnostics::*;
+        peppy_client_core::take_database_fault();
+        assert_eq!(sqlite_open_failure(), CoreError::Database);
+        let expected = peppy_client_core::take_database_fault().unwrap();
+        assert_eq!(
+            expected.kind,
+            peppy_client_core::DatabaseFaultKind::SqliteFailure
+        );
+        let guard = start_capture();
+        let error = core_error(sqlite_open_failure());
+        assert_eq!(error.code, "core");
+        assert_eq!(error.message, "database unavailable or corrupt");
+        let records = finish_capture(guard);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, EVENT_DATABASE_FAULT);
+        let fields = &records[0].1;
+        assert!(fields.contains(&(FIELD_REASON, expected.kind as i64)));
+        assert!(fields.contains(&(
+            FIELD_SQLITE_CODE,
+            i64::from(expected.sqlite_extended_code.unwrap())
+        )));
+        assert!(fields.contains(&(FIELD_SITE, i64::from(expected.site))));
+        assert!(fields.contains(&(FIELD_LINE, i64::from(expected.line))));
+        assert!(fields
+            .iter()
+            .any(|(field, age)| *field == FIELD_AGE_MS && *age >= 0));
+    }
+
+    #[test]
+    fn database_error_without_fault_and_other_errors_clear_faults() {
+        use crate::diagnostics::*;
+        peppy_client_core::take_database_fault();
+        let guard = start_capture();
+        core_error(CoreError::Database);
+        assert_eq!(sqlite_open_failure(), CoreError::Database);
+        core_error(CoreError::NotFound);
+        core_error(CoreError::Database);
+        assert_eq!(
+            finish_capture(guard),
+            vec![
+                (EVENT_DATABASE_FAULT, vec![(FIELD_REASON, 0)]),
+                (EVENT_DATABASE_FAULT, vec![(FIELD_REASON, 0)]),
+            ]
+        );
+    }
 
     #[test]
     fn core_errors_map_to_stable_codes() {
