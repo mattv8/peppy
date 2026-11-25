@@ -571,6 +571,16 @@ This reference records non-obvious Peppy domain constraints.
   deletion policy's approval, once the inherited book's takeover scan
   completes. It is then terminal on every device and never regains contacts.
   See [contact book supersession](../crates/client-core/src/contact_book_supersession.rs).
+- A re-enrolled phone has no source mapping for the book it inherits, so it
+  recognises its predecessor's contacts by content. While the takeover is open,
+  an observed provider contact adopts the identity of the matching predecessor
+  contact. The first complete authoritative scan then removes each predecessor
+  copy that an observed contact covers and links it to that contact, without
+  the deletion policy's approval: nothing the phone holds disappears, and the
+  linked copy is never offered for restore. A copy with content the phone
+  lacks is not merged and follows the deletion policy. Adoption keeps the
+  predecessor's identity; the merge keeps the identity the phone already maps.
+  See [contact takeover](../crates/client-core/src/contact_takeover.rs).
 - Contact photo objects are private encrypted attachments. Retain restore data
   and referenced photos for their promised lifetime; a timer alone does not
   establish that every replay or restore reference has been released.
