@@ -58,15 +58,46 @@ describe("MediaGrid", () => {
     expect(frame).toContainElement(article.querySelector("[data-media-tile]"));
     expect(frame).toContainElement(article.querySelector("[data-message-cancel]"));
     expect(frame).toContainElement(article.querySelector("[data-test-badges]"));
-    expect(frame).not.toContainElement(article.querySelector("[data-media-caption]"));
+    expect(frame).not.toContainElement(article.querySelector("[data-message-caption]"));
     expect(article.closest(".message-row")).toHaveClass("self");
     expect(article.querySelector("[data-message-caption]")).toHaveTextContent("hello");
+  });
+
+  it("keeps self captions untinted even when a style is supplied", () => {
+    const view = render(<MediaGrid messages={[message("1", "hello")]} onOpen={vi.fn()} captionStyle={() => ({ "--peppy-tone": "red" } as CSSProperties)} />);
+    const bubble = view.container.querySelector(".media-caption-bubble")!;
+    expect(bubble).not.toHaveAttribute("data-peppy-tone");
+    expect(bubble).not.toHaveAttribute("style");
+  });
+
+  it.each(["Cancellation was too late.", "Cancellation status is unknown.", "Could not request cancellation."])("places notice %s after a single or carousel frame", (notice) => {
+    for (const messages of [[message("1")], [{ ...message("1"), attachments: [message("1").attachments[0], message("2").attachments[0]] }]]) {
+      const view = render(<MediaGrid messages={messages} onOpen={vi.fn()} renderMessageNotice={() => <span role="status">{notice}</span>} />);
+      const frame = view.container.querySelector("[data-media-frame]")!;
+      const wrapper = view.container.querySelector<HTMLElement>("[data-media-message-notice]")!;
+      expect(wrapper).toHaveTextContent(notice);
+      expect(frame.compareDocumentPosition(wrapper) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(frame).not.toContainElement(wrapper);
+      view.unmount();
+    }
+  });
+
+  it("places a held carousel note between the frame and caption", () => {
+    const held = (id: string) => ({ ...message(id), attachments: [{ ...message(id).attachments[0], state: "pending" as const, mediaHold: "held" as const }] });
+    const first = held("1");
+    const view = render(<MediaGrid messages={[{ ...first, body: "caption", attachments: [first.attachments[0], held("2").attachments[0]] }]} onOpen={vi.fn()} />);
+    const article = view.container.querySelector("article")!;
+    const frame = article.querySelector("[data-media-frame]")!;
+    const note = article.querySelector("[data-group-hold-note]")!;
+    const caption = article.querySelector("[data-message-caption]")!;
+    expect(frame.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(note.compareDocumentPosition(caption) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("uses a toned incoming caption and renders subject-only captions", () => {
     const incoming = { ...message("1"), sender: "other" as const, subject: "topic" };
     const view = render(<MediaGrid messages={[incoming]} onOpen={vi.fn()} captionStyle={() => ({ "--peppy-tone": "red" } as CSSProperties)} />);
-    const caption = view.container.querySelector("[data-media-caption]")!;
+    const caption = view.container.querySelector("[data-message-caption]")!;
     expect(caption).toHaveTextContent("Subject: topic");
     expect(caption.firstElementChild).toHaveAttribute("data-peppy-tone");
     expect((caption.firstElementChild as HTMLElement).style.getPropertyValue("--peppy-tone")).toBe("red");
@@ -76,7 +107,7 @@ describe("MediaGrid", () => {
     const view = render(<MediaGrid messages={[message("1")]} onOpen={vi.fn()} isMessagePending={() => true} renderMessageAction={() => <span>Waiting</span>} />);
     expect(view.container.querySelector("article")).not.toHaveAttribute("data-media-bare");
     expect(view.container.querySelector("[data-media-frame]")).toBeNull();
-    expect(view.container.querySelector("[data-media-caption]")).toBeNull();
+    expect(view.container.querySelector("[data-message-caption]")).toBeNull();
     expect(screen.getByText("Waiting")).toBeInTheDocument();
   });
 
@@ -84,7 +115,7 @@ describe("MediaGrid", () => {
     const view = render(<MediaGrid messages={[message("1"), message("2")]} onOpen={vi.fn()} />);
     expect(view.container.querySelector("article")).toHaveAttribute("data-media-bare");
     expect(view.container.querySelector("[data-media-frame] [data-media-carousel]")).toBeInTheDocument();
-    expect(view.container.querySelector("[data-media-caption]")).toBeNull();
+    expect(view.container.querySelector("[data-message-caption]")).toBeNull();
   });
 
   it("renders a single tile without carousel controls", () => {

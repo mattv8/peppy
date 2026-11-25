@@ -67,7 +67,7 @@ function coveringPlacement(input: ReactionPlacementInput, left: number): Reactio
   let top: number;
   let placement: ReactionPlacement["placement"] = "straddle";
   if (anchor.top - list.top < PARTLY_SCROLLED) {
-    top = input.chipsBottom !== undefined ? input.chipsBottom + EDGE : anchor.bottom - BAR_OVERHANG;
+    top = input.chipsBottom !== undefined ? input.chipsBottom + EDGE : anchor.bottom - overlapFor(input.reach.bottom);
     placement = "below";
     if (top < list.top) return null;
   } else {

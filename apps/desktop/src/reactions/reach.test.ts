@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { measureReach } from "./ReactionLayer";
+import { measureReach, reachBox } from "./ReactionLayer";
+import { placeReactionBar } from "./placement";
 
 function rect(element: Element, top: number, bottom: number, width = 100) {
   vi.spyOn(element, "getBoundingClientRect").mockReturnValue({
@@ -49,9 +50,16 @@ describe("measureReach", () => {
   it("measures photo reach against the frame and keeps its caption clear", () => {
     const element = anchor('<div data-media-frame></div><div data-message-caption>caption</div>');
     element.setAttribute("data-media-message-content", "");
+    rect(element, 100, 220);
     rect(element.firstElementChild!, 100, 180);
     rect(element.lastElementChild!, 182, 220);
-    expect(measureReach(element)).toEqual({ top: 16, bottom: 0 });
+    const box = reachBox(element);
+    const reach = measureReach(element);
+    expect(box).toEqual({ top: 100, bottom: 220, left: 0, right: 100 });
+    expect(reach).toEqual({ top: 16, bottom: 0 });
+    const placement = placeReactionBar({ anchor: box, reach, outgoing: false, list: { top: 95, bottom: 800, left: 0, right: 400 }, composerTop: 700, viewport: { top: 0, bottom: 800 }, width: 212, height: 32, touch: false, allowCover: false });
+    expect(placement?.placement).toBe("below");
+    expect(placement!.top).toBeGreaterThanOrEqual(220);
   });
 
   it("limits chromeless reach to keep a caption clear", () => {

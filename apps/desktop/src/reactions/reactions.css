@@ -49,14 +49,17 @@
  @keyframes reaction-bar-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
  /* The ring is an overlay, not an outline: a photo tile inside the slide paints over an outline on the slide (designer re-check item 3). */
 [data-reaction-target] { position: relative; }
-[data-reaction-target]::after { content: ""; position: absolute; inset: 0; border-radius: inherit; outline: 2px solid var(--peppy-focus); outline-offset: -2px; pointer-events: none; z-index: 1; }
-@media (forced-colors: active) { [data-reaction-target]::after { outline-color: Highlight; } }
+[data-reaction-target]:not([data-media-bare])::after, [data-media-bare][data-reaction-target] > [data-media-frame]::after { content: ""; position: absolute; inset: 0; border-radius: inherit; outline: 2px solid var(--peppy-focus); outline-offset: -2px; pointer-events: none; z-index: 1; }
+[data-media-bare][data-reaction-target] > [data-media-frame]::after { border-radius: var(--peppy-radius-md, 8px); }
+@media (forced-colors: active) { [data-reaction-target]::after, [data-media-bare][data-reaction-target] > [data-media-frame]::after { outline-color: Highlight; } }
  @media (prefers-reduced-motion: reduce) { #message-reaction-bar { animation: none; } }
  /* The overlay badge sits on its photo: only the photo element that holds one becomes its containing block (overlay placement). */
  [data-media-frame]:has(> .reaction-badges-overlay), [data-media-slide]:has(> .reaction-badges-overlay) { position: relative; }
  #message-reaction-bar button { box-sizing: border-box; border-bottom: 2px solid transparent; font-size: 18px; line-height: 1; font-family: var(--peppy-font-body), "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; }
- [data-reaction-ok]:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
- @media (forced-colors: active) { [data-reaction-ok]:focus-visible { outline-color: Highlight; } }
+ [data-reaction-ok]:not([data-media-bare]):focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
+ [data-media-bare][data-reaction-ok]:focus-visible { outline: none; }
+ [data-media-bare][data-reaction-ok]:focus-visible > [data-media-frame] { outline: 2px solid var(--peppy-focus); outline-offset: 2px; border-radius: var(--peppy-radius-md, 8px); }
+ @media (forced-colors: active) { [data-reaction-ok]:focus-visible, [data-media-bare][data-reaction-ok]:focus-visible > [data-media-frame] { outline-color: Highlight; } }
 
 /* Coarse glyphs are 22px: this block comes after the 18px rule, so it wins at equal specificity. */
 @media (pointer: coarse) { #message-reaction-bar button { font-size: 22px; } }
