@@ -257,7 +257,9 @@ func sampleContacts(_ count: Int) -> [PlatformContact] {
         try predecessor.registerDeviceHint(platform: "ios", hint: hint)
         try predecessor.observeServerHighWater(highWaterCursor: "0")
         let predecessorProvider = WritableFakeProvider()
-        await predecessorProvider.configure { $0.book = sampleContacts(1) }
+        // More contacts than one scan may remove without approval: the successor must recognise
+        // them, not publish a second identity for each and hold the removal of the first.
+        await predecessorProvider.configure { $0.book = sampleContacts(12) }
         let predecessorCoordinator = NativeContactsCoordinator(
             client: predecessor, deviceId: predecessorId, provider: predecessorProvider,
             preferences: InMemoryContactsPreferences(ContactsPreferences(enabled: true))
@@ -292,8 +294,25 @@ func sampleContacts(_ count: Int) -> [PlatformContact] {
         #expect(old["contact_count"] as? Int == 0)
         let requests = try NativeContactsCoordinator.object(successor.listContactRequestsJson(input: NativeContactsCoordinator.json(["book_id": supersededBookId])))
         #expect(!(requests["requests"] as? [[String: Any]] ?? []).contains { $0["kind"] as? String == "scan_deletions" })
+        let inherited = try #require(books.first { $0["id"] as? String == inheritedBookId })
+        #expect(inherited["contact_count"] as? Int == 12)
+        let inheritedRequests = try NativeContactsCoordinator.object(successor.listContactRequestsJson(input: NativeContactsCoordinator.json(["book_id": inheritedBookId])))
+        #expect(!(inheritedRequests["requests"] as? [[String: Any]] ?? []).contains { $0["kind"] as? String == "scan_deletions" })
         #expect(try successor.contactBookSelection() == .owned(bookId: inheritedBookId))
         #expect(try await successorCoordinator.run(reason: .foreground, isCancelled: { false }).bookId == inheritedBookId)
+    }
+
+    @Test func inheritedBookNeverContinuesFromChangeHistory() {
+        var checkpoint = ContactsCheckpoint()
+        checkpoint.historyToken = Data([1])
+        let token = { (inherited: Bool) in
+            NativeContactsCoordinator.incrementalToken(
+                checkpoint: checkpoint, hasBook: true, inherited: inherited, pendingRemoteScan: false, access: .full
+            )
+        }
+        #expect(token(false) == Data([1]))
+        // A reopened takeover has a token from its earlier scan; it still needs the full scan.
+        #expect(token(true) == nil)
     }
 
     @Test func selectionResolverReselectsMissingOwnedBook() throws {

@@ -403,7 +403,10 @@ struct NativeContactsCoordinator {
         let budget = photoBudget ?? .for(reason)
 
         var handled = false
-        if existing != nil, checkpoint.scanId == nil, !pendingRemoteScan, access == .full, let token = checkpoint.historyToken {
+        if let token = Self.incrementalToken(
+            checkpoint: checkpoint, hasBook: existing != nil, inherited: selected.inherited,
+            pendingRemoteScan: pendingRemoteScan, access: access
+        ) {
             handled = try await incremental(since: token, book: book, checkpoint: &checkpoint, report: &report, isCancelled: isCancelled)
         }
         if !handled {
@@ -426,6 +429,16 @@ struct NativeContactsCoordinator {
         try writeCheckpoint(bookId, checkpoint)
         if let media { report.media = media.report }
         return report
+    }
+
+    /// The OS change-history token this pass may continue from, or nil when it must run a full scan.
+    /// An inherited book is taken over by a full scan only, also when the core opens a completed
+    /// takeover again to reconcile the predecessor's contacts.
+    static func incrementalToken(
+        checkpoint: ContactsCheckpoint, hasBook: Bool, inherited: Bool, pendingRemoteScan: Bool, access: ContactsAccess
+    ) -> Data? {
+        guard hasBook, !inherited, checkpoint.scanId == nil, !pendingRemoteScan, access == .full else { return nil }
+        return checkpoint.historyToken
     }
 
     /// OS change history fast path. Returns false when a full scan is required instead. The token
