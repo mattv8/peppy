@@ -1,0 +1,163 @@
+[
+  {
+    "canonical": "+12025550123",
+    "e164": "+12025550123",
+    "input": "2025550123",
+    "name": "US national",
+    "region": "US"
+  },
+  {
+    "canonical": "+12025550123",
+    "e164": "+12025550123",
+    "input": "(202) 555-0123",
+    "name": "US national formatted",
+    "region": "US"
+  },
+  {
+    "canonical": "+12025550123",
+    "e164": "+12025550123",
+    "input": "+1 202 555 0123",
+    "name": "US international",
+    "region": null
+  },
+  {
+    "canonical": "+442079460018",
+    "e164": "+442079460018",
+    "input": "020 7946 0018",
+    "name": "GB national",
+    "region": "GB"
+  },
+  {
+    "canonical": "+442079460018",
+    "e164": "+442079460018",
+    "input": "+44 20 7946 0018",
+    "name": "GB international",
+    "region": null
+  },
+  {
+    "canonical": "555",
+    "e164": null,
+    "input": "555",
+    "name": "short code 555",
+    "note": "Normalization rejects the short code; canonical identity preserves it.",
+    "region": "US"
+  },
+  {
+    "canonical": "40404",
+    "e164": null,
+    "input": "40404",
+    "name": "short code 40404",
+    "note": "Normalization rejects the short code; canonical identity preserves it.",
+    "region": "US"
+  },
+  {
+    "canonical": "name@example.com",
+    "e164": null,
+    "input": "name@example.com",
+    "name": "email address",
+    "note": "Normalization rejects the address; canonical identity preserves it.",
+    "region": "US"
+  },
+  {
+    "canonical": "Aurora",
+    "e164": null,
+    "input": "Aurora",
+    "name": "alphanumeric sender",
+    "note": "Normalization rejects the sender; canonical identity preserves it.",
+    "region": "US"
+  },
+  {
+    "canonical": "+12025550123",
+    "e164": null,
+    "input": "2025550123 ext 4",
+    "name": "extension",
+    "note": "Normalization rejects letters; canonical identity parses and drops the extension.",
+    "region": "US"
+  },
+  {
+    "canonical": "+not-a-number",
+    "e164": null,
+    "input": "+not-a-number",
+    "name": "malformed international",
+    "note": "Normalization rejects the address; canonical identity preserves it.",
+    "region": null
+  },
+  {
+    "canonical": "+12025550123",
+    "e164": "+12025550123",
+    "input": "  2025550123  ",
+    "name": "US national whitespace",
+    "region": "US"
+  },
+  {
+    "canonical": "40404",
+    "e164": null,
+    "input": "  40404  ",
+    "name": "short code whitespace",
+    "note": "Normalization rejects the short code; canonical identity preserves it trimmed.",
+    "region": "US"
+  },
+  {
+    "canonical": "+442079460018",
+    "e164": "+442079460018",
+    "input": "+44 20 7946 0018",
+    "name": "GB international in US",
+    "region": "US"
+  },
+  {
+    "canonical": "020 7946 0018",
+    "e164": null,
+    "input": "020 7946 0018",
+    "name": "GB national in US",
+    "note": "Normalization rejects the number; canonical identity preserves it.",
+    "region": "US"
+  },
+  {
+    "canonical": "2025550123",
+    "e164": null,
+    "input": "2025550123",
+    "name": "national without region",
+    "note": "Normalization requires a region; canonical identity preserves the input.",
+    "region": null
+  },
+  {
+    "canonical": "2025550123",
+    "e164": null,
+    "input": "2025550123",
+    "name": "invalid region",
+    "note": "Normalization rejects the region; canonical identity preserves the input.",
+    "region": "ZZ"
+  },
+  {
+    "canonical": "2025550123",
+    "e164": null,
+    "input": "2025550123",
+    "name": "lowercase region",
+    "note": "Normalization rejects the region; canonical identity preserves the input.",
+    "region": "us"
+  },
+  {
+    "canonical": "+18003569377",
+    "e164": null,
+    "input": "1-800-FLOWERS",
+    "name": "vanity number",
+    "note": "Normalization rejects letters; canonical identity parses the vanity number.",
+    "region": "US"
+  },
+  {
+    "canonical": "",
+    "e164": null,
+    "input": "",
+    "name": "empty input",
+    "note": "Normalization rejects empty input; canonical identity preserves it.",
+    "region": "US"
+  },
+  {
+    "canonical": "",
+    "e164": null,
+    "input": "   ",
+    "name": "whitespace only",
+    "note": "Normalization rejects empty input; canonical identity trims it.",
+    "region": "US"
+  }
+]
