@@ -236,7 +236,7 @@ import {
   type CancelledSendRestore,
 } from "./drafts/cancelledSendRestore";
 import { DraftNotice } from "./drafts/DraftNotice";
-import { CLOSE_SEND_WAIT_MS, waitForSend, type SendSettlement } from "./drafts/sendSettlement";
+import { CLOSE_SEND_WAIT_MS, createInFlightSend, waitForSend } from "./drafts/sendSettlement";
 import { DraftSyncStatus } from "./drafts/DraftSyncStatus";
 import type { DraftResolutionResult } from "./drafts/DraftConflictReviewDialog";
 import { selectDraftNotice, type DraftNoticeCandidate } from "./drafts/draftNoticeModel";
@@ -2802,7 +2802,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
   const sendingRef = useRef(false);
-  const inFlightSendRef = useRef<{ settled: Promise<SendSettlement>; resolve(s: SendSettlement): void } | null>(null);
+  const inFlightSendRef = useRef<ReturnType<typeof createInFlightSend> | null>(null);
   const closingRef = useRef(false);
   const loadSequence = useRef(0);
   const historySequence = useRef(0);
@@ -4893,8 +4893,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     autoAcknowledgeDraftSyncNotice();
     const session = currentSearchSessionKey();
     sendingRef.current = true;
-    let resolveSend!: (settlement: SendSettlement) => void;
-    const inFlightSend = { settled: new Promise<SendSettlement>((resolve) => { resolveSend = resolve; }), resolve: (settlement: SendSettlement) => resolveSend(settlement) };
+    const inFlightSend = createInFlightSend();
     inFlightSendRef.current = inFlightSend;
     setSending(true);
     setGroupNotice(null);
@@ -4979,6 +4978,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       if (!sentSlot || !mountedRef.current || session !== currentSearchSessionKey()) return;
       const sentGeneration = sentSlot.generation;
       try {
+        inFlightSend.submit();
         const result = await bridge.send_draft({
           id: current.id,
           conversationId: current.conversationId,
@@ -5013,7 +5013,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
         }
         const postSendContent = store.get(current.key)?.content;
         store.markSent(current.key, sentGeneration, result.revision, postSendContent);
-        inFlightSend.resolve("sent");
+        inFlightSend.settle("sent");
         setNewComposeKey(null);
         if (result.reason === "create_not_rcs") setGroupNotice({ kind: "create-not-rcs", key: store.resolve(current.key) });
         if (detachedHistoryRef.current?.conversationId === current.conversationId) clearDetached();
@@ -5087,7 +5087,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       }
       await refresh(current.conversationId).catch(reportRefresh(""));
     } finally {
-      inFlightSend.resolve("unsent");
+      inFlightSend.settle("unsent");
       if (inFlightSendRef.current === inFlightSend) inFlightSendRef.current = null;
       if (pendingSendId) setPendingSends((sends) => sends.filter((pending) => pending.id !== pendingSendId));
       sendingRef.current = false;
@@ -5143,16 +5143,21 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   };
 
   /** Closing never discards an unsaved draft: a failed save keeps the window open. */
-  const flushForClose = async (): Promise<CloseOutcome> => {
+  const flushForClose = async (mode: "close" | "collapse"): Promise<CloseOutcome> => {
     const inFlightSend = inFlightSendRef.current;
     if (inFlightSend) {
-      const outcome = await waitForSend(inFlightSend.settled, CLOSE_SEND_WAIT_MS);
-      if (outcome !== "sent") return { ok: false, reason: outcome === "unsent" ? "send-unsent" : "still-sending" };
+      if (mode === "collapse") {
+        const outcome = await waitForSend(inFlightSend.submitted, CLOSE_SEND_WAIT_MS);
+        if (outcome !== true) return { ok: false, reason: outcome === false ? "send-unsent" : "still-sending" };
+      } else {
+        const outcome = await waitForSend(inFlightSend.settled, CLOSE_SEND_WAIT_MS);
+        if (outcome !== "sent") return { ok: false, reason: outcome === "unsent" ? "send-unsent" : "still-sending" };
+      }
     }
     const reviewedKeys = new Set<string>();
     for (;;) {
-      const outcome = await store.flushAll();
-      if (!outcome.ok && outcome.key && store.get(store.resolve(outcome.key))?.held) return { ok: false, reason: "still-sending" };
+      const outcome = await store.flushAll(mode === "collapse" ? { skipHeld: true } : undefined);
+      if (mode === "close" && !outcome.ok && outcome.key && store.get(store.resolve(outcome.key))?.held) return { ok: false, reason: "still-sending" };
       if (outcome.ok || !outcome.reviewRequired || !outcome.key || reviewedKeys.has(outcome.key)) return outcome;
       // The store reports reviewRequired only for a clean, durably adopted host row.
       reviewedKeys.add(outcome.key);
@@ -5181,7 +5186,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     if (closingRef.current) return;
     closingRef.current = true;
     try {
-      const outcome = await flushForClose();
+      const outcome = await flushForClose(headPanel ? "collapse" : "close");
       if (!outcome.ok)
         return showFlushFailure(outcome, "The window stayed open because the draft was not saved");
       await close();
@@ -5199,7 +5204,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     if (closingRef.current) return;
     closingRef.current = true;
     setClosingHead(true);
-    void flushForClose().then(async outcome => {
+    void flushForClose("close").then(async outcome => {
       if (!outcome.ok) {
         showFlushFailure(outcome, "The window stayed open because the draft was not saved");
         return;
@@ -5215,7 +5220,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
 
   useEffect(() => bridge.subscribe_lifecycle(request => {
     setLifecyclePending(request.id);
-    void flushForClose().then(async outcome => {
+    void flushForClose(request.action === "collapse" ? "collapse" : "close").then(async outcome => {
       if (!outcome.ok) {
         showFlushFailure(outcome, "The window stayed open because a draft was not saved");
         await bridge.acknowledge_lifecycle(request.id, false);
@@ -5433,7 +5438,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   };
   const lock = bridge.lock_sync?.bind(bridge);
   const lockSync = lock ? async () => {
-    const saved = await flushForClose();
+    const saved = await flushForClose("close");
     if (!saved.ok) {
       showFlushFailure(saved, "Not locked: the draft could not be saved", { "still-sending": "Not locked: your message is still sending. Try again once it finishes.", "send-unsent": "Not locked: your message was not sent." });
       return;

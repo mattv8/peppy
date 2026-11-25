@@ -448,11 +448,12 @@ export class DraftStore {
     return isDirty(slot) ? this.enqueue(slot) : { ok: true };
   }
 
-  /** Flush all live draft slots and report the first failure after every attempt, keyed to its draft. */
-  async flushAll(): Promise<SaveOutcome> {
+  /** Flush live draft slots, optionally skipping held slots, and report the first failure keyed to its draft. */
+  async flushAll(options?: { skipHeld?: boolean }): Promise<SaveOutcome> {
     let review: SaveOutcome | undefined;
     let failure: SaveOutcome | undefined;
     for (const slot of [...this.slots.values()]) {
+      if (options?.skipHeld && slot.held) continue;
       const outcome = await this.flush(slot.key);
       if (outcome.ok) continue;
       const attributed: SaveOutcome = { ...outcome, key: slot.key };

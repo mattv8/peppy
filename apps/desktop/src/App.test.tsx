@@ -4224,7 +4224,7 @@ describe("draft durability", () => {
     expect(screen.getByRole("alert")).toBeInTheDocument();
   });
 
-  it("waits for an accepted send before acknowledging lifecycle collapse", async () => {
+  it("acknowledges lifecycle collapse while a submitted send is pending", async () => {
     const pending = deferred<void>();
     vi.mocked(bridge.send_draft).mockImplementationOnce(async input => { await pending.promise; return host.send(input); });
     render(<App />);
@@ -4234,7 +4234,67 @@ describe("draft durability", () => {
     await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("pending collapse"));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(bridge.send_draft).toHaveBeenCalled());
-    await act(async () => lifecycle?.({ id: "collapse-during-send", action: "collapse" }));
+    await act(async () => lifecycle?.({ id: "collapse-pending", action: "collapse" }));
+    await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("collapse-pending", true));
+    expect(screen.queryByText(/window stayed open|still sending/i)).not.toBeInTheDocument();
+    expect(document.querySelector("[data-draft-notice='save-failed']")).toBeNull();
+    await act(async () => pending.resolve());
+    await waitFor(() => expect(host.sent).toHaveLength(1));
+  });
+
+  it("saves edits made during a pending send after lifecycle collapse", async () => {
+    const pending = deferred<void>();
+    vi.mocked(bridge.send_draft).mockImplementationOnce(async input => { await pending.promise; return host.send(input); });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("first message");
+    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("first message"));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(bridge.send_draft).toHaveBeenCalled());
+    type("next message");
+    await act(async () => lifecycle?.({ id: "collapse-edits", action: "collapse" }));
+    await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("collapse-edits", true));
+    await act(async () => pending.resolve());
+    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("next message"));
+  });
+
+  it("blocks collapse for an offscreen save failure while a send is pending", async () => {
+    const pending = deferred<void>();
+    vi.mocked(bridge.send_draft).mockImplementationOnce(async input => { await pending.promise; return host.send(input); });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("first message");
+    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("first message"));
+    fireEvent.click(screen.getByRole("button", { name: /River/ }));
+    await screen.findByText("Hello from River");
+    host.failSaves = { code: "io", message: "River disk full." };
+    type("river unsaved");
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: /Aurora/ }));
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(bridge.send_draft).toHaveBeenCalled());
+    await act(async () => lifecycle?.({ id: "collapse-river-failure", action: "collapse" }));
+    await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("collapse-river-failure", false));
+    expect(document.querySelector("[data-header-title]")).toHaveTextContent("River");
+    const failure = document.querySelector<HTMLElement>("[data-draft-notice='save-failed']")!;
+    expect(within(failure).getByRole("button", { name: "Retry" })).toBeEnabled();
+    await act(async () => pending.resolve());
+  });
+
+  it("waits for an accepted send before acknowledging lifecycle close", async () => {
+    const pending = deferred<void>();
+    vi.mocked(bridge.send_draft).mockImplementationOnce(async input => { await pending.promise; return host.send(input); });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("pending collapse");
+    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("pending collapse"));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(bridge.send_draft).toHaveBeenCalled());
+    await act(async () => lifecycle?.({ id: "collapse-during-send", action: "close" }));
     expect(bridge.acknowledge_lifecycle).not.toHaveBeenCalled();
     await act(async () => pending.resolve());
     await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("collapse-during-send", true));
@@ -4242,7 +4302,7 @@ describe("draft durability", () => {
     expect(document.querySelector("[data-draft-notice='save-failed']")).toBeNull();
   });
 
-  it("acknowledges lifecycle collapse before the post-send refresh finishes", async () => {
+  it("acknowledges lifecycle close before the post-send refresh finishes", async () => {
     const pending = deferred<void>();
     const refresh = deferred<DesktopSnapshot>();
     vi.mocked(bridge.send_draft).mockImplementationOnce(async input => { await pending.promise; return host.send(input); });
@@ -4253,7 +4313,7 @@ describe("draft durability", () => {
     await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("refresh after collapse"));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(bridge.send_draft).toHaveBeenCalled());
-    await act(async () => lifecycle?.({ id: "collapse-before-refresh", action: "collapse" }));
+    await act(async () => lifecycle?.({ id: "collapse-before-refresh", action: "close" }));
     vi.mocked(bridge.load_state).mockReturnValueOnce(refresh.promise);
     await act(async () => pending.resolve());
     await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("collapse-before-refresh", true));
@@ -4288,7 +4348,7 @@ describe("draft durability", () => {
     }
   });
 
-  it("keeps the composer open without a save error when a send is refused during collapse", async () => {
+  it("keeps the composer open without a save error when a send is refused during close", async () => {
     const pending = deferred<Awaited<ReturnType<typeof bridge.send_draft>>>();
     vi.mocked(bridge.send_draft).mockReturnValueOnce(pending.promise);
     render(<App />);
@@ -4298,7 +4358,7 @@ describe("draft durability", () => {
     await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("refused collapse"));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(bridge.send_draft).toHaveBeenCalled());
-    await act(async () => lifecycle?.({ id: "refused-collapse", action: "collapse" }));
+    await act(async () => lifecycle?.({ id: "refused-collapse", action: "close" }));
     await act(async () => pending.resolve({ accepted: false, status: "failed-before-submit", reason: "Carrier refused the message." }));
     await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("refused-collapse", false));
     expect(await screen.findByText("Not sent: Carrier refused the message.")).toBeInTheDocument();
@@ -4307,7 +4367,7 @@ describe("draft durability", () => {
     expect(document.querySelector("[data-draft-notice='save-failed']")).toBeNull();
   });
 
-  it("keeps the window open when collapse reaches the send wait bound", async () => {
+  it("keeps the window open when close reaches the send wait bound", async () => {
     const pending = deferred<void>();
     vi.mocked(bridge.send_draft).mockImplementationOnce(async input => { await pending.promise; return host.send(input); });
     render(<App />);
@@ -4319,7 +4379,7 @@ describe("draft durability", () => {
     await waitFor(() => expect(bridge.send_draft).toHaveBeenCalled());
     vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout", "Date"] });
     try {
-      await act(async () => lifecycle?.({ id: "slow-collapse", action: "collapse" }));
+      await act(async () => lifecycle?.({ id: "slow-collapse", action: "close" }));
       await act(async () => vi.advanceTimersByTimeAsync(6000));
       await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("slow-collapse", false));
       expect(screen.getByText(/Your message is still sending/)).toBeInTheDocument();
@@ -4330,7 +4390,7 @@ describe("draft durability", () => {
     }
   });
 
-  it("waits for an accepted send before collapsing a head panel", async () => {
+  it("collapses a head panel while the submitted send is pending", async () => {
     const pending = deferred<void>();
     vi.mocked(bridge.send_draft).mockImplementationOnce(async input => { await pending.promise; return host.send(input); });
     host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "", recipientIds: [], attachmentIds: [], gatewayId: SMS_ONLY.id, simId: SMS_ONLY.simId, revision: "1" });
@@ -4342,9 +4402,8 @@ describe("draft durability", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(bridge.send_draft).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "Collapse to bubble" }));
-    expect(bridge.close_composer).not.toHaveBeenCalled();
-    await act(async () => pending.resolve());
     await waitFor(() => expect(bridge.close_composer).toHaveBeenCalledOnce());
+    await act(async () => pending.resolve());
   });
 
   it("shows composer send feedback only in the conversation that produced it", async () => {
