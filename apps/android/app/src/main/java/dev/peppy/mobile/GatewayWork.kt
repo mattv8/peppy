@@ -568,7 +568,7 @@ class GatewaySync(
                 state.advance(SyncPhase.BOOTSTRAP_DRAINING)
                 finishBootstrap()
             }
-            Stage.STAGING -> true
+            Stage.STAGING -> (client.snapshotProgress()?.receivedRecords ?: 0uL) > progress.receivedRecords
             Stage.DEFERRED -> false
         }
     }
@@ -592,22 +592,22 @@ class GatewaySync(
             throw GatewayTransportException("contact repair requires compaction snapshot support")
         }
         // receive() already spent this pass's page budget on any staged snapshot.
-        if (client.snapshotProgress() != null || client.snapshotProjectionStatus()?.state == uniffi.peppy_mobile_bindings.NativeSnapshotProjectionState.DRAINING) return true
-        val cut = snapshotForRepair ?: return true
+        if (client.snapshotProgress() != null || client.snapshotProjectionStatus()?.state == uniffi.peppy_mobile_bindings.NativeSnapshotProjectionState.DRAINING) return false
+        val cut = snapshotForRepair ?: return false
         // Repair only a cut replay has consumed. A fresh cut fetched here could include
         // unreceived SMS commands and permanently turn those commands into history.
-        if (cut.getString("high_water_cursor") != client.receiveCursor()) return true
+        if (cut.getString("high_water_cursor") != client.receiveCursor()) return false
         if (!canBeginSnapshot()) return false
         val progress = beginSnapshot(NativeSnapshotPurpose.RESYNC, cut)
         val staging = stage(progress, NativeSnapshotPurpose.RESYNC, detectOwnRecords = false)
         if (staging == Stage.DEFERRED) return false
-        if (staging != Stage.FINISHED) return true
+        if (staging != Stage.FINISHED) return (client.snapshotProgress()?.receivedRecords ?: 0uL) > progress.receivedRecords
         val draining = drain()
         val status = client.snapshotProjectionStatus()
         if (status?.state == uniffi.peppy_mobile_bindings.NativeSnapshotProjectionState.FAILED) {
             throw GatewayTransportException("contact repair projection failed${status.reason?.let { ": $it" }.orEmpty()}")
         }
-        return draining || client.contactRepairRequired()
+        return draining
     }
 
     private fun receive(): Boolean {
