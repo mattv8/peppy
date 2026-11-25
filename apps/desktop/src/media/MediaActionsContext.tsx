@@ -38,6 +38,8 @@ export type MediaActions = {
   copyImage(attachment: GalleryAttachment): void;
   retry(attachment: GalleryAttachment): void;
   requestDownload(attachmentId: string): void;
+  loadOriginal?(attachmentId: string): Promise<MediaResult>;
+  releaseMedia?(attachmentId: string, url: string): void;
   canRequestMediaSync: boolean;
   requestMediaSync?(attachmentIds: string[]): Promise<void>;
   /** Classified outcome: `busy` is retryable; `terminal` and `settled` without a preview are not. */
@@ -225,11 +227,13 @@ export function MediaActionsProvider(props: MediaActionsProviderProps): JSX.Elem
     copyImage,
     retry,
     requestDownload,
+    loadOriginal: props.loadOriginal,
+    releaseMedia: props.releaseMedia,
     canRequestMediaSync: Boolean(props.requestMediaSync),
     requestMediaSync: props.requestMediaSync ? requestMediaSync : undefined,
     hydratePreview,
     nativeCopy: Boolean(props.copyNativeImage),
-  }), [canCopyImage, copyImage, hydratePreview, props.copyNativeImage, props.onPublish, props.publicCopies, props.requestMediaSync, requestDownload, requestMediaSync, retry, save, savingIds, shareLink]);
+  }), [canCopyImage, copyImage, hydratePreview, props.copyNativeImage, props.loadOriginal, props.releaseMedia, props.onPublish, props.publicCopies, props.requestMediaSync, requestDownload, requestMediaSync, retry, save, savingIds, shareLink]);
 
   const statusNode = <div id="media-action-status" role="status" aria-live="polite" aria-atomic="true" data-tone={status.tone}>{status.text}</div>;
   return <MediaActionsContext.Provider value={actions}>{props.children}{createPortal(statusNode, status.host ?? document.body)}</MediaActionsContext.Provider>;

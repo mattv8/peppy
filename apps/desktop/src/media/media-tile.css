@@ -8,6 +8,9 @@
 [data-media-tile] .tile-body { position: absolute; inset: 0; display: grid; width: 100%; height: 100%; place-items: center; padding: 0; border: 0; background: none; color: inherit; cursor: zoom-in; }
 [data-media-tile] .tile-body img { width: 100%; height: 100%; object-fit: cover; transition: transform var(--peppy-duration-slow) var(--peppy-ease-out); }
 [data-media-tile]:hover .tile-body img { transform: scale(1.02); }
+[data-media-tile][data-media-gif]:hover .tile-body img { transform: none; }
+[data-media-tile] .tile-body img[data-gif-animated] { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: none; }
+[data-media-tile] .tile-body img[data-gif-animated][data-revealed] { opacity: 1; }
 [data-media-tile] .tile-body:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: -2px; }
 [data-media-tile][data-state="loading"] .tile-body { background: linear-gradient(100deg,var(--peppy-surface-active) 30%,var(--peppy-surface-hover) 50%,var(--peppy-surface-active) 70%); background-size: 200% 100%; animation: tile-shimmer 1.4s linear infinite; }
 [data-media-tile][data-state="held"] { outline: 1px dashed var(--peppy-border-strong); outline-offset: -1px; }

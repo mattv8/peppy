@@ -8,6 +8,7 @@ import { useRcsReplacementFocus } from "../rcs/RcsAttachmentSlot";
 import { useMediaActions } from "./MediaActionsContext";
 import { TileContextMenu } from "./TileContextMenu";
 import { useLazyDemand, usePreviewHydration } from "./useLazyDemand";
+import { useAnimatedOriginal } from "./useAnimatedOriginal";
 import { withHydratedPreview } from "./previewHydration";
 import { peppyCopy } from "../generated/peppyCopy";
 import "./media-tile.css";
@@ -126,6 +127,7 @@ export function MediaTile({ attachment, message, variant, onOpen, label, prefetc
   const removedWithLocalCopy = attachment.remoteState === "removed_by_storage_policy" && attachment.localAvailable;
   const isVideo = attachment.mediaType.startsWith("video/");
   const rcsPlaceholder = rcsPlaceholderState(attachment);
+  const animatedUrl = useAnimatedOriginal(rootRef, attachment, variant !== "cell" && state === "ready" && !rcsPlaceholder);
   const placeholderCopy = rcsPlaceholder ? rcsPlaceholderCopy(rcsPlaceholder) : undefined;
   const canAct = !removedRemoteOnly && canOpen(shown, hydration.exhausted);
   // A held original with a visible preview can still be copied natively; the menu then offers Copy only.
@@ -198,7 +200,7 @@ export function MediaTile({ attachment, message, variant, onOpen, label, prefetc
   const attachmentNoun = isVideo ? "video" : "image";
   const syncAccessibleLabel = original.phase === "requested" ? `Requested ${label?.toLowerCase() || attachment.name || attachmentNoun}` : `Sync ${label?.toLowerCase() || attachment.name || attachmentNoun} using mobile data if needed`;
   const syncLabel = attachment.mediaType.startsWith("image/") ? "Sync image" : isVideo ? "Sync video" : "Sync file";
-  return <div ref={rootRef} tabIndex={-1} {...replacementFocus} data-media-tile data-media-attachment={attachment.id} data-media-message={message.id} data-media-kind={isVideo ? "video" : undefined} data-variant={variant} data-state={state} data-rcs-media-state={attachment.rcsState ?? attachment.rcsSendStatus} data-rcs-media-direction={rcsDirection(attachment)} data-original={pendingOriginal ? original.phase : undefined} data-partly-visible={observeSlideVisibility && !slideFullyVisible ? true : undefined} data-sync={pendingOriginal ? effectiveSyncState : undefined} data-has-actions={hasActions || undefined} data-local-copy={removedWithLocalCopy || undefined} data-menu-open={menuAnchor ? true : undefined} aria-busy={rcsPlaceholder === "downloading" || state === "loading" || heldSyncState === "requesting" || undefined}>
+  return <div ref={rootRef} tabIndex={-1} {...replacementFocus} data-media-tile data-media-gif={attachment.mediaType === "image/gif" || undefined} data-media-attachment={attachment.id} data-media-message={message.id} data-media-kind={isVideo ? "video" : undefined} data-variant={variant} data-state={state} data-rcs-media-state={attachment.rcsState ?? attachment.rcsSendStatus} data-rcs-media-direction={rcsDirection(attachment)} data-original={pendingOriginal ? original.phase : undefined} data-partly-visible={observeSlideVisibility && !slideFullyVisible ? true : undefined} data-sync={pendingOriginal ? effectiveSyncState : undefined} data-has-actions={hasActions || undefined} data-local-copy={removedWithLocalCopy || undefined} data-menu-open={menuAnchor ? true : undefined} aria-busy={rcsPlaceholder === "downloading" || state === "loading" || heldSyncState === "requesting" || undefined}>
     {rcsPlaceholder && placeholderCopy ? <div id={`rcs-media-placeholder-${attachment.id}`} className="tile-body tile-placeholder" role="group" aria-label={peppyCopy.rcs_media_state_label.replace("{label}", label ?? attachment.name ?? "Attachment").replace("{state}", placeholderCopy.label)} aria-describedby={placeholderCopy.detail ? `rcs-media-detail-${attachment.id}` : undefined} {...bodyProps}>
       {rcsPlaceholder === "downloading" ? <Loader2 className="tile-loading-icon" size={20} aria-hidden="true" /> : isVideo || attachment.mediaType.startsWith("image/") ? <ImageOff size={20} aria-hidden="true" /> : <FileText size={20} aria-hidden="true" />}
       <span id={`rcs-media-status-${attachment.id}`}>{placeholderCopy.label}</span>
@@ -212,6 +214,7 @@ export function MediaTile({ attachment, message, variant, onOpen, label, prefetc
       {!suppressHeldControl && <span id={noteId} data-original-sync-note className="tile-held-note" aria-live="off">{heldNote}</span>}
     </> : state === "failed" ? <><div className="tile-body tile-failed" role="img" aria-label={accessibleLabel} {...bodyProps}><ImageOff size={20} aria-hidden="true" /></div>{actions && <button type="button" className="tile-retry" onClick={() => actions.retry(attachment)}><RotateCw size={14} aria-hidden="true" />Retry</button>}</> : <button ref={mergedBodyRef} type="button" className="tile-body" aria-label={accessibleLabel} onClick={onOpen} onKeyDown={handleKeyDown} onContextMenu={(event) => { if (!actions || !canAct) return; event.preventDefault(); openMenu(event.clientX, event.clientY); }} {...bodyProps}>
       {imageUrl && <img loading="lazy" decoding="async" src={imageUrl} alt="" aria-hidden="true" />}
+      {animatedUrl && <img key={animatedUrl} data-gif-animated src={animatedUrl} alt="" aria-hidden="true" onLoad={(event) => { event.currentTarget.dataset.revealed = "true"; }} />}
       {state === "loading" && <Loader2 className="tile-loading-icon" size={20} aria-hidden="true" />}
       {state === "unavailable" && <span className="tile-unavailable"><ImageOff size={20} aria-hidden="true" />Preview unavailable</span>}
     </button>}
