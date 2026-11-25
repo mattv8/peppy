@@ -17,7 +17,7 @@
   },
   {
     "command": "acknowledge_lifecycle",
-    "args": ["id", "ok"]
+    "args": ["id", "ok", "reason"]
   },
   {
     "command": "advance_search_index",
