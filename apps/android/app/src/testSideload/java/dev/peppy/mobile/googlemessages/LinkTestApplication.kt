@@ -2,6 +2,7 @@ package dev.peppy.mobile.googlemessages
 
 import android.app.Application
 import android.content.Context
+import android.webkit.CookieManager
 import androidx.test.core.app.ApplicationProvider
 import java.util.concurrent.Executor
 
@@ -49,11 +50,29 @@ internal object LinkTestDeps {
     var available: Boolean?
         get() = null
         set(value) {
-            val base = app.runtime.engine
-            app.runtime = app.runtime.copy(engine = if (value == null) base else {
-                { AvailabilityEngine(base(), value) }
-            })
+            val base = (app.runtime.engine as? AvailabilityProvider)?.base ?: app.runtime.engine
+            app.runtime = app.runtime.copy(engine = if (value == null) base else AvailabilityProvider(base, value))
         }
+
+    private class AvailabilityProvider(val base: () -> LinkEngine, val available: Boolean) : () -> LinkEngine {
+        override fun invoke(): LinkEngine = AvailabilityEngine(base(), available)
+    }
+
+    var startupExecutor: ((() -> Unit) -> Unit)?
+        get() = null
+        set(value) { app.signIn = app.signIn.copy(startupExecutor = value ?: LinkSignInDeps.DEFAULTS.startupExecutor) }
+
+    var awaitSignInReady: ((Context) -> Boolean)?
+        get() = null
+        set(value) { app.signIn = app.signIn.copy(awaitSignInReady = value ?: LinkSignInDeps.DEFAULTS.awaitSignInReady) }
+
+    var cookieManager: (() -> CookieManager)?
+        get() = null
+        set(value) { app.signIn = app.signIn.copy(cookieManager = value ?: LinkSignInDeps.DEFAULTS.cookieManager) }
+
+    var pairingExecutor: Executor?
+        get() = null
+        set(value) { app.signIn = app.signIn.copy(pairingExecutor = value ?: LinkSignInDeps.DEFAULTS.pairingExecutor) }
 
     private class AvailabilityEngine(private val delegate: LinkEngine, override val available: Boolean) : LinkEngine by delegate
 }
