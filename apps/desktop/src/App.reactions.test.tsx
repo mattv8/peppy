@@ -102,6 +102,95 @@ describe("App reactions", () => {
   };
   const reactionChip = () => document.querySelector('[data-reaction-emoji="😆"]')!;
 
+  it("holds an unfocused scroll sighting until focus, then records it", async () => {
+    enableObservation();
+    durableConversation();
+    vi.mocked(document.hasFocus).mockReturnValue(false);
+    renderMessages([message("plan", "plan?"), message(reactionId, "Reacted 😆 to “plan?”")]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    fireEvent.wheel(document.getElementById("message-list")!);
+    act(() => ReactionObserver.intersect(reactionChip()));
+    expect(document.querySelector("[data-reaction-marker]")).toBeInTheDocument();
+    expect(bridge.mark_seen).not.toHaveBeenCalled();
+    expect(reactionStorage.getItem(seenKey())).toBeNull();
+    vi.mocked(document.hasFocus).mockReturnValue(true);
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(bridge.mark_seen).toHaveBeenCalledWith([reactionId]));
+    expect(reactionStorage.getItem(seenKey())).toBe("1");
+  });
+
+  it.each(["expired", "programmatic", "momentum", "hidden"])("gates unfocused scroll sightings: %s", async (scenario) => {
+    enableObservation();
+    durableConversation();
+    vi.mocked(document.hasFocus).mockReturnValue(false);
+    if (scenario === "hidden") vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    const clock = vi.spyOn(performance, "now").mockReturnValue(100);
+    renderMessages([message("plan", "plan?"), message(reactionId, "Reacted 😆 to “plan?”")]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    const list = document.getElementById("message-list")!;
+    fireEvent.wheel(list);
+    clock.mockReturnValue(900);
+    if (scenario === "programmatic") list.setAttribute("data-scroll-programmatic", "");
+    if (scenario === "momentum") list.removeAttribute("data-scroll-programmatic");
+    if (scenario === "programmatic" || scenario === "momentum") fireEvent.scroll(list);
+    clock.mockReturnValue(scenario === "hidden" ? 950 : 1200);
+    act(() => ReactionObserver.intersect(reactionChip()));
+    expect(Boolean(document.querySelector("[data-reaction-marker]"))).toBe(scenario === "momentum");
+    expect(bridge.mark_seen).not.toHaveBeenCalled();
+    expect(reactionStorage.getItem(seenKey())).toBeNull();
+  });
+
+  it("reobserves focused chips after scrolling settles", async () => {
+    enableObservation();
+    renderMessages([message("plan", "plan?"), message("reaction", "Reacted 😆 to “plan?”")]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    const chip = reactionChip();
+    const old = [...ReactionObserver.instances].reverse().find(observer => observer.nodes.has(chip))!;
+    fireEvent.scroll(document.getElementById("message-list")!);
+    await waitFor(() => expect(old.nodes.has(chip)).toBe(false));
+    const fresh = [...ReactionObserver.instances].reverse().find(observer => observer.nodes.has(chip))!;
+    expect(fresh).not.toBe(old);
+    act(() => fresh.deliver(chip));
+    expect(document.querySelector("[data-reaction-marker]")).toBeInTheDocument();
+  });
+
+  it("commits a held sighting when the read gate reopens after focus", async () => {
+    enableObservation();
+    durableConversation();
+    vi.mocked(document.hasFocus).mockReturnValue(false);
+    renderMessages([message("plan", "plan?"), message(reactionId, "Reacted 😆 to “plan?”")]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    fireEvent.wheel(document.getElementById("message-list")!);
+    act(() => ReactionObserver.intersect(reactionChip()));
+    fireEvent.click(screen.getByRole("tab", { name: "Media" }));
+    vi.mocked(document.hasFocus).mockReturnValue(true);
+    act(() => window.dispatchEvent(new Event("focus")));
+    expect(bridge.mark_seen).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "Messages" }));
+    await waitFor(() => expect(bridge.mark_seen).toHaveBeenCalledWith([reactionId]));
+    expect(reactionStorage.getItem(seenKey())).toBe("1");
+  });
+
+  it("drops a held sighting when changing conversations", async () => {
+    enableObservation();
+    durableConversation();
+    vi.mocked(document.hasFocus).mockReturnValue(false);
+    renderMessages([message("plan", "plan?"), message(reactionId, "Reacted 😆 to “plan?”")]);
+    await screen.findByRole("img", { name: /😆 from/ });
+    fireEvent.wheel(document.getElementById("message-list")!);
+    act(() => ReactionObserver.intersect(reactionChip()));
+    expect(document.querySelector("[data-reaction-marker]")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /River Park/ }));
+    await screen.findByText("Attachment received");
+    fireEvent.click(screen.getByRole("button", { name: /Aurora Chen/ }));
+    await screen.findByRole("img", { name: /😆 from/ });
+    vi.mocked(document.hasFocus).mockReturnValue(true);
+    act(() => window.dispatchEvent(new Event("focus")));
+    expect(document.querySelector("[data-reaction-notice]")).toBeInTheDocument();
+    expect(bridge.mark_seen).not.toHaveBeenCalled();
+    expect(reactionStorage.getItem(seenKey())).toBeNull();
+  });
+
   it("preserves an exact visible bubble offset when a visible notice above it collapses", async () => {
     enableObservation();
     renderMessages([message("plan", "plan?"), message("reaction", "Reacted 😆 to “plan?”"), message("anchor", "anchor")]);

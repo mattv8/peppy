@@ -265,6 +265,9 @@ export type PendingSend = {
 /** A stable empty list, so effects keyed on the snapshot's notifications do not re-run while no snapshot is loaded. */
 const EMPTY_NOTIFICATIONS: MirroredNotification[] = [];
 const PENDING_SEND_ECHO_WINDOW_MS = 5 * 60_000;
+/** Recent wheel input permits temporary reaction-hint suppression while unfocused. */
+const SCROLL_ATTENTION_MS = 1_000;
+const EMPTY_REACTION_IDS: ReadonlySet<string> = new Set();
 
 /**
  * Pending bubbles to show for the active conversation. Nothing is shown while a mid-history window is open.
@@ -998,6 +1001,7 @@ function MessageList({
   pendingReactionId,
   reactionFeedback,
   seenReactions,
+  pendingSeenReactionIds,
   badgeObservation,
   captureReactionLayout,
   restoreReactionLayout,
@@ -1063,6 +1067,7 @@ function MessageList({
   pendingReactionId?: string;
   reactionFeedback?: { reactionId: string; message: string };
   seenReactions: SeenReactionLedger;
+  pendingSeenReactionIds: ReadonlySet<string>;
   badgeObservation: { root: HTMLElement | null; obscuredBottom: number | null; enabled: boolean; canRecord(): boolean; onSeen(ids: readonly string[]): void };
   captureReactionLayout(): ReactionLayoutSnapshot | null;
   restoreReactionLayout(snapshot: ReactionLayoutSnapshot): void;
@@ -1303,7 +1308,7 @@ function MessageList({
     badges: [...reactions.badges].flatMap(([id, badges]) => badges.map(badge => ({ key: JSON.stringify([id, badge.emoji]), reactionIds: badge.reactionIds }))),
   });
   const suppressed = new Set(conversation?.messages.filter(message => reactions.notices.has(message.id)
-    && seenReactions.has(conversation.id, message.id) && !showsReactionNoticeMeta(message)
+    && (seenReactions.has(conversation.id, message.id) || pendingSeenReactionIds.has(message.id)) && !showsReactionNoticeMeta(message)
     && pendingReactionId !== message.id && reactionFeedback?.reactionId !== message.id
     && searchTargetId !== message.id && focusedNoticeId !== message.id).map(message => message.id));
   if (loading)
@@ -2778,6 +2783,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   const desktopBodyRef = useRef<HTMLDivElement>(null);
   const [threadListHost, setThreadListHost] = useState<HTMLElement | null>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
+  const listScrollAttentionAt = useRef(Number.NEGATIVE_INFINITY);
+  const [pendingSeenReactions, setPendingSeenReactions] = useState<{ scope: string; ids: ReadonlySet<string> }>();
+  const pendingSeenReactionsRef = useRef<typeof pendingSeenReactions>(undefined);
   const [messageListNode, setMessageListRoot] = useState<HTMLDivElement | null>(null);
   const [reactionSeenRevision, setReactionSeenRevision] = useState(0);
   const badgeReadIds = useRef(new Set<string>());
@@ -4019,7 +4027,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     await refresh();
   };
 
-  /* Only rows that are actually visible while the window is focused are marked seen. */
+  /* Visible rows are marked seen when focused; scrolling may temporarily hide reaction hints. */
   const slotKey = store.resolve(selected);
   const previousSlotKeyRef = useRef(slotKey);
   const composerDraftKeyRef = useRef(slotKey);
@@ -4086,9 +4094,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   const reactionReadEnabled = conversationLoaded && activeView === "conversations" && conversationTab === "messages" && snapshot?.encryption.state === "unlocked" && !appLock?.locked;
   const reactionReadContext = useRef({ key: reactionScopeKey, enabled: reactionReadEnabled });
   reactionReadContext.current = { key: reactionScopeKey, enabled: reactionReadEnabled };
-  const canReadMessages = () => mountedRef.current && selectedRef.current === slotKey && currentSearchSessionKey() === renderedSearchSessionKey
+  const canObserveMessages = () => mountedRef.current && selectedRef.current === slotKey && currentSearchSessionKey() === renderedSearchSessionKey
     && reactionReadContext.current.key === reactionScopeKey && reactionReadContext.current.enabled
-    && !searchReadGate.current && document.hasFocus() && document.visibilityState === "visible";
+    && !searchReadGate.current && document.visibilityState === "visible";
+  const canReadMessages = () => canObserveMessages() && document.hasFocus();
+  const canSeeReactionHints = () => canObserveMessages() && (document.hasFocus() || performance.now() - listScrollAttentionAt.current <= SCROLL_ATTENTION_MS);
   const markReadMessages = (candidateIds: readonly string[]) => {
     if (!canReadMessages()) return;
     const seen = seenMessageIds.current;
@@ -4100,6 +4110,34 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       if (reactionReadContext.current.key === reactionScopeKey) ids.forEach(id => seen.add(id));
     }).catch(() => {}).finally(() => ids.forEach(id => pending.delete(id)));
   };
+  const recordSeenReactions = (ids: readonly string[]) => {
+    if (!canReadMessages()) return;
+    ids.forEach(id => badgeReadIds.current.add(id));
+    seenReactions.mark(slotKey, ids);
+    markReadMessages(ids);
+  };
+  useEffect(() => {
+    const commitHeld = () => {
+      const held = pendingSeenReactionsRef.current;
+      if (!held) return;
+      if (held.scope !== reactionScopeKey) {
+        pendingSeenReactionsRef.current = undefined;
+        setPendingSeenReactions(undefined);
+      } else if (canReadMessages()) {
+        recordSeenReactions([...held.ids]);
+        pendingSeenReactionsRef.current = undefined;
+        setPendingSeenReactions(undefined);
+      }
+    };
+    // A render that reopens the read gate (such as returning to the Messages tab) can commit a hold kept across focus.
+    commitHeld();
+    window.addEventListener("focus", commitHeld);
+    document.addEventListener("visibilitychange", commitHeld);
+    return () => {
+      window.removeEventListener("focus", commitHeld);
+      document.removeEventListener("visibilitychange", commitHeld);
+    };
+  });
   useEffect(() => seenReactions.subscribe(() => setReactionSeenRevision(value => value + 1)), [seenReactions]);
   const copyOneTimeCode = async (target: OneTimeCodeTarget, code: string) => {
     await bridge.copy_one_time_code(target, code);
@@ -4283,6 +4321,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   const onMessageScroll = () => {
     const element = messageListRef.current;
     if (!element) return;
+    const now = performance.now();
+    if (!element.hasAttribute("data-scroll-programmatic") && now - listScrollAttentionAt.current <= SCROLL_ATTENTION_MS) listScrollAttentionAt.current = now;
     const previousScrollTop = messageListScrollTopRef.current;
     const currentScrollTop = element.scrollTop;
     messageListScrollTopRef.current = currentScrollTop;
@@ -4291,6 +4331,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     if (currentScrollTop < previousScrollTop) autoLoadOlderMessages(element);
   };
   const onMessageWheel = (event: WheelEvent<HTMLDivElement>) => {
+    listScrollAttentionAt.current = performance.now();
     const element = messageListRef.current;
     if (!element) return;
     messageListScrollTopRef.current = element.scrollTop;
@@ -4371,6 +4412,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     seenMessageIds.current = new Set<string>();
     pendingSeenMessageIds.current = new Set<string>();
     badgeReadIds.current = new Set<string>();
+    pendingSeenReactionsRef.current = undefined;
+    setPendingSeenReactions(undefined);
   }, [reactionScopeKey]);
   const setMessageListNode = useCallback((node: HTMLDivElement | null) => {
     if (node !== messageListRef.current) lastUnobscuredHeight.current = null;
@@ -6329,13 +6372,18 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       pendingReactionId={pendingReactionId}
       reactionFeedback={reactionFeedback}
       seenReactions={seenReactions}
+      pendingSeenReactionIds={pendingSeenReactions?.scope === reactionScopeKey ? pendingSeenReactions.ids : EMPTY_REACTION_IDS}
       captureReactionLayout={captureReactionLayout}
       restoreReactionLayout={restoreReactionLayout}
-      badgeObservation={{ root: messageListNode, obscuredBottom: overlayMargin, enabled: reactionReadEnabled && showReactions, canRecord: canReadMessages, onSeen: ids => {
-        if (!canReadMessages()) return;
-        ids.forEach(id => badgeReadIds.current.add(id));
-        seenReactions.mark(slotKey, ids);
-        markReadMessages(ids);
+      badgeObservation={{ root: messageListNode, obscuredBottom: overlayMargin, enabled: reactionReadEnabled && showReactions, canRecord: canSeeReactionHints, onSeen: ids => {
+        if (!canSeeReactionHints()) return;
+        if (canReadMessages()) recordSeenReactions(ids);
+        else {
+          const held = pendingSeenReactionsRef.current;
+          const next = { scope: reactionScopeKey, ids: new Set([...(held?.scope === reactionScopeKey ? held.ids : []), ...ids]) };
+          pendingSeenReactionsRef.current = next;
+          setPendingSeenReactions(next);
+        }
       } }}
       toneOverrides={toneOverrides}
       onEditGroupResend={editGroupResend}
