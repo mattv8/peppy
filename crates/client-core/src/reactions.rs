@@ -12,6 +12,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 /// A requester's own stale `sending` request is shown and dismissed as unknown after this.
 const DISMISS_AFTER_MS: i64 = REACTION_REQUEST_TTL_MS + REACTION_REQUEST_SKEW_MS;
+/// Provider message timestamps can be ahead of the local request clock.
+const FAILED_REACTION_SKEW_MS: i64 = 300_000;
 
 /// How the requester can reach a message: a native RCS reaction or an ordinary text reply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,6 +453,33 @@ impl Client {
             support,
             stored_route,
         })
+    }
+
+    /// The newest failed own reaction, allowing for provider clock skew.
+    pub fn latest_failed_reaction_request(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<ReactionRequestId>, Error> {
+        let store = self.lock()?;
+        let id = conversation_id.to_string();
+        let now = notifications::now_ms();
+        let mut query = store.conn.prepare(&format!(
+            "SELECT r.request_id,r.state,r.requested_at_ms FROM reaction_requests r
+             WHERE COALESCE((SELECT target_id FROM conversation_merges WHERE source_id=r.conversation_id),r.conversation_id)=?1
+               AND r.requester_device_id=?2 AND r.state IN {OPEN_REQUEST_STATES}
+               AND r.requested_at_ms + {FAILED_REACTION_SKEW_MS} > COALESCE((SELECT MAX(m.sort_at_ms) FROM messages m
+                 WHERE m.effective_conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM send_cancellations x WHERE x.message_id=m.id AND x.state='confirmed')),0)
+             ORDER BY r.requested_at_ms DESC,r.rowid DESC"
+        ))?;
+        let mut rows = query.query(params![id, store.config.device_id.to_string()])?;
+        while let Some(row) = rows.next()? {
+            let state: String = row.get(1)?;
+            let requested_at_ms: i64 = row.get(2)?;
+            if displayed_state(&state, requested_at_ms, now) != OwnReactionState::Sending {
+                return Ok(Some(parse(&row.get::<_, String>(0)?)?));
+            }
+        }
+        Ok(None)
     }
 
     /// Reacts to a message. `gateway_online` is the presence of the route's gateway as the
@@ -1002,6 +1031,16 @@ pub(crate) fn project_message(
 
 /// request id, emoji, state, refusal, and requested time of one open request.
 type OwnRequestRow = (String, Option<String>, String, Option<String>, i64);
+const OPEN_REQUEST_STATES: &str = "('sending','not_sent','unknown')";
+
+fn displayed_state(state: &str, requested_at_ms: i64, now: i64) -> OwnReactionState {
+    match state {
+        "sending" if requested_at_ms <= now - DISMISS_AFTER_MS => OwnReactionState::Unknown,
+        "sending" => OwnReactionState::Sending,
+        "not_sent" => OwnReactionState::NotSent,
+        _ => OwnReactionState::Unknown,
+    }
+}
 
 fn own_request(
     conn: &Connection,
@@ -1011,24 +1050,27 @@ fn own_request(
 ) -> Result<Option<OwnReactionRequest>, Error> {
     let row: Option<OwnRequestRow> = conn
         .query_row(
-            "SELECT request_id,emoji,state,refusal,requested_at_ms FROM reaction_requests
-             WHERE message_id=? AND requester_device_id=? AND state IN ('sending','not_sent','unknown')
-             ORDER BY requested_at_ms DESC,rowid DESC LIMIT 1",
+            &format!(
+                "SELECT request_id,emoji,state,refusal,requested_at_ms FROM reaction_requests
+             WHERE message_id=? AND requester_device_id=? AND state IN {OPEN_REQUEST_STATES}
+             ORDER BY requested_at_ms DESC,rowid DESC LIMIT 1"
+            ),
             params![message_id.to_string(), device.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()?;
     let Some((request, emoji, state, refusal, requested_at_ms)) = row else {
         return Ok(None);
     };
-    let state = match state.as_str() {
-        "sending" if requested_at_ms <= notifications::now_ms() - DISMISS_AFTER_MS => {
-            OwnReactionState::Unknown
-        }
-        "sending" => OwnReactionState::Sending,
-        "not_sent" => OwnReactionState::NotSent,
-        _ => OwnReactionState::Unknown,
-    };
+    let state = displayed_state(&state, requested_at_ms, notifications::now_ms());
     Ok(Some(OwnReactionRequest {
         request_id: parse(&request)?,
         emoji,

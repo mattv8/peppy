@@ -430,6 +430,31 @@ fn is_failed_send(direction: Direction, state: Option<SendState>) -> bool {
         )
 }
 
+/// A failed newest send wins; the failed reaction is only looked up without one.
+fn select_head_failure(
+    failed_send: Option<String>,
+    failed_reaction: impl FnOnce() -> BridgeResult<Option<String>>,
+) -> BridgeResult<Option<String>> {
+    failed_send.map_or_else(failed_reaction, |id| Ok(Some(id)))
+}
+
+fn head_failure(
+    session: &crate::session::Session,
+    conversation: ConversationId,
+    latest: Option<&peppy_client_core::Message>,
+) -> BridgeResult<Option<String>> {
+    let failed_send = latest
+        .filter(|message| is_failed_send(message.payload.direction, message.send_state))
+        .map(|message| message.payload.record.message_id.to_string());
+    select_head_failure(failed_send, || {
+        session
+            .client
+            .latest_failed_reaction_request(conversation)
+            .map(|id| id.map(|id| id.to_string()))
+            .map_err(core_error)
+    })
+}
+
 /// The spec a native head draws, with displayed state from the maps.
 fn head_spec(
     typing: &TypingDisplays,
@@ -1460,10 +1485,7 @@ fn resolve_heads(
             .client
             .latest_message(conversation.conversation_id)
             .map_err(core_error)?;
-        let failed_message = latest
-            .as_ref()
-            .filter(|message| is_failed_send(message.payload.direction, message.send_state))
-            .map(|message| message.payload.record.message_id.to_string());
+        let failed_message = head_failure(session, conversation.conversation_id, latest.as_ref())?;
         let name = latest
             .as_ref()
             .map(crate::dto::counterpart)
@@ -1537,10 +1559,7 @@ fn resolve_one(
             .client
             .latest_message(conversation)
             .map_err(core_error)?;
-        let failed_message = latest
-            .as_ref()
-            .filter(|message| is_failed_send(message.payload.direction, message.send_state))
-            .map(|message| message.payload.record.message_id.to_string());
+        let failed_message = head_failure(session, conversation, latest.as_ref())?;
         let name = latest
             .as_ref()
             .map(crate::dto::counterpart)
@@ -3342,6 +3361,20 @@ mod tests {
         ));
     }
     use super::*;
+
+    #[test]
+    fn failed_send_takes_priority_over_failed_reaction() {
+        let reaction = || Ok(Some("reaction".to_owned()));
+        assert_eq!(
+            select_head_failure(Some("send".into()), || panic!("not looked up")).unwrap(),
+            Some("send".into())
+        );
+        assert_eq!(
+            select_head_failure(None, reaction).unwrap(),
+            Some("reaction".into())
+        );
+        assert_eq!(select_head_failure(None, || Ok(None)).unwrap(), None);
+    }
 
     #[test]
     fn host_redirect_lookup_failure_protects_only_failed_id() {
