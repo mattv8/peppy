@@ -1107,6 +1107,33 @@ class GatewaySyncTest : GatewayTestBase() {
     }
 
     @Test
+    fun unchangedContactRepairCutMismatchDoesNotRequestAnotherPass() {
+        val client = live()
+        client.requestContactRepair()
+        snapshotCompactionSupported = true
+        snapshotCompactionActive = true
+        snapshotCut = "1" to "0"
+        val cursor = client.receiveCursor()
+        val stationaryClient = object : NativeClientInterface by client {
+            override fun receiveCursor() = cursor
+        }
+
+        val first = sync(stationaryClient, elapsedMs = { 0L }).run()
+        val repeated = sync(stationaryClient, elapsedMs = { 0L }).run()
+
+        assertNull(first.failure)
+        assertNull(repeated.failure)
+        assertEquals(cursor, client.receiveCursor())
+        assertTrue(client.contactRepairRequired())
+        assertNull(client.snapshotProgress())
+        assertNull(client.snapshotProjectionStatus())
+        assertEquals(2, requests.count { it.first == "GET /v1/snapshot" })
+        assertTrue(requests.none { it.first.startsWith("GET /v1/snapshot/records") })
+        assertTrue(requests.none { it.first.startsWith("GET /v1/snapshot/manifest") })
+        assertFalse("An unchanged repair cut mismatch must wait for an ordinary wake", repeated.more)
+    }
+
+    @Test
     fun manualContactRepairUsesEmptyAuthoritativeSnapshotAndClearsTheLatch() {
         val client = live()
         client.requestContactRepair()
@@ -1121,7 +1148,7 @@ class GatewaySyncTest : GatewayTestBase() {
     }
 
     @Test
-    fun partialContactRepairSnapshotBlocksContactCallback() {
+    fun unconsumedContactRepairCutBlocksContactCallback() {
         val client = live()
         client.requestContactRepair()
         snapshotCompactionSupported = true
@@ -1133,9 +1160,40 @@ class GatewaySyncTest : GatewayTestBase() {
         val result = sync(client, contacts = { contactCalls++; false }).run()
 
         assertNull(result.failure)
-        assertTrue(result.more)
+        assertFalse(result.more)
+        assertNull(client.snapshotProgress())
         assertTrue(client.contactRepairRequired())
         assertEquals(0, contactCalls)
+    }
+
+    @Test
+    fun partialContactRepairWithDurableProgressRequestsContinuation() {
+        val client = live()
+        val (first, second) = twoSnapshotRecords()
+        client.ingestRaw(first.toByteArray(), "1")
+        client.ingestRaw(second.toByteArray(), "2")
+        client.applyPending(50uL)
+        client.requestContactRepair()
+        snapshotCompactionSupported = true
+        snapshotCompactionActive = true
+        brokenRecordPages += LoopbackHttpServer.Response(200, JSONObject().put("records", JSONArray().put(record(1, first))).toString())
+        var elapsed = 0L
+        val timedClient = object : NativeClientInterface by client {
+            override fun appendSnapshotRawPage(generation: ULong, records: List<NativeRawSnapshotRecord>) =
+                client.appendSnapshotRawPage(generation, records).also {
+                    elapsed += GatewaySync.SNAPSHOT_STAGE_BUDGET_MS + 1
+                }
+        }
+        var contactCalls = 0
+
+        val result = sync(timedClient, elapsedMs = { elapsed }, contacts = { contactCalls++; false }).run()
+
+        assertNull(result.failure)
+        assertEquals("2", client.receiveCursor())
+        assertEquals(1uL, client.snapshotProgress()?.receivedRecords)
+        assertTrue(client.contactRepairRequired())
+        assertEquals(0, contactCalls)
+        assertTrue(result.more)
     }
 
     @Test
@@ -1306,6 +1364,35 @@ class GatewaySyncTest : GatewayTestBase() {
         assertNull(result.failure)
         assertEquals(200uL, client.snapshotProgress()?.receivedRecords)
         assertTrue(result.more)
+    }
+
+    @Test
+    fun bootstrapManifestBudgetWithoutStagedRowsDoesNotRequestAnotherPass() {
+        val client = enrollAndUnlock()
+        twoSnapshotRecords()
+        snapshotManifestSupported = true
+        var elapsed = 0L
+        val timedClient = object : NativeClientInterface by client {
+            override fun appendSnapshotManifest(generation: ULong, entries: List<NativeSnapshotManifestEntry>) =
+                client.appendSnapshotManifest(generation, entries).also {
+                    elapsed += GatewaySync.SNAPSHOT_STAGE_BUDGET_MS + 1
+                }
+        }
+
+        val first = sync(timedClient, elapsedMs = { elapsed }).run()
+        assertNull(first.failure)
+        val before = client.snapshotProgress()!!
+        assertEquals(0uL, before.receivedRecords)
+        assertEquals("0", before.lastCursor)
+
+        val repeated = sync(timedClient, elapsedMs = { elapsed }).run()
+
+        assertNull(repeated.failure)
+        assertEquals(SyncPhase.BOOTSTRAP, state.phase)
+        assertEquals(before, client.snapshotProgress())
+        assertEquals(2, requests.count { it.first.startsWith("GET /v1/snapshot/manifest") })
+        assertTrue(requests.none { it.first.startsWith("GET /v1/snapshot/records") })
+        assertFalse("Unchanged bootstrap staging must wait for an ordinary wake", repeated.more)
     }
 
     @Test
