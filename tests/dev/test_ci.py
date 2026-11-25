@@ -110,6 +110,7 @@ class CiTestRunnerTests(unittest.TestCase):
             "cargo test --workspace --lib --exclude peppy-push-relay --locked",
             "cargo run --locked -p peppy-desktop-api --bin generate-search-contracts -- --check",
             "cargo run --locked -p peppy-desktop-api --bin generate-attachment-retention-contracts -- --check",
+            "cargo run --locked -p peppy-desktop-api --bin generate-notification-dismissal-contracts -- --check",
             "cargo run --locked -p peppy-desktop-api --bin generate-account-access-contracts -- --check",
             "cargo run --locked -p peppy-desktop-api --bin generate-rcs-status-contracts -- --check",
             "cargo run --locked -p peppy-desktop-api --bin generate-launch-progress-contracts -- --check",
