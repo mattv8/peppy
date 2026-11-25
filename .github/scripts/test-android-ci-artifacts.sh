@@ -56,6 +56,8 @@ grep -Fq 'workflow_call:' "$workflow"
 grep -Fq 'android-native-preparation:' "$workflow"
 grep -Fq 'android-debug-unit-tests:' "$workflow"
 grep -Fq 'android-sideload-unit-tests:' "$workflow"
+grep -Fq 'android-sideload-link-unit-tests:' "$workflow"
+grep -Fq 'android-release-unit-tests:' "$workflow"
 grep -Fq 'android-lint-and-assembly:' "$workflow"
 grep -Fq 'android-aggregate:' "$workflow"
 # shellcheck disable=SC2016
@@ -71,6 +73,10 @@ grep -Fq 'DEBUG_RESULT: ${{ needs.android-debug-unit-tests.result }}' "$workflow
 # shellcheck disable=SC2016
 grep -Fq 'SIDELOAD_RESULT: ${{ needs.android-sideload-unit-tests.result }}' "$workflow"
 # shellcheck disable=SC2016
+grep -Fq 'SIDELOAD_LINK_RESULT: ${{ needs.android-sideload-link-unit-tests.result }}' "$workflow"
+# shellcheck disable=SC2016
+grep -Fq 'RELEASE_RESULT: ${{ needs.android-release-unit-tests.result }}' "$workflow"
+# shellcheck disable=SC2016
 grep -Fq 'LINT_ASSEMBLY_RESULT: ${{ needs.android-lint-and-assembly.result }}' "$workflow"
 
 job_block() {
@@ -81,7 +87,7 @@ job_block() {
   ' "$workflow"
 }
 
-for job in android-debug-unit-tests android-sideload-unit-tests android-lint-and-assembly; do
+for job in android-debug-unit-tests android-sideload-unit-tests android-sideload-link-unit-tests android-release-unit-tests android-lint-and-assembly; do
   block=$(job_block "$job")
   grep -Fq 'path: android-native-artifacts' <<< "$block"
   # shellcheck disable=SC2016
@@ -96,6 +102,8 @@ done
 
 debug_block=$(job_block android-debug-unit-tests)
 sideload_block=$(job_block android-sideload-unit-tests)
+link_block=$(job_block android-sideload-link-unit-tests)
+release_block=$(job_block android-release-unit-tests)
 lint_block=$(job_block android-lint-and-assembly)
 # Job limits must stay above setup plus each watched step's hard cap.
 if ! grep -Fq 'run-with-jvm-watchdog.sh 180 780' <<< "$debug_block" || ! grep -Fq 'timeout-minutes: 20' <<< "$debug_block"; then
@@ -106,10 +114,24 @@ if ! grep -Fq 'run-with-jvm-watchdog.sh 300 1080' <<< "$sideload_block" || ! gre
   echo 'sideload unit tests must use the 300 s stall / 1080 s cap watchdog inside a 25-minute job' >&2
   exit 1
 fi
-if grep -Fq 'peppyGoogleMessagesLink' <<< "$debug_block" || grep -Fq 'peppyGoogleMessagesLink' <<< "$sideload_block"; then
-  echo 'debug and sideload unit test jobs must use the default-off Google Messages link setting' >&2
+if ! grep -Fq 'run-with-jvm-watchdog.sh 180 1500' <<< "$link_block" || ! grep -Fq 'timeout-minutes: 35' <<< "$link_block"; then
+  echo 'sideload link unit tests must use the 180 s stall / 1500 s cap watchdog inside a 35-minute job' >&2
   exit 1
 fi
+if ! grep -Fq 'run-with-jvm-watchdog.sh 180 1080' <<< "$release_block" || ! grep -Fq 'timeout-minutes: 30' <<< "$release_block"; then
+  echo 'release unit tests must use the 180 s stall / 1080 s cap watchdog inside a 30-minute job' >&2
+  exit 1
+fi
+# Link-flag invariant: debug and the default sideload and release suites stay link-off; the link job runs link-on exactly once.
+if grep -Fq 'peppyGoogleMessagesLink' <<< "$debug_block" || grep -Fq 'peppyGoogleMessagesLink' <<< "$sideload_block" || grep -Fq 'peppyGoogleMessagesLink' <<< "$release_block"; then
+  echo 'debug, default sideload, and release unit tests must stay on the default-off Google Messages link setting' >&2
+  exit 1
+fi
+if ! grep -Fq ':app:compileSideloadUnitTestKotlin :app:testSideloadUnitTest --rerun' <<< "$sideload_block" || ! grep -Fq -- '-PpeppyGoogleMessagesLink=true :app:testSideloadUnitTest --rerun' <<< "$link_block" || ! grep -Fq ':app:compileSideloadUnitTestKotlin :app:prepareRobolectricDependencies' <<< "$link_block" || test "$(grep -Foc -- '-PpeppyGoogleMessagesLink=true' <<< "$link_block")" -ne 2; then
+  echo 'sideload link job must prepare link-on sideload tests and run the --rerun suite with the link on; the link flag appears exactly twice (prepare and test)' >&2
+  exit 1
+fi
+# The lint job keeps its two link-on invocations: lint/assembly and the release compile.
 test "$(grep -Foc -- '-PpeppyGoogleMessagesLink=true' <<< "$lint_block")" -eq 2
 if grep -Fq 'peppyGoogleMessagesLink=false' "$workflow"; then
   echo 'workflow must not pass a default-off Google Messages link flag' >&2
@@ -119,10 +141,11 @@ fi
 trusted_cache_guard="github.event_name == 'push' && github.ref == 'refs/heads/production'"
 test "$(grep -Foc "$trusted_cache_guard" "$workflow")" -eq 3
 test "$(grep -Foc 'actions/cache/save@' "$workflow")" -eq 1
-test "$(grep -Foc 'actions/cache/restore@' "$workflow")" -eq 4
+# Restores: preparation, debug, sideload, sideload link, release, lint. Native downloads: the same five consumers plus the producer upload.
+test "$(grep -Foc 'actions/cache/restore@' "$workflow")" -eq 6
 
 # shellcheck disable=SC2016
-test "$(grep -Fxc '          name: android-native-${{ github.sha }}' "$workflow")" -eq 4
+test "$(grep -Fxc '          name: android-native-${{ github.sha }}' "$workflow")" -eq 6
 # shellcheck disable=SC2016
 if grep -Fq 'android-native-${{ github.sha }}-${{ github.run_attempt }}' "$workflow"; then
   echo 'native prerequisite artifact names must survive consumer-only reruns' >&2

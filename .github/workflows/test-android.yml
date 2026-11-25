@@ -91,6 +91,7 @@ jobs:
       - name: Build Google Messages AAR and licenses
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+          sh apps/android/googlemessages/test-build-aar.sh
           apps/android/googlemessages/build-aar.sh
           apps/android/googlemessages/check-licenses.sh
           apps/android/googlemessages/check-licenses-test.sh
@@ -286,6 +287,124 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  android-sideload-link-unit-tests:
+    needs: android-native-preparation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Linux build dependencies
+        timeout-minutes: 30
+        run: bash .github/scripts/install-apt-packages.sh build-essential pkg-config libssl-dev libsodium-dev
+      - name: Install Android runtime dependencies
+        run: |
+          set +e
+          set +o pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018"
+          sdkmanager_status=${PIPESTATUS[1]}
+          set -e
+          exit "$sdkmanager_status"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-dependencies-v1-${{ runner.os }}-${{ hashFiles('.github/scripts/gradle-dependency-cache.init.gradle', 'apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
+          restore-keys: gradle-dependencies-v1-${{ runner.os }}-
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: android-native-${{ github.sha }}
+          path: android-native-artifacts
+      - name: Install native inputs
+        run: .github/scripts/android-ci-artifacts.sh install-artifact android-native-artifacts . "$GITHUB_SHA" debug
+      - name: Compile link-on sideload unit tests and prepare Robolectric runtimes
+        id: sideload-link-preparation
+        working-directory: apps/android
+        run: |
+          set -o pipefail
+          ./gradlew --console=plain --dependency-verification=strict --info -PpeppyGoogleMessagesLink=true :app:compileSideloadUnitTestKotlin :app:prepareRobolectricDependencies 2>&1 | tee "$RUNNER_TEMP/sideload-link-preparation.log"
+      - name: Run Android sideload unit tests with Google Messages link
+        working-directory: apps/android
+        run: ../../.github/scripts/run-with-jvm-watchdog.sh 180 1500 -- ./gradlew --console=plain --dependency-verification=strict -PpeppyGoogleMessagesLink=true :app:testSideloadUnitTest --rerun
+      - name: Report sideload link test timing
+        if: ${{ always() }}
+        run: python3 .github/scripts/ci-timing-report.py junit --title "Android sideload link tests" apps/android/app/build/test-results/testSideloadUnitTest || echo "::warning::Timing report failed"
+      - name: Preserve Android sideload link unit test failure reports
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: android-sideload-link-unit-test-failures-${{ github.run_attempt }}
+          path: |
+            apps/android/app/build/test-results/testSideloadUnitTest/*.xml
+            apps/android/app/build/reports/tests/testSideloadUnitTest/
+          if-no-files-found: warn
+          retention-days: 7
+
+  android-release-unit-tests:
+    needs: android-native-preparation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Linux build dependencies
+        timeout-minutes: 30
+        run: bash .github/scripts/install-apt-packages.sh build-essential pkg-config libssl-dev libsodium-dev
+      - name: Install Android runtime dependencies
+        run: |
+          set +e
+          set +o pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018"
+          sdkmanager_status=${PIPESTATUS[1]}
+          set -e
+          exit "$sdkmanager_status"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-dependencies-v1-${{ runner.os }}-${{ hashFiles('.github/scripts/gradle-dependency-cache.init.gradle', 'apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/verification-metadata.xml') }}
+          restore-keys: gradle-dependencies-v1-${{ runner.os }}-
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: android-native-${{ github.sha }}
+          path: android-native-artifacts
+      - name: Install native inputs
+        run: .github/scripts/android-ci-artifacts.sh install-artifact android-native-artifacts . "$GITHUB_SHA" debug
+      - name: Compile release unit tests and prepare Robolectric runtimes
+        id: release-preparation
+        working-directory: apps/android
+        run: |
+          set -o pipefail
+          ./gradlew --console=plain --dependency-verification=strict --info :app:compileReleaseUnitTestKotlin :app:prepareRobolectricDependencies 2>&1 | tee "$RUNNER_TEMP/release-preparation.log"
+      - name: Run Android release unit tests
+        working-directory: apps/android
+        run: ../../.github/scripts/run-with-jvm-watchdog.sh 180 1080 -- ./gradlew --console=plain --dependency-verification=strict :app:testReleaseUnitTest
+      - name: Report release test timing
+        if: ${{ always() }}
+        run: python3 .github/scripts/ci-timing-report.py junit --title "Android release tests" apps/android/app/build/test-results/testReleaseUnitTest || echo "::warning::Timing report failed"
+      - name: Preserve Android release unit test failure reports
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: android-release-unit-test-failures-${{ github.run_attempt }}
+          path: |
+            apps/android/app/build/test-results/testReleaseUnitTest/*.xml
+            apps/android/app/build/reports/tests/testReleaseUnitTest/
+          if-no-files-found: warn
+          retention-days: 7
+
   android-lint-and-assembly:
     needs: android-native-preparation
     runs-on: ubuntu-24.04
@@ -328,12 +447,6 @@ jobs:
       - name: Compile release with Google Messages link
         working-directory: apps/android
         run: ./gradlew --console=plain --dependency-verification=strict --info --stacktrace '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' --max-workers=2 :app:compileReleaseKotlin -PpeppyDistribution=play -PpeppyGoogleMessagesLink=true
-      - name: Verify release unit-test policies
-        working-directory: apps/android
-        run: ./gradlew --console=plain --dependency-verification=strict --info :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest --tests dev.peppy.mobile.mms.RestrictedAccessActionReleaseTest
-      - name: Report release test timing
-        if: ${{ always() }}
-        run: python3 .github/scripts/ci-timing-report.py junit --title "Android release tests" apps/android/app/build/test-results/testReleaseUnitTest || echo "::warning::Timing report failed"
 
   android-aggregate:
     if: ${{ always() }}
@@ -341,6 +454,8 @@ jobs:
       - android-native-preparation
       - android-debug-unit-tests
       - android-sideload-unit-tests
+      - android-sideload-link-unit-tests
+      - android-release-unit-tests
       - android-lint-and-assembly
     runs-on: ubuntu-24.04
     steps:
@@ -349,8 +464,10 @@ jobs:
           PREPARATION_RESULT: ${{ needs.android-native-preparation.result }}
           DEBUG_RESULT: ${{ needs.android-debug-unit-tests.result }}
           SIDELOAD_RESULT: ${{ needs.android-sideload-unit-tests.result }}
+          SIDELOAD_LINK_RESULT: ${{ needs.android-sideload-link-unit-tests.result }}
+          RELEASE_RESULT: ${{ needs.android-release-unit-tests.result }}
           LINT_ASSEMBLY_RESULT: ${{ needs.android-lint-and-assembly.result }}
         run: |
-          for result in "$PREPARATION_RESULT" "$DEBUG_RESULT" "$SIDELOAD_RESULT" "$LINT_ASSEMBLY_RESULT"; do
+          for result in "$PREPARATION_RESULT" "$DEBUG_RESULT" "$SIDELOAD_RESULT" "$SIDELOAD_LINK_RESULT" "$RELEASE_RESULT" "$LINT_ASSEMBLY_RESULT"; do
             test "$result" = success || { echo "required Android validation result was $result" >&2; exit 1; }
           done
