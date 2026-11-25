@@ -89,6 +89,8 @@ pub use reactions::{
 };
 use reactions::{reaction_refusal_code, store_message_reactions};
 #[cfg(test)]
+mod phone_vectors_tests;
+#[cfg(test)]
 mod reaction_jobs_tests;
 #[cfg(test)]
 mod reaction_requester_tests;
