@@ -375,6 +375,8 @@ pub fn open_composer_mode(
     let window = builder
         .build()
         .map_err(|_| BridgeError::new("window", "Could not open the composer window."))?;
+    #[cfg(target_os = "macos")]
+    let _ = crate::window_level::set_floating(&window.as_ref().window(), effective_panel);
     crate::window_chrome::prepare_material(&window, effective_panel);
     crate::window_chrome::show_when_ready(&window)
         .map_err(|_| BridgeError::new("window", "Could not show the composer window."))?;
@@ -426,8 +428,9 @@ fn composer_window_config(
         visible: false,
         focus: true,
         transparent: false,
-        always_on_top: head_panel,
-        // An inactive always-on-top panel would spend its first click activating itself.
+        // macOS sets AppKit's floating level after creation (window_level::set_floating).
+        always_on_top: head_panel && cfg!(not(target_os = "macos")),
+        // An inactive floating panel would spend its first click activating itself.
         accept_first_mouse: head_panel,
         ..Default::default()
     }
@@ -452,7 +455,7 @@ fn configure_composer(window: &tauri::WebviewWindow, head_panel: bool) {
         }
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, height)));
     }
-    let _ = window.set_always_on_top(head_panel);
+    let _ = crate::window_level::set_floating(&window.as_ref().window(), head_panel);
     crate::sync_media_viewer_topmost(window.app_handle(), window.label(), head_panel);
     crate::window_chrome::prepare_material(window, head_panel);
 }
@@ -757,7 +760,10 @@ mod tests {
         assert!(!config.visible);
         assert!(config.focus);
         assert!(!config.transparent);
-        assert_eq!(config.always_on_top, head_panel);
+        assert_eq!(
+            config.always_on_top,
+            head_panel && cfg!(not(target_os = "macos"))
+        );
         assert_eq!(config.accept_first_mouse, head_panel);
 
         #[cfg(target_os = "macos")]
