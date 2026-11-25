@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useRef, useState } from "react";
+import { Profiler, useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ContactNameChooser } from "./ContactNameChooser";
 import type { ContactBookView } from "../bridge/bridge";
@@ -58,6 +58,29 @@ describe("ContactNameChooser", () => {
     await screen.findByRole("radio");
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("returns focus to its trigger when Escape arrives in the commit that shows the list", async () => {
+    const bridge = makeBridge();
+    let pressed = false;
+    // Profiler's onRender runs in the commit's layout phase, after the chooser's layout effects and before its passive
+    // effects, so this Escape lands while a passive focus effect would still be pending.
+    const pressEscapeWhenListCommits = () => {
+      if (pressed || !document.querySelector('input[type="radio"]')) return;
+      pressed = true;
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    };
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      const trigger = useRef<HTMLButtonElement>(null);
+      return <><button ref={trigger} onClick={() => setOpen(true)}>Contact sources</button>{open && <Profiler id="contact-name-chooser" onRender={pressEscapeWhenListCommits}><ContactNameChooser state="conflict" address="+18015551234" books={books} bridge={bridge} onClose={() => { setOpen(false); trigger.current?.focus(); }} onRefresh={vi.fn()} onOpenContact={vi.fn()} /></Profiler>}</>;
+    }
+    render(<Harness />);
+    const trigger = screen.getByRole("button", { name: "Contact sources" });
+    fireEvent.click(trigger);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(pressed).toBe(true);
     expect(trigger).toHaveFocus();
   });
 

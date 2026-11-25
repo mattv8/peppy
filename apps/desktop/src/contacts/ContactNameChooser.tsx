@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { formatPhoneNumber, X } from "@peppy/desktop-ui";
 import type { ContactBookView, DesktopBridge } from "../bridge/bridge";
 import "./contact-name-chooser.css";
@@ -45,7 +45,9 @@ export function ContactNameChooser({ address, state, sourceDeviceId, books, brid
     return () => { current = false; };
   }, [address, sourceDeviceId, bridge, attempt]);
 
-  useEffect(() => {
+  // Focus in the commit that shows the result. A passive effect could run after an Escape had
+  // already closed the chooser, and take focus back from the trigger that the close restored.
+  useLayoutEffect(() => {
     if (!result && !loadFailed) return;
     const radio = panelRef.current?.querySelector<HTMLInputElement>('input[type="radio"]:checked')
       ?? panelRef.current?.querySelector<HTMLInputElement>('input[type="radio"]');
