@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent, type SyntheticEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type SyntheticEvent } from "react";
 import { attachmentStorageRemovalText } from "@peppy/desktop-ui";
 import type { GalleryAttachment } from "./grouping";
 import { peppyCopy } from "../generated/peppyCopy";
@@ -6,6 +6,7 @@ import "./inline-media.css";
 
 type MediaResult = { state: "ready"; url: string } | { state: "pending" };
 const RATIO_RECONCILIATION_THRESHOLD = 0.01;
+const CONTROLS_IDLE_MS = 2000;
 
 export type InlineMediaProps = {
   attachment: GalleryAttachment;
@@ -30,6 +31,13 @@ export function InlineMedia({ attachment, requestOriginal, checkOriginal, releas
   const requested = useRef(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const focusVideoAfterPlay = useRef(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const controlsTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const playing = useRef(false);
+  const seeking = useRef(false);
+  const keyboardFocus = useRef(false);
+  const keyboardInput = useRef(false);
+  const touchOnly = useRef(false);
   const mediaKind = attachment.mediaType.startsWith("video/") ? "video" : attachment.mediaType.startsWith("audio/") ? "audio" : undefined;
   const mediaDuration = duration(attachment.mediaMeta?.durationMs);
   const removedRemoteOnly = attachment.remoteState === "removed_by_storage_policy" && !attachment.localAvailable;
@@ -79,6 +87,47 @@ export function InlineMedia({ attachment, requestOriginal, checkOriginal, releas
     videoRef.current?.focus();
     focusVideoAfterPlay.current = false;
   }, [url]);
+  useEffect(() => {
+    const media = window.matchMedia?.("(hover: none)");
+    setControlsVisible(true);
+    const updateHover = () => {
+      touchOnly.current = media?.matches ?? false;
+      if (touchOnly.current) setControlsVisible(true);
+    };
+    // Pointer focus does not pin the controls; keyboard focus does.
+    const onKeyDown = () => { keyboardInput.current = true; };
+    const onPointerDown = () => { keyboardInput.current = false; };
+    updateHover();
+    media?.addEventListener("change", updateHover);
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("pointerdown", onPointerDown, true);
+    return () => {
+      clearTimeout(controlsTimer.current);
+      playing.current = false;
+      seeking.current = false;
+      keyboardFocus.current = false;
+      media?.removeEventListener("change", updateHover);
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("pointerdown", onPointerDown, true);
+    };
+  }, [url]);
+  const showControls = () => {
+    clearTimeout(controlsTimer.current);
+    setControlsVisible(true);
+    if (playing.current && !seeking.current && !keyboardFocus.current && !touchOnly.current) {
+      controlsTimer.current = setTimeout(() => setControlsVisible(false), CONTROLS_IDLE_MS);
+    }
+  };
+  const hideControls = () => {
+    clearTimeout(controlsTimer.current);
+    if (playing.current && !seeking.current && !keyboardFocus.current && !touchOnly.current) setControlsVisible(false);
+  };
+  const handleVideoKeyDown = (event: KeyboardEvent<HTMLVideoElement>) => {
+    if (event.key !== " " && event.key.toLowerCase() !== "k") return;
+    event.preventDefault();
+    if (event.currentTarget.paused) void event.currentTarget.play().catch(() => {});
+    else event.currentTarget.pause();
+  };
   const handlePlay = (event: MouseEvent<HTMLButtonElement>) => {
     focusVideoAfterPlay.current = document.activeElement === event.currentTarget;
     void load();
@@ -93,7 +142,18 @@ export function InlineMedia({ attachment, requestOriginal, checkOriginal, releas
   };
   if (!mediaKind) return null;
   if (removedRemoteOnly) return <div data-inline-media data-media-kind={mediaKind} data-attachment-id={attachment.id} data-attachment-storage-removed role="status">{attachmentStorageRemovalText(false, peppyCopy).body}</div>;
-  if (url) return mediaKind === "video" ? <video ref={videoRef} data-inline-media data-media-kind="video" data-attachment-id={attachment.id} controls autoPlay preload="metadata" src={url} aria-label={attachment.name || "Video"} tabIndex={0} onLoadedMetadata={reconcileVideoRatio} /> : <audio data-inline-media data-media-kind="audio" controls autoPlay preload="metadata" src={url} aria-label={attachment.name || "Audio"} />;
+  if (url) return mediaKind === "video" ? <video ref={videoRef} data-inline-media data-media-kind="video" data-attachment-id={attachment.id} data-controls-idle={!controlsVisible || undefined} controls={controlsVisible} autoPlay preload="metadata" src={url} aria-label={attachment.name || "Video"} tabIndex={0} onLoadedMetadata={reconcileVideoRatio}
+    onPlay={() => { playing.current = true; showControls(); }}
+    onPause={() => { playing.current = false; showControls(); }}
+    onEnded={() => { playing.current = false; showControls(); }}
+    onPointerMove={showControls} onPointerEnter={showControls} onPointerLeave={hideControls}
+    onClick={() => { if (!controlsVisible) showControls(); }}
+    onFocus={() => { keyboardFocus.current = keyboardInput.current; showControls(); }}
+    onBlur={() => { keyboardFocus.current = false; showControls(); }}
+    onKeyDown={event => { keyboardFocus.current = true; showControls(); handleVideoKeyDown(event); }}
+    onSeeking={() => { seeking.current = true; showControls(); }}
+    onSeeked={() => { seeking.current = false; showControls(); }}
+    onVolumeChange={showControls} /> : <audio data-inline-media data-media-kind="audio" controls autoPlay preload="metadata" src={url} aria-label={attachment.name || "Audio"} />;
   const isBusy = loading || pending;
   const buttonLabel = isBusy ? `Downloading ${mediaKind}: ${attachment.name || mediaKind}` : `Play ${mediaKind}: ${attachment.name || mediaKind}`;
   return <div data-inline-media data-media-kind={mediaKind} data-attachment-id={attachment.id}>

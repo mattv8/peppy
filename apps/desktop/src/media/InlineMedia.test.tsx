@@ -1,13 +1,95 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InlineMedia } from "./InlineMedia";
+import { stubMatchMedia } from "../test-support/browserStubs";
 
 const attachment = (durationMs?: string) => ({ id: "audio-1", name: "Clip", mediaType: "audio/mpeg", byteSize: 1, state: "ready" as const, mediaMeta: durationMs === undefined ? undefined : { durationMs } });
 const videoAttachment = (overrides = {}) => ({ id: "video-1", name: "Clip", mediaType: "video/mp4", byteSize: 1, state: "ready" as const, ...overrides });
 const props = { requestOriginal: vi.fn(), checkOriginal: vi.fn() };
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
+
+describe("inline video controls", () => {
+  async function renderVideo(touch = false) {
+    stubMatchMedia(touch ? ["(hover: none)"] : []);
+    render(<InlineMedia attachment={videoAttachment()} requestOriginal={vi.fn().mockResolvedValue({ state: "ready", url: "blob:video" })} checkOriginal={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /play video/i }));
+    const video = await screen.findByLabelText("Clip");
+    vi.useFakeTimers();
+    return video;
+  }
+
+  it("reveals controls on activity and hides them when playing becomes idle", async () => {
+    const video = await renderVideo();
+    expect(video).toHaveAttribute("controls");
+    fireEvent.play(video);
+    fireEvent.pointerMove(video);
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(video).not.toHaveAttribute("controls");
+    expect(video).toHaveAttribute("data-controls-idle");
+    fireEvent.pointerMove(video);
+    expect(video).toHaveAttribute("controls");
+    expect(video).not.toHaveAttribute("data-controls-idle");
+    fireEvent.pointerLeave(video);
+    expect(video).not.toHaveAttribute("controls");
+    fireEvent.click(video);
+    expect(video).toHaveAttribute("controls");
+    fireEvent.pause(video);
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(video).toHaveAttribute("controls");
+    fireEvent.play(video);
+    fireEvent.ended(video);
+    expect(video).toHaveAttribute("controls");
+  });
+
+  it("keeps keyboard-focused and seeking controls visible", async () => {
+    const video = await renderVideo();
+    fireEvent.play(video);
+    fireEvent.keyDown(window, { key: "Tab" });
+    fireEvent.focus(video);
+    fireEvent.pointerLeave(video);
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(video).toHaveAttribute("controls");
+    fireEvent.blur(video);
+    fireEvent.seeking(video);
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(video).toHaveAttribute("controls");
+    fireEvent.seeked(video);
+    fireEvent.volumeChange(video);
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(video).not.toHaveAttribute("controls");
+  });
+
+  it("keeps controls visible on touch-only devices and clears timers on unmount", async () => {
+    const video = await renderVideo(true);
+    fireEvent.play(video);
+    fireEvent.pointerLeave(video);
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(video).toHaveAttribute("controls");
+    cleanup();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("clears an active idle timer on unmount", async () => {
+    const video = await renderVideo();
+    fireEvent.play(video);
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    cleanup();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("toggles playback with Space and k", async () => {
+    const video = await renderVideo() as HTMLVideoElement;
+    const play = vi.spyOn(video, "play").mockResolvedValue();
+    const pause = vi.spyOn(video, "pause").mockImplementation(() => {});
+    fireEvent.keyDown(video, { key: " " });
+    expect(play).toHaveBeenCalledOnce();
+    Object.defineProperty(video, "paused", { configurable: true, value: false });
+    fireEvent.keyDown(video, { key: "k" });
+    expect(pause).toHaveBeenCalledOnce();
+  });
+});
 
 describe("InlineMedia duration metadata", () => {
   it("formats finite metadata duration", () => {
