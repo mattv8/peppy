@@ -75,13 +75,12 @@ type Link struct {
 	setTyping           func(context.Context, string, *gmproto.SIMPayload) error
 	typingNow           func() time.Time
 
-	outputMu              sync.Mutex
-	outputCond            *sync.Cond
-	outputQueue           []hostOutput
-	outputClosed          bool
-	outputActive          int
-	closeReady            bool
-	completionOutputReady func()
+	outputMu     sync.Mutex
+	outputCond   *sync.Cond
+	outputQueue  []hostOutput
+	outputClosed bool
+	outputActive int
+	closeReady   bool
 
 	changes                      chan any
 	conversationEvents           []conversationEvent
@@ -1611,9 +1610,6 @@ func (link *Link) completeTerminal(completion *terminalCompletion) {
 		close(completion.outputQueued)
 		link.stopFatalFor(completion.generation, "persist_failed", false)
 		return
-	}
-	if persistCurrent && current && err == nil && completion.kind != "" && link.completionOutputReady != nil {
-		link.completionOutputReady()
 	}
 	if persistCurrent && current && err == nil && completion.kind != "" {
 		link.enqueueOutput(hostOutput{kind: completion.kind, code: completion.code, generation: completion.generation, revision: completion.revision, requireRevision: true})
