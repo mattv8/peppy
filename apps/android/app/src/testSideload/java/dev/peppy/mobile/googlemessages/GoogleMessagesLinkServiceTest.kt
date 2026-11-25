@@ -12,6 +12,8 @@ import dev.peppy.mobile.gateway.GatewayTestBase
 import dev.peppy.mobile.gateway.NativeGateway
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -62,6 +64,8 @@ private annotation class Unenrolled
 @Config(sdk = [35], application = LinkTestApplication::class)
 class GoogleMessagesLinkServiceTest : GatewayTestBase() {
     private var unenrolled = false
+    private val serviceControllers = mutableListOf<ServiceController<GoogleMessagesLinkService>>()
+    private val typingBridgeExecutors = mutableListOf<ExecutorService>()
     @get:Rule val enrollmentRule = object : TestWatcher() {
         override fun starting(description: Description) {
             unenrolled = description.getAnnotation(Unenrolled::class.java) != null
@@ -69,7 +73,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
     }
     @Test fun `journaled command wake starts media discovery without service restart`() {
         installEngine(StatusHandle(UNLINKED_STATUS))
-        val controller = Robolectric.buildService(GoogleMessagesLinkService::class.java).create()
+        val controller = createService()
         var sent = 0
         val work = RcsNativeSendWork(
             enabled = { true }, candidates = { listOf(RcsNativeCommand("media-command", "conversation", "peer")) },
@@ -95,7 +99,50 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         LinkTestDeps.service = null
         GoogleMessagesLinkService.nativeRcsSendExecutorEnabledForTest = null
         RemoteMessagingRuntime.peersListener = null
+        awaitQueuedLinkWork()
     }
+
+    /**
+     * Waits for the work a test leaves queued on the link's executors. Robolectric gives the next test a new
+     * Application but keeps this sandbox's [NativeGateway], so a queued task that opened the gateway after the next
+     * test's reset would reopen it for this test's Application, and the next enrollment would refuse to import.
+     * Every wait is attempted even after one fails; the first failure is rethrown with the rest suppressed.
+     * Runs before [GatewayTestBase.closeOwner].
+     */
+    private fun awaitQueuedLinkWork() {
+        val failures = mutableListOf<Throwable>()
+        fun attempt(step: () -> Unit) { runCatching(step).exceptionOrNull()?.let(failures::add) }
+        // Workers hand work to the executors below, so they must exit first.
+        serviceControllers.forEach { attempt { assertTrue("service worker did not exit", it.get().joinWorker()) } }
+        // Each executor is a single thread, so a task queued now runs after every earlier one.
+        attempt { linkExecutors().forEach { executor -> attempt { executor.submit {}.get(5, TimeUnit.SECONDS) } } }
+        typingBridgeExecutors.forEach(ExecutorService::shutdown)
+        typingBridgeExecutors.forEach { attempt { assertTrue("typing bridge did not drain", it.awaitTermination(5, TimeUnit.SECONDS)) } }
+        failures.firstOrNull()?.let { first -> failures.drop(1).forEach(first::addSuppressed); throw first }
+    }
+
+    /**
+     * The link's shared executors, each listed before the ones its tasks queue work on: engine callbacks feed the
+     * other queues, readiness and receive sweeps start the send queues, and sends queue media transfers. Work a task
+     * waits for, such as a notification task's lifecycle record, finishes inside that task's own barrier. A finished
+     * media transfer restarts sends, but this class queues no media. Three of these are private, so they are read
+     * reflectively.
+     */
+    private fun linkExecutors(): List<ExecutorService> = listOf(
+        LinkRuntime.callbackExecutor,
+        DEFAULT_RCS_BOOTSTRAP_EXECUTOR,
+        DEFAULT_RCS_RECEIVE_EXECUTOR,
+        privateExecutor(GoogleMessagesLinkService::class.java, null, "NATIVE_RCS_SEND_EXECUTOR"),
+        privateExecutor(GoogleMessagesLinkService::class.java, null, "NATIVE_RCS_MEDIA_EXECUTOR"),
+        DEFAULT_RCS_ELIGIBILITY_EXECUTOR,
+        privateExecutor(LinkCoreBridge::class.java, LinkCoreBridge, "lifecycleExecutor"),
+        DEFAULT_NOTIFICATION_EXECUTOR,
+        DEFAULT_CLOSE_EXECUTOR,
+        DEFAULT_TYPING_EXECUTOR,
+    )
+
+    private fun privateExecutor(owner: Class<*>, instance: Any?, name: String): ExecutorService =
+        owner.getDeclaredField(name).apply { isAccessible = true }.get(instance) as ExecutorService
 
 
     @Test fun `restart sweep does not run before ready`() {
@@ -432,7 +479,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         val executor = QueueExecutor()
         LinkTestDeps.service = LinkServiceDeps.DEFAULTS.copy(notificationExecutor = executor)
         installEngine(StatusHandle(UNLINKED_STATUS))
-        val controller = Robolectric.buildService(GoogleMessagesLinkService::class.java).create()
+        val controller = createService()
 
         GoogleMessagesLinkService.onLinkEvent("conn", "ready")
 
@@ -447,7 +494,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
             bootstrapExecutor = executor, eligibilityExecutor = executor,
         )
         installEngine(StatusHandle(UNLINKED_STATUS))
-        val controller = Robolectric.buildService(GoogleMessagesLinkService::class.java).create()
+        val controller = createService()
         listOf("native_prepare", "conversation_refresh", "conversation_scan", "conversation_rpc").forEach { kind ->
             GoogleMessagesLinkService.onLinkEvent(kind, "fixed_diagnostic")
         }
@@ -563,7 +610,7 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
             eligibilityPortFactory = { port },
         )
         installEngine(handle)
-        val controller = Robolectric.buildService(GoogleMessagesLinkService::class.java).create()
+        val controller = createService()
         assertNotNull(LinkRuntime.handleLease(context))
         GoogleMessagesLinkService.onLinkEvent("index", "stale")
 
@@ -1218,9 +1265,24 @@ class GoogleMessagesLinkServiceTest : GatewayTestBase() {
         return events
     }
 
-    private fun startService() = Robolectric.buildService(GoogleMessagesLinkService::class.java)
-        .create()
-        .startCommand(0, 1)
+    /**
+     * Creates the service and records it for [awaitQueuedLinkWork]. A default typing bridge gets its own executor
+     * here, so cleanup can wait for the bridge's queued stop; a test's own bridge factory is kept as it is.
+     */
+    private fun createService(): ServiceController<GoogleMessagesLinkService> {
+        val app = context as LinkTestApplication
+        if (app.service.typingBridgeFactory === LinkServiceDeps.DEFAULTS.typingBridgeFactory) {
+            app.service = app.service.copy(typingBridgeFactory = { application ->
+                val executor = Executors.newSingleThreadExecutor()
+                typingBridgeExecutors += executor
+                TypingBridge(application, executor = executor)
+            })
+        }
+        return Robolectric.buildService(GoogleMessagesLinkService::class.java).create()
+            .also(serviceControllers::add)
+    }
+
+    private fun startService() = createService().startCommand(0, 1)
 
     /**
      * Waits a bounded time for a worker that ends on its own. A natural exit ends with stopSelf, so the
