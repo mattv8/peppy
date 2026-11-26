@@ -4886,16 +4886,19 @@ describe("composer window", () => {
     expect(document.getElementById("head-panel-route-description")).toHaveTextContent("Phone, SIM 2. Phone and SIM are selected in the main window.");
     expect(screen.queryByRole("combobox", { name: "Phone" })).not.toBeInTheDocument();
   });
-  it("numbers one SIM per gateway independently in route controls and the head pill", async () => {
+  it("shows SIM badges only for phones with multiple SIM routes", async () => {
     const backupGateway = { ...SMS_ONLY, id: "gw-backup", name: "Backup phone" };
     host.gateways = [SMS_ONLY, backupGateway];
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("combobox", { name: "Phone" }));
+    const trigger = await screen.findByRole("combobox", { name: "Phone" });
+    expect(trigger.querySelector('[data-route-badge="sim"]')).not.toBeInTheDocument();
+    fireEvent.click(trigger);
     const options = await screen.findAllByRole("option");
     for (const gateway of host.gateways) {
       const option = options.find((candidate) => candidate.getAttribute("data-gateway-choice") === routeValue(gateway));
-      expect(option).toHaveTextContent("SIM 1");
+      expect(option).toBeDefined();
+      expect(option?.querySelector('[data-route-badge="sim"]')).not.toBeInTheDocument();
     }
 
     cleanup();
@@ -4912,7 +4915,25 @@ describe("composer window", () => {
     openComposerWindow("aurora", true);
     render(<App />);
 
-    await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent("SIM 1"));
+    await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent("Status unknown"));
+    expect(document.querySelector("#head-panel-route [data-head-route-sim]")).not.toBeInTheDocument();
+    expect(document.querySelector('#head-panel-route-section [role="status"]')).toHaveTextContent(`${backupGateway.name}, Status unknown`);
+
+    cleanup();
+    host.gateways = [SMS_ONLY, MMS_SIM];
+    host.drafts.clear();
+    openComposerWindow("aurora");
+    render(<App />);
+    fireEvent.click(await screen.findByRole("combobox", { name: "Phone" }));
+    const multiOptions = await screen.findAllByRole("option");
+    expect(multiOptions.find((option) => option.getAttribute("data-gateway-choice") === routeValue(SMS_ONLY))).toHaveTextContent("SIM 1");
+    expect(multiOptions.find((option) => option.getAttribute("data-gateway-choice") === routeValue(MMS_SIM))).toHaveTextContent("SIM 2");
+
+    cleanup();
+    host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "", recipientIds: [], attachmentIds: [], gatewayId: MMS_SIM.id, simId: MMS_SIM.simId, revision: "1" });
+    openComposerWindow("aurora", true);
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent("SIM 2"));
   });
   it("points no-route and stale head recovery to the main window", async () => {
     openComposerWindow("aurora", true);
@@ -4955,14 +4976,14 @@ describe("composer window", () => {
       revision: "1",
     });
     const cases: Array<{ gateways: GatewayView[]; draft?: Draft; label: string }> = [
-      { gateways: [{ ...SMS_ONLY, availability: "connected" }], label: "SIM 1 · Online" },
-      { gateways: [{ ...SMS_ONLY, availability: "delayed", lastSeenAgeSeconds: 120 }], label: "SIM 1 · Seen 2m ago" },
-      { gateways: [{ ...SMS_ONLY, availability: "delayed" }], label: "SIM 1 · Last seen" },
-      { gateways: [{ ...SMS_ONLY, availability: "offline" }], label: "SIM 1 · Not responding" },
+      { gateways: [{ ...SMS_ONLY, availability: "connected" }], label: "Online" },
+      { gateways: [{ ...SMS_ONLY, availability: "delayed", lastSeenAgeSeconds: 120 }], label: "Seen 2m ago" },
+      { gateways: [{ ...SMS_ONLY, availability: "delayed" }], label: "Last seen" },
+      { gateways: [{ ...SMS_ONLY, availability: "offline" }], label: "Not responding" },
       { gateways: [SMS_ONLY, MMS_SIM], label: "No SIM chosen" },
       { gateways: [], label: "No phone" },
       { gateways: [{ ...SMS_ONLY, availability: "no_sms_sim" }], label: "No SMS SIM" },
-      { gateways: [{ ...SMS_ONLY, availability: "unknown" }], label: "SIM 1 · Status unknown" },
+      { gateways: [{ ...SMS_ONLY, availability: "unknown" }], label: "Status unknown" },
       { gateways: [SMS_ONLY], draft: selectedDraft("sim-9"), label: "SIM unavailable" },
     ];
 
@@ -4973,7 +4994,7 @@ describe("composer window", () => {
       if (routeCase.draft) host.drafts.set("aurora", routeCase.draft);
       openComposerWindow("aurora", true);
       render(<App />);
-      await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent(routeCase.label.replace(" · ", "")));
+      await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent(routeCase.label));
       expect(screen.queryByRole("combobox", { name: "Phone" })).not.toBeInTheDocument();
     }
   });

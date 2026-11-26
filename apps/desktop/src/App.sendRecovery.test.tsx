@@ -329,8 +329,10 @@ describe("sendAgainRouteLabel", () => {
     expect(sendAgainRouteLabel([delayed], false)(delayed).statusLabel).not.toContain(peppyCopy.account_send_paused_status);
   });
 
-  it("labels the SIM the way the composer's picker does, and omits it for a phone without a SIM", () => {
-    expect(sendAgainRouteLabel([delayed])(delayed).simLabel).toBe("SIM 1");
+  it("labels SIMs only for phones with multiple distinct routes", () => {
+    expect(sendAgainRouteLabel([delayed])(delayed).simLabel).toBeUndefined();
+    expect(sendAgainRouteLabel([delayed, delayed])(delayed).simLabel).toBeUndefined();
+    expect(sendAgainRouteLabel([delayed, { ...delayed, simId: "sim-2" }])(delayed).simLabel).toBe("SIM 1");
     expect(sendAgainRouteLabel([{ ...delayed, simId: "" }])({ ...delayed, simId: "" }).simLabel).toBeUndefined();
   });
 });
