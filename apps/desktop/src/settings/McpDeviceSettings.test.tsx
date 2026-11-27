@@ -144,15 +144,26 @@ describe("McpDeviceSettings", () => {
     });
 
     it("silently recovers a conflict when refresh shows the existing device", async () => {
+      const mutation = deferred<void>();
       vi.mocked(bridge.mcp_status).mockResolvedValueOnce(ready).mockResolvedValueOnce(onlineStatus);
       vi.mocked(bridge.mcp_enable).mockRejectedValueOnce({ code: "mcp_device_conflict", message: "already configured" });
-      renderSettings();
-      fireEvent.click(await screen.findByText("Enable"));
+      renderSettings({ onMutation: () => mutation.promise });
+      const opener = await screen.findByText("Enable");
+      fireEvent.click(opener);
       fireEvent.click(screen.getByRole("checkbox", { name: /Peppy can decrypt this vault/i }));
       fireEvent.click(document.getElementById("mcp-custody-consent-enable")!);
-      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-      expect(screen.queryByRole("alert")).toBeNull();
-      expect(document.activeElement).toBe(document.getElementById("mcp-device-mcp-device"));
+      await waitFor(() => {
+        expect(document.getElementById("mcp-custody-consent")).toBeInTheDocument();
+        expect(document.querySelector('[data-device-badge="presence"]')).toHaveTextContent("Online");
+        expect(opener).not.toBeInTheDocument();
+        expect(screen.queryByRole("alert")).toBeNull();
+      });
+      await act(async () => { mutation.resolve(); });
+      await waitFor(() => {
+        expect(screen.queryByRole("dialog")).toBeNull();
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(document.activeElement).toBe(document.getElementById("mcp-device-mcp-device"));
+      });
     });
 
     it("reconciles a conflict even while a Details refresh is unresolved", async () => {
