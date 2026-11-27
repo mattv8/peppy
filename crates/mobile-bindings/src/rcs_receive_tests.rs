@@ -542,6 +542,160 @@ fn go_wire_record_may_carry_the_other_ids_google_gives_the_message() {
     assert_eq!(result.record_outcome, "inserted");
 }
 
+/// An incoming Go record with the given id, body, and optional reply target id.
+fn go_reply(google_message_id: &str, body: &str, reply_to: Option<&str>) -> String {
+    let mut value: serde_json::Value = serde_json::from_str(&go_incoming("")).unwrap();
+    value["google_message_id"] = json!(google_message_id);
+    value["body"] = json!(body);
+    if let Some(reply_to) = reply_to {
+        value["reply_to_google_message_id"] = json!(reply_to);
+    }
+    value.to_string()
+}
+
+/// The core message whose body is `body`, with its stored reply target.
+fn stored_by_body(fixture: &Fixture, body: &str) -> peppy_client_core::Message {
+    with_client(&fixture.client.client, |core| {
+        core.messages(fixture.conversation_id.parse().unwrap())
+    })
+    .unwrap()
+    .into_iter()
+    .find(|message| message.payload.body == body)
+    .unwrap()
+}
+
+#[test]
+fn go_wire_reply_id_links_a_reply_to_a_target_ingested_earlier() {
+    let fixture = fixture();
+    let ingest = |record: String| {
+        fixture
+            .client
+            .gateway_ingest_go_rcs_record_json(
+                fixture.conversation_id.clone(),
+                fixture.generation,
+                record,
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        ingest(go_reply("message-1", "target body", None)).record_outcome,
+        "inserted"
+    );
+    assert_eq!(
+        ingest(go_reply("message-2", "reply body", Some("message-1"))).record_outcome,
+        "inserted"
+    );
+
+    let target = stored_by_body(&fixture, "target body");
+    assert_eq!(
+        stored_by_body(&fixture, "reply body").payload.reply_to,
+        Some(target.payload.record.message_id)
+    );
+    assert_eq!(target.payload.reply_to, None);
+}
+
+#[test]
+fn go_wire_reply_id_without_a_known_target_ingests_unlinked() {
+    let fixture = fixture();
+    let result = fixture
+        .client
+        .gateway_ingest_go_rcs_record_json(
+            fixture.conversation_id.clone(),
+            fixture.generation,
+            go_reply("message-2", "reply body", Some("never-seen")),
+        )
+        .unwrap();
+
+    assert_eq!(result.record_outcome, "inserted");
+    assert_eq!(
+        stored_by_body(&fixture, "reply body").payload.reply_to,
+        None
+    );
+}
+
+#[test]
+fn go_wire_invalid_reply_id_is_absent_and_the_record_still_ingests() {
+    let fixture = fixture();
+    let too_long = "x".repeat(513);
+    for (index, reply) in ["", "bad\u{1}id", "bad\tid", too_long.as_str()]
+        .into_iter()
+        .enumerate()
+    {
+        let body = format!("reply body {index}");
+        let result = fixture
+            .client
+            .gateway_ingest_go_rcs_record_json(
+                fixture.conversation_id.clone(),
+                fixture.generation,
+                go_reply(&format!("message-{index}"), &body, Some(reply)),
+            )
+            .unwrap();
+
+        assert_eq!(result.record_outcome, "inserted");
+        assert_eq!(stored_by_body(&fixture, &body).payload.reply_to, None);
+    }
+}
+
+#[test]
+fn go_wire_reply_id_of_the_wrong_type_is_rejected_without_mutation() {
+    let fixture = fixture();
+    let mut value: serde_json::Value = serde_json::from_str(&go_incoming("")).unwrap();
+    value["reply_to_google_message_id"] = json!(42);
+
+    let result = fixture.client.gateway_ingest_go_rcs_record_json(
+        fixture.conversation_id.clone(),
+        fixture.generation,
+        value.to_string(),
+    );
+
+    assert!(matches!(result, Err(MobileBindingsError::InvalidRequest)));
+    assert!(
+        fixture
+            .client
+            .messages(fixture.conversation_id.clone())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Go decodes the same golden in `native_reply_contract_test.go`. The reply must resolve to the
+/// target that is ingested first, through the record object Go emits.
+#[test]
+fn go_projected_reply_fixture_links_to_its_target() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/contracts/fixtures/gmlink-replies/receive-reply.json"
+    );
+    let samples: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let fixture = fixture();
+    let ingest = |sample: &str| {
+        fixture
+            .client
+            .gateway_ingest_go_rcs_record_json(
+                fixture.conversation_id.clone(),
+                fixture.generation,
+                samples[sample]["record"].to_string(),
+            )
+            .unwrap()
+    };
+
+    assert_eq!(ingest("target").record_outcome, "inserted");
+    assert_eq!(ingest("reply").record_outcome, "inserted");
+    let target = stored_by_body(&fixture, "synthetic target");
+    assert_eq!(
+        stored_by_body(&fixture, "synthetic reply").payload.reply_to,
+        Some(target.payload.record.message_id)
+    );
+    // A tab-containing reply id is invalid on both sides: the record ingests without a link.
+    assert_eq!(ingest("invalid_tab_reply").record_outcome, "inserted");
+    assert_eq!(
+        stored_by_body(&fixture, "synthetic tab reply")
+            .payload
+            .reply_to,
+        None
+    );
+}
+
 /// The transaction id Google Messages writes on the copy of a chat message in the phone's store.
 fn mirrored_transaction_id(google_message_id: &str) -> String {
     use base64::Engine;

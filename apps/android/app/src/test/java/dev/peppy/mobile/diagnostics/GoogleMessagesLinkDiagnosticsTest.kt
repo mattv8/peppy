@@ -232,6 +232,13 @@ class GoogleMessagesLinkDiagnosticsTest {
         assertEquals(GoogleMessagesLinkDiagnosticReason.codes.size, GoogleMessagesLinkDiagnosticReason.codes.values.toSet().size)
     }
 
+    @Test fun `reply diagnostics append stable codes`() {
+        assertEquals(339L, GoogleMessagesLinkDiagnosticReason.codes["receive" to "reply_unresolved"])
+        assertEquals(340L, GoogleMessagesLinkDiagnosticReason.codes["reply" to "native_target_unresolved"])
+        assertEquals(341L, GoogleMessagesLinkDiagnosticReason.codes["receive" to "reply_id_invalid"])
+        assertEquals(GoogleMessagesLinkDiagnosticReason.codes.size, GoogleMessagesLinkDiagnosticReason.codes.values.toSet().size)
+    }
+
     @Test fun goEventVocabularyIsCoveredByTheClosedMapping() {
         val root = generateSequence(File(requireNotNull(System.getProperty("user.dir")))) { it.parentFile }
             .first { File(it, "apps/android/googlemessages/gmlink/events.go").isFile }

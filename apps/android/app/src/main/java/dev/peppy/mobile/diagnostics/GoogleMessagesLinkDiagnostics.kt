@@ -345,6 +345,12 @@ internal object GoogleMessagesLinkDiagnosticReason {
         ("typing" to "frame_ignored") to 336L,
         ("typing" to "outcome_not_current") to 337L,
         ("typing" to "replayed") to 338L,
+        // 339 is a counter, not an event: core `rcs_reply_unresolved_count`. Nothing reads it yet.
+        ("receive" to "reply_unresolved") to 339L,
+        // 340 is stored, not emitted: core metadata `rcs_native_reply_diagnostic_v1/<conversation>` holds `rcs_native_reply_target_unresolved`. Nothing reads it yet.
+        ("reply" to "native_target_unresolved") to 340L,
+        // 341 is a Go event (`events.go`): a record's reply id failed validation and was dropped.
+        ("receive" to "reply_id_invalid") to 341L,
     )
 }
 
