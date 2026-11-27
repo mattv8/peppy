@@ -109,26 +109,56 @@ describe("placeReactionBar, touch", () => {
 });
 
 describe("barMetrics", () => {
-  it("measures the fine-pointer bar at 212px with six quick reactions, and 152px compact", () => {
-    expect(barMetrics({ route: "native", coarse: false, listWidth: 771 })).toEqual({ width: 212, height: 32, quick: 6 });
-    expect(barMetrics({ route: "native", coarse: false, listWidth: 300 })).toEqual({ width: 152, height: 32, quick: 4 });
+  it("keeps six quick reactions and the full Reply label when the list has room", () => {
+    expect(barMetrics({ route: "native", coarse: false, listWidth: 771 })).toEqual({ width: 280, height: 32, quick: 6, compactReply: false });
+    expect(barMetrics({ route: "native", coarse: false, listWidth: 300 })).toEqual({ width: 280, height: 32, quick: 6, compactReply: false });
   });
 
-  it("adds the 52px Text segment to the text route", () => {
-    expect(barMetrics({ route: "text", coarse: false, listWidth: 771 }).width).toBe(264);
+  it("steps the fine-pointer quick count down to four when six no longer fit with the label", () => {
+    expect(barMetrics({ route: "native", coarse: false, listWidth: 295 })).toEqual({ width: 220, height: 32, quick: 4, compactReply: false });
   });
 
-  it("measures the coarse bar at 324px (7 x 44px) and 232px compact under 340px", () => {
-    expect(barMetrics({ route: "native", coarse: true, listWidth: 412 })).toEqual({ width: 324, height: 48, quick: 6 });
-    expect(barMetrics({ route: "native", coarse: true, listWidth: 330 })).toEqual({ width: 232, height: 48, quick: 4 });
+  it("adds the 68px Reply segment to both routes, and the 52px Text segment on the text route", () => {
+    expect(barMetrics({ route: "native", coarse: false, listWidth: 771 }).width).toBe(280);
+    expect(barMetrics({ route: "text", coarse: false, listWidth: 771 }).width).toBe(332);
   });
 
-  it("drops to three quick reactions on coarse pointers under 248px", () => {
-    expect(barMetrics({ route: "native", coarse: true, listWidth: 240 })).toEqual({ width: 186, height: 48, quick: 3 });
+  it("measures the coarse bar at 392px with six quick reactions, and 300px with four", () => {
+    expect(barMetrics({ route: "native", coarse: true, listWidth: 412 })).toEqual({ width: 392, height: 48, quick: 6, compactReply: false });
+    expect(barMetrics({ route: "native", coarse: true, listWidth: 330 })).toEqual({ width: 300, height: 48, quick: 4, compactReply: false });
+  });
+
+  it("falls back to the icon-only Reply before dropping quick reactions below three", () => {
+    expect(barMetrics({ route: "native", coarse: true, listWidth: 260 })).toEqual({ width: 235, height: 48, quick: 3, compactReply: true });
+    expect(barMetrics({ route: "text", coarse: true, listWidth: 330 })).toEqual({ width: 306, height: 48, quick: 3, compactReply: false });
+  });
+
+  it("returns the minimal bar when even three quick reactions and the icon do not fit the list", () => {
+    expect(barMetrics({ route: "text", coarse: true, listWidth: 240 })).toEqual({ width: 287, height: 48, quick: 3, compactReply: true });
+    expect(barMetrics({ route: "native", coarse: true, listWidth: 240 })).toEqual({ width: 235, height: 48, quick: 3, compactReply: true });
+  });
+
+  it("drops the Reply segment when the conversation cannot be replied to", () => {
+    expect(barMetrics({ route: "native", coarse: false, listWidth: 771, canReply: false })).toEqual({ width: 212, height: 32, quick: 6, compactReply: false });
+    expect(barMetrics({ route: "text", coarse: false, listWidth: 771, canReply: false }).width).toBe(264);
   });
 
   it("sizes the capture panel the same for both pointers, with a taller coarse panel", () => {
     expect(barMetrics({ route: "native", coarse: false, listWidth: 771, capture: true }).width).toBe(248);
     expect(barMetrics({ route: "native", coarse: true, listWidth: 771, capture: true }).height).toBe(104);
+  });
+
+  it.each([
+    ["fine", false],
+    ["coarse", true],
+  ])("keeps every %s bar inside the list width, or uses the minimal bar when nothing fits, from 240 to 420px", (_pointer, coarse) => {
+    const minimal = { quick: 3, compactReply: true };
+    for (const route of ["native", "text"] as const) {
+      for (let listWidth = 240; listWidth <= 420; listWidth += 1) {
+        const metrics = barMetrics({ route, coarse, listWidth });
+        if (metrics.width + 16 <= listWidth) continue;
+        expect({ route, listWidth, quick: metrics.quick, compactReply: metrics.compactReply }).toEqual({ route, listWidth, ...minimal });
+      }
+    }
   });
 });

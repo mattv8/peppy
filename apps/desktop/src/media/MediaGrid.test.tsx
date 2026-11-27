@@ -21,6 +21,13 @@ describe("MediaGrid", () => {
     expect(view.container.querySelector('[data-message-group="1"]')).toBeInTheDocument();
   });
 
+  it("renders one reply context per carousel group, from its first message", () => {
+    const replyTo = { messageId: "original", sender: "other" as const, excerpt: "Dinner", available: true };
+    const view = render(<MediaGrid messages={[{ ...message("1"), replyTo }, { ...message("2"), replyTo, timestamp: "2026-01-01T12:01:00.000Z" }]} onOpen={vi.fn()} renderReplyContext={(value) => <span data-test-reply-context={value.id}>Replying</span>} />);
+    expect(view.container.querySelectorAll("[data-test-reply-context]")).toHaveLength(1);
+    expect(view.container.querySelector('[data-test-reply-context="1"]')).toBeInTheDocument();
+  });
+
   it("puts each eligible image control inside its message content boundary", () => {
     const view = render(<MediaGrid messages={[message("1"), message("2")]} onOpen={vi.fn()} hasMessageAction={() => true} renderMessageAction={(value) => <button data-cancellation-action={value.id}>Cancel {value.id}</button>} />);
 

@@ -34,7 +34,13 @@
  #message-reaction-bar button { width: 28px; height: 28px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: inherit; }
  #message-reaction-bar button:hover { background: var(--peppy-surface-hover); }
  #message-reaction-bar button[aria-pressed="true"] { background: color-mix(in srgb, var(--peppy-accent) 24%, transparent); border-bottom-color: var(--peppy-accent); }
- #message-reaction-bar [data-reaction-route-label] { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 8px 0 6px; margin-right: 2px; border-right: 1px solid var(--peppy-border-strong); color: var(--peppy-text-secondary); font-size: 11px; }
+ #message-reaction-bar [data-reaction-route-label] { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 8px 0 6px; margin-right: 2px; color: var(--peppy-text-secondary); font-size: 11px; }
+  /* The Reply label sizes to its text: the 28px emoji square rule would clip "Reply" and its icon. */
+  #message-reaction-bar [data-reaction-reply] { width: auto; display: inline-flex; align-items: center; gap: 4px; padding: 0 8px 0 6px; font-size: 12px; color: var(--peppy-text-strong); }
+  #message-reaction-bar [data-reaction-divider] { flex: none; width: 1px; height: 20px; margin: 0 2px; background: var(--peppy-border-strong); }
+  /* Icon-only Reply when the list is too narrow for the label: the emoji square size, centred (44px coarse, below). */
+  #message-reaction-bar[data-reply-compact] [data-reaction-reply] { width: 28px; padding: 0; justify-content: center; }
+  @media (pointer: coarse) { #message-reaction-bar[data-reply-compact] [data-reaction-reply] { width: 44px; } }
  #message-reaction-bar [data-reaction-bar-notice] { display: flex; align-items: center; gap: 4px; min-height: 28px; padding: 4px 8px; font-size: 12px; line-height: 16px; }
  #message-reaction-bar[data-reaction-mode="capture"] { width: 248px; padding: 4px; display: block; }
  [data-reaction-capture-row] { display: flex; gap: 4px; }
@@ -42,7 +48,7 @@
  #message-reaction-capture:focus { outline: 2px solid var(--peppy-focus); outline-offset: 1px; }
  #message-reaction-capture[aria-invalid="true"] { border-color: var(--peppy-error); }
  #message-reaction-capture-hint { margin: 4px 4px 2px; color: var(--peppy-text-secondary); font-size: 12px; line-height: 16px; }
- @media (forced-colors: active) { #message-reaction-bar { border-color: CanvasText; background: Canvas; box-shadow: none; } #message-reaction-bar button[aria-pressed="true"] { border-bottom-color: Highlight; } }
+ @media (forced-colors: active) { #message-reaction-bar { border-color: CanvasText; background: Canvas; box-shadow: none; } #message-reaction-bar [data-reaction-divider] { background: CanvasText; } #message-reaction-bar button[aria-pressed="true"] { border-bottom-color: Highlight; } }
  @media (pointer: coarse) { #message-reaction-bar { min-height: 48px; } #message-reaction-bar button { width: 44px; height: 44px; font-size: 22px; } }
  #message-list { isolation: isolate; scroll-padding-bottom: var(--composer-overlay-height, 120px); }
  #message-reaction-bar { animation: reaction-bar-in var(--peppy-duration-fast, 80ms) var(--peppy-ease-out, ease-out) both; }

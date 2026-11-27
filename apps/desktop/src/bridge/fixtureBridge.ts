@@ -34,6 +34,8 @@ import type {
 import type { DesktopBridge } from "./bridge";
 import { normalizePhoneNumber } from "@peppy/desktop-ui";
 import { fixtureRcsMediaMessages } from "./rcsMediaFixtures";
+import { quoteExcerpt } from "../replies/excerpt";
+import type { MessageReplyView } from "@peppy/generated/message";
 
 type FixtureConversationInput = Omit<ConversationView, "recipientlessDraft" | "draftOnly" | "pinned" | "folder" | "canUnblock"> & Partial<Pick<ConversationView, "recipientlessDraft" | "draftOnly" | "pinned" | "folder" | "canUnblock">>;
 
@@ -46,10 +48,13 @@ const fixtureConversation = (conversation: FixtureConversationInput): Conversati
   ...conversation,
 });
 
+const auroraSentBody = "I'll have it to you shortly.\nIt was received by the phone and can still be cancelled.";
 const fixtureMessages: MessageView[] = [
   { id: "message-aurora-1", revision: "1", sender: "other", body: "Can you send over the estimate?", timestamp: "1788434460000", attachments: [] },
-  { id: "message-aurora-2", revision: "2", sender: "self", body: "I'll have it to you shortly.\nIt was received by the phone and can still be cancelled.", timestamp: "1788434580000", status: "gateway-persisted", statusAt: "1788434640000", subject: "Fixture subject", attachments: [{ id: "attachment-aurora-1", name: "fixture-photo.png", mediaType: "image/png", byteSize: 67, state: "ready", previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" }], sendCancellation: { state: "none", canCancel: true, requiresGatewayUpdate: false } },
+  { id: "message-aurora-2", revision: "2", sender: "self", body: auroraSentBody, timestamp: "1788434580000", status: "gateway-persisted", statusAt: "1788434640000", subject: "Fixture subject", attachments: [{ id: "attachment-aurora-1", name: "fixture-photo.png", mediaType: "image/png", byteSize: 67, state: "ready", previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" }], sendCancellation: { state: "none", canCancel: true, requiresGatewayUpdate: false } },
   { id: "message-aurora-3", revision: "1", sender: "other", body: "Your verification code is 482913.", oneTimeCode: "482913", timestamp: "1788434700000", attachments: [] },
+  // An inbound reply whose original is loaded in this conversation: the reply context is a locate button.
+  { id: "message-aurora-4", revision: "1", sender: "other", body: "Thanks, I'll wait for it.", timestamp: "1788434800000", attachments: [], replyTo: { messageId: "message-aurora-2", sender: "self", excerpt: quoteExcerpt(auroraSentBody), available: true } },
 ];
 const fixtureReactionMessages: MessageView[] = [
   { id: "message-sam-1", revision: "1", sender: "self", body: "Did they discuss the NICU at all in the group conversation that I had muted?? but yes, people suck. “Jerk chicken” are you trying to send a message? 😘", timestamp: "1788434700000", attachments: [] },
@@ -57,7 +62,13 @@ const fixtureReactionMessages: MessageView[] = [
   { id: "message-sam-3", revision: "1", sender: "other", senderAddress: "+15555550142", body: "Reacted 😆 to “Did they discuss the NICU at all in the group conversation that I had muted?? but yes, people suck. “Jerk chicken” are you trying to send a message? 😘”", timestamp: "1788434820000", attachments: [] },
   { id: "message-sam-4", revision: "1", sender: "self", body: "Loved “lol it autocorrected”", timestamp: "1788434880000", attachments: [] },
   { id: "message-sam-5", revision: "1", sender: "other", senderAddress: "+15555550142", body: "Reacted 👍 to “a message from last year that is not loaded…”", timestamp: "1788434940000", attachments: [] },
+  // A reply to a message that is not in the fixture: the reply context is plain text.
+  { id: "message-sam-6", revision: "1", sender: "other", senderAddress: "+15555550142", body: "Still on for tonight?", timestamp: "1788435000000", attachments: [], replyTo: { messageId: "message-sam-missing", sender: "self", available: false } },
 ];
+/** The reply context the core projects for a target: its sender and quote when the target is in this conversation. */
+function fixtureReplyContext(target: MessageView): MessageReplyView {
+  return { messageId: target.id, sender: target.sender, senderAddress: target.senderAddress, excerpt: quoteExcerpt(target.body) || undefined, available: true };
+}
 /** The text route body, as spec 4.3: NFC, whitespace collapsed, quote cut to 79 graphemes plus an ellipsis past 80. */
 function composeFixtureReactionText(body: string, emoji: string): string {
   const graphemes = Array.from(body.normalize("NFC").trim().replace(/\s+/g, " "));
@@ -590,7 +601,19 @@ export const fixtureBridge: DesktopBridge = {
     if (draft.recipientIds.length || fixtureSnapshot.conversations.some(conversation => conversation.id === draft.conversationId && conversation.messages.length)) throw fixtureError("draft-not-discardable", "Only an empty recipientless draft can be deleted.");
     fixtureDrafts.delete(input.conversationId);
   },
-  send_draft: async () => ({ accepted: false, status: "failed-before-submit", reason: "Fixture gateway is offline; the draft was preserved." }),
+  send_draft: async input => {
+    const conversation = fixtureSnapshot.conversations.find(item => item.id === input.conversationId);
+    // Only a reply is stored; every other fixture send keeps the offline refusal, so existing fixture states hold.
+    if (!input.replyTo || !conversation) return { accepted: false, status: "failed-before-submit", reason: "Fixture gateway is offline; the draft was preserved." };
+    // Like the host's `reply-unavailable` refusal: a target that is not in this conversation is refused and the draft kept.
+    const target = conversation.messages.find(message => message.id === input.replyTo);
+    if (!target) throw fixtureError("reply-unavailable", "The message you're replying to is no longer available.");
+    const timestamp = String(Date.now());
+    const reply: MessageView = { id: `fixture-reply-${timestamp}`, revision: "1", sender: "self", body: input.text, timestamp, status: "queued-local", statusAt: timestamp, attachments: [], replyTo: fixtureReplyContext(target) };
+    conversation.messages.push(reply);
+    publishFixtureChange();
+    return { accepted: true, status: "queued-local", revision: "1" };
+  },
   mark_seen: async () => undefined,
   copy_one_time_code: async (target: OneTimeCodeTarget) => {
     if (target.kind === "message") {

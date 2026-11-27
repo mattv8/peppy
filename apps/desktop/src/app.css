@@ -795,6 +795,15 @@ button.message-sender-label { appearance: none; border: 0; border-radius: var(--
 button.message-sender-label:hover { color: var(--peppy-text-primary); text-decoration: underline; text-underline-offset: 2px; }
 button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus-ring); outline-offset: 1px; }
 .message-sender-label[data-plain] { cursor: default; }
+.message-reply-context { display: flex; align-items: center; gap: 4px; box-sizing: border-box; max-width: min(76%, 620px); margin: -2px 0 0 calc(var(--message-sender-indent, 0px) - 4px); padding: 2px 4px; overflow: hidden; color: var(--peppy-text-secondary); font: inherit; font-size: 12px; line-height: 16px; text-align: left; white-space: nowrap; }
+.message-row.self .message-reply-context { margin-left: auto; margin-right: 0; justify-content: flex-end; text-align: right; }
+.message-reply-context svg { flex: none; }
+.message-reply-context strong { color: var(--peppy-text-primary); font-weight: 700; }
+.message-reply-who { flex: none; }
+.message-reply-excerpt, .message-reply-unavailable { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+button.message-reply-context { appearance: none; border: 0; border-radius: var(--peppy-radius-sm); background: none; cursor: pointer; }
+button.message-reply-context:hover { color: var(--peppy-text-primary); text-decoration: underline; text-underline-offset: 2px; }
+button.message-reply-context:focus-visible { outline: 2px solid var(--peppy-focus-ring); outline-offset: 1px; }
 .message-bubble > .sr-only { user-select: none; }
 .message-row[data-sender-gutter] > .message-meta,
 .message-row[data-sender-gutter][data-message-group] > [data-message-row] { margin-left: var(--message-sender-indent); }
@@ -876,6 +885,9 @@ button.message-sender-label:focus-visible { outline: 2px solid var(--peppy-focus
   button.message-sender-label { color: LinkText; text-decoration: underline; }
   button.message-sender-label:hover { color: LinkText; }
   button.message-sender-label:focus-visible { outline-color: Highlight; }
+  .message-reply-context { color: CanvasText; }
+  button.message-reply-context { color: LinkText; text-decoration: underline; }
+  button.message-reply-context:focus-visible { outline-color: Highlight; }
   .message-sender-avatar[data-clickable]:hover { outline-color: Highlight; }
 }
 @media (forced-colors: active) {

@@ -697,6 +697,75 @@ select:focus-visible {
   order: 3;
   padding: 10px 12px 4px;
 }
+/* Same order as the input row; the chip precedes it in the DOM, so it sits directly above the textarea. */
+#composer-reply-chip {
+  order: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 0 12px;
+}
+#composer-reply-chip [data-reply-chip-avatar] {
+  display: grid;
+  place-items: center;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--peppy-surface-active);
+  color: var(--peppy-text-strong);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+#composer-reply-chip [data-reply-chip-quote] {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  padding: 4px 8px;
+  border-radius: var(--peppy-radius-sm);
+  background: var(--peppy-surface-hover);
+  font-size: 12px;
+  line-height: 16px;
+}
+#composer-reply-chip [data-reply-chip-quote] strong {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--peppy-text-strong);
+}
+#composer-reply-chip [data-reply-chip-excerpt] {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--peppy-text-primary);
+}
+#composer-reply-chip [data-reply-chip-cancel] {
+  display: grid;
+  place-items: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: var(--peppy-radius-sm);
+  background: var(--peppy-surface-widget);
+  color: var(--peppy-text-secondary);
+}
+#composer-reply-chip [data-reply-chip-cancel]:hover {
+  background: var(--peppy-surface-hover);
+  color: var(--peppy-text-primary);
+}
+#composer-reply-chip [data-reply-chip-cancel]:focus-visible {
+  outline: 2px solid var(--peppy-focus);
+  outline-offset: 2px;
+}
 #composer-textarea {
   flex: 1;
   min-height: 22px;
@@ -1372,6 +1441,7 @@ select:focus-visible {
   [data-inline-status-popover-actions] button, [data-inline-status-confirmation-actions] button { min-height: 44px; }
   .attachment-chip { grid-template-columns: minmax(0, 1fr) 48px; }
   .attachment-remove { width: 48px; height: 48px; }
+  #composer-reply-chip [data-reply-chip-cancel] { width: 44px; height: 44px; flex-basis: 44px; }
   #attachment-tray[data-attachment-layout="rows"] .attachment-chip { grid-template-columns: 46px minmax(0, 1fr) 48px; }
   #attachment-tray[data-attachment-layout="rows"] .attachment-copy { grid-template-columns: minmax(0, 1fr); }
   #attachment-tray[data-attachment-layout="rows"] .attachment-retry { grid-column: 1; grid-row: auto; justify-self: start; }
@@ -1424,4 +1494,8 @@ select:focus-visible {
   .attachment-remove, .attachment-retry { color: ButtonText; background: Canvas; }
   .attachment-remove { border-color: ButtonText; }
   .attachment-remove:focus-visible, .attachment-retry:focus-visible { outline-color: Highlight; }
+  #composer-reply-chip [data-reply-chip-quote] { background: Canvas; color: CanvasText; outline: 1px solid CanvasText; }
+  #composer-reply-chip [data-reply-chip-avatar] { border: 1px solid CanvasText; }
+  #composer-reply-chip [data-reply-chip-cancel] { border-color: ButtonText; background: Canvas; color: ButtonText; }
+  #composer-reply-chip [data-reply-chip-cancel]:focus-visible { outline-color: Highlight; }
 }

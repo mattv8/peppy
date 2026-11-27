@@ -23,7 +23,7 @@ export type MediaTileProps = {
   bodyRef?: Ref<HTMLButtonElement>;
   onBodyKeyDown?: KeyboardEventHandler<HTMLButtonElement>;
   bodyAttributes?: Record<`data-${string}`, string | boolean | undefined>;
-  /** Id of the text that describes the body (for a reactable photo, the "Press R to react." hint). */
+  /** Id of the text that describes the body (for a reactable photo, the "Press R to react or reply." hint). */
   describedBy?: string;
   suppressHeldControl?: boolean;
 };

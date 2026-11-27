@@ -7,9 +7,6 @@ export const QUICK_REACTIONS = [
   { emoji: "🙏", name: "Folded hands", hook: "folded-hands" },
 ] as const;
 
-/** Compact bars (list narrower than 328px) drop the last two quick reactions. */
-export const COMPACT_QUICK_COUNT = 4;
-
 export type ReactionPlatform = "macos" | "windows" | "linux";
 
 /**
@@ -38,7 +35,8 @@ export function isSingleEmojiValue(value: string): boolean {
   return parts.length === 1 && isEmojiGrapheme(parts[0]);
 }
 
-function graphemes(value: string): string[] {
+/** The value split into extended grapheme clusters (`Intl.Segmenter` where available). */
+export function graphemes(value: string): string[] {
   if (typeof Intl.Segmenter !== "function") return Array.from(value);
   return Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value), (part) => part.segment);
 }

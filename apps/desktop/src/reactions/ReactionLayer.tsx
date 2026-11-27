@@ -1,7 +1,7 @@
 import { UPDATE_PAUSED_DESCRIPTION } from "@peppy/desktop-ui";
 import { createPortal } from "react-dom";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
-import { Clock, Info, MessageSquare, SmilePlus, TriangleAlert, WifiOff, detectPlatform } from "@peppy/desktop-ui";
+import { Clock, Info, MessageSquare, Reply, SmilePlus, TriangleAlert, WifiOff, detectPlatform } from "@peppy/desktop-ui";
 import type { MessageView, ReactionRoute, ReactionSubmitView, ReactionSupport } from "@peppy/desktop-ui/bridge-contracts";
 import { ALREADY_REACTION_COPY, pickAnnouncement, withFirstEmojiNote } from "./announcements";
 import { QUICK_REACTIONS } from "./emoji";
@@ -38,6 +38,21 @@ export function barViewFor(message: MessageView, reactionSupport: ReactionSuppor
 export function isReactionEligible(message: MessageView, reactionSupport: ReactionSupport | undefined): boolean {
   return Boolean(message.reactable) || (reactionSupport === "needs_phone_update" && message.transport === "rcs");
 }
+
+/**
+ * Whether this message's bar shows the Reply button: the bar is a route with buttons (not a notice), and nothing is in flight.
+ * The conversation-wide `canReply` is checked by the caller.
+ */
+export function replyAvailable(message: MessageView, reactionSupport: ReactionSupport | undefined, routeOffline: boolean, inFlight = false): boolean {
+  const view = barViewFor(message, reactionSupport, routeOffline);
+  return Boolean(view) && !view?.notice && !inFlight;
+}
+
+/** The sr-only hints. The "react or reply" wording is used only where that message's bar offers Reply. */
+export const REACTION_HINT_IDS = {
+  enter: { reply: "message-reaction-hint", react: "message-reaction-hint-react" },
+  r: { reply: "message-reaction-hint-r", react: "message-reaction-hint-r-react" },
+} as const;
 
 export function nativeSelection(message: MessageView): string | undefined {
   return message.reactions?.find((reaction) => reaction.actors.some((actor) => actor.self))?.emoji;
@@ -109,18 +124,20 @@ export function ReactionAnnouncer({ announcement }: { announcement: Announcement
   </>;
 }
 
-/** "React to photo 2 of 4 from Alex" for a slide of a run; "React to photo from Alex" for a single photo. */
-function photoLabel(target: HTMLElement, name: string): string {
-  if (!target.hasAttribute("data-media-slide")) return `React to photo from ${name}`;
+/** "{verb} to photo 2 of 4 from Alex" for a slide of a run; "{verb} to photo from Alex" for a single photo. */
+function photoLabel(target: HTMLElement, name: string, verb: string): string {
+  if (!target.hasAttribute("data-media-slide")) return `${verb} to photo from ${name}`;
   const slides = Array.from(target.parentElement?.children ?? []).filter((node) => node.hasAttribute("data-media-slide"));
   const index = slides.indexOf(target);
-  return index < 0 || slides.length < 2 ? `React to photo from ${name}` : `React to photo ${index + 1} of ${slides.length} from ${name}`;
+  return index < 0 || slides.length < 2 ? `${verb} to photo from ${name}` : `${verb} to photo ${index + 1} of ${slides.length} from ${name}`;
 }
 
-function toolbarLabel(route: ReactionRoute, message: MessageView, target: HTMLElement, nameOf: (message: MessageView) => string): string {
-  if (route === "text") return "React with a text message";
-  if (target.dataset.reactionMessage) return photoLabel(target, nameOf(message));
-  return message.sender === "self" ? "React to your message" : `React to message from ${nameOf(message)}`;
+/** The toolbar's name: "Reply or react" only while the bar offers Reply (quick mode, reply allowed); else the reaction-only wording. */
+function toolbarLabel(route: ReactionRoute, message: MessageView, target: HTMLElement, nameOf: (message: MessageView) => string, replyable: boolean): string {
+  const verb = replyable ? "Reply or react" : "React";
+  if (route === "text") return `${verb} with a text message`;
+  if (target.dataset.reactionMessage) return photoLabel(target, nameOf(message), verb);
+  return message.sender === "self" ? `${verb} to your message` : `${verb} to message from ${nameOf(message)}`;
 }
 
 export type MessageReactionLayerProps = {
@@ -138,18 +155,27 @@ export type MessageReactionLayerProps = {
   openPicker?: () => Promise<void>;
   isInFlight(messageId: string): boolean;
   onSubmit(message: MessageView, emoji: string | null): Promise<ReactionSubmitView | undefined>;
+  /** Starts a reply to the message; the App shows the composer chip and focuses the textarea. */
+  onReply(message: MessageView): void;
+  /** False when the conversation is read-only (a group the user left, or a composer that cannot send). Hides Reply. */
+  canReply?: boolean;
 };
+
+/** Roving slots in quick mode: Reply (0, when shown), then the quick emoji, then More (last). */
+const REPLY_SLOT = 0;
+const ROVING_BUTTONS = "button[data-reaction-reply], button[data-reaction-quick], button[data-reaction-more]";
 
 /**
  * The single reaction bar, portaled to the body and positioned from the target bubble. It is outside `#message-list`,
  * so opening it never changes row layout or fires log announcements.
  */
-export function MessageReactionLayer({ reaction, barRef, messages, reactionSupport, routeOffline, writesPaused = false, nameOf, announce, openPicker, isInFlight, onSubmit }: MessageReactionLayerProps) {
+export function MessageReactionLayer({ reaction, barRef, messages, reactionSupport, routeOffline, writesPaused = false, nameOf, announce, openPicker, isInFlight, onSubmit, onReply, canReply = true }: MessageReactionLayerProps) {
   const target = reaction.target;
   const message = target ? messages.get(target.messageId) : undefined;
   const [mode, setMode] = useState<"quick" | "capture">("quick");
   const [placement, setPlacement] = useState<ReactionPlacement | null>(null);
   const [quickCount, setQuickCount] = useState<number>(QUICK_REACTIONS.length);
+  const [compactReply, setCompactReply] = useState(false);
   const [rovingIndex, setRovingIndex] = useState<number>();
   const returnFocus = useRef<HTMLElement | null>(null);
   const focusMoreAfterBack = useRef(false);
@@ -161,14 +187,18 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
     : baseView;
   const route = view?.route ?? "native";
   const notice = view?.notice;
+  // Reply is offered only where this message's bar shows buttons: the conversation allows it, and the bar is not a notice.
+  const replyOffered = Boolean(message && canReply && replyAvailable(message, reactionSupport, routeOffline, isInFlight(message.id)));
   const coarse = isCoarsePointer();
   const selected = message && route === "native" ? nativeSelection(message) : undefined;
   const hidden = !target || !message || !view || !placement || reaction.selecting;
   const targetKey = target ? `${target.messageId}:${target.origin}` : "";
   const quick = QUICK_REACTIONS.slice(0, quickCount);
-  const selectedIndex = selected ? quick.findIndex(({ emoji }) => emoji === selected) : -1;
-  // The toolbar is one tab stop: the selected (or first) button, or the one the arrow keys last reached.
-  const tabStop = rovingIndex ?? (selectedIndex >= 0 ? selectedIndex : 0);
+  const selectedQuick = selected ? quick.findIndex(({ emoji }) => emoji === selected) : -1;
+  // Quick slots start after Reply when Reply is shown, so the first quick emoji is slot 0 without it.
+  const firstQuick = replyOffered ? REPLY_SLOT + 1 : REPLY_SLOT;
+  // The toolbar is one tab stop: the one the arrow keys last reached, else the selected emoji, else Reply (or the first emoji).
+  const tabStop = rovingIndex ?? (selectedQuick >= 0 ? selectedQuick + firstQuick : replyOffered ? REPLY_SLOT : firstQuick);
 
   useLayoutEffect(() => {
     setMode("quick");
@@ -188,10 +218,11 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
     const row = target.article.closest<HTMLElement>(".message-row");
     const labelNode = message.sender === "other" ? row?.querySelector<HTMLElement>(".message-sender-label") : null;
     const listRect = list.getBoundingClientRect();
-    const metrics = barMetrics({ route, coarse, listWidth: listRect.width, capture: mode === "capture" });
+    const metrics = barMetrics({ route, coarse, listWidth: listRect.width, capture: mode === "capture", canReply: replyOffered });
     const visual = window.visualViewport;
     const viewport = visual ? { top: visual.offsetTop, bottom: visual.offsetTop + visual.height } : { top: 0, bottom: window.innerHeight };
     setQuickCount(metrics.quick || QUICK_REACTIONS.length);
+    setCompactReply(metrics.compactReply);
     setPlacement(placeReactionBar({
       anchor: reachBox(anchor),
       outgoing: message.sender === "self",
@@ -206,7 +237,7 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
       reach: measureReach(anchor),
       allowCover: target.origin !== "pointer" || mode === "capture",
     }));
-  }, [coarse, message, mode, route, target]);
+  }, [replyOffered, coarse, message, mode, route, target]);
 
   useLayoutEffect(() => { measure(); }, [measure]);
 
@@ -260,7 +291,7 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
       announce(NOTICE_COPY[notice]);
       return;
     }
-    barRef.current?.querySelectorAll<HTMLElement>("button[data-reaction-quick]")[tabStop]?.focus();
+    barRef.current?.querySelectorAll<HTMLElement>(ROVING_BUTTONS)[tabStop]?.focus();
   }, [announce, barRef, keyboardOpen, notice, tabStop]);
 
   useEffect(() => {
@@ -333,7 +364,7 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
       return;
     }
     if (mode !== "quick" || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    const buttons = Array.from(barRef.current?.querySelectorAll<HTMLElement>("button[data-reaction-quick], button[data-reaction-more]") ?? []);
+    const buttons = Array.from(barRef.current?.querySelectorAll<HTMLElement>(ROVING_BUTTONS) ?? []);
     const index = buttons.indexOf(document.activeElement as HTMLElement);
     if (index < 0) return;
     event.preventDefault();
@@ -347,7 +378,7 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
   const Icon = notice ? NOTICE_ICON[notice] : undefined;
   const compact = quickCount < QUICK_REACTIONS.length;
   const busy = isInFlight(message.id);
-  const moreIndex = quick.length;
+  const moreIndex = quick.length + firstQuick;
 
   return createPortal(<div id="message-reaction-layer" data-reaction-layer style={{ left: placement.left, top: placement.top }}>
     <div
@@ -358,9 +389,10 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
       data-reaction-route={route}
       data-reaction-placement={placement.placement}
       data-compact={compact || undefined}
+      data-reply-compact={(compactReply && replyOffered) || undefined}
       data-reaction-busy={busy || undefined}
       role={notice ? undefined : "toolbar"}
-      aria-label={notice ? undefined : toolbarLabel(route, message, target.article, nameOf)}
+      aria-label={notice ? undefined : toolbarLabel(route, message, target.article, nameOf, replyOffered && mode === "quick")}
       onKeyDown={onBarKeyDown}
       onPointerEnter={reaction.keepOpen}
       onPointerLeave={() => { if (mode === "quick") reaction.scheduleClose(); }}
@@ -381,6 +413,20 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
         announce={announce}
       />}
       {!notice && mode === "quick" && <>
+        {replyOffered && <>
+          <button
+            type="button"
+            data-reaction-reply
+            aria-label={message.sender === "self" ? "Reply to your message" : `Reply to ${nameOf(message)}`}
+            aria-disabled={writesPaused || undefined}
+            aria-describedby={writesPaused ? "update-paused-description" : undefined}
+            title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : compactReply ? "Reply" : undefined}
+            tabIndex={REPLY_SLOT === tabStop ? 0 : -1}
+            onFocus={() => setRovingIndex(REPLY_SLOT)}
+            onClick={() => { if (!writesPaused) { close(false); onReply(message); } }}
+          ><Reply size={14} aria-hidden />{!compactReply && "Reply"}</button>
+          <span data-reaction-divider aria-hidden />
+        </>}
         {route === "text" && <span data-reaction-route-label="text"><MessageSquare size={12} aria-hidden />Text</span>}
         {quick.map(({ emoji, name, hook }, index) => <button
           key={emoji}
@@ -391,8 +437,8 @@ export function MessageReactionLayer({ reaction, barRef, messages, reactionSuppo
           aria-disabled={writesPaused || undefined}
           aria-describedby={writesPaused ? "update-paused-description" : undefined}
           title={writesPaused ? UPDATE_PAUSED_DESCRIPTION : undefined}
-          tabIndex={index === tabStop ? 0 : -1}
-          onFocus={() => setRovingIndex(index)}
+          tabIndex={index + firstQuick === tabStop ? 0 : -1}
+          onFocus={() => setRovingIndex(index + firstQuick)}
           onClick={() => choose(emoji, false)}
         >{emoji}</button>)}
         <button

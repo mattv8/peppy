@@ -5,12 +5,10 @@ import { MediaSyncButton, MediaTile, useReturnedToHoldGeneration, type SyncState
 import { demandTarget, holdNoteText, originalPending, originalView } from "./mediaState";
 import { useMediaActions } from "./MediaActionsContext";
 import { rcsAttachmentIndex } from "../rcs/rcsMediaState";
+import { REACTION_HINT_IDS } from "../reactions/ReactionLayer";
 import { MediaCaption } from "./MediaCaption";
 import "./media.css";
 import "./media-carousel.css";
-
-/** The sr-only "Press R to react." line outside the message log, rendered by the reaction layer owner. */
-export const REACTION_HINT_ID = "message-reaction-hint-r";
 
 export type MediaGridProps = {
   messages: GalleryMessage[];
@@ -18,6 +16,8 @@ export type MediaGridProps = {
   renderMessageMeta?(message: GalleryMessage): ReactNode;
   messageRef?(message: GalleryMessage): RefCallback<HTMLElement> | undefined;
   renderCaption?(message: GalleryMessage): ReactNode;
+  /** The reply line above the photos, placed where the sender label goes. */
+  renderReplyContext?(message: GalleryMessage): ReactNode;
   captionStyle?(message: GalleryMessage): CSSProperties | undefined;
   renderMessageNotice?(message: GalleryMessage): ReactNode;
   renderMessageAction?(message: GalleryMessage): ReactNode;
@@ -27,11 +27,18 @@ export type MediaGridProps = {
   senderRun?(group: MessageGroup): { label?: ReactNode; avatar?: ReactNode; gutter: boolean; ariaName?: string; start: boolean; end: boolean } | undefined;
   /** Whether a message can take a reaction; reactable slides and single tiles get the reaction hooks. */
   reactable?(message: GalleryMessage): boolean;
+  /** Whether the message's bar offers Reply; decides the hint wording a reactable tile points at. */
+  replyable?(message: GalleryMessage): boolean;
   /** Reaction badges for a media message, drawn over the photo (overlay placement). */
   renderBadges?(message: GalleryMessage): ReactNode;
 };
 
-function Carousel({ group, onOpen, messageTitle, reactable, renderBadges, frameActions, notices }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; messageTitle?: MediaGridProps["messageTitle"]; reactable?: MediaGridProps["reactable"]; renderBadges?: MediaGridProps["renderBadges"]; frameActions: ReactNode; notices: ReactNode }) {
+/** The R hint a reactable tile points at: the "react or reply" wording only where the message's bar offers Reply. */
+function reactionHintId(message: GalleryMessage, replyable: MediaGridProps["replyable"]): string {
+  return replyable?.(message) ? REACTION_HINT_IDS.r.reply : REACTION_HINT_IDS.r.react;
+}
+
+function Carousel({ group, onOpen, messageTitle, reactable, replyable, renderBadges, frameActions, notices }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; messageTitle?: MediaGridProps["messageTitle"]; reactable?: MediaGridProps["reactable"]; replyable?: MediaGridProps["replyable"]; renderBadges?: MediaGridProps["renderBadges"]; frameActions: ReactNode; notices: ReactNode }) {
   const carouselRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   const bodyRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -127,7 +134,7 @@ function Carousel({ group, onOpen, messageTitle, reactable, renderBadges, frameA
   return <><div data-media-frame={group.id}>{frameActions}<div ref={carouselRef} tabIndex={-1} data-media-carousel data-media-group={group.id} data-sync-owner={allHeld ? "group" : undefined} data-sync={groupSyncState} role="region" aria-roledescription="carousel" aria-label={`Images, ${total} total`} data-slide-count={total} data-has-peek={total >= 4 || undefined} data-can-scroll-prev={scrollState.previous || undefined} data-can-scroll-next={scrollState.next || undefined}>
     <div ref={trackRef} className="carousel-track">
       {group.attachments.map(({ attachment, message }, index) => <div key={`${message.id}:${attachment.rcsState ? rcsAttachmentIndex(message, attachment) : attachment.id}`} ref={(element) => { slideRefs.current[index] = element; }} data-media-slide data-media-attachment={attachment.id} data-media-message={message.id} data-reaction-ok={reactable?.(message) ? "" : undefined} data-reaction-message={reactable?.(message) ? message.id : undefined} aria-keyshortcuts={reactable?.(message) ? "R" : undefined} data-slide-index={index} role="group" aria-roledescription="slide" aria-label={`${index + 1} of ${total}`} title={messageTitle?.(message)}>
-        <MediaTile attachment={attachment} message={message} variant="slide" describedBy={reactable?.(message) ? REACTION_HINT_ID : undefined} label={`Photo, ${index + 1} of ${total}`} onOpen={() => onOpen({ attachment, message })} suppressHeldControl={allHeld} prefetchIds={[group.attachments[index + 1] ? demandTarget(group.attachments[index + 1].attachment) : undefined]} bodyRef={bodyRefCallbacks[index]} onBodyKeyDown={(event) => {
+        <MediaTile attachment={attachment} message={message} variant="slide" describedBy={reactable?.(message) ? reactionHintId(message, replyable) : undefined} label={`Photo, ${index + 1} of ${total}`} onOpen={() => onOpen({ attachment, message })} suppressHeldControl={allHeld} prefetchIds={[group.attachments[index + 1] ? demandTarget(group.attachments[index + 1].attachment) : undefined]} bodyRef={bodyRefCallbacks[index]} onBodyKeyDown={(event) => {
           if (event.key === "ArrowLeft" && moveFocus(index, -1)) event.preventDefault();
           if (event.key === "ArrowRight" && moveFocus(index, 1)) event.preventDefault();
         }} />
@@ -141,7 +148,7 @@ function Carousel({ group, onOpen, messageTitle, reactable, renderBadges, frameA
   </div></div>{notices}{allHeld && <p id={holdNoteId} data-group-hold-note aria-live="off"><WifiOff size={12} aria-hidden="true" />{groupStatus}</p>}</>;
 }
 
-function Group({ group, onOpen, renderMessageMeta, messageRef, renderCaption, captionStyle, renderMessageAction, renderMessageNotice, isMessagePending, messageTitle, senderRun, reactable, renderBadges }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; renderMessageMeta?: MediaGridProps["renderMessageMeta"]; messageRef?: MediaGridProps["messageRef"]; renderCaption?: MediaGridProps["renderCaption"]; captionStyle?: MediaGridProps["captionStyle"]; renderMessageNotice?: MediaGridProps["renderMessageNotice"]; renderMessageAction?: MediaGridProps["renderMessageAction"]; isMessagePending?: MediaGridProps["isMessagePending"]; messageTitle?: MediaGridProps["messageTitle"]; senderRun?: MediaGridProps["senderRun"]; reactable?: MediaGridProps["reactable"]; renderBadges?: MediaGridProps["renderBadges"] }) {
+function Group({ group, onOpen, renderMessageMeta, messageRef, renderCaption, renderReplyContext, captionStyle, renderMessageAction, renderMessageNotice, isMessagePending, messageTitle, senderRun, reactable, replyable, renderBadges }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; renderMessageMeta?: MediaGridProps["renderMessageMeta"]; messageRef?: MediaGridProps["messageRef"]; renderCaption?: MediaGridProps["renderCaption"]; renderReplyContext?: MediaGridProps["renderReplyContext"]; captionStyle?: MediaGridProps["captionStyle"]; renderMessageNotice?: MediaGridProps["renderMessageNotice"]; renderMessageAction?: MediaGridProps["renderMessageAction"]; isMessagePending?: MediaGridProps["isMessagePending"]; messageTitle?: MediaGridProps["messageTitle"]; senderRun?: MediaGridProps["senderRun"]; reactable?: MediaGridProps["reactable"]; replyable?: MediaGridProps["replyable"]; renderBadges?: MediaGridProps["renderBadges"] }) {
   const finalMessage = group.messages.at(-1);
   const isGrouped = group.messages.length > 1 || group.attachments.length > 1;
   const onlyAttachment = group.attachments[0];
@@ -154,13 +161,14 @@ function Group({ group, onOpen, renderMessageMeta, messageRef, renderCaption, ca
   const notices = group.messages.map((message) => <span key={message.id} data-media-message-notice={message.id}>{renderMessageNotice?.(message)}</span>);
   const article = <article className="message-bubble" data-media-bare={!pending || undefined} data-media-message-content={group.id} data-grouped={isGrouped || undefined} data-reaction-ok={singleReactable ? "" : undefined} data-reaction-message={singleReactable ? group.messages[0].id : undefined} aria-keyshortcuts={singleReactable ? "R" : undefined} data-sender={group.messages[0].sender} data-sender-address={group.messages[0].senderAddress} aria-label={sender?.ariaName ? `${imageLabel} from ${sender.ariaName}` : imageLabel} title={group.attachments.length === 1 && onlyAttachment ? messageTitle?.(onlyAttachment.message) : undefined}>
       {pending ? actions : <>
-        {group.attachments.length === 1 && onlyAttachment ? <div data-media-frame={group.id}>{actions}<MediaTile attachment={onlyAttachment.attachment} message={onlyAttachment.message} variant="single" describedBy={singleReactable ? REACTION_HINT_ID : undefined} onOpen={() => onOpen(onlyAttachment)} />{group.messages.length === 1 && renderBadges?.(group.messages[0])}</div> : <Carousel group={group} onOpen={onOpen} messageTitle={messageTitle} reactable={reactable} renderBadges={renderBadges} frameActions={actions} notices={notices} />}
+        {group.attachments.length === 1 && onlyAttachment ? <div data-media-frame={group.id}>{actions}<MediaTile attachment={onlyAttachment.attachment} message={onlyAttachment.message} variant="single" describedBy={singleReactable ? reactionHintId(onlyAttachment.message, replyable) : undefined} onOpen={() => onOpen(onlyAttachment)} />{group.messages.length === 1 && renderBadges?.(group.messages[0])}</div> : <Carousel group={group} onOpen={onOpen} messageTitle={messageTitle} reactable={reactable} replyable={replyable} renderBadges={renderBadges} frameActions={actions} notices={notices} />}
         {group.attachments.length === 1 && notices}
         {finalMessage && <MediaCaption messageId={finalMessage.id} sender={finalMessage.sender} body={finalMessage.body ? renderCaption?.(finalMessage) ?? finalMessage.body : undefined} subject={finalMessage.subject} toneStyle={finalMessage.sender === "other" ? captionStyle?.(finalMessage) : undefined} />}
       </>}
     </article>;
   return <div className={`message-row ${group.messages[0].sender}`} data-message-group={group.id} data-media-group={group.id} data-sender={group.messages[0].sender} data-sender-gutter={sender?.gutter ? "" : undefined} data-sender-run-start={sender?.start ? "" : undefined} data-sender-run-end={sender?.end ? "" : undefined}>
     {sender?.label}
+    {group.messages[0].replyTo && renderReplyContext?.(group.messages[0])}
     {sender ? <div className="message-sender-line" data-sender-line>{sender.avatar ?? (sender.gutter && <span className="message-sender-gutter" aria-hidden="true" />)}{article}</div> : article}
     {group.messages.map((message) => <div key={message.id} ref={messageRef?.(message)} data-message-row={message.id}><div data-message-id={message.id} data-message-meta={message.id}>{renderMessageMeta?.(message)}</div></div>)}
   </div>;
