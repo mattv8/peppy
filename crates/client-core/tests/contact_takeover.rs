@@ -3,6 +3,7 @@
 //! book, so it must recognise the predecessor's contacts by content: every contact keeps one
 //! identity, and a book that an earlier build already doubled is repaired once.
 use crate::common::*;
+use peppy_crypto::{EncryptedEnvelope, KeyPurpose, decrypt, derive_purpose_key, derive_root_key};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -13,6 +14,97 @@ const BOOK: &str = "takeover-book";
 const HINT: &[u8] = b"reinstall-stable-android-id";
 /// More than the deletion policy lets one scan remove without approval (`max(10, 5%)`).
 const CONTACTS: usize = 25;
+
+#[test]
+fn deleted_active_book_real_takeover_snapshot_observation() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let a_cfg = config(&dir, "n5-a", &vault);
+    let b_cfg = config(&dir, "n5-b", &vault);
+    let d_cfg = config(&dir, "n5-d", &vault);
+    let a = unlocked(&a_cfg, &vault);
+    let b = unlocked(&b_cfg, &vault);
+    let d = unlocked(&d_cfg, &vault);
+    let mut server = Server::default();
+    call(a.capture_platform_contacts_json(
+        &json!({"schema_version":1,"book":book(&a_cfg),"contacts":[entry(1)]}).to_string(),
+    ));
+    a.register_device_hint("android", HINT).unwrap();
+    server.upload(&a);
+    settle(&server, &b);
+    settle(&server, &d);
+    let adopted = ids(&b).into_iter().next().unwrap();
+    let active_high_water = server.log.len();
+    call(d.delete_contact_book(&json!({"book_id":BOOK,"revoked_device_ids":[a_cfg.device_id.to_string()],"sync_current":true}).to_string()));
+    server.upload(&d);
+    b.observe_server_high_water(Cursor(active_high_water as u64))
+        .unwrap();
+    b.register_device_hint("android", HINT).unwrap();
+    assert!(matches!(
+        b.contact_book_selection().unwrap(),
+        ContactBookSelection::Inherited { .. }
+    ));
+    start_pass(&b, &b_cfg);
+    scan(&b, "n5-takeover", &[entry(1), entry(2)]);
+    assert!(
+        ids(&b).contains(&adopted),
+        "predecessor identity was adopted"
+    );
+    let new_id = named(&contacts(&b), "Person 02")[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let root = derive_root_key(PASSPHRASE, &vault.profile).unwrap();
+    let key = derive_purpose_key(&root, &vault.profile, KeyPurpose::Event).unwrap();
+    let payload = |e: &Envelope| {
+        let (nonce, ciphertext) = e.ciphertext.split_at(24);
+        let encrypted = EncryptedEnvelope {
+            nonce: nonce.try_into().unwrap(),
+            ciphertext: ciphertext.to_vec(),
+        };
+        serde_json::from_slice::<PrivatePayload>(
+            &decrypt(&key, &e.aad_bytes().unwrap(), &encrypted).unwrap(),
+        )
+        .unwrap()
+    };
+    assert!(!b.pending_outbox().unwrap().iter().any(|e| matches!(payload(e), PrivatePayload::ContactUpserted { contact, .. } if contact["id"] == adopted)));
+    server.upload(&b);
+    settle(&server, &b);
+    let b_fences: i64 = sqlcipher(&b_cfg.database_path)
+        .query_row(
+            "SELECT COUNT(*) FROM deleted_contact_books WHERE book_id=?",
+            [BOOK],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(b_fences, 0, "B ignores A's deletion after succession");
+    settle(&server, &d);
+    let observe = |client: &Client| {
+        let books = call(client.list_contact_books_json());
+        (books["books"].clone(), ids(client))
+    };
+    let live = observe(&d);
+    assert_eq!(live.0.as_array().unwrap().len(), 1);
+    assert_eq!(live.0[0]["id"], BOOK);
+    assert_eq!(live.0[0]["owner_device_id"], b_cfg.device_id.to_string());
+    assert_eq!(live.1, BTreeSet::from([new_id.clone()]));
+    let retained = crate::snapshot_projection::compact(&server.log, false);
+    let session = d
+        .begin_snapshot_with_compaction(
+            Cursor(server.log.len() as u64),
+            retained.len() as u64,
+            SnapshotPurpose::Resync,
+            Some(99),
+        )
+        .unwrap();
+    for page in retained.chunks(2) {
+        d.append_snapshot_page(session.generation, page).unwrap();
+    }
+    d.finish_snapshot(session.generation).unwrap();
+    assert_eq!(crate::snapshot_projection::settle(&d).quarantined, 0);
+    let snapshot = observe(&d);
+    assert_eq!(snapshot, live);
+}
 
 fn call(result: Result<String, Error>) -> Value {
     serde_json::from_str(&result.unwrap()).unwrap()
