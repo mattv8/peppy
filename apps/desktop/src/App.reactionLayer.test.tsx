@@ -115,7 +115,7 @@ describe("reaction layer", () => {
 
   it("points the roving stop at the hint and its badge group", async () => {
     await openConversation("conv-reaction-states");
-    expect(article("reaction-unknown")).toHaveAttribute("aria-describedby", "message-reaction-hint reactions-reaction-unknown");
+    expect(article("reaction-unknown")).toHaveAttribute("aria-describedby", "message-reaction-hint-react reactions-reaction-unknown");
     expect(article("reaction-group-dinner")).not.toHaveAttribute("aria-describedby");
   });
 

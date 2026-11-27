@@ -1,5 +1,6 @@
 import { UPDATE_SEND_FAILURE, UPDATE_SEND_REASON, UPDATE_STATUS_TERM } from "@peppy/desktop-ui";
 import { UPDATE_PAUSED_DESCRIPTION } from "@peppy/desktop-ui";
+import { COMPOSER_TEXTAREA_ID, ReplyChip } from "@peppy/desktop-ui";
 import { isWritesPaused, useDelayedWritesPaused } from "./shell/updatePaused";
 import {
   Component,
@@ -209,8 +210,11 @@ import { senderLabel, senderRunEdges } from "./sender/attribution";
 import { conversationContactAddress } from "./contacts/conversation-contact";
 import { ContactNameChooser } from "./contacts/ContactNameChooser";
 import { hiddenTimeIds } from "./conversation/timestamp-bursts";
+import { ReplyContext } from "./replies/ReplyContext";
+import { replyCounterPrefix } from "./replies/excerpt";
+import { NO_REPLY_SCOPE, replyBelongsTo, replyLineExcerpt, replySubject, replyTargetFrom, replyTargetsIn, type ReplyScope } from "./replies/replyTarget";
 import { createSeenReactionLedger, linkReactions, locateReactionTarget, mergeReactions, NO_REACTIONS, ReactionAnnouncer, ReactionBadges, ReactionNotice, ReactionSettings, useSeenBadges, useShowReactions, type ActorName, type MergedReactionBadge, type OwnChipState, type ReactionNoticeInfo, type ReactionTargetResult, type SeenReactionLedger } from "./reactions";
-import { type Announcement, isReactionEligible, MessageReactionLayer, NO_ANNOUNCEMENT, nativeSelection } from "./reactions/ReactionLayer";
+import { type Announcement, isReactionEligible, MessageReactionLayer, NO_ANNOUNCEMENT, nativeSelection, REACTION_HINT_IDS, replyAvailable } from "./reactions/ReactionLayer";
 import { pickAnnouncement, REFUSAL_COPY, requestAnnouncement, type RequestSnapshot, UNREACHABLE_COPY } from "./reactions/announcements";
 import type { ReactionSubmitView } from "@peppy/desktop-ui/bridge-contracts";
 import { PendingReactionStore, usePendingReactions } from "./reactions/usePendingReactions";
@@ -223,6 +227,7 @@ import { CancelSendControl, SendCancellationPending } from "./messages/CancelSen
 import {
   DraftStore,
   blankContent,
+  draftIdentityOf,
   isDirty,
   isLocalDraftKey,
   shouldConfirmPostFlushDelete,
@@ -1001,6 +1006,11 @@ function MessageList({
   writesPaused,
   actorName,
   onOpenReactionTarget,
+  onOpenReply,
+  onReply,
+  canReply,
+  announcement,
+  announceReaction,
   pendingReactionId,
   reactionFeedback,
   seenReactions,
@@ -1068,6 +1078,15 @@ function MessageList({
   writesPaused: boolean;
   actorName: ActorName;
   onOpenReactionTarget(reaction: MessageView, notice: ReactionNoticeInfo): void;
+  /** Locates a reply's original message in this conversation, or highlights it when it is already loaded. */
+  onOpenReply(messageId: string): void;
+  /** Reply from the reaction bar: sets the conversation's reply target. */
+  onReply(message: MessageView): void;
+  /** False when the conversation cannot take a reply (a group the user left, or a read-only composer). Hides Reply. */
+  canReply: boolean;
+  /** The latest reaction announcement; `ReactionAnnouncer` renders it outside the log. Owned by App, so the composer can announce too. */
+  announcement: Announcement;
+  announceReaction(text: string, alert?: boolean): void;
   pendingReactionId?: string;
   reactionFeedback?: { reactionId: string; message: string };
   seenReactions: SeenReactionLedger;
@@ -1090,6 +1109,8 @@ function MessageList({
   const reactionBarRef = useRef<HTMLDivElement>(null);
   const reaction = useReactionTarget(reactionContent, reactionBarRef, reactionsEnabled);
   const reactionEligible = (message: MessageView) => reactionsEnabled && isReactionEligible(message, conversation?.reactionSupport);
+  // Each message's hint follows its own bar: "react or reply" only where that bar offers Reply.
+  const replyable = (message: MessageView) => canReply && replyAvailable(message, conversation?.reactionSupport, reactionRouteOffline, pendingReactionStore.isInFlight(message.id));
   const pendingRequests = usePendingReactions(pendingReactionStore);
   const overlayFor = (message: MessageView) => {
     const pending = pendingRequests.get(message.id);
@@ -1116,10 +1137,6 @@ function MessageList({
   const roving = useRovingMessages(useMemo(() => (conversation?.messages ?? [])
     .filter((message) => reactionEligible(message) && !isImageRun(message))
     .map((message) => message.id), [conversation?.messages, reactionsEnabled, conversation?.reactionSupport]), reaction.reveal);
-  const [announcement, setAnnouncement] = useState<Announcement>(NO_ANNOUNCEMENT);
-  const announceReaction = useCallback((text: string, alert = false) => {
-    setAnnouncement((current) => ({ seq: current.seq + 1, polite: alert ? "" : text, alert: alert ? text : "" }));
-  }, []);
   const textOwnStatus = useMemo(() => {
     const states = new Map<string, OwnChipState>();
     for (const message of conversation?.messages ?? []) {
@@ -1466,7 +1483,7 @@ function MessageList({
             if (onEditRcsUnsent && candidate.attachments.some((attachment) => attachment.rcsSendStatus === "not_sent")) return () => onEditRcsUnsent(candidate);
             return undefined;
           };
-          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} reactable={reactionEligible} renderBadges={(candidate) => badgeElement(candidate, "overlay-bottom-start")} renderMessageMeta={(candidate) => <MessageMeta message={candidate} resend={chains.byLatest.get(candidate.id)} hideTime={hiddenTimes.has(candidate.id)} onEditResend={resendFor(candidate)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} captionStyle={incomingMessageTone} hasMessageAction={hasCancellationAction} renderMessageAction={(candidate) => cancellationState(candidate) === "requested" ? <SendCancellationPending messageId={candidate.id} waitingForPhone /> : candidate.sender === "self" && candidate.sendCancellation?.canCancel && !candidate.sendRecovery && bridge.cancel_send ? <CancelSendControl messageId={candidate.id} disabled={cancellingMessageIds.has(candidate.id)} onCancel={() => void requestSendCancellation(candidate)} /> : undefined} renderMessageNotice={(candidate) => {
+          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} reactable={reactionEligible} replyable={replyable} renderBadges={(candidate) => badgeElement(candidate, "overlay-bottom-start")} renderMessageMeta={(candidate) => <MessageMeta message={candidate} resend={chains.byLatest.get(candidate.id)} hideTime={hiddenTimes.has(candidate.id)} onEditResend={resendFor(candidate)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} renderReplyContext={(candidate) => candidate.replyTo ? <ReplyContext reply={candidate.replyTo} sourceMessageId={candidate.id} resolution={resolution} excerpt={replyLineExcerpt(candidate.replyTo, messagesById)} onOpen={onOpenReply} /> : undefined} captionStyle={incomingMessageTone} hasMessageAction={hasCancellationAction} renderMessageAction={(candidate) => cancellationState(candidate) === "requested" ? <SendCancellationPending messageId={candidate.id} waitingForPhone /> : candidate.sender === "self" && candidate.sendCancellation?.canCancel && !candidate.sendRecovery && bridge.cancel_send ? <CancelSendControl messageId={candidate.id} disabled={cancellingMessageIds.has(candidate.id)} onCancel={() => void requestSendCancellation(candidate)} /> : undefined} renderMessageNotice={(candidate) => {
             const notice = cancellationNoticeText(cancellationState(candidate));
             return notice ? <span data-message-cancellation-notice={candidate.id} role="status">{notice}</span> : undefined;
           }} isMessagePending={(candidate) => cancellationState(candidate) === "requested"} messageRef={(candidate) => (row) => registerMessageRow(candidate, row)} messageTitle={hiddenTimeTitle} senderRun={(candidate) => sender && candidate.id === group.id ? { label: sender.labelNode, avatar: sender.avatar, gutter: showSenderAvatars, ariaName: sender.label.text, start: sender.edge.start, end: sender.edge.end } : undefined} />;
@@ -1484,7 +1501,7 @@ function MessageList({
           // The roving stop announces the reaction hint and the badge group together (ux-design E).
           const describedBy = [
             searchTargetId === message.id ? "search-result-message-hint" : undefined,
-            roving.stopId === message.id && reactionEligible(message) ? ["message-reaction-hint", badges ? `reactions-${message.id}` : undefined].filter(Boolean).join(" ") : undefined,
+            roving.stopId === message.id && reactionEligible(message) ? [replyable(message) ? REACTION_HINT_IDS.enter.reply : REACTION_HINT_IDS.enter.react, badges ? `reactions-${message.id}` : undefined].filter(Boolean).join(" ") : undefined,
           ].filter(Boolean).join(" ") || undefined;
           const bubble = (
             <article
@@ -1602,6 +1619,7 @@ function MessageList({
               )}
             </article>
           );
+          const replyTo = message.replyTo;
           return (
             <div
               key={message.id}
@@ -1613,6 +1631,7 @@ function MessageList({
               data-sender-run-end={sender?.edge.end ? "" : undefined}
             >
               {sender?.labelNode}
+              {replyTo && <ReplyContext reply={replyTo} sourceMessageId={message.id} resolution={resolution} excerpt={replyLineExcerpt(replyTo, messagesById)} onOpen={onOpenReply} />}
               {sender ? <div className="message-sender-line" data-sender-line>{sender.avatar ?? (showSenderAvatars && <span className="message-sender-gutter" aria-hidden="true" />)}{bubble}</div> : bubble}
               {badgeElement(message, "row")}
               <MessageMeta message={message} resend={chains.byLatest.get(message.id)} hideTime={hiddenTimes.has(message.id)} onEditResend={resendFor(message)} onCreateAgain={onCreateGroupAgain ? () => onCreateGroupAgain(message) : undefined} />
@@ -1634,10 +1653,14 @@ function MessageList({
       announce={announceReaction}
       openPicker={bridge.open_emoji_picker}
       onSubmit={(candidate, emoji) => submitReaction(candidate.id, emoji)}
+      onReply={onReply}
+      canReply={canReply}
     />}
     {/* Outside the log: the hint and both live regions are never announced as list content. */}
-    {reactionsEnabled && <span id="message-reaction-hint" className="sr-only">Press Enter to react.</span>}
-    {reactionsEnabled && <span id="message-reaction-hint-r" className="sr-only">Press R to react.</span>}
+    {reactionsEnabled && <span id={REACTION_HINT_IDS.enter.reply} className="sr-only">Press Enter to react or reply.</span>}
+    {reactionsEnabled && <span id={REACTION_HINT_IDS.enter.react} className="sr-only">Press Enter to react.</span>}
+    {reactionsEnabled && <span id={REACTION_HINT_IDS.r.reply} className="sr-only">Press R to react or reply.</span>}
+    {reactionsEnabled && <span id={REACTION_HINT_IDS.r.react} className="sr-only">Press R to react.</span>}
     <ReactionAnnouncer announcement={announcement} />
     </ReactionHintLayout>
   );
@@ -2327,6 +2350,10 @@ export function hasInFlightAttachmentPreparation(
   );
 }
 
+/** A reaction announcement tagged with the conversation and session it was made in. */
+type ScopedAnnouncement = Announcement & { scope: string };
+const NO_SCOPED_ANNOUNCEMENT: ScopedAnnouncement = { ...NO_ANNOUNCEMENT, scope: "" };
+
 export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeployment = false }: { hostKind?: "native" | "browser"; fixedOrigin?: string; accountUrl?: string; hostedDeployment?: boolean } = {}) {
   const launchProgress = useLaunchProgress(bridge);
   const platform = detectPlatform();
@@ -2378,6 +2405,19 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   }, [isWritesPaused(snapshot)]);
   const [nameChooser, setNameChooser] = useState<{ address: string; conversationId: string; returnFocus: HTMLElement | null }>();
   const [pendingSends, setPendingSends] = useState<PendingSend[]>([]);
+  /** The reply targets per conversation id, tied to the search session they were chosen in. Memory only: never saved with the draft or synced. */
+  const [replyScope, setReplyScope] = useState<ReplyScope>(NO_REPLY_SCOPE);
+  const replySelectionSequence = useRef(0);
+  const replyScopeRef = useRef(replyScope);
+  replyScopeRef.current = replyScope;
+  const [announcementState, setAnnouncement] = useState<ScopedAnnouncement>(NO_SCOPED_ANNOUNCEMENT);
+  const announcementScopeRef = useRef("");
+  /** Announces into `scope`. A completion whose scope was left in the meantime is dropped, not read out in the new conversation. */
+  const announceIn = useCallback((scope: string, text: string, alert = false) => {
+    if (scope !== announcementScopeRef.current) return;
+    setAnnouncement((current) => ({ scope, seq: current.seq + 1, polite: alert ? "" : text, alert: alert ? text : "" }));
+  }, []);
+  const announcerFor = useCallback((scope: string) => (text: string, alert = false) => announceIn(scope, text, alert), [announceIn]);
   const [pendingReactionStore] = useState(() => new PendingReactionStore());
   const [cancelledSendRestore, setCancelledSendRestore] = useState<CancelledSendRestore>();
   const cancelledSendSequence = useRef(0);
@@ -2422,9 +2462,20 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   const appLockStatusRequest = useRef(0);
   const previousLockCode = useRef<string | undefined>(undefined);
   appLockRef.current = appLock;
+  const replySession = createSearchSessionKey(snapshot, Boolean(appLock?.locked));
   const [mode, setMode] = useState<"hosted" | "self-hosted">(() => browserHost ? "self-hosted" : savedSetupMode());
   const headPanel = Boolean(composerConversation && (snapshot?.head.panel ?? headPanelBootstrap));
   const [selected, setSelected] = useState(composerConversation ?? "");
+  // The announcement belongs to one conversation in one session. Its remounted list must not replay another conversation's line.
+  const announcementBase = `${replySession}\u0000${selected}`;
+  // Each visit gets a new token, so a completion from an earlier visit to the same conversation (A→B→A) is dropped as well.
+  const announcementVisit = useRef({ base: "", visit: 0 });
+  if (announcementVisit.current.base !== announcementBase) announcementVisit.current = { base: announcementBase, visit: announcementVisit.current.visit + 1 };
+  const announcementScope = `${announcementBase}\u0000${announcementVisit.current.visit}`;
+  announcementScopeRef.current = announcementScope;
+  const announceReaction = useMemo(() => announcerFor(announcementScope), [announcerFor, announcementScope]);
+  const announcement = announcementState.scope === announcementScope ? announcementState : NO_ANNOUNCEMENT;
+  useEffect(() => { setAnnouncement(NO_SCOPED_ANNOUNCEMENT); }, [announcementScope]);
   useEffect(() => { setNameChooser(undefined); }, [selected]);
   const [attachmentViews, setAttachmentViews] = useState<
     Record<string, AttachmentView>
@@ -2941,11 +2992,38 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     store.adopt(conversationId, draft);
   };
   /**
+   * The reply chip moves only when the source draft becomes the survivor's draft (followMerge says so). When the survivor keeps
+   * its own draft, its reply state stays as it is and the source's chip is dropped, so the survivor's text never quotes the source.
+   * A held source does not follow (followMerge leaves it), so its reply stays put too. A moved reply keeps the draft identity it
+   * was chosen for; if a host draft later takes that slot over, the reply is removed then (see the effect below the composer state).
+   */
+  const followMergedDraft = (from: string, to: string, survivorDraft?: Draft) => {
+    if (from === to) return;
+    const draftFollows = store.followMerge(from, to);
+    if (store.resolve(from) !== to) return;
+    const session = currentSearchSessionKey();
+    const targets = { ...replyTargetsIn(replyScopeRef.current, session) };
+    const moved = targets[from];
+    if (!moved) return;
+    delete targets[from];
+    const survivorHasReply = Boolean(targets[to]);
+    // The host moves a stored source draft under its own id, even when the survivor's empty local slot keeps its place.
+    // Install that draft first, so the moved selection matches the survivor's draft in the same synchronous block.
+    const hostMovedDraft = Boolean(survivorDraft && moved.draftIdentity.draftId === survivorDraft.id);
+    if (hostMovedDraft) adoptHostDraft(to, survivorDraft);
+    const follows = (draftFollows || hostMovedDraft) && !survivorHasReply;
+    if (follows) targets[to] = { ...moved, movedByMerge: true };
+    setReplyScope({ session, targets });
+    if (!follows) setComposerNotice(to, "Reply removed because this chat was merged.", "warning");
+  };
+  /** The survivor's stored draft in a redirected snapshot, when the snapshot carries that survivor's draft. */
+  const survivorDraftOf = (state: DesktopSnapshot, to: string) => (state.draft?.conversationId === to ? state.draft : undefined);
+  /**
    * A merge redirected a requested conversation to its survivor. The draft moves with it and the selection
    * follows in place; choose() is not called, so scroll, history window and folder view stay as they are.
    */
-  const followRequestedRedirect = (redirect: { from: string; to: string }) => {
-    store.followMerge(redirect.from, redirect.to);
+  const followRequestedRedirect = (redirect: { from: string; to: string }, survivorDraft?: Draft) => {
+    followMergedDraft(redirect.from, redirect.to, survivorDraft);
     if (latestRequiredConversationRef.current === redirect.from) latestRequiredConversationRef.current = redirect.to;
     // An open gallery keeps its loaded items and cursors, and paginates under the survivor's ID from now on.
     if (sameGalleryConversation(galleryCacheRef.current.conversationId, redirect.from)) {
@@ -3353,7 +3431,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     resetDraftAttachmentCache(state.sessionScopeId);
     // Applies the merge's selection and draft move; it must share a flush with the snapshot write.
     const followRedirect = () => {
-      if (redirect) followRequestedRedirect(redirect);
+      if (redirect) followRequestedRedirect(redirect, survivorDraftOf(state, redirect.to));
     };
     const detachedIsCurrent = () => Boolean(detached && detachedHistoryRef.current?.generation === detached.generation);
 
@@ -3513,7 +3591,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     clearDetached();
     const redirect = state.requestedRedirect?.from === conversationId ? state.requestedRedirect : undefined;
     const survivorId = redirect?.to ?? conversationId;
-    if (redirect) followRequestedRedirect(redirect);
+    if (redirect) followRequestedRedirect(redirect, survivorDraftOf(state, redirect.to));
     if (state.activeConversationId !== survivorId) {
       latestRequiredConversationRef.current = survivorId;
       setSnapshot({ ...state, activeConversationId: undefined });
@@ -3769,6 +3847,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     attachmentSessionRef.current = undefined;
     setAttachmentViews({});
     setDraftViews({});
+    // Lock must clear the stored scope itself: unlocking returns to the same session key, which would revive the old targets.
+    setReplyScope(NO_REPLY_SCOPE);
+    setAnnouncement(NO_SCOPED_ANNOUNCEMENT);
     store.reset();
     setCancelledSendRestore(undefined);
     saveFailedKeysRef.current.clear();
@@ -3858,7 +3939,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       const targetId = redirect?.to ?? destination.conversationId;
       const found = state.conversations.find(item => item.id === targetId);
       clearDetached();
-      if (redirect) store.followMerge(redirect.from, redirect.to);
+      if (redirect) followMergedDraft(redirect.from, redirect.to, survivorDraftOf(state, redirect.to));
       flushSync(() => {
         setSnapshot(state);
         setActiveViewNow("conversations");
@@ -4892,6 +4973,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     }
     autoAcknowledgeDraftSyncNotice();
     const session = currentSearchSessionKey();
+    // The reply shown when Send was pressed, if it was chosen for this draft. Captured before the flush, so a merge during the flush cannot change it.
+    const reply = active && replyBelongsTo(replyTargets[active.id], store.identityOf(slotKey)) ? replyTargets[active.id] : undefined;
     sendingRef.current = true;
     const inFlightSend = createInFlightSend();
     inFlightSendRef.current = inFlightSend;
@@ -4977,6 +5060,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       const sentSlot = store.get(current.key);
       if (!sentSlot || !mountedRef.current || session !== currentSearchSessionKey()) return;
       const sentGeneration = sentSlot.generation;
+      // The reply travels only with the draft it was chosen for. If a merge put another draft in the slot, this sends
+      // that draft exactly as a plain Send does.
+      const replyTo = reply && replyBelongsTo(reply, draftIdentityOf(current)) ? reply.messageId : undefined;
       try {
         inFlightSend.submit();
         const result = await bridge.send_draft({
@@ -4989,6 +5075,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
           simId: chosen.gateway.simId,
           ...(expectedMemberRevision === undefined ? {} : { expectedMemberRevision }),
           ...(options.groupCreateConfirmDuplicate ? { groupCreateConfirmDuplicate: true } : {}),
+          ...(replyTo ? { replyTo } : {}),
         });
         if (!mountedRef.current || session !== currentSearchSessionKey() || !store.get(current.key)) return;
         if (!result.accepted) {
@@ -5014,6 +5101,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
         const postSendContent = store.get(current.key)?.content;
         store.markSent(current.key, sentGeneration, result.revision, postSendContent);
         inFlightSend.settle("sent");
+        if (reply) clearReplyTarget(reply.selection);
         setNewComposeKey(null);
         if (result.reason === "create_not_rcs") setGroupNotice({ kind: "create-not-rcs", key: store.resolve(current.key) });
         if (detachedHistoryRef.current?.conversationId === current.conversationId) clearDetached();
@@ -5079,6 +5167,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
           }
         }
         await restoreUnsent();
+        // The target is gone: drop the chip so the user is not stuck, keep the draft text, and show the core's message.
+        if (errorCode(error) === "reply-unavailable") {
+          if (reply) clearReplyTarget(reply.selection);
+          return setComposerNotice(current.key, `Not sent. ${errorText(error)}`);
+        }
         if (errorCode(error) === "update-in-progress") {
           void refresh().catch(reportRefresh(""));
           return setComposerNotice(current.key, UPDATE_SEND_FAILURE, "warning");
@@ -5466,7 +5559,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   useEffect(() => {
     if (!composerConversation) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !event.isComposing)
+      // The composer's own Escape (cancels a reply chip) runs first and prevents default: that Escape does not collapse.
+      if (event.key === "Escape" && !event.isComposing && !event.defaultPrevented)
         handlers.current.collapse();
     };
     window.addEventListener("keydown", onKey);
@@ -5682,6 +5776,17 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
   /* Facts read for another account are unresolved, in the same render as the identity change. */
   const ribbonFacts = ribbonBilling?.identityKey === accountIdentityKey ? ribbonBilling : null;
 
+  const replyTargets = replyTargetsIn(replyScope, replySession);
+  // A reply that a merge carried onto the survivor's draft is removed once a host draft takes that draft over, and the user is told why.
+  // Hooks run before the early returns below; the loop is over a handful of selections at most.
+  useEffect(() => {
+    for (const [conversationId, selection] of Object.entries(replyTargets)) {
+      if (!selection.movedByMerge || replyBelongsTo(selection, store.identityOf(conversationId))) continue;
+      clearReplyTarget(selection.selection);
+      setComposerNotice(conversationId, "Reply removed because this chat was merged.", "warning");
+    }
+  });
+
   /* Locked snapshots carry no conversations, contacts, or notifications, so nothing else renders. */
   if (!browserHost && (lockCode === "app-locked" || lockCode === "secure-store-unavailable" || lockCode === "app-lock-checking"))
     return <>
@@ -5881,6 +5986,39 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
     } finally {
       if (reactionNavigationGeneration.current === requestGeneration) setPendingReactionId(undefined);
     }
+  };
+  /** Reply is chosen from the reaction bar: the target is per conversation, and the composer takes focus. */
+  const replyToMessage = (message: MessageView) => {
+    if (!active) return;
+    const target = replyTargetFrom(message, actorName(message));
+    const session = currentSearchSessionKey();
+    const selection = ++replySelectionSequence.current;
+    const draftIdentity = store.ensureIdentity(active.id);
+    setReplyScope((scope) => ({ session, targets: { ...replyTargetsIn(scope, session), [active.id]: { ...target, selection, draftIdentity } } }));
+    announceReaction(`Replying to ${replySubject(target)}.`);
+    requestAnimationFrame(() => document.getElementById(COMPOSER_TEXTAREA_ID)?.focus());
+  };
+  /** The chip's ✕ and Escape: clears the target and announces it. A refused or accepted send clears without announcing. */
+  const cancelReply = (selection: number) => {
+    clearReplyTarget(selection);
+    announceReaction("Reply cancelled.");
+  };
+  /**
+   * Clears the selection the caller saw, wherever it now lives (a merge may have moved it), so a reply chosen meanwhile
+   * (even to the same message) survives.
+   */
+  const clearReplyTarget = (selection: number) => {
+    setReplyScope((scope) => {
+      const entry = Object.entries(scope.targets).find(([, target]) => target.selection === selection);
+      if (!entry) return scope;
+      return { ...scope, targets: Object.fromEntries(Object.entries(scope.targets).filter(([id]) => id !== entry[0])) };
+    });
+  };
+  const openReplyTarget = (messageId: string) => {
+    const row = messageRows.current.get(messageId);
+    if (row) return revealReactionTarget(row);
+    const conversationId = selectedRef.current;
+    if (conversationId) activateSearchHit({ kind: "message", conversationId, messageId, title: "", snippet: "", timestamp: "" });
   };
   const title = active?.group
     ? groupTitle({ name: active.group.name, memberNames: groupMembers(active).map((part) => displayAddressName(part, resolution)) })
@@ -6178,6 +6316,27 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       });
     });
   };
+  // The loaded message gives the live name and quote; a target that scrolled out keeps the values captured when Reply was chosen.
+  // Targets from another session are absent here, so a replacement session that reuses the conversation id shows no chip.
+  // A selection shows only on the draft it was chosen for; any other draft in the slot hides it.
+  const storedReplyTarget = active && replyBelongsTo(replyTargets[active.id], store.identityOf(slotKey)) ? replyTargets[active.id] : undefined;
+  const loadedReplyMessage = storedReplyTarget && active?.messages.find((message) => message.id === storedReplyTarget.messageId);
+  const replyTarget = storedReplyTarget && (loadedReplyMessage
+    ? { ...replyTargetFrom(loadedReplyMessage, actorName(loadedReplyMessage)), selection: storedReplyTarget.selection }
+    : storedReplyTarget);
+  // The chip's avatar reads background and color directly: outgoing targets take the self-bubble tokens, others the conversation tone.
+  const replyAvatarStyle: CSSProperties | undefined = replyTarget && (replyTarget.sender === "self"
+    ? { background: "var(--peppy-bubble-self-surface)", color: "var(--peppy-bubble-self-text)" }
+    : { ...toneStyle(incomingToneSeed(conversationToneSeed, replyTarget.senderAddress), toneOverrides), background: "var(--peppy-tone)", color: "var(--peppy-tone-text)" });
+  const replySlot = replyTarget && active && (
+    <ReplyChip
+      name={replyTarget.name}
+      subject={replySubject(replyTarget)}
+      excerpt={replyTarget.excerpt}
+      avatarStyle={replyAvatarStyle}
+      onCancel={() => { cancelReply(replyTarget.selection); document.getElementById(COMPOSER_TEXTAREA_ID)?.focus(); }}
+    />
+  );
   const composer = (
             <section
       id="composer-area"
@@ -6192,6 +6351,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
         attachments={attachments}
         sendSupported={Boolean(slotKey) && draftHydrated && !draftSubscriptionError && !unavailableReason && !sending && !resolvingDraftConflict && !isWritesPaused(snapshot)}
         hideSmsCounter={rcsRoute.current || rcsBlock.kind !== "none"}
+        replySlot={replySlot}
+        counterPrefix={replyTarget?.quote ? replyCounterPrefix(replyTarget.quote) : undefined}
+        onEscapeWhenEmpty={replyTarget && active ? () => cancelReply(replyTarget.selection) : undefined}
         typingSendState={typingSender.state}
         unavailableReason={isWritesPaused(snapshot) ? UPDATE_SEND_REASON : resolvingDraftConflict ? "resolving draft conflict…" : sending ? "sending…" : draftSubscriptionError ? "draft updates unavailable; retry setup" : composerReadOnly ? "draft is loading" : composerUnavailableReason}
         readOnly={composerReadOnly || resolvingDraftConflict || groupLeft}
@@ -6396,6 +6558,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl, hostedDeploy
       showReactions={showReactions}
       actorName={actorName}
       onOpenReactionTarget={(reaction, notice) => { void openReactionTarget(reaction, notice); }}
+      onOpenReply={openReplyTarget}
+      onReply={replyToMessage}
+      canReply={!composerReadOnly && !resolvingDraftConflict && !groupLeft}
+      announcement={announcement}
+      announceReaction={announceReaction}
       writesPaused={isWritesPaused(snapshot)}
       pendingReactionId={pendingReactionId}
       reactionFeedback={reactionFeedback}

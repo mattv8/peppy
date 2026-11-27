@@ -58,6 +58,7 @@ export {
 } from "./composerPaste";
 export type { DraftAttachmentState };
 export { BusyIndicator } from "./BusyIndicator";
+export { ReplyChip, type ReplyChipProps } from "./ReplyChip";
 export { formatComposerReason, InlineStatus, type InlineStatusAction, type InlineStatusItem, type InlineStatusLabels, type InlineStatusTone } from "./InlineStatus";
 import type { ConversationFolder } from "./bridge-contracts";
 export { TonePicker, TONE_PRESETS, type TonePickerProps } from "./TonePicker";
@@ -139,6 +140,7 @@ export {
   Plus,
   Radio,
   PhoneOff,
+  Reply,
   RotateCw,
   Search,
   ShieldAlert,
@@ -1256,6 +1258,9 @@ export function Composer({
   onPasteImages,
   onRetryAttachment,
   maxAttachments = MAX_COMPOSER_ATTACHMENTS,
+  replySlot,
+  counterPrefix = "",
+  onEscapeWhenEmpty,
 }: {
   draft: string;
   attachments: Attachment[];
@@ -1291,6 +1296,12 @@ export function Composer({
   onPasteImages?(files: File[]): void;
   onRetryAttachment?(id: string): void;
   maxAttachments?: number;
+  /** Rendered above the input row, inside the composer field (the reply chip). */
+  replySlot?: ReactNode;
+  /** Text counted ahead of the draft for the SMS counter only; send readiness ignores it. */
+  counterPrefix?: string;
+  /** Escape in an empty textarea calls this, without any text to clear. */
+  onEscapeWhenEmpty?(): void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pasteRejectionCountRef = useRef(0);
@@ -1306,7 +1317,7 @@ export function Composer({
   const [pasteRejection, setPasteRejection] = useState<{ message: string; details: string[]; key: number } | null>(null);
   const hasContent = Boolean(draft.trim()) || attachments.length > 0;
   const canSend = sendSupported && !readOnly && hasContent;
-  const counter = !attachments.length ? smsCounter(draft) : null;
+  const counter = !attachments.length ? smsCounter(counterPrefix + draft) : null;
   const fallbackShown = !sendSupported && !gatewaySlot && !inlineStatusSlot && !statusTrailingSlot && !statusItems?.length;
   const ownStatusItems: InlineStatusItem[] = [
     ...(pasteRejection ? [{
@@ -1380,6 +1391,11 @@ export function Composer({
     if (localDraftRef.current === draft) localDraftRef.current = null;
   }, [draft, isComposing]);
   const keydown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Escape" && onEscapeWhenEmpty && !event.currentTarget.value && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      onEscapeWhenEmpty();
+      return;
+    }
     if (
       event.key === "Enter" &&
       !event.shiftKey &&
@@ -1423,6 +1439,7 @@ export function Composer({
           {bannerSlot}
         </div>
         <ComposerAttachmentTray key={logicalDraftIdentity} attachments={attachments} layout={attachmentLayout} attachmentHeaderDetail={attachmentHeaderDetail} onRemoveAttachment={onRemoveAttachment} onRetryAttachment={onRetryAttachment} onPaste={pasteImages} onFocusTextarea={() => textareaRef.current?.focus()} />
+        {replySlot}
         <div id="composer-input-row">
         <label htmlFor="composer-textarea" className="sr-only">
           Message
@@ -1431,6 +1448,7 @@ export function Composer({
           ref={textareaRef}
           id={COMPOSER_TEXTAREA_ID}
           aria-label="Message"
+          aria-describedby={replySlot ? "composer-reply-chip" : undefined}
           value={isComposing ? compositionValueRef.current ?? draft : draft}
           readOnly={readOnly}
           onChange={(e) => {

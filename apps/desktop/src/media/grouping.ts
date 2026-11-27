@@ -42,6 +42,7 @@ function canJoin(group: GalleryMessage[], candidate: GalleryMessage): boolean {
   const previous = group.at(-1);
   if (!previous || !isImageOnly(candidate) || !isImageOnly(previous)) return false;
   if (previous.body || previous.subject) return false;
+  if (previous.replyTo?.messageId !== candidate.replyTo?.messageId) return false;
   const previousIdentity = senderIdentity(previous);
   const candidateIdentity = senderIdentity(candidate);
   if (!previousIdentity || previousIdentity !== candidateIdentity) return false;
@@ -58,7 +59,7 @@ function toGroup(messages: GalleryMessage[]): MessageGroup {
   };
 }
 
-/** Groups only chronological, same-sender image messages; all other messages stay solo. */
+/** Groups only chronological, same-sender image messages that share a reply target (or none); all other messages stay solo. */
 export function groupMessages(messages: GalleryMessage[]): MessageGroup[] {
   const groups: MessageGroup[] = [];
   let candidate: GalleryMessage[] = [];

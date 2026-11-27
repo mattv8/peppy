@@ -33,7 +33,19 @@ export type DraftSlot = {
   acknowledgedContent: DraftContent;
   /** Captions recovered into this surviving local slot, keyed by their source attachment. */
   recoveredCaptionSources: Set<string>;
+  /**
+   * Identity of this local slot while it holds no stored draft. It survives the first save and merges that move the slot, and
+   * changes when a host draft takes the slot over (see takeOver). Stored drafts are identified by their host id instead.
+   */
+  identity: string;
 };
+
+/**
+ * What a reply selection is bound to. A stored draft is named by its host id, which survives merges and slot re-creation;
+ * an unstored draft is named by its slot identity, which changes when a host draft takes that slot over.
+ */
+export type DraftIdentity = { slot: string; draftId: string };
+export const draftIdentityOf = (slot: DraftSlot): DraftIdentity => ({ slot: slot.identity, draftId: slot.id });
 
 /** A failed outcome from `flushAll` carries the resolved key of the draft that failed, which may be offscreen. */
 export type SaveOutcome = { ok: true } | { ok: false; error: string; reviewRequired?: true; key?: string };
@@ -113,6 +125,7 @@ export class DraftStore {
   private recoverySaves = new Map<string, Promise<SaveOutcome>>();
   private saveStates = new Map<string, DraftSaveState>();
   private newCount = 0;
+  private identitySequence = 0;
   private sessionGeneration = 0;
 
   constructor(
@@ -135,6 +148,17 @@ export class DraftStore {
 
   get(key: string): DraftSlot | undefined {
     return this.slots.get(this.resolve(key));
+  }
+
+  /** The identity of the draft a key resolves to, or undefined when no slot exists. See DraftIdentity. */
+  identityOf(key: string): DraftIdentity | undefined {
+    const slot = this.get(key);
+    return slot && draftIdentityOf(slot);
+  }
+
+  /** Like identityOf, but creates the slot when it is absent, so a selection made now has an identity to match later. */
+  ensureIdentity(key: string): DraftIdentity {
+    return draftIdentityOf(this.ensure(key));
   }
 
   isHydrated(key: string): boolean {
@@ -380,6 +404,7 @@ export class DraftStore {
       const target = slot;
       if (!this.shouldAdopt(target, draft)) return;
       const changed = !sameDraftContent(target.content, contentOf(draft));
+      this.takeOver(target, draft.id);
       Object.assign(target, {
         id: draft.id,
         conversationId: draft.conversationId,
@@ -390,6 +415,7 @@ export class DraftStore {
       });
       if (changed) target.recoveredCaptionSources.clear();
     } else {
+      this.takeOver(slot, "");
       Object.assign(slot, {
         id: "",
         revision: "0",
@@ -420,6 +446,7 @@ export class DraftStore {
       this.retainCopy(slot.key, slot.content);
       this.undoVersions.delete(slot.key);
     }
+    this.takeOver(slot, draft.id);
     Object.assign(slot, {
       id: draft.id,
       conversationId: draft.conversationId,
@@ -469,21 +496,27 @@ export class DraftStore {
    * moves. With one, the survivor keeps its own content: unsaved source text becomes a retained copy
    * there for review, and a clean source is dropped. A held source is left alone because its send
    * settles against that slot.
+   * Returns true when the survivor now holds the source's draft (the source slot moved, or was already the survivor's);
+   * false when the survivor keeps its own draft, or the source did not move.
    */
-  followMerge(from: string, to: string): void {
-    if (from === to || this.resolve(to) === from) return;
+  followMerge(from: string, to: string): boolean {
+    if (from === to || this.resolve(to) === from) return false;
     const source = this.get(from);
-    if (source?.held) return;
+    if (source?.held) return false;
     this.aliases.set(from, to);
-    if (!source || source.key === to) {
+    if (!source) {
       this.events.changed();
-      return;
+      return false;
+    }
+    if (source.key === to) {
+      this.events.changed();
+      return true;
     }
     const destination = this.slots.get(to);
     if (!destination) {
       this.moveSlot(source, to);
       this.events.changed();
-      return;
+      return true;
     }
     const copy = source.content;
     const copyDiffers = isDirty(source) && Boolean(copy.text || copy.attachmentIds.length) && !sameDraftContent(destination.content, copy);
@@ -496,6 +529,7 @@ export class DraftStore {
       this.events.notice?.(to, "moved");
     }
     this.events.changed();
+    return false;
   }
 
   hold(key: string) {
@@ -619,6 +653,7 @@ export class DraftStore {
         queue: Promise.resolve(),
         acknowledgedContent: blankContent(),
         recoveredCaptionSources: new Set(),
+        identity: this.nextIdentity(),
       };
       this.slots.set(resolved, slot);
     }
@@ -871,6 +906,7 @@ export class DraftStore {
       this.reviewRequired.add(host.conversationId);
       return false;
     }
+    this.takeOver(slot, host.id);
     Object.assign(slot, {
       id: host.id,
       conversationId: host.conversationId,
@@ -947,6 +983,7 @@ export class DraftStore {
       if (!slot || !this.isCurrent(slot, slot.key, session) || (snapshot && slot.id !== snapshot.id) || isDirty(slot)) return;
       if (!current) {
         if (snapshot) this.retireDraftIdentity(snapshot.id, conversationId, snapshot.revision);
+        this.takeOver(slot, "");
         Object.assign(slot, {
           id: "",
           revision: "0",
@@ -1014,6 +1051,15 @@ export class DraftStore {
     } catch {
       return false;
     }
+  }
+
+  private nextIdentity(): string {
+    return `draft-slot-${++this.identitySequence}`;
+  }
+
+  /** A host draft with another id (or none) takes the slot over, so reply selections made on the old draft stop matching. */
+  private takeOver(slot: DraftSlot, id: string) {
+    if (slot.id !== id) slot.identity = this.nextIdentity();
   }
 
   private installIdentity(slot: DraftSlot, draft: Draft) {

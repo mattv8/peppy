@@ -89,23 +89,57 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 export type BarRoute = "native" | "text";
-export type BarMetricsInput = { route: BarRoute; coarse: boolean; listWidth: number; capture?: boolean };
-export type BarMetrics = { width: number; height: number; quick: number };
+export type BarMetricsInput = { route: BarRoute; coarse: boolean; listWidth: number; capture?: boolean; canReply?: boolean };
+export type BarMetrics = { width: number; height: number; quick: number; compactReply: boolean };
 
+/** The Text tag on the SMS/MMS route: 52px, measured from its icon, label and padding. */
 const SEGMENT_WIDTH = 52;
-const CAPTURE_WIDTH = 248;
-
 /**
- * The bar's measured size. Buttons are 28px (fine) or 44px (coarse) with a 2px gap, 1px padding and 1px border.
- * The number of quick reactions shrinks with the list: 6, then 4 under 328px (340px coarse), then 3 under 248px coarse.
+ * The Reply label button plus its divider: 63px (6px left padding, 14px icon, 4px gap, "Reply" at 12px
+ * about 31px, 8px right padding) and the 1px divider with 2px margins on each side. Both routes have it.
  */
-export function barMetrics({ route, coarse, listWidth, capture = false }: BarMetricsInput): BarMetrics {
-  if (capture) return { width: CAPTURE_WIDTH, height: coarse ? 104 : 88, quick: 0 };
-  const quick = coarse
-    ? (listWidth < 248 ? 3 : listWidth < 340 ? 4 : 6)
-    : (listWidth < 328 ? 4 : 6);
+const REPLY_SEGMENT_WIDTH = 68;
+/** The icon-only Reply: a 28px square (44px coarse) and the same divider. Used when the label does not fit. */
+const REPLY_ICON_SEGMENT_WIDTH = 33;
+const REPLY_ICON_COARSE_SEGMENT_WIDTH = 49;
+const CAPTURE_WIDTH = 248;
+/** Quick-reaction counts to try, largest first. */
+const QUICK_CHOICES = [6, 4, 3];
+/** Left and right inset the bar keeps inside the list (see `placeReactionBar`). */
+const LIST_INSET = SIDE_INSET * 2;
+/** The smallest bar: three quick reactions and the icon-only Reply. Used when nothing fits the list. */
+const MINIMAL_QUICK = 3;
+
+function replySegmentWidth(coarse: boolean, compactReply: boolean): number {
+  if (!compactReply) return REPLY_SEGMENT_WIDTH;
+  return coarse ? REPLY_ICON_COARSE_SEGMENT_WIDTH : REPLY_ICON_SEGMENT_WIDTH;
+}
+
+function barWidth(route: BarRoute, coarse: boolean, quick: number, replySegment: number): number {
   const button = coarse ? 44 : 28;
   const buttonRow = (quick + 1) * button + quick * 2 + 4;
-  const segment = route === "text" ? SEGMENT_WIDTH : 0;
-  return { width: buttonRow + segment, height: coarse ? 48 : 32, quick };
+  return buttonRow + replySegment + (route === "text" ? SEGMENT_WIDTH : 0);
+}
+
+/**
+ * The bar's measured size. Emoji buttons are 28px (fine) or 44px (coarse) with a 2px gap, 1px padding and 1px border.
+ * The Reply segment is a label, not a square button, so it adds a fixed segment width instead of a button width.
+ * The bar takes the largest quick count (6, 4, then 3) that fits the list with the full Reply label. If none fits,
+ * it tries the icon-only Reply the same way. If still nothing fits, it returns the minimal bar: 3 quick reactions
+ * and the icon-only Reply, which may be wider than the list.
+ */
+export function barMetrics({ route, coarse, listWidth, capture = false, canReply = true }: BarMetricsInput): BarMetrics {
+  const height = coarse ? 48 : 32;
+  if (capture) return { width: CAPTURE_WIDTH, height: coarse ? 104 : 88, quick: 0, compactReply: false };
+  if (!canReply) {
+    const quick = QUICK_CHOICES.find((count) => barWidth(route, coarse, count, 0) + LIST_INSET <= listWidth) ?? MINIMAL_QUICK;
+    return { width: barWidth(route, coarse, quick, 0), height, quick, compactReply: false };
+  }
+  for (const compactReply of [false, true]) {
+    for (const quick of QUICK_CHOICES) {
+      const width = barWidth(route, coarse, quick, replySegmentWidth(coarse, compactReply));
+      if (width + LIST_INSET <= listWidth) return { width, height, quick, compactReply };
+    }
+  }
+  return { width: barWidth(route, coarse, MINIMAL_QUICK, replySegmentWidth(coarse, true)), height, quick: MINIMAL_QUICK, compactReply: true };
 }

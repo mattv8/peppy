@@ -103,7 +103,7 @@ export type DesktopSnapshot = { writesPaused?: boolean; version: "1"; mode: "fix
 export type DraftInput = Pick<Draft, "id" | "conversationId" | "text" | "recipientIds" | "attachmentIds" | "groupName"> & { expectedRevision: string; gatewayId?: string; simId?: string };
 export type DiscardDraftInput = Pick<Draft, "id" | "conversationId"> & { expectedRevision: string };
 /** `expectedMemberRevision` is required for a group send; `groupCreateConfirmDuplicate` is set only by the explicit "Create it again" action. */
-export type SendDraftInput = DraftInput & { gatewayId: string; simId: string; expectedMemberRevision?: string; groupCreateConfirmDuplicate?: boolean };
+export type SendDraftInput = DraftInput & { gatewayId: string; simId: string; expectedMemberRevision?: string; groupCreateConfirmDuplicate?: boolean; replyTo?: string };
 /** A separate, server-readable re-encoded copy created only after native confirmation. */
 export type PublicCopy = { url: string; expiresInSeconds: number };
 export type NotificationTarget = { sourceDeviceId: string; notificationKey: string; lifetime: string };

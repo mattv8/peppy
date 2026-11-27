@@ -200,13 +200,13 @@ describe("photo labels", () => {
   it("names a single photo without a count", async () => {
     await openConversation("conv-reaction-states");
     fireEvent.keyDown(document.querySelector('[data-reaction-message="reaction-photo"]')!, { key: "r" });
-    expect(bar()).toHaveAttribute("aria-label", "React to photo from +15555550180");
+    expect(bar()).toHaveAttribute("aria-label", "Reply or react to photo from +15555550180");
   });
 
   it("numbers a slide within its run, never zero", async () => {
     await openConversation("conv-reaction-states");
     fireEvent.keyDown(document.querySelector('[data-reaction-message="reaction-photo-pair"][data-slide-index="1"]')!, { key: "r" });
-    expect(bar()).toHaveAttribute("aria-label", "React to photo 2 of 2 from +15555550180");
+    expect(bar()).toHaveAttribute("aria-label", "Reply or react to photo 2 of 2 from +15555550180");
   });
 });
 
@@ -304,7 +304,7 @@ describe("re-check: the tile body is described by the R hint", () => {
   it("points a reactable photo's body at the sr-only R hint, outside the log", async () => {
     await openConversation("conv-reaction-states");
     const hint = document.getElementById("message-reaction-hint-r")!;
-    expect(hint).toHaveTextContent("Press R to react.");
+    expect(hint).toHaveTextContent("Press R to react or reply.");
     expect(document.getElementById("message-list")!.contains(hint)).toBe(false);
     expect(document.querySelector('.tile-body[data-message-id="reaction-photo"]')).toHaveAttribute("aria-describedby", "message-reaction-hint-r");
   });
