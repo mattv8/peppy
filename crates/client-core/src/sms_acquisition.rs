@@ -1,5 +1,6 @@
 use crate::sms_reconciliation::{
-    ProviderSmsEvidence, SmsReconciliation, canonical_counterpart, reconcile_provider_sms,
+    ProviderSmsEvidence, SmsReconciliation, canonical_counterpart,
+    forget_carrier_wire_bodies_for_message, reconcile_provider_sms,
 };
 use crate::{
     Captured, Client, ConversationId, Direction, Error, IncomingSms, Inserted, MessageId,
@@ -275,6 +276,7 @@ impl Client {
         }
         let reconciliation = reconcile_provider_sms(&tx, &ctx.device_id, &evidence(&input))?;
         if let SmsReconciliation::Matched(existing) = reconciliation {
+            forget_carrier_wire_bodies_for_message(&tx, existing.message_id)?;
             publish_reconciliation_alias(&tx, &ctx, &existing.message_id, &input)?;
             link_matched_thread(
                 &tx,
@@ -387,6 +389,7 @@ impl Client {
             SmsReconciliation::Matched(existing)
                 if existing.message_id.to_string() != stored_message =>
             {
+                forget_carrier_wire_bodies_for_message(&tx, existing.message_id)?;
                 publish_reconciliation_alias(&tx, &ctx, &existing.message_id, &input)?;
                 link_matched_thread(
                     &tx,
@@ -463,6 +466,7 @@ impl Client {
         };
         let message_id: MessageId = crate::parse(&stored_message)?;
         let payload = MessagePayload {
+            reply_to: None,
             record: MessageRecord {
                 message_id,
                 conversation_id,

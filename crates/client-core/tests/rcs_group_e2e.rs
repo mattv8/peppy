@@ -8,6 +8,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use common::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const GOOGLE: &str = "g-weekend";
@@ -177,6 +180,7 @@ fn observation(members: &[&str], at: i64) -> RcsMappingObservation {
 struct Group {
     _directory: tempfile::TempDir,
     gateway_device: DeviceId,
+    gateway_database: PathBuf,
     sender: Client,
     gateway: Client,
     server: Server,
@@ -211,6 +215,7 @@ impl Group {
         Self {
             _directory: directory,
             gateway_device: gateway_config.device_id,
+            gateway_database: gateway_config.database_path.clone(),
             sender,
             gateway,
             server: Server::default(),
@@ -328,6 +333,188 @@ fn live_group_text_routes_to_rcs_once_and_projects_a_group_class() {
     assert!(!group.pending(command));
     assert!(group.gateway.prepare_native_rcs_send(command, now).is_err());
     assert!(carrier_never_permits(&group.carrier(command)));
+}
+
+/// Stand-in object store, as `c4_media.rs` has for its own target: the native host uploads
+/// ciphertext and reports the server object ID.
+#[derive(Default)]
+struct Objects(HashMap<String, Vec<u8>>);
+
+impl Objects {
+    fn upload_all(&mut self, client: &Client) -> usize {
+        let pending = client.pending_uploads().unwrap();
+        for object in &pending {
+            let bytes = fs::read(client.native_cipher_file(object.attachment_id).unwrap()).unwrap();
+            let remote = uuid::Uuid::new_v4().to_string();
+            self.0.insert(remote.clone(), bytes);
+            client
+                .mark_attachment_uploaded(object.attachment_id, &remote)
+                .unwrap();
+        }
+        pending.len()
+    }
+
+    fn download_to(&self, object: &CipherObject, path: &Path) {
+        fs::write(path, &self.0[object.remote_object_id.as_ref().unwrap()]).unwrap();
+    }
+}
+
+/// A raw connection to the gateway database, to seed the Google identity a reply targets.
+fn gateway_connection(database: &Path) -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open(database).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+        )
+        .unwrap();
+    connection
+}
+
+/// A reply with two images to a group becomes two native media commits. Only the first names the
+/// target, so the second image does not become another quoted message.
+#[test]
+fn group_media_reply_names_the_target_only_on_its_first_image() {
+    let mut group = Group::new(true);
+    let now = now_ms();
+    let mut objects = Objects::default();
+    let mut attachment_ids = Vec::new();
+    for name in ["first.png", "second.png"] {
+        let picture = group._directory.path().join(name);
+        let bytes = [b"\x89PNG\r\n\x1a\n".as_slice(), &[name.len() as u8; 256]].concat();
+        fs::write(&picture, bytes).unwrap();
+        attachment_ids.push(
+            group
+                .sender
+                .prepare_attachment(&picture, "image/png", name)
+                .unwrap()
+                .attachment_id,
+        );
+    }
+    let draft = group
+        .sender
+        .save_new_compose_draft(ComposeDraftUpdate {
+            group_name: None,
+            text: "two of them".into(),
+            recipients: vec![ALEX.into(), SAM.into()],
+            attachment_ids,
+            route: Some(GatewayRoute::Carrier {
+                gateway_device_id: group.gateway_device,
+                subscription_id: SUBSCRIPTION.into(),
+            }),
+        })
+        .unwrap();
+    // The reply target lives in the group's conversation, as a composer reply must.
+    let target = group
+        .sender
+        .capture_incoming(IncomingSms {
+            conversation_id: Some(draft.conversation_id),
+            sender_address: ALEX.into(),
+            body: "look at these".into(),
+            provider_message_id: Some("provider-group-media-target".into()),
+            imported: true,
+        })
+        .unwrap();
+    let queued = group
+        .sender
+        .send_compose_draft_with_options(
+            draft.draft_id,
+            draft.revision,
+            ComposeSendOptions {
+                group: Some(GroupDraftSend {
+                    group_name: Some("Weekend".into()),
+                    expected_member_revision: None,
+                    group_create_confirm_duplicate: false,
+                }),
+                reply_to: Some(target.message_id),
+                ..ComposeSendOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(objects.upload_all(&group.sender), 2);
+    group.server.upload(&group.sender);
+    group.server.sync(&group.gateway);
+    for (position, download) in group
+        .gateway
+        .pending_downloads()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let path = group
+            ._directory
+            .path()
+            .join(format!("download-{position}.bin"));
+        objects.download_to(download, &path);
+        group
+            .gateway
+            .install_downloaded_attachment(download.attachment_id, &path)
+            .unwrap();
+    }
+    let report = group.ingest(&snapshot(vec![group_at(GOOGLE, &[ALEX, SAM], now)]), now);
+    assert_eq!(report.linked, 1);
+    assert_eq!(
+        group
+            .gateway
+            .verify_rcs_group_observation(&observation(&[ALEX, SAM], now), now)
+            .unwrap(),
+        GroupProofOutcome::Proven
+    );
+    gateway_connection(&group.gateway_database)
+        .execute(
+            "INSERT INTO rcs_message_identities(google_message_id,google_conversation_id,conversation_id,ownership_generation,message_id) VALUES(?,?,?,?,?)",
+            rusqlite::params![
+                "google-target",
+                GOOGLE,
+                target.conversation_id.to_string(),
+                1,
+                target.message_id.to_string()
+            ],
+        )
+        .unwrap();
+
+    // The carrier permit hands a group picture to the RCS media work, which materializes its rows.
+    assert!(carrier_never_permits(&group.carrier(queued.command_id)));
+    for index in 0..2_u32 {
+        let command = queued.command_id;
+        group
+            .gateway
+            .mark_rcs_media_uploading(command, index)
+            .unwrap();
+        // A 32-byte zero key and a 264-byte image: the shape the Go upload hands back.
+        let reference = json!({
+            "media_id": format!("media-{index}"),
+            "key": format!("{}=", "A".repeat(43)),
+            "mime": "image/png",
+            "size": 264,
+            "name": if index == 0 { "first.png" } else { "second.png" },
+        })
+        .to_string();
+        group
+            .gateway
+            .mark_rcs_media_reference_ready(command, index, &reference, now)
+            .unwrap();
+        let preparation = group
+            .gateway
+            .prepare_native_rcs_media_send(command, index, now)
+            .unwrap();
+        let projection = group
+            .gateway
+            .begin_native_rcs_send(preparation, &observation(&[ALEX, SAM], now), now)
+            .unwrap();
+        assert_eq!(
+            projection.reply_to_google_message_id.as_deref(),
+            (index == 0).then_some("google-target"),
+            "attachment {index}"
+        );
+        group
+            .gateway
+            .record_rcs_media_commit(command, index)
+            .unwrap();
+        group
+            .gateway
+            .record_rcs_media_outcome(command, index, "ok")
+            .unwrap();
+    }
 }
 
 #[test]

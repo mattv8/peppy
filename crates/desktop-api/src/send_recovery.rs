@@ -132,6 +132,7 @@ mod tests {
     ) -> Message {
         Message {
             payload: MessagePayload {
+                reply_to: None,
                 record: MessageRecord {
                     message_id: MessageId::new(),
                     conversation_id: conversation,

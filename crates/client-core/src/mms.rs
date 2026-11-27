@@ -879,6 +879,7 @@ impl Client {
             Reconciliation::OriginalProviderMessage => {}
         }
         let payload = MessagePayload {
+            reply_to: None,
             record: MessageRecord {
                 message_id,
                 conversation_id,

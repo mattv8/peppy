@@ -378,6 +378,11 @@ pub struct NativeRcsCommitProjection {
     /// Group targets only: the stored member digest Go rechecks immediately before sending.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_member_digest: Option<String>,
+    /// Gateway-local Google message ID of the message this send replies to, resolved in the target's
+    /// Google conversation at admission. Only emitted to the trusted native host, never in a synced
+    /// payload or renderer DTO. Absent when the send is not a reply or its target is unresolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_google_message_id: Option<String>,
 }
 
 /// The exact media part Go derives into its `SendMessageRequest`.

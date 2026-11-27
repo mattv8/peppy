@@ -64,9 +64,9 @@ fn checkpoint_media_inventory_includes_drafts_and_drops_discarded_objects() {
 
 /// Stand-in object store: the native host uploads ciphertext and reports the server object ID.
 #[derive(Default)]
-struct Objects(HashMap<String, Vec<u8>>);
+pub(crate) struct Objects(HashMap<String, Vec<u8>>);
 impl Objects {
-    fn upload_all(&mut self, client: &Client) -> usize {
+    pub(crate) fn upload_all(&mut self, client: &Client) -> usize {
         let pending = client.pending_uploads().unwrap();
         for object in &pending {
             assert_eq!(object.remote_object_id, None);
@@ -83,7 +83,7 @@ impl Objects {
         }
         pending.len()
     }
-    fn download_to(&self, object: &CipherObject, path: &Path) -> Vec<u8> {
+    pub(crate) fn download_to(&self, object: &CipherObject, path: &Path) -> Vec<u8> {
         let bytes = self.0[object.remote_object_id.as_ref().unwrap()].clone();
         fs::write(path, &bytes).unwrap();
         bytes

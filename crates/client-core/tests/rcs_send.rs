@@ -428,6 +428,18 @@ fn rcs_link_command_gets_one_durable_exact_mapping_permit() {
     assert_eq!(serialized["target"]["status"], "eligible");
     assert_eq!(serialized["target"]["send_mode"], "Automatic");
     assert_eq!(serialized["target"]["read_only"], false);
+    assert!(
+        serialized.get("reply_to_google_message_id").is_none(),
+        "a send that is not a reply keeps the commit JSON unchanged"
+    );
+    let mut replying = serialized.clone();
+    replying["reply_to_google_message_id"] = "google-target".into();
+    let replying: peppy_client_core::NativeRcsCommitProjection =
+        serde_json::from_value(replying).unwrap();
+    assert_eq!(
+        replying.reply_to_google_message_id.as_deref(),
+        Some("google-target")
+    );
     assert!(uuid::Uuid::parse_str(permit.tmp_id()).is_ok());
     assert_eq!(
         gateway
@@ -2843,4 +2855,229 @@ fn resend_addressed_to_another_gateway_stays_duplicate_and_has_no_authority() {
             .unwrap_err(),
         Error::NotFound
     );
+}
+
+/// A 1:1 RCS reply whose target already has a Google identity in the mapped Google conversation.
+#[test]
+fn native_reply_commit_projection_names_the_target_google_message() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let sender_config = config(&directory, "sender-native-reply", &vault);
+    let gateway_config = config(&directory, "gateway-native-reply", &vault);
+    let sender = unlocked(&sender_config, &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let target = sender
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "peer-local".into(),
+            body: "meet at the big oak".into(),
+            provider_message_id: Some("provider-native-target".into()),
+            imported: true,
+        })
+        .unwrap();
+    let current = observation("peer-local", 1);
+    let draft = sender
+        .create_compose_draft(Some(target.conversation_id))
+        .unwrap();
+    let draft = sender
+        .save_compose_draft(
+            draft.draft_id,
+            draft.revision,
+            ComposeDraftUpdate {
+                group_name: None,
+                text: "sounds good".into(),
+                recipients: vec!["peer-local".into()],
+                route: Some(GatewayRoute::Carrier {
+                    gateway_device_id: gateway_config.device_id,
+                    subscription_id: "android-subscription-7".into(),
+                }),
+                attachment_ids: vec![],
+            },
+        )
+        .unwrap();
+    let queued = sender
+        .send_compose_draft_with_options(
+            draft.draft_id,
+            draft.revision,
+            ComposeSendOptions {
+                reply_to: Some(target.message_id),
+                ..ComposeSendOptions::default()
+            },
+        )
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&sender);
+    server.sync(&gateway);
+    assert!(matches!(
+        gateway.verify_rcs_mapping(&current, 1_000).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    // The target's Google identity, recorded as receive would record it.
+    encrypted_connection(&gateway_config)
+        .execute(
+            "INSERT INTO rcs_message_identities(google_message_id,google_conversation_id,conversation_id,ownership_generation,message_id) VALUES(?,?,?,?,?)",
+            rusqlite::params![
+                "google-target",
+                "conversation-local",
+                target.conversation_id.to_string(),
+                1,
+                target.message_id.to_string()
+            ],
+        )
+        .unwrap();
+
+    let preparation = gateway
+        .prepare_native_rcs_send(queued.command_id, 1_000)
+        .unwrap();
+    let projection = gateway
+        .begin_native_rcs_send(preparation, &current, 1_000)
+        .unwrap();
+    assert_eq!(
+        projection.reply_to_google_message_id.as_deref(),
+        Some("google-target")
+    );
+    assert_eq!(
+        serde_json::to_value(&projection).unwrap()["reply_to_google_message_id"],
+        "google-target"
+    );
+}
+
+/// A reply with two images becomes two native media commits. Only the first names the target, so
+/// the second image does not become another quoted message.
+#[test]
+fn native_media_reply_names_the_target_only_on_its_first_image() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let sender_config = config(&directory, "sender-native-media-reply", &vault);
+    let gateway_config = config(&directory, "gateway-native-media-reply", &vault);
+    let sender = unlocked(&sender_config, &vault);
+    let gateway = unlocked(&gateway_config, &vault);
+    let target = sender
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "peer-local".into(),
+            body: "look at these".into(),
+            provider_message_id: Some("provider-native-media-target".into()),
+            imported: true,
+        })
+        .unwrap();
+    let current = observation("peer-local", 1);
+    let mut attachment_ids = Vec::new();
+    for name in ["first.png", "second.png"] {
+        let picture = directory.path().join(name);
+        let bytes = [b"\x89PNG\r\n\x1a\n".as_slice(), &[name.len() as u8; 256]].concat();
+        fs::write(&picture, bytes).unwrap();
+        attachment_ids.push(
+            sender
+                .prepare_attachment(&picture, "image/png", name)
+                .unwrap()
+                .attachment_id,
+        );
+    }
+    let draft = sender
+        .create_compose_draft(Some(target.conversation_id))
+        .unwrap();
+    let draft = sender
+        .save_compose_draft(
+            draft.draft_id,
+            draft.revision,
+            ComposeDraftUpdate {
+                group_name: None,
+                text: "two of them".into(),
+                recipients: vec!["peer-local".into()],
+                route: Some(GatewayRoute::Carrier {
+                    gateway_device_id: gateway_config.device_id,
+                    subscription_id: "android-subscription-7".into(),
+                }),
+                attachment_ids,
+            },
+        )
+        .unwrap();
+    let queued = sender
+        .send_compose_draft_with_options(
+            draft.draft_id,
+            draft.revision,
+            ComposeSendOptions {
+                reply_to: Some(target.message_id),
+                ..ComposeSendOptions::default()
+            },
+        )
+        .unwrap();
+    let mut objects = crate::c4_media::Objects::default();
+    assert_eq!(objects.upload_all(&sender), 2);
+    let mut server = Server::default();
+    server.upload(&sender);
+    server.sync(&gateway);
+    for (position, download) in gateway.pending_downloads().unwrap().iter().enumerate() {
+        let path = directory.path().join(format!("download-{position}.bin"));
+        objects.download_to(download, &path);
+        gateway
+            .install_downloaded_attachment(download.attachment_id, &path)
+            .unwrap();
+    }
+    assert!(matches!(
+        gateway.verify_rcs_mapping(&current, 1_000).unwrap(),
+        RcsMappingOutcome::Mapped(_)
+    ));
+    encrypted_connection(&gateway_config)
+        .execute(
+            "INSERT INTO rcs_message_identities(google_message_id,google_conversation_id,conversation_id,ownership_generation,message_id) VALUES(?,?,?,?,?)",
+            rusqlite::params![
+                "google-target",
+                "conversation-local",
+                target.conversation_id.to_string(),
+                1,
+                target.message_id.to_string()
+            ],
+        )
+        .unwrap();
+
+    let send_observation = observation("peer-local", 2);
+    let outcome = gateway
+        .verify_rcs_send_mapping(&send_observation, queued.command_id, 1_000)
+        .unwrap();
+    assert!(
+        matches!(outcome, RcsMappingOutcome::Mapped(_)),
+        "{outcome:?}"
+    );
+    // The carrier permit leaves a mapped picture to the RCS media work, which materializes its rows.
+    assert!(matches!(
+        gateway.begin_send_attempt(queued.command_id).unwrap(),
+        PermitDecision::Blocked(PermitBlock::CarrierOnlyProofUnavailable)
+    ));
+    for index in 0..2_u32 {
+        gateway
+            .mark_rcs_media_uploading(queued.command_id, index)
+            .unwrap();
+        // A 32-byte zero key and a 264-byte image: the shape the Go upload hands back.
+        let reference = serde_json::json!({
+            "media_id": format!("media-{index}"),
+            "key": format!("{}=", "A".repeat(43)),
+            "mime": "image/png",
+            "size": 264,
+            "name": if index == 0 { "first.png" } else { "second.png" },
+        })
+        .to_string();
+        gateway
+            .mark_rcs_media_reference_ready(queued.command_id, index, &reference, 1_000)
+            .unwrap();
+        let preparation = gateway
+            .prepare_native_rcs_media_send(queued.command_id, index, 1_000)
+            .unwrap();
+        let projection = gateway
+            .begin_native_rcs_send(preparation, &send_observation, 1_000)
+            .unwrap();
+        assert_eq!(
+            projection.reply_to_google_message_id.as_deref(),
+            (index == 0).then_some("google-target"),
+            "attachment {index}"
+        );
+        // The host reports the attachment accepted, which lets the next index start.
+        gateway
+            .record_rcs_media_commit(queued.command_id, index)
+            .unwrap();
+        gateway
+            .record_rcs_media_outcome(queued.command_id, index, "ok")
+            .unwrap();
+    }
 }

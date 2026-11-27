@@ -1,3 +1,4 @@
+use crate::conversation_merge;
 use crate::rcs_media;
 use crate::rcs_mirror::{MirrorKey, MirrorSource};
 use crate::{
@@ -685,6 +686,30 @@ impl Client {
         sender: Option<RcsGroupSender>,
         provenance: RcsObservationProvenance,
     ) -> Result<RcsReceiveOutcome, Error> {
+        self.ingest_rcs_receive_observation_replying(
+            conversation_id,
+            ownership_generation,
+            record,
+            sender,
+            provenance,
+            None,
+        )
+    }
+
+    /// As `ingest_rcs_receive_observation`, with the Google id of the message this record replies
+    /// to. An invalid id is treated as absent. The reply target is stored on a new message only,
+    /// never on a duplicate or an already stored message. A target that is not resolved in the
+    /// conversation's merge survivor leaves `reply_to` unset and increments the unresolved count
+    /// (diagnostic 339).
+    pub fn ingest_rcs_receive_observation_replying(
+        &self,
+        conversation_id: ConversationId,
+        ownership_generation: u64,
+        record: RcsProjectedRecord,
+        sender: Option<RcsGroupSender>,
+        provenance: RcsObservationProvenance,
+        reply_to_google_message_id: Option<&str>,
+    ) -> Result<RcsReceiveOutcome, Error> {
         if record.google_message_id.is_empty()
             || record.google_conversation_id.is_empty()
             || record.body.len() > 16_384
@@ -693,6 +718,9 @@ impl Client {
                 RcsReceiveCode::IdentityConflict,
             ));
         }
+        // An invalid reply id is absent, so the record still ingests without a reply link.
+        let reply_to_google_message_id =
+            reply_to_google_message_id.filter(|id| valid_google_message_id(id));
         let mut store = self.lock()?;
         let (conn, ctx) = store.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -886,7 +914,24 @@ impl Client {
                     &record.google_conversation_id,
                     record.direction,
                 )?;
+                let reply_to = match reply_to_google_message_id {
+                    Some(target) => {
+                        let resolved = inbound_reply_target(
+                            &tx,
+                            conversation_id,
+                            &record.google_conversation_id,
+                            target,
+                            message_id,
+                        )?;
+                        if resolved.is_none() {
+                            increment_metadata_counter(&tx, RCS_REPLY_UNRESOLVED_COUNTER)?;
+                        }
+                        resolved
+                    }
+                    None => None,
+                };
                 let payload = MessagePayload {
+                    reply_to,
                     record: MessageRecord {
                         message_id,
                         conversation_id,
@@ -2260,6 +2305,12 @@ fn write_link_generation(
 }
 
 const RCS_RECOVERY_VERSION: u32 = 1;
+/// Counts inbound replies whose target is not resolved at ingest. The numeric diagnostic is 339, the
+/// next free code after the receive and reaction codes (287 to 338, `GoogleMessagesLinkDiagnostics.kt`).
+/// The count carries no message text or Google identifiers.
+const RCS_REPLY_UNRESOLVED_COUNTER: &str = "rcs_reply_unresolved_count";
+/// Same bound as Go's `maxMessageIDBytes` (`gmlink/receive.go`).
+const MAX_GOOGLE_MESSAGE_ID_BYTES: usize = 512;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2395,6 +2446,61 @@ fn record_identity(
         params![google_message_id, google_conversation_id, conversation_id.to_string(), ownership_generation, message_id.map(|id| id.to_string())],
     )?;
     Ok(RcsIdentityOutcome::Recorded)
+}
+
+/// The one opaque-id rule for Google message ids, shared with Go's `validGoogleMessageID`: non-empty,
+/// at most 512 bytes, and no Unicode Cc control character. A Rust string is valid UTF-8 already.
+pub(crate) fn valid_google_message_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_GOOGLE_MESSAGE_ID_BYTES && !id.chars().any(char::is_control)
+}
+
+/// The local message a reply names, when its Google identity is known in the same merge survivor
+/// as the receiving conversation. `own` is the new message, which can never be its own target.
+fn inbound_reply_target(
+    conn: &Connection,
+    conversation_id: ConversationId,
+    google_conversation_id: &str,
+    google_message_id: &str,
+    own: MessageId,
+) -> Result<Option<MessageId>, Error> {
+    let identity: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT conversation_id,message_id FROM rcs_message_identities WHERE google_message_id=? AND google_conversation_id=?",
+            params![google_message_id, google_conversation_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((target_conversation, Some(target_message))) = identity else {
+        return Ok(None);
+    };
+    let target_message: MessageId = target_message.parse().map_err(|_| Error::Database)?;
+    if target_message == own {
+        return Ok(None);
+    }
+    let target_conversation: ConversationId =
+        target_conversation.parse().map_err(|_| Error::Database)?;
+    let target_survivor = conversation_merge::survivor(conn, target_conversation)?;
+    let survivor = conversation_merge::survivor(conn, conversation_id)?;
+    Ok((target_survivor == survivor).then_some(target_message))
+}
+
+pub(crate) fn increment_metadata_counter(conn: &Connection, key: &str) -> Result<(), Error> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COALESCE(CAST(v AS INTEGER),0) FROM metadata WHERE k=?",
+            [key],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        params![
+            key,
+            count.checked_add(1).ok_or(Error::Database)?.to_string()
+        ],
+    )?;
+    Ok(())
 }
 
 fn deterministic_message_id(
@@ -2923,5 +3029,20 @@ mod receive_context_snapshot_tests {
                 context_revision: 5,
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod reply_id_tests {
+    use super::valid_google_message_id;
+
+    #[test]
+    fn google_message_ids_are_bounded_and_free_of_control_characters() {
+        assert!(valid_google_message_id("Mx-1"));
+        assert!(!valid_google_message_id(""));
+        assert!(!valid_google_message_id("a\tb"));
+        assert!(!valid_google_message_id("a\nb"));
+        assert!(valid_google_message_id(&"x".repeat(512)));
+        assert!(!valid_google_message_id(&"x".repeat(513)));
     }
 }

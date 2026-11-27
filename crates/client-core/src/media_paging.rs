@@ -295,6 +295,7 @@ mod tests {
                 let message_id = MessageId::new();
                 let attachment_id = AttachmentId::new();
                 let payload = MessagePayload {
+                    reply_to: None,
                     record: MessageRecord {
                         message_id,
                         conversation_id: original,

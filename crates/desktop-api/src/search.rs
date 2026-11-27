@@ -487,6 +487,7 @@ mod tests {
     fn message_window_mapper_accepts_the_existing_message_view() {
         let message = Message {
             payload: MessagePayload {
+                reply_to: None,
                 record: MessageRecord {
                     message_id: MessageId::new(),
                     conversation_id: ConversationId::new(),

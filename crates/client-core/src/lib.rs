@@ -83,11 +83,15 @@ mod reactions;
 mod send_cancellation_decoder_recovery_tests;
 #[cfg(test)]
 mod send_cancellation_validation_tests;
+use reactions::quote_excerpt;
 pub use reactions::{
     OwnReactionRequest, OwnReactionState, RcsReactionEntry, ReactionRoute, ReactionRouting,
     ReactionSubmit, ReactionSupport, ReactionSupportView, SubmitRefusal, compose_reaction_text,
+    compose_reply_text,
 };
+mod replies;
 use reactions::{reaction_refusal_code, store_message_reactions};
+pub use replies::MessageReplySummary;
 #[cfg(test)]
 mod phone_vectors_tests;
 #[cfg(test)]
@@ -521,6 +525,9 @@ pub struct MessagePayload {
     #[serde(default)]
     pub subject: Option<String>,
     pub body: String,
+    /// Local id of the message this one replies to; same conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<MessageId>,
     pub transport: Transport,
     pub direction: Direction,
     /// Set only by authenticated native RCS capture for an unmatched outgoing observation.
@@ -1656,6 +1663,21 @@ pub struct ComposeDraft {
 pub struct DraftSendParts {
     pub caption: bool,
     pub image_groups: Vec<Vec<AttachmentId>>,
+}
+
+/// Optional inputs of `Client::send_compose_draft_with_options`. The default value sends the
+/// draft exactly like `send_compose_draft`.
+#[derive(Clone, Debug, Default)]
+pub struct ComposeSendOptions {
+    /// Refuses the send unless the draft still routes as this transport.
+    pub expected_transport: Option<Transport>,
+    /// Group fields of a send to two or more members.
+    pub group: Option<GroupDraftSend>,
+    /// Split MMS grouping; see `Client::send_compose_draft_with_parts`.
+    pub parts: Option<DraftSendParts>,
+    /// Local id of the message being replied to. It must be in the draft's conversation (after
+    /// merges); the queued message keeps it as `MessagePayload::reply_to` and the body is unchanged.
+    pub reply_to: Option<MessageId>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ComposeDraftUpdate {
@@ -4119,6 +4141,7 @@ fn capture_in(
         }
     };
     let payload = MessagePayload {
+        reply_to: None,
         record: MessageRecord {
             message_id: MessageId::new(),
             conversation_id,
@@ -4215,6 +4238,7 @@ impl Client {
             local_references(&tx, &mms.attachment_ids)?,
             Transport::Mms,
             mms.subject,
+            None,
             None,
             None,
         )?;
@@ -4555,7 +4579,31 @@ impl Client {
         draft_id: DraftId,
         expected_revision: u64,
     ) -> Result<QueuedSend, Error> {
-        self.send_compose_draft_impl(draft_id, expected_revision, None, None, None, None, None)
+        self.send_compose_draft_with_options(
+            draft_id,
+            expected_revision,
+            ComposeSendOptions::default(),
+        )
+    }
+
+    /// Sends the stored draft with the optional inputs in `options`. Every other send entry point
+    /// in this file is a fixed combination of these inputs.
+    pub fn send_compose_draft_with_options(
+        &self,
+        draft_id: DraftId,
+        expected_revision: u64,
+        options: ComposeSendOptions,
+    ) -> Result<QueuedSend, Error> {
+        self.send_compose_draft_impl(
+            draft_id,
+            expected_revision,
+            options.expected_transport,
+            None,
+            None,
+            options.parts.as_ref(),
+            options.group.as_ref(),
+            options.reply_to,
+        )
     }
 
     /// Sends only if transport classification still matches the caller's preflight decision.
@@ -4570,6 +4618,7 @@ impl Client {
             draft_id,
             expected_revision,
             Some(expected_transport),
+            None,
             None,
             None,
             None,
@@ -4594,6 +4643,7 @@ impl Client {
             None,
             None,
             Some(&group),
+            None,
         )
     }
 
@@ -4614,6 +4664,7 @@ impl Client {
             None,
             None,
             Some(&group),
+            None,
         )
     }
 
@@ -4630,6 +4681,7 @@ impl Client {
             None,
             None,
             Some(&parts),
+            None,
             None,
         )
     }
@@ -4675,6 +4727,7 @@ impl Client {
         stored_snapshot: Option<ComposeDraft>,
         parts: Option<&DraftSendParts>,
         group: Option<&GroupDraftSend>,
+        reply_to: Option<MessageId>,
     ) -> Result<QueuedSend, Error> {
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
@@ -4748,9 +4801,20 @@ impl Client {
             )?,
             _ => None,
         };
+        if let Some(target) = reply_to {
+            validate_reply_target(&tx, draft.conversation_id, target)?;
+        }
         let remote_claim_accepted = preset_command_id.is_some();
         let queued = if let Some(parts) = parts {
-            queue_split_draft_messages(&tx, &ctx, &draft, route, preset_command_id, parts)?
+            queue_split_draft_messages(
+                &tx,
+                &ctx,
+                &draft,
+                route,
+                preset_command_id,
+                parts,
+                reply_to,
+            )?
         } else {
             queue_message(
                 &tx,
@@ -4766,6 +4830,7 @@ impl Client {
                 None,
                 preset_command_id,
                 group_fields,
+                reply_to,
             )?
         };
         let next = draft.revision.checked_add(1).ok_or(Error::Database)?;
@@ -4780,6 +4845,7 @@ impl Client {
         Ok(queued)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn send_compose_draft_snapshot(
         &self,
         draft_id: DraftId,
@@ -4788,6 +4854,7 @@ impl Client {
         snapshot: ComposeDraft,
         parts: Option<&DraftSendParts>,
         group: Option<&GroupDraftSend>,
+        reply_to: Option<MessageId>,
     ) -> Result<QueuedSend, Error> {
         self.send_compose_draft_impl(
             draft_id,
@@ -4797,8 +4864,81 @@ impl Client {
             Some(snapshot),
             parts,
             group,
+            reply_to,
         )
     }
+}
+
+/// Metadata counter of carrier replies sent without their quote. Holds no text or IDs.
+const RCS_REPLY_UNQUOTED_COUNTER: &str = "rcs_carrier_reply_unquoted_count";
+
+/// Carrier text for a reply whose target resolves locally in the same merge survivor, through
+/// `effective_carrier_body`. `None` leaves the carrier text as the stored body.
+pub(crate) fn carrier_reply_text(
+    conn: &Connection,
+    message: &MessagePayload,
+) -> Result<Option<String>, Error> {
+    let Some(target) = message.reply_to else {
+        return Ok(None);
+    };
+    let payload: Option<String> = conn
+        .query_row(
+            "SELECT payload FROM messages WHERE id=?",
+            params![target.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    let target: MessagePayload = decode(payload.as_bytes())?;
+    let excerpt = quote_excerpt(&target.body);
+    if excerpt.is_empty() {
+        return Ok(None);
+    }
+    let target_survivor = conversation_merge::survivor(conn, target.record.conversation_id)?;
+    let reply_survivor = conversation_merge::survivor(conn, message.record.conversation_id)?;
+    if target_survivor != reply_survivor {
+        return Ok(None);
+    }
+    // A composed body over the outgoing limit goes out as the reply alone, so the carrier never
+    // receives more text than the core accepts for the stored message.
+    let composed = reactions::quoted_reply(&excerpt, &message.body);
+    Ok((composed.len() <= MAX_BODY_BYTES).then_some(composed))
+}
+
+/// The exact body the carrier receives for `message`: the quoted reply text when it applies, else
+/// the stored body. Admission and `carrier_send_body` both call this, so a host's pre-admission
+/// read matches the permit unless the target changes in between.
+fn effective_carrier_body(conn: &Connection, message: &MessagePayload) -> Result<String, Error> {
+    Ok(carrier_reply_text(conn, message)?.unwrap_or_else(|| message.body.clone()))
+}
+
+/// Checks that a reply target is a message in `conversation_id`'s merge survivor. Runs inside the
+/// caller's transaction so the queued reply and its target are checked together.
+pub(crate) fn validate_reply_target(
+    conn: &Connection,
+    conversation_id: ConversationId,
+    target: MessageId,
+) -> Result<(), Error> {
+    let payload: Option<String> = conn
+        .query_row(
+            "SELECT payload FROM messages WHERE id=?",
+            params![target.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(payload) = payload else {
+        return Err(Error::InvalidRequest("reply target"));
+    };
+    let target_message: MessagePayload = decode(payload.as_bytes())?;
+    let target_survivor =
+        conversation_merge::survivor(conn, target_message.record.conversation_id)?;
+    let draft_survivor = conversation_merge::survivor(conn, conversation_id)?;
+    if target_survivor != draft_survivor {
+        return Err(Error::InvalidRequest("reply target"));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_draft_send_parts(
@@ -4822,8 +4962,12 @@ fn queue_split_draft_messages(
     route: &GatewayRoute,
     preset_command_id: Option<CommandId>,
     parts: &DraftSendParts,
+    reply_to: Option<MessageId>,
 ) -> Result<QueuedSend, Error> {
     let mut command_id = preset_command_id;
+    // The reply attaches to the first queued part only (the caption when there is one, otherwise
+    // the first image group), so the quote shows once per reply.
+    let mut reply_to = reply_to;
     let mut queue_part = |body: String, attachment_ids: &[AttachmentId]| {
         let queued = queue_message(
             tx,
@@ -4839,6 +4983,7 @@ fn queue_split_draft_messages(
             None,
             command_id.take(),
             None,
+            reply_to.take(),
         )?;
         Ok::<_, Error>(queued)
     };
@@ -5191,6 +5336,7 @@ fn queue_sms(
         None,
         None,
         None,
+        None,
     )
 }
 /// The durable command for a queued message. Group fields ride on the text-only `SendCommand`;
@@ -5236,8 +5382,10 @@ fn queue_message(
     subject: Option<String>,
     preset_command_id: Option<CommandId>,
     group: Option<GroupSendFields>,
+    reply_to: Option<MessageId>,
 ) -> Result<QueuedSend, Error> {
     let payload = MessagePayload {
+        reply_to,
         record: MessageRecord {
             message_id: MessageId::new(),
             conversation_id: sms.conversation_id,
@@ -6328,12 +6476,39 @@ impl Client {
         // The attempt time is the gateway's best evidence for the provider row the platform
         // writes when it submits this text; queue time on another device is not.
         record_finalized_attempt(&tx, command_id, "carrier", now_ms)?;
+        // Carrier text is the only place the quote appears; the stored body stays the reply alone.
+        let carrier_body = effective_carrier_body(&tx, &message)?;
+        // The composed quote is always longer than the reply, so the body differs from the stored
+        // one exactly when the quote applied.
+        let quoted = carrier_body != message.body;
+        // A reply sent without its quote (target missing, empty, elsewhere, or too long) is counted.
+        if message.reply_to.is_some() && !quoted {
+            rcs_receive::increment_metadata_counter(&tx, RCS_REPLY_UNQUOTED_COUNTER)?;
+        }
+        // A quoted SMS body differs from the stored one, so its provider rows reconcile against this
+        // digest. A plain body needs none, and MMS rows match by transaction id, not by text.
+        if quoted && message.transport == Transport::Sms {
+            sms_reconciliation::record_carrier_wire_body(&tx, command_id, &carrier_body)?;
+        }
         tx.commit()?;
+        let mut message = message;
+        message.body = carrier_body;
         Ok(PermitDecision::Permit(ReceivedCommand {
             command_id,
             subscription_id,
             message,
         }))
+    }
+
+    /// The body `begin_send_attempt_at` would place on the permit right now, if admission permits
+    /// the command. It does not check admission (cancellation, restore guard, epoch); only the
+    /// permit authorizes a send. Read-only: it records no attempt, counter, or digest. A host
+    /// divides or fits this body before admission and compares the permit's body with it.
+    pub fn carrier_send_body(&self, command_id: CommandId) -> Result<String, Error> {
+        let store = self.lock()?;
+        ensure_recovery_complete(&store)?;
+        let LedgerCommand { message, .. } = ledger_command(&store.conn, command_id)?;
+        effective_carrier_body(&store.conn, &message)
     }
 
     /// Captures a received command's exact stored mapping without authorizing a send.
@@ -7312,6 +7487,7 @@ impl Client {
             message.subject,
             None,
             None,
+            message.reply_to,
         )?;
         set_meta(
             &tx,
@@ -7505,6 +7681,13 @@ impl Client {
             "UPDATE attempts SET state=? WHERE command_id=?",
             params![state_code(next), command_id.to_string()],
         )?;
+        // A failed attempt never matches a provider row again, so its wire digest is dead.
+        if matches!(
+            next,
+            SendState::FailedBeforeSubmission | SendState::FailedConfirmed
+        ) {
+            sms_reconciliation::forget_carrier_wire_body(&tx, command_id)?;
+        }
         emit_status(&tx, &ctx, command_id, next)?;
         tx.commit()?;
         Ok(next)
@@ -16360,6 +16543,12 @@ fn admit_rcs_send(
             observation,
             now_ms,
         )?;
+        let permit = match permit {
+            Some(permit) if prepared_mapping.is_some() => {
+                Some(rcs_send::resolve_native_reply(&tx, permit)?)
+            }
+            other => other,
+        };
         tx.commit()?;
         return permit.ok_or(Error::InvalidRequest("mapping unproven"));
     }
@@ -16382,6 +16571,10 @@ fn admit_rcs_send(
     require_exact_rcs_recipient(&message.message, &mapping)?;
     let tmp_id = finalize_rcs_admission(&tx, command_id, &mapping, observation, now_ms)?;
     let permit = rcs_permit(command_id, message.message, tmp_id, &mapping, observation)?;
+    let permit = match prepared_mapping {
+        Some(_) => rcs_send::resolve_native_reply(&tx, permit)?,
+        None => permit,
+    };
     tx.commit()?;
     Ok(permit)
 }
@@ -16435,13 +16628,20 @@ fn admit_group_rcs_send(
         &current.google_conversation_id,
         request.now_ms,
     )?;
-    let projection = rcs_send::group_commit_projection(
+    let reply_to_google_message_id = rcs_send::native_reply_google_message_id(
+        &tx,
+        message.message.reply_to.as_ref(),
+        message.message.record.conversation_id,
+        &current.google_conversation_id,
+    )?;
+    let mut projection = rcs_send::group_commit_projection(
         request.command_id,
         tmp_id,
         &current,
         request.observation,
         message.message.body,
     )?;
+    projection.reply_to_google_message_id = reply_to_google_message_id;
     tx.commit()?;
     Ok(projection)
 }
@@ -16493,14 +16693,20 @@ fn admit_native_rcs_media_send(
                 &prepared_media,
                 request.now_ms,
             )?;
-            let mut projection = rcs_permit(
+            let permit = rcs_permit(
                 request.command_id,
                 message,
                 tmp_id,
                 &mapping,
                 request.observation,
-            )?
-            .native_commit_projection();
+            )?;
+            // Only the first attachment quotes the reply; each later one would be another quoted message.
+            let permit = if attachment_index == 0 {
+                rcs_send::resolve_native_reply(&tx, permit)?
+            } else {
+                permit
+            };
+            let mut projection = permit.native_commit_projection();
             projection.message_body =
                 rcs_media::planned_content(&tx, request.command_id, attachment_index)?;
             projection.media = Some(media);
@@ -16570,6 +16776,17 @@ fn admit_native_rcs_media_send(
                 &prepared_media,
                 request.now_ms,
             )?;
+            // Only the first attachment quotes the reply; each later one would be another quoted message.
+            let reply_to_google_message_id = if attachment_index == 0 {
+                rcs_send::native_reply_google_message_id(
+                    &tx,
+                    message.reply_to.as_ref(),
+                    message.record.conversation_id,
+                    &current.google_conversation_id,
+                )?
+            } else {
+                None
+            };
             let mut projection = rcs_send::group_commit_projection(
                 request.command_id,
                 tmp_id,
@@ -16577,6 +16794,7 @@ fn admit_native_rcs_media_send(
                 request.observation,
                 rcs_media::planned_content(&tx, request.command_id, attachment_index)?,
             )?;
+            projection.reply_to_google_message_id = reply_to_google_message_id;
             projection.media = Some(media);
             rcs_media::bind_echo_target(
                 &tx,
@@ -17952,6 +18170,7 @@ mod tests {
             .unwrap();
         let payload = |attachments: usize| {
             serde_json::to_string(&MessagePayload {
+                reply_to: None,
                 record: MessageRecord {
                     message_id: MessageId::new(),
                     conversation_id: ConversationId::new(),
@@ -18338,6 +18557,7 @@ mod tests {
         let message_id = MessageId::new();
         let conversation_id = ConversationId::new();
         let message = MessagePayload {
+            reply_to: None,
             record: MessageRecord {
                 message_id,
                 conversation_id,
@@ -19065,6 +19285,7 @@ mod tests {
 
     fn webhook_test_message(sequence: u64, direction: Direction) -> MessagePayload {
         MessagePayload {
+            reply_to: None,
             record: MessageRecord {
                 message_id: MessageId::new(),
                 conversation_id: ConversationId::new(),
@@ -19606,6 +19827,7 @@ mod tests {
         let preview = AttachmentId::new();
         let binding = AttachmentId::new();
         let message = MessagePayload {
+            reply_to: None,
             record: MessageRecord {
                 message_id: MessageId::new(),
                 conversation_id: ConversationId::new(),
@@ -21108,6 +21330,7 @@ mod tests {
             .unwrap();
         let media_payload = |attachment_id| PrivatePayload::MmsMessage {
             message: MessagePayload {
+                reply_to: None,
                 record: MessageRecord {
                     message_id: MessageId::new(),
                     conversation_id: ConversationId::new(),
@@ -22107,6 +22330,7 @@ mod tests {
         let mut message = |ids: &[AttachmentId]| {
             sequence += 1;
             MessagePayload {
+                reply_to: None,
                 record: MessageRecord {
                     message_id: MessageId::new(),
                     conversation_id: conversation,
@@ -22419,6 +22643,7 @@ mod tests {
     fn inbound_mms_bounds_apply_even_when_body_is_present() {
         let producer = DeviceId::new();
         let mut message = MessagePayload {
+            reply_to: None,
             record: MessageRecord {
                 message_id: MessageId::new(),
                 conversation_id: ConversationId::new(),

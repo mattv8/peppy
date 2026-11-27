@@ -2929,6 +2929,7 @@ mod tests {
 
     fn rcs_message(source: DeviceId, direction: Direction) -> MessagePayload {
         MessagePayload {
+            reply_to: None,
             record: MessageRecord {
                 message_id: MessageId::new(),
                 conversation_id: ConversationId::new(),

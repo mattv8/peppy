@@ -404,6 +404,7 @@ mod tests {
             (
                 peppy_client_core::SendState::QueuedLocal,
                 MessageStatus::QueuedLocal,
+                reply_to: None,
             ),
             (
                 peppy_client_core::SendState::FailedBeforeSubmission,

@@ -1952,6 +1952,7 @@ mod tests {
         let observation = observation();
         let conversation_id = ConversationId::new();
         let payload = MessagePayload {
+            reply_to: None,
             record: MessageRecord {
                 message_id: MessageId::new(),
                 conversation_id,

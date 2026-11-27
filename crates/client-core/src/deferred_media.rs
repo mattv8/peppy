@@ -911,6 +911,7 @@ mod tests {
     }
     fn message(source: DeviceId, original: &DeferredOriginal) -> MessagePayload {
         MessagePayload {
+            reply_to: None,
             record: MessageRecord {
                 message_id: MessageId::new(),
                 conversation_id: ConversationId::new(),
