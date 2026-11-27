@@ -1,5 +1,10 @@
 import type { ContactBookView, ContactScanStatus } from "../bridge/bridge";
 
+export type BookEnd = "removed" | "retired";
+/** Why a book no longer syncs from its phone. Removed wins over retired. */
+export const bookEnd = (book: ContactBookView): BookEnd | undefined =>
+  book.sourceRevoked ? "removed" : book.state === "retired" ? "retired" : undefined;
+
 const EDIT_STATE_LABELS: Record<string, string> = {
   pending: "Waiting for the phone",
   "awaiting-approval": "Waiting for approval on the phone",

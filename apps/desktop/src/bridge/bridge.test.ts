@@ -590,7 +590,18 @@ describe("fixture draft saves", () => {
     expect((await fixtureBridge.list_contacts_page("book-pixel8", { sort: givenDesc })).contacts).toEqual(await fixtureBridge.list_contacts("book-pixel8", "", 0, givenDesc));
   });
 
-  it("deletes only a removed phone's fixture book, for every device, and reports its contact count", async () => {
+  it("deletes a retired fixture book whose phone remains on the account", async () => {
+    const book = (await fixtureBridge.list_contact_books()).find(item => item.id === "book-iphone-retired")!;
+    expect(book).toBeDefined();
+    expect(book.state).toBe("retired");
+    expect(book.sourceRevoked).toBeFalsy();
+    expect(book.contactCount).toBe(12);
+    expect(await fixtureBridge.list_contacts(book.id, "", 0)).toHaveLength(book.contactCount);
+    expect((await fixtureBridge.list_devices()).devices.find(device => device.id === book.ownerDeviceId)).toMatchObject({ name: "iPhone", revoked: false });
+    await expect(fixtureBridge.delete_contact_book(book.id)).resolves.toEqual({ bookId: book.id, contacts: book.contactCount });
+  });
+
+  it("deletes a removed phone's fixture book, for every device, and reports its contact count", async () => {
     await expect(fixtureBridge.delete_contact_book("book-pixel8")).rejects.toMatchObject({ code: "contact-book-not-deletable" });
     await expect(fixtureBridge.delete_contact_book("missing")).rejects.toMatchObject({ code: "contact-book-not-deletable" });
 

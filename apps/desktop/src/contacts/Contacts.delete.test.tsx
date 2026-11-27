@@ -5,7 +5,7 @@ import { bridge, type ContactBookView } from "../bridge/bridge";
 import { ContactsView } from "./Contacts";
 import { DeleteBookDialog } from "./DeleteBookDialog";
 import { BookRail } from "./BookRail";
-import { RemovedBookStrip } from "./RemovedBookStrip";
+import { EndedBookStrip } from "./RemovedBookStrip";
 import { deferred, mockContactBook, resetContactBridgeMocks, restoreContactDomGlobals } from "./contacts-test-utils";
 
 vi.mock("../bridge/bridge", { spy: true });
@@ -35,7 +35,7 @@ describe("removed book delete actions", () => {
   afterEach(() => restoreContactDomGlobals());
 
   it("keeps both strip actions in one group, with the delete action last", () => {
-    render(<RemovedBookStrip book={removedBook} onRemoveRequest={vi.fn()} onDeleteRequest={vi.fn()} />);
+    render(<EndedBookStrip book={removedBook} onRemoveRequest={vi.fn()} onDeleteRequest={vi.fn()} />);
     const group = document.querySelector<HTMLElement>("#contacts-book-removed .contacts-strip-actions")!;
     const buttons = within(group).getAllByRole("button");
     expect(buttons.map(button => button.textContent)).toEqual(["Remove from this computer", "Delete for all devices…"]);

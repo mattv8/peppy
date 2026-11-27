@@ -58,7 +58,7 @@ function nextMenuIndex(key: string, current: number, count: number): number | un
   return undefined;
 }
 
-/** Row actions for a removed contact book. Closes on Escape, Tab, outside press, or an item choice. */
+/** Row actions for a removed or retired contact book. Closes on Escape, Tab, outside press, or an item choice. */
 export function BookRowMenu({ label, items, point, anchorRef, onClose }: {
   label: string;
   items: BookMenuEntry[];

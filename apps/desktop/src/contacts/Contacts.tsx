@@ -8,11 +8,11 @@ import { findContactTarget } from "./contact-target";
 import { ContactList } from "./ContactList";
 import { useContactPages } from "./useContactPages";
 import { canCreateContactInBook } from "./conversation-contact";
-import { bookLabels, contactErrorText, scanStatusText } from "./contact-labels";
+import { bookEnd, bookLabels, contactErrorText, scanStatusText } from "./contact-labels";
 import type { ContactActionNotice } from "./contact-action-notice";
 import { BookLookupStrip, BookRail } from "./BookRail";
 import { ContactListHeader } from "./ContactListHeader";
-import { RemoveBookDialog, RemovedBookStrip } from "./RemovedBookStrip";
+import { EndedBookStrip, RemoveBookDialog } from "./RemovedBookStrip";
 import { DeleteBookDialog } from "./DeleteBookDialog";
 import { ContactsActionNotice } from "./ContactsActionNotice";
 import { ContactsStatus, SyncStatusStrip, activeContactsStatus, type ContactsStatusStrip } from "./ContactsStatus";
@@ -265,13 +265,14 @@ export function ContactsView({ books: initialBooks = [], sync, serverConnected =
       .then(next => {
         if (!mountedRef.current) return;
         const selectedBook = booksRef.current.find(item => item.id === currentBookRef.current);
+        const selectedEnd = selectedBook && bookEnd(selectedBook);
         const disappeared = selectedBook && !next.some(item => item.id === selectedBook.id);
         const replacement = disappeared && !selectedBook.sourceRevoked && !removedBookIdRef.current
           ? next.find(item => item.replacedBookIds?.includes(selectedBook.id))
           : undefined;
-        // A removed phone's book vanishing while this computer did not remove or delete it means another device deleted it.
-        if (selectedBook?.sourceRevoked && !next.some(item => item.id === selectedBook.id) && !removedBookIdRef.current) {
-          setActionNotice({ kind: "success", message: <><IsolatedText text={selectedBook.deviceName} />'s contacts were deleted from another device.</> });
+        // An ended book vanishing without a replacement or local action was deleted by another device.
+        if (selectedBook && disappeared && selectedEnd && !replacement && !removedBookIdRef.current) {
+          setActionNotice({ kind: "success", message: <><IsolatedText text={selectedBook.deviceName} />'s {selectedEnd === "retired" ? "retired contact book was" : "contacts were"} deleted from another device.</> });
         } else if (replacement && selectedBook) {
           const allExcluded = next.every(item => item.lookupExcluded);
           setActionNotice({ kind: "success", holdMs: allExcluded ? REPLACED_NOTICE_HOLD_MS : undefined, message: <><IsolatedText text={selectedBook.deviceName} />'s earlier contact book was replaced by its current one.{allExcluded && " No contact book is used for names or recipient search."}</> });
@@ -738,7 +739,7 @@ export function ContactsView({ books: initialBooks = [], sync, serverConnected =
     });
   };
 
-  // Reloading drops the removed book and selects the first remaining one; focus then moves to that book's list entry.
+  // Reloading drops the removed or retired book and selects the first remaining one; focus then moves to that book's list entry.
   const handleBookRemoved = (removedId: string) => {
     removedBookIdRef.current = removedId;
     loadBooks();
@@ -750,7 +751,7 @@ export function ContactsView({ books: initialBooks = [], sync, serverConnected =
   const handleBookDeleted = (deleted: ContactBookView) => {
     setBookDeletion(undefined);
     handleBookRemoved(deleted.id);
-    setActionNotice({ kind: "success", message: <>Deleted <IsolatedText text={deleted.deviceName} />'s contacts for all devices. Other devices remove it as they sync.</> });
+    setActionNotice({ kind: "success", message: <>Deleted <IsolatedText text={deleted.deviceName} />'s {bookEnd(deleted) === "retired" ? "retired contact book" : "contacts"} for all devices. Other devices remove it as they sync.</> });
   };
   // Restore focus only when the previously focused element disappeared with the replaced book.
   useEffect(() => {
@@ -769,7 +770,7 @@ export function ContactsView({ books: initialBooks = [], sync, serverConnected =
     if (!removedId || books.some(item => item.id === removedId)) return;
     removedBookIdRef.current = null;
     const focusTarget = railVisible
-      ? document.querySelector<HTMLElement>("#contacts-books .contacts-book-row[aria-current]")
+      ? document.querySelector<HTMLElement>("#contacts-books .contacts-book-row[aria-current]") ?? document.getElementById("contacts-list-title")
       : document.getElementById("contacts-book-selector") ?? document.getElementById("contacts-list-title") ?? document.getElementById("contacts-list");
     focusTarget?.focus();
   }, [books, railVisible]);
@@ -985,7 +986,7 @@ export function ContactsView({ books: initialBooks = [], sync, serverConnected =
     </p>
   );
 
-  // Deleting a removed phone's book for every device needs unlocked sync, a live connection and a settled contacts sync.
+  // Deleting a removed phone's or retired book for every device needs unlocked sync, a live connection and a settled contacts sync.
   // The strip and menu show the first reason that applies: updating, then locked, then offline, then syncing.
   const deleteDisabledReason = writesPaused ? UPDATE_PAUSED_DESCRIPTION
     : toneDisabled || sync?.readiness?.state === "needs_unlock" ? DELETE_LOCKED_REASON
@@ -994,10 +995,11 @@ export function ContactsView({ books: initialBooks = [], sync, serverConnected =
     : undefined;
 
   // Priority order: the first present strip is the only one the status slot shows.
+  const end = book && bookEnd(book);
   const statusStrips: Array<ContactsStatusStrip | false | null | undefined> = [
     !detailOverlay && unsavedBanner ? { kind: "unsaved", node: unsavedBanner } : null,
     !detailOverlay && !restore && errorBanner ? { kind: "error", node: errorBanner } : null,
-    book?.sourceRevoked ? { kind: "removed", node: <RemovedBookStrip book={book} onRemoveRequest={requestRemoveBook} onDeleteRequest={requestDeleteBook} deleteDisabledReason={deleteDisabledReason} /> } : null,
+    book && end ? { kind: end, node: <EndedBookStrip book={book} onRemoveRequest={requestRemoveBook} onDeleteRequest={requestDeleteBook} deleteDisabledReason={deleteDisabledReason} /> } : null,
     // The sync strip carries the completed-scan wording too, so a finished scan is not hidden behind the repair state.
     contactsRepairState ? { kind: "sync", node: <SyncStatusStrip state={contactsRepairState} text={scanStatus?.state === "completed" && completedScanText ? completedScanText : contactsSyncText} /> } : null,
     sync?.readiness && (sync.readiness.state !== "ready" || !sync.readiness.server_active) ? { kind: "readiness", node: (
@@ -1012,7 +1014,7 @@ export function ContactsView({ books: initialBooks = [], sync, serverConnected =
         {scanStatusText(scanStatus)}
       </p>
     ) } : null,
-    syncDisabledReason && !book?.sourceRevoked ? { kind: "unavailable", node: <p id="contacts-sync-unavailable" role="status">{syncDisabledReason}</p> } : null,
+    syncDisabledReason && !end ? { kind: "unavailable", node: <p id="contacts-sync-unavailable" role="status">{syncDisabledReason}</p> } : null,
   ];
 
   const activeStatus = activeContactsStatus(statusStrips);
