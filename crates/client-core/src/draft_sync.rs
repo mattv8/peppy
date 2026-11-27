@@ -6,8 +6,8 @@
 
 use crate::{
     AttachmentId, AttachmentState, CipherObject, Client, CommandId, ComposeDraft, ConversationId,
-    DraftId, DraftSendParts, Error, GatewayRoute, GroupDraftSend, PurposeKey, Store, VaultId,
-    attachment_retention, attachment_row, conversation_match, decode, media,
+    DraftId, DraftSendParts, Error, GatewayRoute, GroupDraftSend, MessageId, PurposeKey, Store,
+    VaultId, attachment_retention, attachment_row, conversation_match, decode, media,
 };
 use peppy_crypto::{FileKey, decrypt, encrypt};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -57,6 +57,9 @@ struct SendIntentSnapshot {
     /// Group fields of a send to two or more recipients; absent for 1:1 intents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     group: Option<GroupDraftSend>,
+    /// Local id of the replied-to message; absent for a send that is not a reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reply_to: Option<MessageId>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -656,6 +659,20 @@ impl Client {
         parts: Option<DraftSendParts>,
         group: Option<GroupDraftSend>,
     ) -> Result<DraftSendGate, Error> {
+        self.begin_draft_send_for_group_with_reply(draft_id, expected_revision, parts, group, None)
+    }
+
+    /// Like `begin_draft_send_for_group`, and persists `reply_to` in the intent so the remote
+    /// acceptance queues the reply with the same target. The target must be in the draft's
+    /// conversation (after merges), checked here before the intent is written.
+    pub fn begin_draft_send_for_group_with_reply(
+        &self,
+        draft_id: DraftId,
+        expected_revision: u64,
+        parts: Option<DraftSendParts>,
+        group: Option<GroupDraftSend>,
+        reply_to: Option<MessageId>,
+    ) -> Result<DraftSendGate, Error> {
         let mut store = self.lock()?;
         let existing: Option<(String, String, i64, Vec<u8>)> = store
             .conn
@@ -727,6 +744,9 @@ impl Client {
             crate::validate_draft_send_parts(&draft, parts)?;
         }
         crate::compose_references(&store.conn, &draft.attachment_ids)?;
+        if let Some(target) = reply_to {
+            crate::validate_reply_target(&store.conn, draft.conversation_id, target)?;
+        }
         let attachment_ids = draft.attachment_ids.clone();
         // The stored draft's name is authoritative, so the accepted send matches the stored draft.
         let group = group.map(|group| GroupDraftSend {
@@ -741,6 +761,7 @@ impl Client {
             route: draft.route,
             parts,
             group,
+            reply_to,
         })
         .map_err(|_| Error::Database)?;
         let tx = store.conn.transaction()?;
@@ -903,6 +924,7 @@ impl Client {
         }
         let parts = snapshot.parts;
         let group = snapshot.group;
+        let reply_to = snapshot.reply_to;
         drop(store);
         self.send_compose_draft_snapshot(
             draft_id,
@@ -911,6 +933,7 @@ impl Client {
             draft,
             parts.as_ref(),
             group.as_ref(),
+            reply_to,
         )?;
         self.lock()?.conn.execute(
             "UPDATE draft_send_intents SET queued=1 WHERE draft_id=?",
@@ -2466,6 +2489,7 @@ fn install_remote_attachments(conn: &Connection, record: &DraftRecordV1) -> Resu
 #[cfg(test)]
 mod tests {
     use super::SendIntentSnapshot;
+    use crate::MessageId;
 
     #[test]
     fn legacy_send_intent_snapshot_defaults_to_single_part_send() {
@@ -2478,5 +2502,38 @@ mod tests {
         });
         let parsed: SendIntentSnapshot = serde_json::from_value(snapshot).unwrap();
         assert!(parsed.parts.is_none());
+    }
+
+    #[test]
+    fn send_intent_snapshot_without_reply_to_decodes_as_not_a_reply() {
+        let snapshot = serde_json::json!({
+            "conversation_id": uuid::Uuid::new_v4(),
+            "text": "plain",
+            "recipients": ["+15555550100"],
+            "attachment_ids": [],
+            "route": null,
+        });
+        let parsed: SendIntentSnapshot = serde_json::from_value(snapshot).unwrap();
+        assert!(parsed.reply_to.is_none());
+        let encoded = serde_json::to_value(&parsed).unwrap();
+        assert!(encoded.get("reply_to").is_none());
+    }
+
+    #[test]
+    fn send_intent_snapshot_round_trips_reply_to() {
+        let target = MessageId::new();
+        let snapshot = serde_json::json!({
+            "conversation_id": uuid::Uuid::new_v4(),
+            "text": "reply",
+            "recipients": ["+15555550100"],
+            "attachment_ids": [],
+            "route": null,
+            "reply_to": target,
+        });
+        let parsed: SendIntentSnapshot = serde_json::from_value(snapshot).unwrap();
+        assert_eq!(parsed.reply_to, Some(target));
+        let decoded: SendIntentSnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&parsed).unwrap()).unwrap();
+        assert_eq!(decoded.reply_to, Some(target));
     }
 }

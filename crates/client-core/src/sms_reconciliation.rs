@@ -1,13 +1,67 @@
 //! Provider evidence reconciliation without provider-invented command identities.
 
 use crate::{
-    ConversationId, DeviceId, Direction, Error, MessageId, MessagePayload, SourceSequence,
-    Transport,
+    CommandId, ConversationId, DeviceId, Direction, Error, MessageId, MessagePayload,
+    SourceSequence, Transport,
 };
 use rusqlite::{Connection, OptionalExtension, params};
+use sha2::{Digest, Sha256};
 
 const PEPPY_ANDROID_PACKAGE: &str = "dev.peppy.mobile";
 pub(crate) const PEPPY_CLOCK_SKEW_MS: i64 = 120_000;
+const CARRIER_WIRE_DIGEST_PREFIX: &str = "carrier_wire_sha256_v1/";
+
+/// Records the digest of the exact body handed to the carrier for `command_id`. Provider rows of
+/// that attempt reconcile against this digest and not against the stored body, so a quoted reply
+/// cannot claim a plain message with the same clean text, and a plain message cannot claim it.
+pub(crate) fn record_carrier_wire_body(
+    conn: &Connection,
+    command_id: CommandId,
+    wire_body: &str,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO metadata(k,v) VALUES(?,?)",
+        params![
+            carrier_wire_digest_key(&command_id.to_string()),
+            body_digest(wire_body)
+        ],
+    )?;
+    Ok(())
+}
+
+/// Drops the wire digest of an attempt that can no longer match a provider row, such as one the
+/// carrier reported as failed. Only quoted attempts have a digest, so plain sends are a no-op.
+pub(crate) fn forget_carrier_wire_body(
+    conn: &Connection,
+    command_id: CommandId,
+) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM metadata WHERE k=?",
+        params![carrier_wire_digest_key(&command_id.to_string())],
+    )?;
+    Ok(())
+}
+
+/// Drops the wire digests of every attempt of `message_id` once a provider row has settled that
+/// message. Matched messages are excluded from later outgoing matches, so their digests are dead.
+pub(crate) fn forget_carrier_wire_bodies_for_message(
+    conn: &Connection,
+    message_id: MessageId,
+) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM metadata WHERE k IN (SELECT ?1 || c.command_id FROM commands c WHERE c.message_id=?2)",
+        params![CARRIER_WIRE_DIGEST_PREFIX, message_id.to_string()],
+    )?;
+    Ok(())
+}
+
+fn carrier_wire_digest_key(command_id: &str) -> String {
+    format!("{CARRIER_WIRE_DIGEST_PREFIX}{command_id}")
+}
+
+fn body_digest(body: &str) -> String {
+    crate::media::hex(&Sha256::digest(body.as_bytes()))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderSmsEvidence {
@@ -168,10 +222,12 @@ fn unclaimed(conn: &Connection, message_id: &str) -> Result<bool, Error> {
 }
 
 /// Outgoing provider rows reconcile to one unconsumed gateway send attempt on the same route with
-/// the same canonical recipient and exact body. Android writes `date_sent=0` for sends, so the
-/// provider `date` is compared with the gateway's durable attempt time. A Peppy-created row may
-/// also claim a legacy attempt recorded before attempt times existed; a row created by another
-/// app never reconciles, because that app really sent its own message.
+/// the same canonical recipient and the exact text the carrier was handed. An attempt with a
+/// recorded wire digest matches only that digest; a legacy attempt without one matches its stored
+/// body. Android writes `date_sent=0` for sends, so the provider `date` is compared with the
+/// gateway's durable attempt time. A Peppy-created row may also claim a legacy attempt recorded
+/// before attempt times existed; a row created by another app never reconciles, because that app
+/// really sent its own message.
 fn outgoing_match(
     conn: &Connection,
     gateway_device_id: &DeviceId,
@@ -187,10 +243,12 @@ fn outgoing_match(
         return Ok(SmsReconciliation::NoMatch);
     }
     let counterpart = canonical_counterpart(conn, &evidence.counterpart)?;
+    // The wire digest, when the attempt recorded one, comes with the candidate row.
     let mut statement = conn.prepare(
-        "SELECT m.id,m.payload
+        "SELECT m.id,m.payload,wire.v
          FROM attempts a JOIN commands c ON c.command_id=a.command_id
          JOIN command_ledger l ON l.command_id=a.command_id JOIN messages m ON m.id=c.message_id
+         LEFT JOIN metadata wire ON wire.k=(?6 || a.command_id)
          WHERE c.gateway_device_id=?1 AND l.subscription_id=?2
            AND a.state NOT IN ('failed_before_submission','failed_confirmed')
            AND ((?3 IS NOT NULL AND a.attempted_at_ms BETWEEN ?3-?4 AND ?3+?4)
@@ -204,19 +262,32 @@ fn outgoing_match(
                 evidence.subscription_id,
                 provider_time,
                 PEPPY_CLOCK_SKEW_MS,
-                peppy_created
+                peppy_created,
+                CARRIER_WIRE_DIGEST_PREFIX
             ],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
         )?
         .collect::<Result<Vec<_>, _>>()?;
+    let evidence_digest = body_digest(&evidence.body);
     let mut candidates = Vec::new();
-    for (id, encoded) in rows {
+    for (id, encoded, wire_digest) in rows {
         let payload: MessagePayload = crate::decode(encoded.as_bytes())?;
         let same_counterpart = payload.recipients.len() == 1
             && canonical_counterpart(conn, &payload.recipients[0])? == counterpart;
+        let same_body = match wire_digest {
+            Some(digest) => digest == evidence_digest,
+            // Match the stored body when no wire digest exists.
+            None => payload.body == evidence.body,
+        };
         if payload.transport == Transport::Sms
             && payload.direction == Direction::Outgoing
-            && payload.body == evidence.body
+            && same_body
             && same_counterpart
         {
             candidates.push(message_by_id(conn, &id)?);

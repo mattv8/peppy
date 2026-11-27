@@ -1,5 +1,5 @@
 use crate::{
-    CommandId, ConversationId, Error, MessagePayload, Transport,
+    CommandId, ConversationId, Error, MessageId, MessagePayload, Transport,
     conversation_match::canonical_address,
     rcs_group::{self, GroupMappingState, GroupSendAuthority},
     rcs_mapping::{
@@ -20,6 +20,10 @@ const CARRIER_ONLY_PROOF_PREFIX: &str = "rcs_carrier_only_proof_v1/";
 const INTENTIONAL_UNLINK_KEY: &str = "rcs_intentional_unlink_context_v1";
 const RCS_TARGET_IDENTITY_PREFIX: &str = "rcs_target_identity_v1/";
 const ADMISSION_DIAGNOSTIC_PREFIX: &str = "rcs_carrier_admission_diagnostic_v1/";
+const NATIVE_REPLY_DIAGNOSTIC_PREFIX: &str = "rcs_native_reply_diagnostic_v1/";
+/// Fixed code recorded when a native reply's target has no single trusted Google message ID. It
+/// never carries message text or IDs, and it never refuses the send.
+const NATIVE_REPLY_TARGET_UNRESOLVED: &str = "rcs_native_reply_target_unresolved";
 
 /// A completed, target-scoped local lookup which found no eligible RCS target.
 /// This is intentionally a typed host result: unknown, partial, and failed lookups have no
@@ -324,6 +328,73 @@ fn record_admission_diagnostic(
     Ok(())
 }
 
+/// True when a mirror entry for `message_id` is conflicted. A conflicted message has no usable
+/// Google identity for reactions or reply targets, even when an identity row exists.
+pub(crate) fn has_conflicted_mirror(conn: &Connection, message_id: &str) -> Result<bool, Error> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM rcs_mirror_ids c WHERE c.message_id=? AND c.conflicted=1)",
+        [message_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// The Google message ID of the message `message` replies to, in the target's Google conversation.
+/// `None` when the message is not a reply. An unresolved target (no identity row, several rows, or
+/// a conflicted mirror entry for the target) also yields `None`, with a fixed diagnostic.
+pub(crate) fn native_reply_google_message_id(
+    conn: &Connection,
+    reply_to: Option<&MessageId>,
+    conversation_id: ConversationId,
+    google_conversation_id: &str,
+) -> Result<Option<String>, Error> {
+    let Some(target) = reply_to.map(ToString::to_string) else {
+        return Ok(None);
+    };
+    let identities = conn
+        .prepare(
+            "SELECT google_message_id FROM rcs_message_identities WHERE message_id=? AND google_conversation_id=? LIMIT 2",
+        )?
+        .query_map(params![target, google_conversation_id], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let conflicted = has_conflicted_mirror(conn, &target)?;
+    match identities.as_slice() {
+        // An identity that breaks the opaque-id rule would make Go reject the commit after the
+        // permit is consumed, so it is unresolved here instead.
+        [google_message_id]
+            if !conflicted && crate::rcs_receive::valid_google_message_id(google_message_id) =>
+        {
+            Ok(Some(google_message_id.clone()))
+        }
+        _ => {
+            conn.execute(
+                "INSERT INTO metadata(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                params![
+                    format!("{NATIVE_REPLY_DIAGNOSTIC_PREFIX}{conversation_id}"),
+                    NATIVE_REPLY_TARGET_UNRESOLVED
+                ],
+            )?;
+            Ok(None)
+        }
+    }
+}
+
+/// Stores the native reply's Google message ID on an admitted permit. Only native admission calls
+/// this; the carrier-only and legacy RCS paths keep the permit unchanged.
+pub(crate) fn resolve_native_reply(
+    conn: &Connection,
+    mut permit: RcsPermit,
+) -> Result<RcsPermit, Error> {
+    permit.native_reply_google_message_id = native_reply_google_message_id(
+        conn,
+        permit.message.reply_to.as_ref(),
+        permit.conversation_id,
+        &permit.google_conversation_id,
+    )?;
+    Ok(permit)
+}
+
 pub(crate) fn invalidate_carrier_only_proof(
     conn: &Connection,
     conversation_id: ConversationId,
@@ -435,6 +506,8 @@ pub struct RcsPermit {
     google_conversation_id: String,
     target: LocalRcsTargetSnapshot,
     message: MessagePayload,
+    /// Native admission only; resolved in the admission transaction, never part of the proof.
+    native_reply_google_message_id: Option<String>,
 }
 
 impl RcsPermit {
@@ -454,6 +527,7 @@ impl RcsPermit {
             google_conversation_id: mapping.google_conversation_id.clone(),
             target: local_target_snapshot(mapping, observation)?,
             message,
+            native_reply_google_message_id: None,
         })
     }
 
@@ -502,6 +576,7 @@ impl RcsPermit {
             media: None,
             target: self.target.clone(),
             expected_member_digest: None,
+            reply_to_google_message_id: self.native_reply_google_message_id.clone(),
         }
     }
 }
@@ -756,6 +831,7 @@ pub(crate) fn group_commit_projection(
             evidence: observation.native_evidence.clone(),
         },
         expected_member_digest: Some(authority.member_set_digest.clone()),
+        reply_to_google_message_id: None,
     })
 }
 
@@ -765,8 +841,137 @@ fn target_identity_key(command_id: CommandId) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{INTENTIONAL_UNLINK_KEY, IntentionalUnlinkContext, intentional_unlink_is_current};
-    use rusqlite::Connection;
+    use super::{
+        INTENTIONAL_UNLINK_KEY, IntentionalUnlinkContext, NATIVE_REPLY_DIAGNOSTIC_PREFIX,
+        NATIVE_REPLY_TARGET_UNRESOLVED, intentional_unlink_is_current,
+        native_reply_google_message_id,
+    };
+    use crate::{ConversationId, MessageId};
+    use rusqlite::{Connection, OptionalExtension, params};
+
+    const GOOGLE_CONVERSATION: &str = "google-conversation";
+
+    fn reply_store() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metadata(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+             CREATE TABLE rcs_message_identities(
+               google_message_id TEXT NOT NULL,
+               google_conversation_id TEXT NOT NULL,
+               conversation_id TEXT NOT NULL,
+               ownership_generation INTEGER NOT NULL,
+               message_id TEXT,
+               PRIMARY KEY(google_message_id,google_conversation_id)
+             );",
+        )
+        .unwrap();
+        crate::rcs_mirror::initialize(&conn).unwrap();
+        conn
+    }
+
+    fn add_identity(
+        conn: &Connection,
+        google_message: &str,
+        google_conversation: &str,
+        target: MessageId,
+    ) {
+        conn.execute(
+            "INSERT INTO rcs_message_identities(google_message_id,google_conversation_id,conversation_id,ownership_generation,message_id) VALUES(?,?,?,1,?)",
+            params![
+                google_message,
+                google_conversation,
+                ConversationId::new().to_string(),
+                target.to_string()
+            ],
+        )
+        .unwrap();
+    }
+
+    fn diagnostic(conn: &Connection, conversation: ConversationId) -> Option<String> {
+        conn.query_row(
+            "SELECT v FROM metadata WHERE k=?",
+            [format!("{NATIVE_REPLY_DIAGNOSTIC_PREFIX}{conversation}")],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    #[test]
+    fn native_reply_resolves_the_target_in_its_google_conversation() {
+        let conn = reply_store();
+        let target = MessageId::new();
+        let conversation = ConversationId::new();
+        add_identity(&conn, "google-target", GOOGLE_CONVERSATION, target);
+
+        assert_eq!(
+            native_reply_google_message_id(&conn, Some(&target), conversation, GOOGLE_CONVERSATION)
+                .unwrap(),
+            Some("google-target".into())
+        );
+        assert_eq!(diagnostic(&conn, conversation), None);
+    }
+
+    #[test]
+    fn native_send_without_a_reply_has_no_id_and_no_diagnostic() {
+        let conn = reply_store();
+        let conversation = ConversationId::new();
+
+        assert_eq!(
+            native_reply_google_message_id(&conn, None, conversation, GOOGLE_CONVERSATION).unwrap(),
+            None
+        );
+        assert_eq!(diagnostic(&conn, conversation), None);
+    }
+
+    #[test]
+    fn unresolved_native_reply_targets_record_a_fixed_diagnostic_and_no_id() {
+        let target = MessageId::new();
+        type Setup = fn(&Connection, MessageId);
+        let cases: [(&str, Setup); 5] = [
+            ("missing identity", |_, _| {}),
+            ("identity that breaks the opaque-id rule", |conn, target| {
+                add_identity(conn, "google\ttarget", GOOGLE_CONVERSATION, target);
+            }),
+            ("identity in another google conversation", |conn, target| {
+                add_identity(conn, "google-elsewhere", "google-other", target);
+            }),
+            ("several identities in the conversation", |conn, target| {
+                add_identity(conn, "google-first", GOOGLE_CONVERSATION, target);
+                add_identity(conn, "google-second", GOOGLE_CONVERSATION, target);
+            }),
+            ("conflicted mirror entry", |conn, target| {
+                add_identity(conn, "google-target", GOOGLE_CONVERSATION, target);
+                conn.execute(
+                    "INSERT INTO rcs_mirror_ids(mirror_id,conversation_id,source,message_id,conflicted,recorded_at_ms) VALUES('mirror',?,'link',?,1,1)",
+                    params![ConversationId::new().to_string(), target.to_string()],
+                )
+                .unwrap();
+            }),
+        ];
+        for (name, setup) in cases {
+            let conn = reply_store();
+            setup(&conn, target);
+            let conversation = ConversationId::new();
+
+            assert_eq!(
+                native_reply_google_message_id(
+                    &conn,
+                    Some(&target),
+                    conversation,
+                    GOOGLE_CONVERSATION
+                )
+                .unwrap(),
+                None,
+                "{name}"
+            );
+            assert_eq!(
+                diagnostic(&conn, conversation).as_deref(),
+                Some(NATIVE_REPLY_TARGET_UNRESOLVED),
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn legacy_intentional_unlink_context_is_unfenced() {

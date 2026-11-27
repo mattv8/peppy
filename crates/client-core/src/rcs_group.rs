@@ -2953,6 +2953,7 @@ mod tests {
     ) -> Result<NativeCommand, Error> {
         let command_id = CommandId::new();
         let message = MessagePayload {
+            reply_to: None,
             record: MessageRecord {
                 message_id: MessageId::new(),
                 conversation_id: group.conversation,

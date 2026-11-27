@@ -307,6 +307,7 @@ mod tests {
         let source = ConversationId::new();
         let device = DeviceId::new();
         let mut payload = crate::MessagePayload {
+            reply_to: None,
             record: MessageRecord {
                 message_id: MessageId::new(),
                 conversation_id: source,
@@ -377,6 +378,7 @@ mod tests {
         )
         .unwrap();
         let payload = crate::MessagePayload {
+            reply_to: None,
             record: MessageRecord {
                 message_id: MessageId::new(),
                 conversation_id,

@@ -636,6 +636,7 @@ impl Client {
             None,
             None,
             None,
+            None,
         )?;
         tx.commit()?;
         Ok(ReactionSubmit {
@@ -697,13 +698,19 @@ fn refusal_before_attempt(
     if payload.transport != Transport::Rcs {
         return Ok(Some(ReactionRefusal::NotRcs));
     }
-    let identity: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM rcs_message_identities i WHERE i.message_id=? AND i.message_id IS NOT NULL)
-           AND NOT EXISTS(SELECT 1 FROM rcs_mirror_ids c WHERE c.message_id=? AND c.conflicted=1)",
-        params![message_id.to_string(), message_id.to_string()],
-        |row| row.get(0),
-    )?;
-    if !identity {
+    let message = message_id.to_string();
+    // The reaction sends the identity row's Google id, so an id the opaque-id rule rejects is refused
+    // here, before the attempt is recorded. Every row is checked, not just the one the permit reads.
+    let identities: Vec<String> = conn
+        .prepare("SELECT google_message_id FROM rcs_message_identities WHERE message_id=?")?
+        .query_map([&message], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    if identities.is_empty()
+        || identities
+            .iter()
+            .any(|id| !crate::rcs_receive::valid_google_message_id(id))
+        || crate::rcs_send::has_conflicted_mirror(conn, &message)?
+    {
         return Ok(Some(ReactionRefusal::MessageUnavailable));
     }
     if crate::rcs_mapping::current_link_state(conn)? != Some(true) {
@@ -1084,19 +1091,34 @@ fn own_request(
 /// over 80 grapheme clusters keeps its first 79 clusters, trims trailing whitespace, and ends with
 /// an ellipsis. Clusters are UAX #29 extended grapheme clusters, so truncation never splits one.
 pub fn compose_reaction_text(body: &str, emoji: &str) -> String {
+    format!("Reacted {emoji} to “{}”", quote_excerpt(body))
+}
+
+/// The quoted excerpt of a message body, shared by reaction and reply quotes. See
+/// `compose_reaction_text` for the rule.
+pub(crate) fn quote_excerpt(body: &str) -> String {
     let normalized = body
         .nfc()
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let quote = if normalized.graphemes(true).count() > 80 {
+    if normalized.graphemes(true).count() > 80 {
         let kept: String = normalized.graphemes(true).take(79).collect();
         format!("{}…", kept.trim_end())
     } else {
         normalized
-    };
-    format!("Reacted {emoji} to “{quote}”")
+    }
+}
+
+/// The carrier text of a reply: the quoted target excerpt on its own line, then the reply.
+pub fn compose_reply_text(target_body: &str, reply: &str) -> String {
+    quoted_reply(&quote_excerpt(target_body), reply)
+}
+
+/// `compose_reply_text` for a caller that already holds the excerpt.
+pub(crate) fn quoted_reply(excerpt: &str, reply: &str) -> String {
+    format!("“{excerpt}”\n{reply}")
 }
 
 /// Whether the stored eligibility projection says `gateway_id` owns the conversation's RCS link

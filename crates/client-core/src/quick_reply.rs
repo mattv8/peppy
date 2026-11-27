@@ -126,6 +126,7 @@ impl Client {
             None,
             Some(input.command_id),
             group,
+            None,
         )?;
         tx.commit()?;
         Ok(queued)

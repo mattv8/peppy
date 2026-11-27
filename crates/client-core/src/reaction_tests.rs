@@ -590,6 +590,23 @@ fn reaction_compose_text_matches_the_shared_fixture() {
 }
 
 #[test]
+fn reply_quote_matches_the_shared_fixture() {
+    let entries: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../packages/contracts/fixtures/reply-quote.json"
+    ))
+    .unwrap();
+    assert!(!entries.is_empty());
+    for entry in entries {
+        let body = entry["body"].as_str().unwrap();
+        let excerpt = entry["excerpt"].as_str().unwrap();
+        let reply = entry["reply"].as_str().unwrap();
+        let text = entry["text"].as_str().unwrap();
+        assert_eq!(quote_excerpt(body), excerpt, "{body}");
+        assert_eq!(compose_reply_text(body, reply), text, "{body}");
+    }
+}
+
+#[test]
 fn reaction_schema_fresh_install_creates_the_schema_61_objects_and_constraints() {
     let fixture = Fixture::new();
     let store = fixture.client.lock().unwrap();
@@ -711,6 +728,7 @@ pub(crate) fn seed_message(
 ) -> MessageId {
     let message_id = MessageId::new();
     let payload = MessagePayload {
+        reply_to: None,
         record: MessageRecord {
             message_id,
             conversation_id,

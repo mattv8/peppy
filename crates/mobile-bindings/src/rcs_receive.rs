@@ -302,6 +302,7 @@ mod tests {
                     conversation_id: ConversationId::new(),
                     source_sequence: SourceSequence(1),
                     attachments: vec![],
+                reply_to: None,
                 },
                 source_device_id: DeviceId::new(),
                 provider_message_id: None,

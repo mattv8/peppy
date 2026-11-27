@@ -385,6 +385,52 @@ fn reaction_begin_refuses_each_unreachable_message_and_records_not_sent() {
 }
 
 #[test]
+fn reaction_refuses_an_identity_that_breaks_the_opaque_id_rule_before_any_attempt() {
+    let fixture = Fixture::new();
+    let (message, _) = ready_rcs_message(&fixture, "g\ttab");
+    let request = deliver_request(&fixture, fixture.device_id, message, Some("👍"), now());
+
+    assert_eq!(
+        fixture.client.begin_reaction_attempt(request).unwrap(),
+        ReactionAttemptDecision::Refused {
+            reason: ReactionRefusal::MessageUnavailable
+        }
+    );
+    assert_eq!(state_of(&fixture, request).as_deref(), Some("not_sent"));
+    assert_eq!(
+        fixture
+            .query_text("SELECT COUNT(*) FROM reaction_attempts")
+            .as_deref(),
+        Some("0")
+    );
+}
+
+#[test]
+fn reaction_refuses_a_message_with_one_invalid_identity_row_even_when_another_is_valid() {
+    let fixture = Fixture::new();
+    let (message, _) = ready_rcs_message(&fixture, "g-valid");
+    fixture.execute(&format!(
+        "INSERT INTO rcs_message_identities(google_message_id,google_conversation_id,conversation_id,ownership_generation,message_id) \
+         SELECT 'g\ttab',google_conversation_id,conversation_id,ownership_generation,message_id FROM rcs_message_identities WHERE message_id='{message}'"
+    ));
+    let request = deliver_request(&fixture, fixture.device_id, message, Some("👍"), now());
+
+    assert_eq!(
+        fixture.client.begin_reaction_attempt(request).unwrap(),
+        ReactionAttemptDecision::Refused {
+            reason: ReactionRefusal::MessageUnavailable
+        }
+    );
+    assert_eq!(state_of(&fixture, request).as_deref(), Some("not_sent"));
+    assert_eq!(
+        fixture
+            .query_text("SELECT COUNT(*) FROM reaction_attempts")
+            .as_deref(),
+        Some("0")
+    );
+}
+
+#[test]
 fn reaction_unfinished_attempt_found_on_the_next_begin_is_unknown_and_refused() {
     let fixture = Fixture::new();
     let (message, _) = ready_rcs_message(&fixture, "g-crash");

@@ -1033,6 +1033,7 @@ mod tests {
         let device = crate::DeviceId::new();
         let conversation = ConversationId::new();
         let message = MessagePayload {
+            reply_to: None,
             record: crate::MessageRecord {
                 message_id: crate::MessageId::new(),
                 conversation_id: conversation,

@@ -344,6 +344,7 @@ fn media_original_recorded_on_an_rcs_link_is_refused_by_its_route() {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         tx.commit().unwrap();

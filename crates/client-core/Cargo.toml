@@ -53,6 +53,10 @@ name = "rcs_status"
 path = "tests/rcs_status.rs"
 
 [[test]]
+name = "rcs_receive_reply"
+path = "tests/rcs_receive_reply.rs"
+
+[[test]]
 name = "rcs_receive_regressions"
 path = "tests/rcs_receive_regressions.rs"
 
@@ -108,5 +112,5 @@ rusqlite = { version = "=0.32.1", features = ["bundled-sqlcipher-vendored-openss
 
 [dev-dependencies]
 peppy-client-core = { path = ".", features = ["test-support"] }
-rusqlite = { version = "=0.32.1", features = ["hooks"] }
+rusqlite = { version = "=0.32.1", features = ["hooks", "trace"] }
 tempfile.workspace = true

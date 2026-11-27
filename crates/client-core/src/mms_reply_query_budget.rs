@@ -123,6 +123,7 @@ fn indexes_preserve_reply_metadata_and_source_sim_guard() {
     let source = DeviceId::new();
     let other_source = DeviceId::new();
     let message = MessagePayload {
+        reply_to: None,
         record: MessageRecord {
             message_id: MessageId::new(),
             conversation_id: conversation,
