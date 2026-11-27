@@ -29,13 +29,14 @@ const (
 )
 
 type rcsSendRequest struct {
-	CommandID            string             `json:"command_id"`
-	TmpID                string             `json:"tmp_id"`
-	GoogleConversationID string             `json:"google_conversation_id"`
-	MappingRevision      uint64             `json:"mapping_revision"`
-	ProofDigest          string             `json:"proof_digest"`
-	Content              string             `json:"content"`
-	Media                *rcsMediaReference `json:"media,omitempty"`
+	CommandID              string             `json:"command_id"`
+	TmpID                  string             `json:"tmp_id"`
+	GoogleConversationID   string             `json:"google_conversation_id"`
+	MappingRevision        uint64             `json:"mapping_revision"`
+	ProofDigest            string             `json:"proof_digest"`
+	Content                string             `json:"content"`
+	Media                  *rcsMediaReference `json:"media,omitempty"`
+	ReplyToGoogleMessageID string             `json:"reply_to_google_message_id,omitempty"`
 }
 
 type rcsSendResult struct {
@@ -403,10 +404,14 @@ func validatedPayload(conversation *gmproto.Conversation, settings *gmproto.Sett
 	if request.Media != nil {
 		infos = append(infos, &gmproto.MessageInfo{Data: &gmproto.MessageInfo_MediaContent{MediaContent: &gmproto.MediaContent{MediaID: request.Media.MediaID, DecryptionKey: request.Media.Key, MimeType: request.Media.MIME, Size: request.Media.Size, MediaName: request.Media.Name}}})
 	}
-	return &gmproto.SendMessageRequest{
+	payload := &gmproto.SendMessageRequest{
 		ConversationID: conversation.GetConversationID(), SIMPayload: simPayload, TmpID: request.TmpID, ForceRCS: request.Media != nil,
 		MessagePayload: &gmproto.MessagePayload{TmpID: request.TmpID, TmpID2: request.TmpID, ConversationID: conversation.GetConversationID(), ParticipantID: outgoingID, MessageInfo: infos},
-	}, ""
+	}
+	if request.ReplyToGoogleMessageID != "" {
+		payload.Reply = &gmproto.ReplyPayload{MessageID: request.ReplyToGoogleMessageID}
+	}
+	return payload, ""
 }
 
 func validCommitContent(content string, media *rcsMediaReference) bool {

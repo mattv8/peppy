@@ -62,6 +62,14 @@ func TestValidatedPayload(t *testing.T) {
 	if code != "" || payload == nil || payload.GetConversationID() != request.GoogleConversationID || payload.GetTmpID() != request.TmpID {
 		t.Fatalf("validatedPayload() = (%v, %q)", payload, code)
 	}
+	if payload.Reply != nil {
+		t.Fatal("unexpected reply")
+	}
+	request.ReplyToGoogleMessageID = "reply-id"
+	payload, code = validatedPayload(validConversation(), validSettings(), request, false)
+	if code != "" || payload.GetReply().GetMessageID() != "reply-id" {
+		t.Fatalf("reply payload = (%v, %q)", payload, code)
+	}
 }
 
 func TestValidRcsRequestRequiresCanonicalUUID(t *testing.T) {

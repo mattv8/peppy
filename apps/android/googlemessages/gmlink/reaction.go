@@ -3,7 +3,9 @@ package gmlink
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
@@ -172,11 +174,17 @@ func decodeReactionRequest(input string) (reactionRequest, bool) {
 	}
 	if !decodeFixedReactionJSON(input, &request) || request.RequestID == "" || len(request.RequestID) > maxOpaqueIDBytes ||
 		request.GoogleConversationID == "" || len(request.GoogleConversationID) > maxOpaqueIDBytes ||
-		request.GoogleMessageID == "" || len(request.GoogleMessageID) > maxMessageIDBytes ||
+		!validGoogleMessageID(request.GoogleMessageID) ||
 		(request.Action != "add" && request.Action != "switch" && request.Action != "remove") {
 		return reactionRequest{}, false
 	}
 	return request, true
+}
+
+// validGoogleMessageID is the one opaque-id rule for Google message ids: non-empty, bounded, valid UTF-8,
+// and free of control characters (Unicode Cc), the same rule the core applies to a receive reply id.
+func validGoogleMessageID(id string) bool {
+	return id != "" && len(id) <= maxMessageIDBytes && utf8.ValidString(id) && strings.IndexFunc(id, unicode.IsControl) < 0
 }
 
 func reactionPayload(conversation *gmproto.Conversation, settings *gmproto.Settings, request reactionRequest) (*gmproto.SendReactionRequest, bool) {

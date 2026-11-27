@@ -84,7 +84,7 @@ func (link *Link) CommitNativeRcs(ticketID, commitJSON string) string {
 		return reject()
 	}
 	payload, code := validatedPayload(ticket.conversation, ticket.settings, rcsSendRequest{
-		TmpID: commit.TmpID, GoogleConversationID: ticket.targetObservation.GoogleConversationID, Content: commit.MessageBody, Media: commit.Media,
+		TmpID: commit.TmpID, GoogleConversationID: ticket.targetObservation.GoogleConversationID, Content: commit.MessageBody, Media: commit.Media, ReplyToGoogleMessageID: commit.ReplyToGoogleMessageID,
 	}, ticket.group)
 	if code != "" {
 		return reject()
