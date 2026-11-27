@@ -2,6 +2,7 @@ package dev.peppy.mobile.googlemessages.live
 
 import java.util.ArrayDeque
 import java.util.Base64
+import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -345,9 +346,9 @@ internal class LivePublication internal constructor(
         coordinator.retire(this)
     }
 
-    fun closeAsync(coordinator: LiveIncarnationCoordinator) {
+    fun closeAsync(coordinator: LiveIncarnationCoordinator, executor: Executor) {
         closeGate()
-        Thread { coordinator.retire(this) }.start()
+        executor.execute { coordinator.retire(this) }
     }
 
     internal fun closeGate() { gate.set(false) }
@@ -378,6 +379,7 @@ internal class LiveConnection(
     private val core: LiveCore,
     private val localDeviceId: String,
     private val coordinator: LiveIncarnationCoordinator = LiveIncarnationCoordinator(),
+    private val retirementExecutor: Executor = Executor { action -> Thread(action).start() },
 ) {
     private val state = Any(); private val connectionGate = AtomicBoolean(true)
     private var connectionId: String? = null; private var highwater = 0L; private var pending: Pending? = null
@@ -488,6 +490,6 @@ internal class LiveConnection(
         publication?.beginOperation(deadline)
         return true
     }
-    private fun retireLocked() { if (retired) return; retired = true; connectionGate.set(false); pending = null; data.clear(); controls.clear(); controlBytes = 0; publication?.closeAsync(coordinator); publication = null }
+    private fun retireLocked() { if (retired) return; retired = true; connectionGate.set(false); pending = null; data.clear(); controls.clear(); controlBytes = 0; publication?.closeAsync(coordinator, retirementExecutor); publication = null }
     private fun validNonce(value: String) = try { value.length == 22 && Base64.getUrlDecoder().decode(value).let { it.size == 16 && Base64.getUrlEncoder().withoutPadding().encodeToString(it) == value } } catch (_: IllegalArgumentException) { false }
 }

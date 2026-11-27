@@ -55,6 +55,7 @@ class LiveTypingHostTest {
 
     private class QueueExecutor : Executor {
         private val actions = ArrayDeque<Runnable>()
+        val size get() = actions.size
         override fun execute(command: Runnable) { actions += command }
         fun runAll() { while (actions.isNotEmpty()) actions.removeFirst().run() }
         fun runLast() { actions.removeLast().run() }
@@ -155,6 +156,18 @@ class LiveTypingHostTest {
         await { listener.disabled.contains(LiveTypingDisabledReason.PROTOCOL_ERROR) }
         assertTrue(listener.frames.isEmpty())
         assertFalse(host.send("{}", 0L))
+    }
+
+    @Test
+    fun `server revocation reports membership revoked without reconnecting`() {
+        val factory = Factory(); val listener = Listener(); val scheduler = Scheduler(); val executor = QueueExecutor()
+        val host = LiveTypingHost.forTest(factory::create, scheduler, executor = executor)
+        host.start(LiveTypingCredentials("https://example.test", "secret", local), listener)
+        executor.runAll()
+        factory.listeners.single().onClosed(factory.sockets.single(), 4401, "revoked")
+        executor.runAll()
+        assertEquals(listOf(LiveTypingDisabledReason.MEMBERSHIP_REVOKED), listener.disabled)
+        assertTrue(scheduler.entries.none { !it.cancelled })
     }
 
     @Test
@@ -287,6 +300,11 @@ class LiveTypingHostTest {
 
     @Test
     fun `membership response timeout disables then reconnects and enables after the next bootstrap`() {
+        verifyTimeoutRetirement(releaseAfterSuccessor = false)
+        verifyTimeoutRetirement(releaseAfterSuccessor = true)
+    }
+
+    private fun verifyTimeoutRetirement(releaseAfterSuccessor: Boolean) {
         val factory = Factory(); val listener = Listener(); val scheduler = Scheduler(); val clock = Clock(); val executor = QueueExecutor()
         val host = LiveTypingHost.forTest(factory::create, scheduler, clock, executor)
         host.start(LiveTypingCredentials("https://example.test", "secret", local), listener)
@@ -305,20 +323,32 @@ class LiveTypingHostTest {
         assertEquals(2, socket.sent.size)
         clock.now = 25_001L
         scheduler.runNext()
-        executor.runAll()
+        executor.runLast()
 
         assertEquals(listOf(LiveTypingDisabledReason.CONNECTION_LOST), listener.disabled)
         assertTrue(scheduler.entries.any { !it.cancelled && it.delayMs == 1_000L })
+        val oldPublication = listener.enabled.single().publication
+        assertFalse(host.send("{}", oldPublication))
+        assertEquals(1, executor.size)
+        if (!releaseAfterSuccessor) executor.runAll()
+        assertEquals(listOf(LiveTypingDisabledReason.CONNECTION_LOST), listener.disabled)
         scheduler.runNext()
-        executor.runAll()
+        executor.runLast()
         assertEquals(2, factory.sockets.size)
         val nextSocket = factory.sockets.last(); val nextCallback = factory.listeners.last()
         nextCallback.onMessage(nextSocket, bootstrap(device(local)))
-        executor.runAll()
+        executor.runLast()
         challenge = Regex("\\\"challenge_id\\\":\\\"([^\\\"]+)\\\"").find(nextSocket.sent.single())!!.groupValues[1]
         nextCallback.onMessage(nextSocket, "{\"type\":\"membership_response\",\"version\":1,\"connection_id\":\"$connectionId\",\"challenge_id\":\"$challenge\",\"membership_version\":\"1\",\"roster\":[${device(local)}]}")
-        executor.runAll()
+        executor.runLast()
         assertEquals(2, listener.enabled.size)
+        executor.runAll()
+        assertEquals(listOf(LiveTypingDisabledReason.CONNECTION_LOST), listener.disabled)
+        assertFalse(host.send("{}", oldPublication))
+        assertTrue(host.send("{}", listener.enabled.last().publication))
+        executor.runAll()
+        assertEquals("{}", nextSocket.sent.last())
+        assertEquals(listOf(LiveTypingDisabledReason.CONNECTION_LOST), listener.disabled)
         host.stop()
         executor.runAll()
     }
@@ -354,6 +384,7 @@ class LiveTypingHostTest {
         response(1, "${device(local)},${device(peer)}"); assertTrue(listener.enabledLatch.await(1, TimeUnit.SECONDS))
         callback.onMessage(socket, "{\"type\":\"membership_hint\",\"version\":1,\"membership_version\":\"2\"}")
         await { listener.disabled.size == 1 }
+        assertEquals(listOf(LiveTypingDisabledReason.MEMBERSHIP_REVOKED), listener.disabled)
         await { scheduler.entries.size >= 2 }
         clock.now = 20_000
         scheduler.runNext()

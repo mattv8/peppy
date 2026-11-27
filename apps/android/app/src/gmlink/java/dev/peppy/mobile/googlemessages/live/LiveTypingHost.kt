@@ -120,14 +120,14 @@ class LiveTypingHost private constructor(
             }
 
             override fun disable() {
-                if (isCurrent(token)) markDisabled(LiveTypingDisabledReason.MEMBERSHIP_REVOKED)
+                if (isCurrent(token) && socket != null) markDisabled(LiveTypingDisabledReason.MEMBERSHIP_REVOKED)
             }
 
             override fun renewed() {
                 if (isCurrent(token)) listener?.onMembershipRenewed()
             }
         }
-        connection = LiveConnection(clock, core, currentCredentials.localDeviceId)
+        connection = LiveConnection(clock, core, currentCredentials.localDeviceId, retirementExecutor = executor)
         socket = socketFactory(requestFor(currentCredentials), socketListener(token))
     }
 
