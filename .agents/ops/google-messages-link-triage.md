@@ -59,6 +59,22 @@ Native RCS reactions are always on. The phone advertises support (`publishReacti
 
 What is not established: whether a reaction change on an existing message reaches the link as an update event, whether the receive sweep recovers one missed during a reopen (a reaction does not move a chat's last activity, so the memo can skip it, like a status change), and whether Google accepts the message ID for add, switch and remove on both received and sent messages. Start here when a reaction is missing, stuck as sending, or refused as `message_unavailable`.
 
+## Replies
+
+A native RCS reply sends the Google ID of the message it quotes. Core resolves it when the send is admitted: the target's identity row must exist in the permit's Google conversation, with one row and no conflicted mirror entry. The commit JSON then carries `reply_to_google_message_id`, and Go sets the send's `Reply`. An unresolved target omits the key and records diagnostic 340 (metadata `rcs_native_reply_diagnostic_v1/<conversation>`). The send is never refused for it. Legacy and reaction tickets never carry a reply.
+
+The ID rule is one rule on both sides: a Google message ID is non-empty, at most 512 bytes, valid UTF-8, and contains no control characters (Unicode Cc). Go applies it in `validGoogleMessageID`, and core applies it in `valid_google_message_id`.
+
+Received replies arrive as `reply_to_google_message_id` on the record. Go drops an invalid value and emits 341 (`receive/reply_id_invalid`); the record still ingests. Core links the reply only when it inserts a new message, and only to a target identity in the same Google conversation that passes the ID rule. A duplicate keeps the reply it stored. An unresolved target leaves the reply unlinked and increments the metadata counter `rcs_reply_unresolved_count` (339). No diagnostic event is emitted yet, and nothing reads the counter.
+
+A native reply whose stored target identity breaks the ID rule is unresolved like a missing one: the commit omits the key and records 340. A reaction to such a message is refused with `message_unavailable` before any attempt is recorded.
+
+A reply sent over the carrier quotes the target's excerpt in the wire text only. Storage keeps the clean body. The phone reads that text with `carrier_send_body` before admission and refuses a permit whose body differs (FAILED_BEFORE_SUBMISSION). A reply sent unquoted (missing target, empty excerpt, or over the body limit) increments the metadata counter `rcs_carrier_reply_unquoted_count`. A quoted SMS records a fingerprint (SHA-256) of the exact text handed to the carrier, and its provider row matches only that fingerprint, so a quoted reply and a plain message with the same text each match their own row. A plain SMS matches its stored body. A quoted MMS writes no fingerprint and matches by transaction id. Diagnostics 339 and 340 are stored values. The Android registry lists them for when a reader exists.
+
+Recovery walks each page newest first and ingests as it goes. A reply whose target is ingested later, on the same page or in a later walk, stays unlinked. Neither case is repaired yet (the receive sweep is unchanged).
+
+What is not established: whether Google accepts `Reply` for a received, sent or group message (a real-phone check is needed), and how often a reply stays unlinked because its target is ingested later.
+
 ## Conversation index revalidation
 
 libgm reopens its long-poll stream about every 16 minutes on the evidence device, and the safety patch retires the stream on every reopen, including a clean one. The link used to discard the index on each reopen and at ten minutes of age (`conversationIndexMaxAge`), then list every conversation again. It now keeps a copy of a complete index, the probe basis, and checks it against one page.

@@ -317,6 +317,9 @@ notification previews and floating heads.
 - The quick set is fixed (👍 ❤️ 😂 😮 😢 🙏) plus More. More opens a capture field and, only on desktop and only after the field has focus, the OS emoji panel through `open_emoji_picker`. The OS panel returns nothing, so the field takes the first emoji typed into it and always shows the platform shortcut. Accept only what `packages/contracts/fixtures/reaction-emoji.json` accepts.
 - Only the user's own native reaction chip is a button. Other people's chips are images with names in their accessible label; `title` is not the disclosure. Pending, removing, not sent and unknown states differ by border style and icon, not colour alone.
 - SMS/MMS chats show a "Text" segment in the bar, because the reaction is sent as an ordinary message that cannot be taken back.
+- Reply is the first item in the bar on every route, ahead of the SMS/MMS "Text" tag. It is left out when the conversation is read-only.
+- Reply sets a per-conversation composer chip (`#composer-reply-chip`): a tone avatar and an inset quote, with no left border. Its ✕ and Escape cancel the reply, and both are announced. The chip lives in memory only, so it is never saved with the draft, and an accepted send clears it.
+- RCS replies sent through the Google Messages link are real replies. SMS/MMS replies carry the quote as a prefix in the sent text only; a photo-only original shows "Photo" or "Attachment" in the chip and reply line, not in the sent text. Incoming replies show `[data-message-reply-context]` above the bubble, and "Original message not available" when the original is not loaded.
 - Approved mockups and the full interaction spec are not in the repository; screenshot-compare any visual change against the shipped fixture states (`fixtureReactionConversations` in `apps/desktop/src/bridge/bridge.ts`).
 
 ## Floating recipient rail
