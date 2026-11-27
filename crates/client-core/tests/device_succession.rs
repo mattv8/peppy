@@ -413,6 +413,103 @@ fn reverse_applied_succession_resolves_the_terminal_successor() {
 }
 
 #[test]
+fn retired_fence_survives_both_succession_delivery_orders() {
+    for reverse in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let vault = Vault::new();
+        let a_cfg = config(&dir, "retired-chain-a", &vault);
+        let observer_cfg = config(&dir, "retired-chain-observer", &vault);
+        let a = unlocked(&a_cfg, &vault);
+        let observer = unlocked(&observer_cfg, &vault);
+        let b = DeviceId::new();
+        let c = DeviceId::new();
+        capture(&a, &a_cfg, "address-book");
+        a.register_device_hint("android", HINT).unwrap();
+        let mut retired = book(&a_cfg, "address-book");
+        retired["state"] = json!("retired");
+        crate::snapshot_projection::capture(&a, &retired, vec![]);
+        assert_eq!(sync(&queued(&a), &observer).quarantined, 0);
+        observer
+            .delete_contact_book(
+                &json!({"book_id":"address-book","revoked_device_ids":[],"sync_current":true})
+                    .to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            sync(&[hint(&vault, b, 1), hint(&vault, c, 1)], &observer).quarantined,
+            0
+        );
+        let edge = |producer, predecessor, successor| {
+            sealed(
+                &vault,
+                producer,
+                2,
+                PrivatePayload::DeviceSucceeded {
+                    predecessor,
+                    successor,
+                    platform: "android".into(),
+                    hint_tag: tag(&vault),
+                    key_epoch: 1,
+                },
+            )
+        };
+        let ab = edge(b, a_cfg.device_id, b);
+        let bc = edge(c, b, c);
+        let edges = if reverse { vec![bc, ab] } else { vec![ab, bc] };
+        assert_eq!(sync(&edges, &observer).quarantined, 0);
+        let db = sqlcipher(&observer_cfg.database_path);
+        let next: String = db
+            .query_row(
+                "SELECT successor FROM device_successions WHERE predecessor=?",
+                [a_cfg.device_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(next, b.to_string(), "A→B, reverse={reverse}");
+        let terminal: String = db
+            .query_row(
+                "SELECT successor FROM device_successions WHERE predecessor=?",
+                [&next],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(terminal, c.to_string(), "B→C, reverse={reverse}");
+        drop(db);
+        retired["state_revision"] = json!("100");
+        let mut ada = contact("address-book", "ada", "Ada");
+        ada["revision"] = json!("1");
+        let late = [
+            sealed(
+                &vault,
+                a_cfg.device_id,
+                1000,
+                PrivatePayload::ContactBookState {
+                    book: retired.clone(),
+                },
+            ),
+            sealed(
+                &vault,
+                a_cfg.device_id,
+                1001,
+                PrivatePayload::ContactUpserted {
+                    book: retired,
+                    contact: ada,
+                },
+            ),
+        ];
+        assert_eq!(sync(&late, &observer).quarantined, 0);
+        assert!(
+            books(&observer)["books"].as_array().unwrap().is_empty(),
+            "reverse={reverse}"
+        );
+        let count: i64 = sqlcipher(&observer_cfg.database_path)
+            .query_row("SELECT COUNT(*) FROM contacts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "reverse={reverse}");
+    }
+}
+
+#[test]
 fn forward_succession_chain_selects_the_terminal_book_after_reopen() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
