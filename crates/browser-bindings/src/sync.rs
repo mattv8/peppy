@@ -380,6 +380,11 @@ impl BrowserCore {
                     group_create_confirm_duplicate: args
                         .get("groupCreateConfirmDuplicate")
                         .and_then(Value::as_bool),
+                    reply_to: match args.get("replyTo") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(value)) => Some(value.clone()),
+                        Some(_) => return Err(invalid()),
+                    },
                 };
                 let gateways = self
                     .gateways_known
@@ -387,9 +392,22 @@ impl BrowserCore {
                 let parts = compose::prepared_draft_send_parts(client, &input, gateways)
                     .map_err(compose_failure)?;
                 let group = compose::prepared_draft_send_group(&input).map_err(compose_failure)?;
+                let reply_to = compose::draft_reply_target(&input).map_err(compose_failure)?;
                 let gate = client
-                    .begin_draft_send_for_group(draft_id, expected_revision, parts, group)
-                    .map_err(|error| draft_send_failure(error, expected_revision))?;
+                    .begin_draft_send_for_group_with_reply(
+                        draft_id,
+                        expected_revision,
+                        parts,
+                        group,
+                        reply_to,
+                    )
+                    .map_err(|error| {
+                        if compose::is_reply_target_refusal(&error) {
+                            compose_failure(compose::reply_target_unavailable())
+                        } else {
+                            draft_send_failure(error, expected_revision)
+                        }
+                    })?;
                 Ok(
                     json!({"remote": gate.remote.map(|value| json!({"draftId": value.draft_id.to_string(), "revisionId": value.revision_id.to_string(), "commandId": value.command_id.to_string()}))}),
                 )

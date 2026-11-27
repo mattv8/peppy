@@ -1,10 +1,10 @@
 use peppy_desktop_api::{
     AttachmentStateDto, AttachmentTransfer, AttachmentView, DraftAttachmentState, GroupHint,
-    MediaHold, MediaMetadataView, MediaPreviewUnavailable, MessageReactionView, MessageSender,
-    MessageStatus, MessageTransport, MessageView, OwnReactionRefusal, OwnReactionRequestState,
-    OwnReactionRequestView, RcsAttachmentState, RcsSendStatus, ReactionActorView, ReactionRouteDto,
-    SendCancellationStateDto, SendCancellationView, SendRecoveryKind, SendRecoveryView,
-    SentAgainView,
+    MediaHold, MediaMetadataView, MediaPreviewUnavailable, MessageReactionView, MessageReplyView,
+    MessageSender, MessageStatus, MessageTransport, MessageView, OwnReactionRefusal,
+    OwnReactionRequestState, OwnReactionRequestView, RcsAttachmentState, RcsSendStatus,
+    ReactionActorView, ReactionRouteDto, SendCancellationStateDto, SendCancellationView,
+    SendRecoveryKind, SendRecoveryView, SentAgainView,
 };
 use std::{env, fs, path::Path};
 use ts_rs::TS;
@@ -35,6 +35,7 @@ fn contracts() -> String {
         OwnReactionRequestView::decl(),
         SentAgainView::decl(),
         SendRecoveryView::decl(),
+        MessageReplyView::decl(),
         MessageView::decl(),
     ]
     .join("\n")

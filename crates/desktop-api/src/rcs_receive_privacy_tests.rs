@@ -320,6 +320,7 @@ fn rcs_media_never_receives_a_carrier_mms_split_plan() {
             group_name: None,
             expected_member_revision: None,
             group_create_confirm_duplicate: None,
+            reply_to: None,
         };
         let gateway = crate::GatewayView {
             id: input.gateway_id.clone().unwrap(),

@@ -78,6 +78,7 @@ mod conversation_contract_goldens {
             reactions: None,
             own_reaction_request: None,
             reactable: None,
+            reply_to: None,
         }
     }
 
@@ -910,6 +911,26 @@ pub struct MessageView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub reactable: Option<ReactionRouteDto>,
+    /// The message this one replies to; absent when the message is not a reply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reply_to: Option<MessageReplyView>,
+}
+
+/// The reply target shown above a reply. `excerpt` is absent for a media-only target.
+#[derive(Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageReplyView {
+    pub message_id: String,
+    pub sender: MessageSender,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sender_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub excerpt: Option<String>,
+    /// Whether the target message is loaded on this device.
+    pub available: bool,
 }
 
 #[derive(Serialize, ts_rs::TS)]
@@ -1431,6 +1452,7 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
             .as_ref()
             .map(reactions::own_reaction_request_view),
         reactable: reactions::reactable_wire(message.reactable),
+        reply_to: None,
     }
 }
 
@@ -2034,6 +2056,7 @@ mod tests {
     fn message_status_time_serializes_as_optional_decimal_milliseconds() {
         let message = Message {
             payload: MessagePayload {
+                reply_to: None,
                 record: MessageRecord {
                     message_id: MessageId::new(),
                     conversation_id: ConversationId::new(),
@@ -2056,7 +2079,6 @@ mod tests {
             },
             seen: true,
             send_state: Some(SendState::Sent),
-                reply_to: None,
             status_at_ms: Some(1_725_363_180_000),
             send_refusal: None,
             target_gateway_id: None,
@@ -2087,6 +2109,7 @@ mod tests {
     fn message_with_body(direction: Direction, body: &str) -> Message {
         Message {
             payload: MessagePayload {
+                reply_to: None,
                 record: MessageRecord {
                     message_id: MessageId::new(),
                     conversation_id: ConversationId::new(),
@@ -2109,7 +2132,6 @@ mod tests {
             },
             seen: false,
             send_state: None,
-                reply_to: None,
             status_at_ms: None,
             send_refusal: None,
             target_gateway_id: None,
@@ -2292,6 +2314,7 @@ mod message_wire_tests {
             reactions: None,
             own_reaction_request: None,
             reactable: None,
+            reply_to: None,
         }
     }
 
@@ -2771,6 +2794,47 @@ mod message_wire_tests {
                 },
                 "reactable": "native"
             })
+        );
+    }
+
+    #[test]
+    fn reply_json_adds_only_reply_to() {
+        let available = MessageView {
+            reply_to: Some(MessageReplyView {
+                message_id: "target-1".into(),
+                sender: MessageSender::SelfSent,
+                sender_address: None,
+                excerpt: Some("Original text".into()),
+                available: true,
+            }),
+            ..message(MessageSender::Other)
+        };
+        assert_eq!(
+            wire(&available),
+            with_field(
+                minimal_message_json(),
+                "replyTo",
+                json!({"messageId": "target-1", "sender": "self", "excerpt": "Original text", "available": true}),
+            )
+        );
+
+        let unavailable = MessageView {
+            reply_to: Some(MessageReplyView {
+                message_id: "missing-1".into(),
+                sender: MessageSender::Other,
+                sender_address: Some("+15555550100".into()),
+                excerpt: None,
+                available: false,
+            }),
+            ..message(MessageSender::Other)
+        };
+        assert_eq!(
+            wire(&unavailable),
+            with_field(
+                minimal_message_json(),
+                "replyTo",
+                json!({"messageId": "missing-1", "sender": "other", "senderAddress": "+15555550100", "available": false}),
+            )
         );
     }
 

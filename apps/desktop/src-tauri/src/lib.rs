@@ -2730,6 +2730,7 @@ fn copy_draft_input(input: &DraftInput) -> DraftInput {
         group_name: input.group_name.clone(),
         expected_member_revision: input.expected_member_revision.clone(),
         group_create_confirm_duplicate: input.group_create_confirm_duplicate,
+        reply_to: input.reply_to.clone(),
     }
 }
 
@@ -2752,10 +2753,19 @@ fn gate_draft_send(session: &Session, input: &DraftInput) -> BridgeResult<DraftS
     )
     .map_err(session::compose_error)?;
     let group = compose::prepared_draft_send_group(input).map_err(session::compose_error)?;
-    Ok(session
-        .client
-        .begin_draft_send_for_group(draft_id, expected_revision, parts, group)
-        .map(|gate| gate.remote))
+    let reply_to = compose::draft_reply_target(input).map_err(session::compose_error)?;
+    match session.client.begin_draft_send_for_group_with_reply(
+        draft_id,
+        expected_revision,
+        parts,
+        group,
+        reply_to,
+    ) {
+        Err(error) if compose::is_reply_target_refusal(&error) => {
+            Err(session::compose_error(compose::reply_target_unavailable()))
+        }
+        gate => Ok(gate.map(|gate| gate.remote)),
+    }
 }
 
 fn terminated_draft_send_error(reason: peppy_client_core::DraftTerminalReasonCore) -> BridgeError {
