@@ -7,6 +7,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
-syn = { version = "2.0.119", features = ["full"] }
+syn = { version = "3.0.6", features = ["full"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 heck = "0.5"
