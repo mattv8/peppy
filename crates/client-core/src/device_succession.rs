@@ -305,8 +305,9 @@ fn accept(
     if conn.changes() == 0 {
         return Ok(false);
     }
-    // Deletion records a predecessor made stay keyed by it. Once succeeded, it has no authority,
-    // so they never delete the successor's book, whichever arrived first.
+    // Deletion fences stay keyed by the owner they name and cannot delete a continued book.
+    // While that book is absent, earlier publications by the owner the fence names, or by that
+    // owner's predecessors, cannot recreate it (`contact_book_deletion::blocks_recreation`).
     let books: Vec<(String, String)> = conn
         .prepare("SELECT id,body FROM contact_books WHERE owner_device_id=?")?
         .query_map([predecessor.to_string()], |row| {

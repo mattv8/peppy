@@ -276,7 +276,7 @@
   :is(.contacts-book-use, #contacts-book-use) .settings-switch > span { display: none; }
 }
 
-#contacts-book-removed {
+:is(#contacts-book-removed, #contacts-book-retired) {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -289,40 +289,40 @@
   color: var(--peppy-warning-text);
 }
 
-#contacts-book-removed .contacts-strip-text {
+:is(#contacts-book-removed, #contacts-book-retired) .contacts-strip-text {
   flex: 1 1 260px;
   min-width: 0;
   color: var(--peppy-text-primary);
 }
 
-#contacts-book-removed .contacts-strip-text strong {
+:is(#contacts-book-removed, #contacts-book-retired) .contacts-strip-text strong {
   display: block;
   color: var(--peppy-warning-text);
   font-weight: 600;
 }
 
-#contacts-book-removed .contacts-strip-text p {
+:is(#contacts-book-removed, #contacts-book-retired) .contacts-strip-text p {
   margin: 2px 0 0;
 }
 
-#contacts-book-removed .contacts-strip-actions {
+:is(#contacts-book-removed, #contacts-book-retired) .contacts-strip-actions {
   display: flex;
   gap: 8px;
   flex: 0 0 auto;
   margin-left: auto;
 }
 
-#contacts-book-removed .contacts-strip-actions button {
+:is(#contacts-book-removed, #contacts-book-retired) .contacts-strip-actions button {
   white-space: nowrap;
 }
 
-#contacts-book-removed .contacts-strip-actions .destructive-button {
+:is(#contacts-book-removed, #contacts-book-retired) .contacts-strip-actions .destructive-button {
   height: 26px;
   min-height: 26px;
   line-height: 24px;
 }
 
-#contacts-book-removed .contacts-strip-actions .secondary-button {
+:is(#contacts-book-removed, #contacts-book-retired) .contacts-strip-actions .secondary-button {
   height: 26px;
   min-height: 26px;
   line-height: 24px;

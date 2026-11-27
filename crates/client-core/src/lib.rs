@@ -2854,15 +2854,15 @@ impl Client {
         let (conn, ctx) = store.parts();
         contact_sync_requests::request(conn, &ctx, input)
     }
-    /// Deletes a removed device's synced contact book for every device in the vault. Input is
-    /// `{"book_id", "revoked_device_ids", "sync_current"}`; the revoked list and `sync_current` are
+    /// Deletes a non-replaced retired book or a removed device's book for every vault device.
+    /// Input is `{"book_id", "revoked_device_ids", "sync_current"}`; the revoked list and `sync_current` are
     /// the host's trusted facts (a missing `sync_current` is false). Refusals are
     /// `Error::InvalidRequest` with a static reason: "contact book deletion input is invalid",
     /// "contact book deletion needs an up-to-date sync" (`sync_current` is false, or this device
     /// holds pending inbound work, a snapshot not yet drained, a projection draining, staging or
     /// failed, or a latched contact repair), "contact book is not on this device", "contact book
-    /// was already deleted for all devices", "contact book owner is not a removed device", "contact
-    /// book belongs to this device" and "contact book owner was succeeded by another device". A
+    /// was already deleted for all devices", "contact book is neither an eligible retired book nor owned by a removed device",
+    /// "contact book belongs to this device" and "contact book owner was succeeded by another device". A
     /// locked vault returns `KeysUnavailable`, checked before the sync gate. Success returns
     /// `{"status":"deleted","book_id","contacts"}`.
     pub fn delete_contact_book(&self, input: &str) -> Result<String, Error> {
@@ -14282,9 +14282,14 @@ fn apply_record(
                 return Ok(Some(Q::InvalidPayload));
             };
             if contact_book_deletion::targets_own_book(&payload, &ctx.device_id.to_string()) {
-                return Ok(Some(Q::InvalidPayload));
-            }
-            if !contacts::apply_event(
+                if !contact_book_deletion::own_book_is_retired(
+                    conn,
+                    &payload,
+                    &ctx.device_id.to_string(),
+                )? {
+                    return Ok(Some(Q::InvalidPayload));
+                }
+            } else if !contacts::apply_event(
                 conn,
                 &producer.to_string(),
                 historical,
@@ -14292,8 +14297,9 @@ fn apply_record(
                 &payload,
             )? {
                 return Ok(Some(Q::InvalidPayload));
+            } else {
+                contact_media::after_apply(conn, &payload)?;
             }
-            contact_media::after_apply(conn, &payload)?;
         }
         (
             EnvelopePurpose::Event,

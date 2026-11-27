@@ -4,7 +4,7 @@ import { bridge, type ContactBookView } from "../bridge/bridge";
 import { errorCode } from "../bridge/bridgeErrors";
 import { IsolatedText } from "../notices/IsolatedText";
 import { deleteRefusalText } from "./book-delete-copy";
-import { bookContactCountText } from "./contact-labels";
+import { bookContactCountText, bookEnd } from "./contact-labels";
 
 function deleteFailureText(code: string | undefined): string {
   switch (code) {
@@ -14,7 +14,7 @@ function deleteFailureText(code: string | undefined): string {
   }
 }
 
-/** Confirms deleting a removed phone's synced contacts for every vault device. ContactsView owns it, like the removal dialog. */
+/** Confirms deleting the saved contacts of a book its phone no longer syncs, whether the phone was removed or the book was retired, for every other vault device. ContactsView owns it, like the removal dialog. */
 export function DeleteBookDialog({ book, opener, disabledReason, onDismiss, onDeleted, onBooksChanged }: {
   book: ContactBookView;
   opener: RefObject<HTMLElement | null>;
@@ -30,6 +30,7 @@ export function DeleteBookDialog({ book, opener, disabledReason, onDismiss, onDe
   const inFlight = useRef(false);
   const ackRef = useRef<HTMLInputElement>(null);
   const blocked = !acknowledged || busy || Boolean(disabledReason);
+  const retired = bookEnd(book) === "retired";
   const activateDelete = () => {
     if (disabledReason) return;
     if (!acknowledged) {
@@ -55,7 +56,7 @@ export function DeleteBookDialog({ book, opener, disabledReason, onDismiss, onDe
       setBusy(false);
     }
   };
-  return <Modal id="contacts-book-delete-dialog" title={<>Delete <IsolatedText text={book.deviceName} />'s contacts for all devices?</>} opener={opener} busy={busy} onDismiss={onDismiss} actions={<>
+  return <Modal id="contacts-book-delete-dialog" title={<>Delete <IsolatedText text={book.deviceName} />'s {retired ? "retired contact book" : "contacts"} for all devices?</>} opener={opener} busy={busy} onDismiss={onDismiss} actions={<>
     <button type="button" className="secondary-button" disabled={busy} onClick={onDismiss}>Cancel</button>
     <button
       type="button"
@@ -69,10 +70,10 @@ export function DeleteBookDialog({ book, opener, disabledReason, onDismiss, onDe
     </button>
   </>}>
     <ul id="contacts-book-delete-consequences">
-      <li>Deletes the saved copy of {bookContactCountText(book.contactCount)} from every device in your vault.</li>
+      <li>Deletes the saved copy of {bookContactCountText(book.contactCount)} from every device in your vault{retired ? " except the phone itself." : "."}</li>
       <li>Devices that are offline remove it when they next connect.</li>
       <li>Names from this book stop showing in conversations on all your devices.</li>
-      <li><strong>This can't be undone.</strong> Contacts on the phone itself aren't touched.</li>
+      <li><strong>This can't be undone.</strong> Contacts on the phone itself aren't touched{retired ? ", and any newer book from this phone isn't affected." : "."}</li>
     </ul>
     {disabledReason && <p id="contacts-book-delete-dialog-reason">{disabledReason}</p>}
     <label className="contacts-book-delete-ack">

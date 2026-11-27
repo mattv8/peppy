@@ -568,7 +568,7 @@ export function readComposerConversation(search: string): string | null {
 export function sendAgainRouteLabel(gateways: GatewayView[], accountReadOnly = false): SendAgainRouteLabeler {
   const labels = simLabels(gateways);
   return (gateway) => ({
-    simLabel: gateway.simId ? (labels.get(routeKey(gateway.id, gateway.simId)) ?? gateway.simId) : undefined,
+    simLabel: gateway.simId ? labels.get(routeKey(gateway.id, gateway.simId)) : undefined,
     statusLabel: availabilityLabel(gateway, accountReadOnly),
   });
 }
@@ -580,8 +580,15 @@ const routeKey = (gatewayId: string, simId: string) =>
 function formatAge(seconds: number): string { return seconds < 60 ? "under a minute" : seconds < 3_600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3_600)}h`; }
 function simLabels(gateways: GatewayView[]): Map<string, string> {
   const labels = new Map<string, string>();
+  const simsByGateway = new Map<string, Set<string>>();
+  gateways.filter((gateway) => gateway.simId).forEach((gateway) => {
+    const sims = simsByGateway.get(gateway.id) ?? new Set<string>();
+    sims.add(gateway.simId);
+    simsByGateway.set(gateway.id, sims);
+  });
   const simCounts = new Map<string, number>();
   gateways.filter((gateway) => gateway.simId).forEach((gateway) => {
+    if ((simsByGateway.get(gateway.id)?.size ?? 0) < 2) return;
     const key = routeKey(gateway.id, gateway.simId);
     if (labels.has(key)) return;
     const simCount = (simCounts.get(gateway.id) ?? 0) + 1;
@@ -687,7 +694,7 @@ function GatewaySelector({
     );
     if (gateway) onSelect(gateway);
   };
-  const simLabel = (gateway: GatewayView) => gateway.simId ? (labels.get(routeKey(gateway.id, gateway.simId)) ?? gateway.simId) : "No SMS SIM";
+  const simLabel = (gateway: GatewayView) => gateway.simId ? labels.get(routeKey(gateway.id, gateway.simId)) : "No SMS SIM";
   const selectedGateway = route.kind === "route" ? route.gateway : undefined;
   const selectedAvailability = selectedGateway && gatewayAvailability(selectedGateway);
   // The finished-setup hint says "You can send now", so it is raised only for a phone that is actually
@@ -773,7 +780,7 @@ export function headRoutePresentation(route: RouteChoice, gateways: GatewayView[
   }
   if (liveSettingUpGatewayFor(route, gateways)) return { state: peppyCopy.gateway_status_setting_up, label: peppyCopy.gateway_status_setting_up };
   if (route.kind === "stale") return { state: "SIM unavailable", label: "SIM unavailable" };
-  const simLabel = simLabels(gateways).get(routeKey(route.gateway.id, route.gateway.simId)) ?? route.gateway.simId;
+  const simLabel = simLabels(gateways).get(routeKey(route.gateway.id, route.gateway.simId));
   if (gatewayAvailability(route.gateway) === "no_sms_sim") return { state: "No SMS SIM", label: "No SMS SIM" };
   let state: string;
   switch (gatewayAvailability(route.gateway)) {
@@ -782,7 +789,7 @@ export function headRoutePresentation(route: RouteChoice, gateways: GatewayView[
     case "offline": state = "Not responding"; break;
     default: state = availabilityLabel(route.gateway, accountReadOnly);
   }
-  return { sim: simLabel, state, label: `${simLabel}, ${state}` };
+  return { sim: simLabel, state, label: `${simLabel ?? route.gateway.name}, ${state}` };
 }
 
 function HeadRoutePill({ content, gateways, accountReadOnly = false, rcsBlock = { kind: "none" } }: { content: DraftContent; gateways: GatewayView[]; accountReadOnly?: boolean; rcsBlock?: ReturnType<typeof rcsSendBlock> }) {

@@ -177,6 +177,12 @@ it("retains an ordinary retired book without a notice", async () => {
   expect(document.getElementById("contacts-action-notice")).toBeEmptyDOMElement();
 });
 
+it("announces a replacement instead of deletion when a retired book is superseded", async () => {
+  const { replacement, refresh } = await setup({ state: "retired" });
+  await refresh([replacement]);
+  expect(noticeText()).toBe(shortNotice);
+});
+
 it("falls back silently when no survivor identifies the vanished book", async () => {
   const { replacement, refresh } = await setup({}, { replacedBookIds: undefined });
   await refresh([replacement]);

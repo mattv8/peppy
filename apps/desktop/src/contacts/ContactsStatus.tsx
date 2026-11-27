@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Clock, Loader2, TriangleAlert } from "@peppy/desktop-ui";
 
-export type ContactsStatusKind = "unsaved" | "error" | "removed" | "sync" | "readiness" | "scan" | "unavailable";
+export type ContactsStatusKind = "unsaved" | "error" | "removed" | "retired" | "sync" | "readiness" | "scan" | "unavailable";
 export type ContactsRepairState = "rebuilding" | "repairWaiting" | "failed" | "needsRepair";
 
 export type ContactsStatusStrip = { kind: ContactsStatusKind; node: ReactNode };

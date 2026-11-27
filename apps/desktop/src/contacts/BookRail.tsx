@@ -2,7 +2,7 @@ import { useCallback, useRef, useState, type CSSProperties, type RefObject } fro
 import { Ellipsis, PhoneOff, Search, Smartphone } from "@peppy/desktop-ui";
 import type { ContactBookView } from "../bridge/bridge";
 import type { PostContactActionNotice } from "./contact-action-notice";
-import { bookContactCountText, bookLabels, bookStateText, bookSummaryText } from "./contact-labels";
+import { bookContactCountText, bookEnd, bookLabels, bookStateText, bookSummaryText } from "./contact-labels";
 import { BookRowMenu, pointerMenuPoint, underButtonPoint, type BookMenuEntry, type BookMenuPoint } from "./BookRowMenu";
 import { bookUseSwitchId, useBookLookup, type BookLookup, type LookupFailure } from "./useBookLookup";
 import "./book-rail.css";
@@ -27,7 +27,7 @@ export function BookRail({ books, loading, bookId, width, panelRef, onSelect, on
   lookupFailure?: LookupFailure;
 }) {
   const lookup = useBookLookup({ books, bookId, onBooksChanged, onNotice, failure: lookupFailure });
-  const { suffix } = bookLabels(books);
+  const { suffix, label } = bookLabels(books);
   const railStyle = { "--contacts-book-width": `${width}px` } as CSSProperties;
   return (
     <aside ref={panelRef} id="contacts-book-list" aria-label="Contact books" style={railStyle}>
@@ -44,6 +44,7 @@ export function BookRail({ books, loading, bookId, width, panelRef, onSelect, on
             item={item}
             selected={item.id === bookId}
             suffix={suffix(item)}
+            label={label(item)}
             showSwitch={books.length >= 2 || Boolean(item.lookupExcluded)}
             lookup={lookup}
             onSelect={onSelect}
@@ -59,10 +60,11 @@ export function BookRail({ books, loading, bookId, width, panelRef, onSelect, on
   );
 }
 
-function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, onRemoveRequest, onDeleteRequest, deleteDisabledReason, railRef, onNotice }: {
+function BookRailItem({ item, selected, suffix, label, showSwitch, lookup, onSelect, onRemoveRequest, onDeleteRequest, deleteDisabledReason, railRef, onNotice }: {
   item: ContactBookView;
   selected: boolean;
   suffix: string;
+  label: string;
   showSwitch: boolean;
   lookup: BookLookup;
   onSelect(bookId: string): void;
@@ -73,6 +75,7 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
   onNotice: PostContactActionNotice;
 }) {
   const hintId = `contacts-book-use-hint-${item.id}`;
+  const end = bookEnd(item);
   const use = item.lookupExcluded ? "excluded" : "included";
   const moreButton = useRef<HTMLButtonElement>(null);
   const [menuPoint, setMenuPoint] = useState<BookMenuPoint | null>(null);
@@ -92,7 +95,7 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
       onKeyDown={event => {
         if (lookup.confirmBookId === item.id && event.key === "Escape") { event.preventDefault(); lookup.cancelConfirm(); }
       }}
-      onContextMenu={item.sourceRevoked ? event => {
+      onContextMenu={end ? event => {
         event.preventDefault();
         setMenuPoint(pointerMenuPoint(event.clientX, event.clientY, railLeft()));
       } : undefined}
@@ -111,14 +114,14 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
           <b>{item.deviceName}</b>
           {suffix && <span className="contacts-book-id">{suffix}</span>}
           {item.lookupExcluded && <span className="contacts-book-hidden">Hidden from names</span>}
-          {item.sourceRevoked ? <>
-            <small className="contacts-book-removed-text" data-book-state={item.state}>{bookStateText(item)}</small>
+          {end ? <>
+            <small className={item.sourceRevoked ? "contacts-book-removed-text" : undefined} data-book-state={item.state}>{bookStateText(item)}</small>
             <small>{bookContactCountText(item.contactCount)}</small>
           </> : <small data-book-state={item.state}>{bookSummaryText(item)}</small>}
           {item.defaultAccountLabel && <small className="contacts-book-account">{item.defaultAccountLabel}</small>}
         </span>
       </button>
-      {(showSwitch || item.sourceRevoked) && (
+      {(showSwitch || end) && (
         <div className="contacts-book-use">
           {showSwitch && <>
             <Search size={14} aria-hidden />
@@ -128,7 +131,7 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
                 data-action="toggle-book-use"
                 type="checkbox"
                 role="switch"
-                aria-label={`Use ${item.deviceName} for names and recipient search`}
+                aria-label={`Use ${label} for names and recipient search`}
                 aria-describedby={hintId}
                 title={BOOK_USE_HINT}
                 checked={!item.lookupExcluded}
@@ -139,13 +142,13 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
             </span>
             <span id={hintId} className="visually-hidden">{BOOK_USE_HINT}</span>
           </>}
-          {item.sourceRevoked && (
+          {end && (
             <button
               ref={moreButton}
               type="button"
               className="contacts-book-more"
               data-action="book-menu"
-              aria-label={`More actions for ${item.deviceName}`}
+              aria-label={`More actions for ${label}`}
               aria-haspopup="menu"
               aria-expanded={menuPoint !== null}
               title="More actions"
@@ -161,7 +164,7 @@ function BookRailItem({ item, selected, suffix, showSwitch, lookup, onSelect, on
       )}
       {menuPoint && (
         <BookRowMenu
-          label={`Actions for ${item.deviceName}`}
+          label={`Actions for ${label}`}
           items={menuItems}
           point={menuPoint}
           anchorRef={moreButton}

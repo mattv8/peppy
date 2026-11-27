@@ -2670,6 +2670,17 @@ fn apply_peer(
                 return Ok(true);
             }
             let (id, rev, body) = peer_contact(contact, book_id)?;
+            // Only a book that was absent before this record can be recreated by it.
+            if prior_generation.is_none()
+                && crate::contact_book_deletion::blocks_recreation(
+                    conn,
+                    producer,
+                    book_id,
+                    revision(book, "generation")?,
+                )?
+            {
+                return Ok(true);
+            }
             let owner = publication_owner(conn, book)?;
             let book_generation = revision(book, "generation")?;
             if crate::contact_book_deletion::member_covers(
@@ -2901,6 +2912,7 @@ fn apply_book(conn: &Connection, producer: &str, book: &Value) -> Result<bool, E
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
+    let absent = stored.is_none();
     if let Some((owner, stored_generation, stored_body)) = stored {
         if !owner_or_successor(conn, &owner, producer)? {
             return Ok(false);
@@ -2914,6 +2926,9 @@ fn apply_book(conn: &Connection, producer: &str, book: &Value) -> Result<bool, E
         if !book_supersedes(stored_generation, &stored_body, generation, book)? {
             return Ok(true);
         }
+    }
+    if absent && crate::contact_book_deletion::blocks_recreation(conn, producer, id, generation)? {
+        return Ok(true);
     }
     let mut body = book.clone();
     strip_sources(&mut body);
@@ -2954,6 +2969,238 @@ mod tests {
         PrivatePayload::ContactUpserted {
             book: book("owner", "1"),
             contact: contact(rev, name),
+        }
+    }
+
+    fn succeeded_fenced_book() -> Connection {
+        let conn = db();
+        conn.execute_batch(
+            "INSERT INTO deleted_contact_books VALUES('b1','owner',1,0);
+             INSERT INTO device_successions VALUES('owner','successor','android','hint',1);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn fenced_predecessor_invalid_records_remain_rejected() {
+        let mut bad_state = book("owner", "1");
+        bad_state["state_revision"] = json!("07");
+        let records = [
+            PrivatePayload::ContactBookState {
+                book: book("foreign", "1"),
+            },
+            PrivatePayload::ContactBookState {
+                book: book("owner", "07"),
+            },
+            PrivatePayload::ContactBookState { book: bad_state },
+            PrivatePayload::ContactUpserted {
+                book: book("owner", "1"),
+                contact: contact("07", "invalid"),
+            },
+        ];
+        for record in records {
+            assert!(!apply_event(&succeeded_fenced_book(), "owner", false, 1, &record).unwrap());
+        }
+    }
+
+    #[test]
+    fn fenced_predecessor_state_and_upsert_leave_no_book_or_completion() {
+        for record in [
+            PrivatePayload::ContactBookState {
+                book: book("owner", "1"),
+            },
+            upsert("1", "Ada"),
+        ] {
+            let conn = succeeded_fenced_book();
+            assert!(apply_event(&conn, "owner", false, 1, &record).unwrap());
+            for table in [
+                "contact_books",
+                "contacts",
+                "contact_book_deletion_completion",
+                "contact_book_deletion_completion_contacts",
+            ] {
+                let count: i64 = conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(count, 0, "{table}");
+            }
+        }
+    }
+
+    #[test]
+    fn successor_fence_coverage_owes_as_before_when_predecessor_is_also_fenced() {
+        let conn = succeeded_fenced_book();
+        conn.execute_batch(
+            "CREATE TABLE metadata(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+             INSERT INTO deleted_contact_books VALUES('b1','successor',1,0);",
+        )
+        .unwrap();
+        assert!(apply_event(&conn, "owner", false, 1, &upsert("1", "Ada")).unwrap());
+        let owed: (String, String, i64, i64) = conn
+            .query_row(
+                "SELECT book_id,owner_device_id,generation,gate_cursor FROM contact_book_deletion_completion",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(owed, ("b1".into(), "successor".into(), 1, 0));
+        let member: (String, String, String) = conn
+            .query_row(
+                "SELECT book_id,owner_device_id,contact_id FROM contact_book_deletion_completion_contacts",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(member, ("b1".into(), "successor".into(), "c1".into()));
+        for table in [
+            "contact_book_deletion_completion",
+            "contact_book_deletion_completion_contacts",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1, "{table}");
+        }
+        assert!(stored_owner(&conn, "b1").unwrap().is_none());
+    }
+
+    #[test]
+    fn fenced_predecessor_forgotten_book_is_present() {
+        let conn = succeeded_fenced_book();
+        conn.execute(
+            "INSERT INTO contact_books(id,owner_device_id,generation,state,body,forgotten) VALUES('b1','successor',1,'active',?,1)",
+            [book("successor", "1").to_string()],
+        ).unwrap();
+        assert!(
+            !apply_event(
+                &conn,
+                "owner",
+                false,
+                1,
+                &PrivatePayload::ContactBookState {
+                    book: book("owner", "1")
+                }
+            )
+            .unwrap()
+        );
+        let forgotten: i64 = conn
+            .query_row(
+                "SELECT forgotten FROM contact_books WHERE id='b1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(forgotten, 1);
+    }
+
+    #[test]
+    fn fenced_predecessor_higher_generation_then_lower_uses_base_rules() {
+        let conn = succeeded_fenced_book();
+        assert!(
+            apply_event(
+                &conn,
+                "owner",
+                false,
+                1,
+                &PrivatePayload::ContactBookState {
+                    book: book("owner", "2")
+                }
+            )
+            .unwrap()
+        );
+        let owner: String = conn
+            .query_row(
+                "SELECT owner_device_id FROM contact_books WHERE id='b1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner, "successor");
+        assert!(
+            !apply_event(
+                &conn,
+                "owner",
+                false,
+                1,
+                &PrivatePayload::ContactBookState {
+                    book: book("owner", "1")
+                }
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn fenced_predecessor_does_not_block_successor_publications() {
+        for named_owner in ["owner", "successor"] {
+            let conn = succeeded_fenced_book();
+            let record = PrivatePayload::ContactUpserted {
+                book: book(named_owner, "1"),
+                contact: contact("1", "Ada"),
+            };
+            assert!(apply_event(&conn, "successor", false, 1, &record).unwrap());
+            let owner: String = conn
+                .query_row(
+                    "SELECT owner_device_id FROM contact_books WHERE id='b1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(owner, "successor");
+        }
+    }
+
+    #[test]
+    fn unsucceeded_exact_fence_keeps_base_coverage() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO deleted_contact_books VALUES('b1','owner',1,0)",
+            [],
+        )
+        .unwrap();
+        assert!(!crate::contact_book_deletion::blocks_recreation(&conn, "owner", "b1", 1).unwrap());
+        assert!(
+            apply_event(
+                &conn,
+                "owner",
+                false,
+                1,
+                &PrivatePayload::ContactBookState {
+                    book: book("owner", "1")
+                }
+            )
+            .unwrap()
+        );
+        assert!(stored_owner(&conn, "b1").unwrap().is_none());
+    }
+
+    #[test]
+    fn fenced_predecessor_removal_does_not_restore_absent_book() {
+        for embedded in [false, true] {
+            let conn = succeeded_fenced_book();
+            let mut tombstone = json!({"contact_id":"c1","revision":"1","deleted_at":1,"restored_contact":contact("1","Ada")});
+            if embedded {
+                tombstone["book"] = book("owner", "1");
+            }
+            let removal = PrivatePayload::ContactRemoved {
+                book_id: "b1".into(),
+                contact_id: "c1".into(),
+                tombstone,
+            };
+            assert!(
+                !apply_event(&conn, "owner", false, 1, &removal).unwrap(),
+                "embedded={embedded}"
+            );
+            assert!(stored_owner(&conn, "b1").unwrap().is_none());
+            let contacts: i64 = conn
+                .query_row("SELECT COUNT(*) FROM contacts", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(contacts, 0);
         }
     }
     fn name(conn: &Connection) -> (String, Option<i64>) {

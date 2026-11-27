@@ -1062,6 +1062,16 @@ fn stage_contact_payload(
             {
                 return Ok(true);
             }
+            if known_book(conn, generation, book_id)?.is_none()
+                && contact_book_deletion::blocks_recreation(
+                    conn,
+                    producer,
+                    book_id,
+                    book_generation,
+                )?
+            {
+                return Ok(true);
+            }
             conn.execute(
                 &format!(
                     "INSERT INTO projection_contacts(generation,book_id,contact_id,revision,body,deleted_at,publication_owner,publication_generation) VALUES(?,?,?,?,?,NULL,?,?) ON CONFLICT(generation,book_id,contact_id) DO UPDATE SET revision=CASE WHEN excluded.revision>projection_contacts.revision THEN excluded.revision ELSE projection_contacts.revision END,body=CASE WHEN excluded.revision>projection_contacts.revision THEN excluded.body ELSE projection_contacts.body END,deleted_at=CASE WHEN excluded.revision>projection_contacts.revision THEN NULL ELSE projection_contacts.deleted_at END,publication_owner=excluded.publication_owner,publication_generation={} WHERE excluded.revision>=projection_contacts.revision",
@@ -1359,6 +1369,11 @@ fn stage_book(
         }
     } else {
         contacts::book_state_revision(book)?;
+    }
+    if known_book(conn, generation, id)?.is_none()
+        && contact_book_deletion::blocks_recreation(conn, producer, id, book_generation)?
+    {
+        return Ok(true);
     }
     let mut body = book.clone();
     contacts::strip_sources(&mut body);
@@ -2296,6 +2311,276 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blocked_staged_removal_with_embedded_book_is_ignored() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::contacts::initialize(&conn).unwrap();
+        initialize(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO deleted_contact_books VALUES('b1','owner',1,0);
+             INSERT INTO device_successions VALUES('owner','successor','android','hint',1);",
+        )
+        .unwrap();
+        let record = PrivatePayload::ContactRemoved {
+            book_id: "b1".into(),
+            contact_id: "c1".into(),
+            tombstone: serde_json::json!({
+                "contact_id":"c1","revision":"1","deleted_at":1,
+                "book":{"id":"b1","owner_device_id":"owner","generation":"1"},
+                "restored_contact":{"id":"c1","book_id":"b1","revision":"1","display_name":"Ada"}
+            }),
+        };
+        assert!(stage(&conn, 1, "observer", "owner", 1, record).unwrap());
+        for table in [
+            "projection_books",
+            "projection_contacts",
+            "projection_covered_contacts",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table}");
+        }
+    }
+
+    #[test]
+    fn staged_predecessor_contact_before_successor_book_is_not_retained() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let device = crate::DeviceId::new();
+        let client = Client::open(
+            crate::ClientConfig {
+                database_path: directory.path().join("stage-order.db"),
+                vault_id: crate::VaultId::new(),
+                device_id: device,
+            },
+            crate::DatabaseKey::new(&[8; 32]).unwrap(),
+        )
+        .unwrap();
+        let mut store = client.lock().unwrap();
+        let (conn, ctx) = store.parts();
+        conn.execute_batch(
+            "INSERT INTO deleted_contact_books VALUES('b1','owner',1,0);
+             INSERT INTO device_successions VALUES('owner','successor','android','hint',1);",
+        )
+        .unwrap();
+        let predecessor = PrivatePayload::ContactUpserted {
+            book: serde_json::json!({"id":"b1","owner_device_id":"owner","generation":"1"}),
+            contact: serde_json::json!({"id":"c1","book_id":"b1","revision":"1","display_name":"Ada"}),
+        };
+        let successor = PrivatePayload::ContactBookState {
+            book: serde_json::json!({"id":"b1","owner_device_id":"successor","generation":"1"}),
+        };
+        assert!(stage(conn, 1, "observer", "owner", 1, predecessor.clone()).unwrap());
+        assert!(stage(conn, 1, "observer", "successor", 1, successor.clone()).unwrap());
+        let books: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM projection_books WHERE owner_device_id='successor'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let contacts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projection_contacts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!((books, contacts), (1, 0));
+        promote(conn, &ctx, 1, 0, &device.to_string()).unwrap();
+        let books: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM contact_books WHERE id='b1' AND owner_device_id='successor'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let contacts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM contacts WHERE book_id='b1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((books, contacts), (1, 0));
+        // Baseline without the block: first promotion has (b1, successor, c1); the second
+        // promotion removes c1 because the stored successor no longer authorizes producer A.
+        assert!(stage(conn, 2, "observer", "owner", 1, predecessor).unwrap());
+        assert!(stage(conn, 2, "observer", "successor", 1, successor).unwrap());
+        promote(conn, &ctx, 2, 0, &device.to_string()).unwrap();
+        let books: Vec<(String, String)> = conn
+            .prepare("SELECT id,owner_device_id FROM contact_books ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let contacts: Vec<String> = conn
+            .prepare("SELECT id FROM contacts ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(books, [("b1".to_owned(), "successor".to_owned())]);
+        assert!(contacts.is_empty());
+    }
+
+    #[test]
+    fn middle_fence_blocks_ancestor_contact_before_terminal_successor_book() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let device = crate::DeviceId::new();
+        let client = Client::open(
+            crate::ClientConfig {
+                database_path: directory.path().join("middle-fence-stage.db"),
+                vault_id: crate::VaultId::new(),
+                device_id: device,
+            },
+            crate::DatabaseKey::new(&[8; 32]).unwrap(),
+        )
+        .unwrap();
+        let mut store = client.lock().unwrap();
+        let (conn, ctx) = store.parts();
+        // SQL-seeded lineage/fence: an ancestor contact before C's book illustrates the
+        // stage-order limit. The base promotes it in import one and removes it in import two.
+        conn.execute_batch(
+            "INSERT INTO device_successions VALUES('a','b','android','hint',1),('b','c','android','hint',1);
+             INSERT INTO deleted_contact_books VALUES('b1','b',1,0);",
+        )
+        .unwrap();
+        let original = PrivatePayload::ContactUpserted {
+            book: serde_json::json!({"id":"b1","owner_device_id":"a","generation":"1"}),
+            contact: serde_json::json!({"id":"adopted","book_id":"b1","revision":"1","display_name":"Ada"}),
+        };
+        let continued = PrivatePayload::ContactBookState {
+            book: serde_json::json!({"id":"b1","owner_device_id":"c","generation":"1"}),
+        };
+        for generation in [1, 2] {
+            assert!(stage(conn, generation, "observer", "a", 1, original.clone()).unwrap());
+            assert!(stage(conn, generation, "observer", "c", 1, continued.clone()).unwrap());
+            promote(conn, &ctx, generation, 0, &device.to_string()).unwrap();
+            let books: Vec<(String, String)> = conn
+                .prepare("SELECT id,owner_device_id FROM contact_books ORDER BY id")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let contacts: i64 = conn
+                .query_row("SELECT COUNT(*) FROM contacts", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(books, [("b1".to_owned(), "c".to_owned())]);
+            assert_eq!(contacts, 0, "import {generation}");
+        }
+    }
+
+    #[test]
+    fn previously_staged_book_survives_fence_and_succession_before_promotion() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let device = crate::DeviceId::new();
+        let client = Client::open(
+            crate::ClientConfig {
+                database_path: directory.path().join("stage-race.db"),
+                vault_id: crate::VaultId::new(),
+                device_id: device,
+            },
+            crate::DatabaseKey::new(&[8; 32]).unwrap(),
+        )
+        .unwrap();
+        let mut store = client.lock().unwrap();
+        let (conn, ctx) = store.parts();
+        let upsert = PrivatePayload::ContactUpserted {
+            book: serde_json::json!({"id":"b1","owner_device_id":"owner","generation":"1"}),
+            contact: serde_json::json!({"id":"c1","book_id":"b1","revision":"1","display_name":"Ada"}),
+        };
+        assert!(stage(conn, 1, "observer", "owner", 1, upsert).unwrap());
+        conn.execute_batch(
+            "INSERT INTO deleted_contact_books VALUES('b1','owner',1,0);
+             INSERT INTO device_successions VALUES('owner','successor','android','hint',1);",
+        )
+        .unwrap();
+        promote(conn, &ctx, 1, 0, &device.to_string()).unwrap();
+        let owner: String = conn
+            .query_row(
+                "SELECT owner_device_id FROM contact_books WHERE id='b1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let contacts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM contacts WHERE book_id='b1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((owner.as_str(), contacts), ("successor", 1));
+    }
+
+    #[test]
+    fn invalid_fenced_predecessor_stage_base_outcomes() {
+        for (case, book, contact, expected, books) in [
+            (
+                "foreign owner",
+                serde_json::json!({"id":"b1","owner_device_id":"foreign","generation":"1"}),
+                serde_json::json!({"id":"c1","book_id":"b1","revision":"1","display_name":"Ada"}),
+                true,
+                0,
+            ),
+            (
+                "malformed state revision",
+                serde_json::json!({"id":"b1","owner_device_id":"owner","generation":"1","state_revision":"07"}),
+                serde_json::json!({"id":"c1","book_id":"b1","revision":"1","display_name":"Ada"}),
+                false,
+                0,
+            ),
+            (
+                "malformed contact",
+                serde_json::json!({"id":"b1","owner_device_id":"owner","generation":"1"}),
+                serde_json::json!({"id":"c1","book_id":"b1","revision":"07","display_name":"Ada"}),
+                false,
+                0,
+            ),
+        ] {
+            let conn = Connection::open_in_memory().unwrap();
+            crate::contacts::initialize(&conn).unwrap();
+            initialize(&conn).unwrap();
+            conn.execute_batch(
+                "INSERT INTO deleted_contact_books VALUES('b1','owner',1,0);
+                 INSERT INTO device_successions VALUES('owner','successor','android','hint',1);
+                 INSERT INTO projection_generations(generation,high_water,state) VALUES(1,0,'staging');",
+            )
+            .unwrap();
+            let applied = stage(
+                &conn,
+                1,
+                "observer",
+                "owner",
+                1,
+                PrivatePayload::ContactUpserted { book, contact },
+            )
+            .unwrap();
+            assert_eq!(applied, expected, "{case}");
+            if !applied {
+                fail(&conn, 1, "invalid_payload").unwrap();
+            }
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM projection_books", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            // The base left a book row for the malformed contact. That projection fails;
+            // advance selects only draining or staging generations, never failed ones.
+            assert_eq!(count, books, "{case}");
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM projection_contacts", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{case}");
+        }
+    }
 
     #[test]
     fn in_flight_stage_with_legacy_staged_contact_restarts_on_upgrade() {

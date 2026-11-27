@@ -151,6 +151,7 @@ const fixtureDevices: ManagedDeviceView[] = [
   { id: "device-desktop", name: "This Mac", kind: "desktop", role: "owner", revoked: false },
   { id: "device-pixel8", name: "Pixel 8", kind: "android", role: "gateway", revoked: false },
   { id: "device-browser", name: "Work browser", kind: "browser", role: "device", revoked: false },
+  { id: "device-iphone", name: "iPhone", kind: "ios", role: "device", revoked: false },
   { id: "device-old-iphone", name: "Old iPhone", kind: "ios", role: "owner", revoked: true },
 ];
 const fixtureScanStatuses = new Map<string, ContactScanStatus>();
@@ -283,6 +284,7 @@ const fixtureGeneratedContact = (bookId: string, index: number, phonePrefix: str
 const fixtureContactRowsByBook = new Map<string, ContactView[]>([
   ["book-pixel8", [...fixtureNamedContacts("book-pixel8"), ...Array.from({ length: 427 }, (_, index) => fixtureGeneratedContact("book-pixel8", index, "+1801555"))]],
   ["book-phone-retired", Array.from({ length: 25 }, (_, index) => fixtureGeneratedContact("book-phone-retired", index, "+1206555"))],
+  ["book-iphone-retired", Array.from({ length: 12 }, (_, index) => fixtureGeneratedContact("book-iphone-retired", index, "+1415555"))],
 ]);
 const fixtureContactRows = (bookId: string): ContactView[] => fixtureContactRowsByBook.get(bookId) ?? [];
 /** Removes a fixture book with its rows and lookup state; returns the removed book. */
@@ -292,7 +294,7 @@ const dropFixtureContactBook = (index: number): ContactBookView => {
   fixtureLookupExcludedBookIds.delete(book.id);
   return book;
 };
-const fixtureContactBooks: ContactBookView[] = [{ id: "book-pixel8", deviceName: "Android phone", state: "active", capabilities: { canWrite: true, canDelete: true, canRestore: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true, canSync: true }, ownerDeviceId: "device-pixel8", contactCount: fixtureContactRows("book-pixel8").length, defaultAccountLabel: "Google, aurora@example.com", lastSyncAt: "Just now", pendingEditCount: 1 }, { id: "book-phone-retired", deviceName: "Phone", state: "retired", capabilities: { canWrite: false, canDelete: false, supportsNotes: false, supportsPhoto: true, canSync: false }, sourceRevoked: true, ownerDeviceId: "device-old-iphone", contactCount: fixtureContactRows("book-phone-retired").length, lastSyncAt: "3 days ago", pendingEditCount: 0 }];
+const fixtureContactBooks: ContactBookView[] = [{ id: "book-pixel8", deviceName: "Android phone", state: "active", capabilities: { canWrite: true, canDelete: true, canRestore: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true, canSync: true }, ownerDeviceId: "device-pixel8", contactCount: fixtureContactRows("book-pixel8").length, defaultAccountLabel: "Google, aurora@example.com", lastSyncAt: "Just now", pendingEditCount: 1 }, { id: "book-phone-retired", deviceName: "Phone", state: "retired", capabilities: { canWrite: false, canDelete: false, supportsNotes: false, supportsPhoto: true, canSync: false }, sourceRevoked: true, ownerDeviceId: "device-old-iphone", contactCount: fixtureContactRows("book-phone-retired").length, lastSyncAt: "3 days ago", pendingEditCount: 0 }, { id: "book-iphone-retired", deviceName: "iPhone", state: "retired", capabilities: { canWrite: false, canDelete: false, supportsNotes: false, supportsPhoto: true, canSync: false }, ownerDeviceId: "device-iphone", contactCount: fixtureContactRows("book-iphone-retired").length, lastSyncAt: "2 weeks ago", pendingEditCount: 0 }];
 /** The fixture book's contacts in the requested order; `list_contacts` and `list_contacts_page` share it. */
 const sortedFixtureContacts = (bookId: string, query: string, sort: ContactSort): ContactView[] => {
   const contacts = fixtureContactRows(bookId);
@@ -791,7 +793,7 @@ export const fixtureBridge: DesktopBridge = {
     const index = fixtureContactBooks.findIndex(book => book.id === bookId);
     if (fixtureContactDeleteGate === "offline") throw fixtureError("offline", "Connect to the server to delete this book for all devices.");
     if (fixtureContactDeleteGate === "sync-not-current") throw fixtureError("sync-not-current", "Finish syncing to delete this book for all devices.");
-    if (index < 0 || !fixtureContactBooks[index].sourceRevoked) throw fixtureError("contact-book-not-deletable", "This contact book can't be deleted for all devices.");
+    if (index < 0 || (!fixtureContactBooks[index].sourceRevoked && fixtureContactBooks[index].state !== "retired")) throw fixtureError("contact-book-not-deletable", "This contact book can't be deleted for all devices.");
     const book = dropFixtureContactBook(index);
     return { bookId, contacts: book.contactCount };
   },
