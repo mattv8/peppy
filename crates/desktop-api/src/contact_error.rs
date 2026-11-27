@@ -48,7 +48,7 @@ pub fn delete_book_error(error: CoreError) -> ContactError {
             )
         }
         CoreError::InvalidRequest(
-            "contact book owner is not a removed device"
+            "contact book is neither an eligible retired book nor owned by a removed device"
             | "contact book belongs to this device"
             | "contact book owner was succeeded by another device",
         ) => ContactError::ui(
@@ -92,6 +92,19 @@ mod tests {
             (
                 "sync-not-current",
                 "Finish syncing to delete this book for all devices."
+            )
+        );
+    }
+
+    #[test]
+    fn not_deletable_refusal_has_stable_code_and_copy() {
+        assert_eq!(
+            code_and_message(delete_book_error(CoreError::InvalidRequest(
+                "contact book is neither an eligible retired book nor owned by a removed device"
+            ))),
+            (
+                "contact-book-not-deletable",
+                "This contact book can't be deleted for all devices."
             )
         );
     }

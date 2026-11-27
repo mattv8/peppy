@@ -153,8 +153,9 @@ pub fn forget_book(session: &Session, book_id: &str) -> BridgeResult<()> {
 }
 
 /// Deletion is queued locally and may be uploaded after reconnecting.
-/// Core input for a vault-wide book deletion. Both trusted facts come from the host, never the
-/// renderer: the revoked roster and whether every row through the server head is applied.
+/// Core input for deletion of a non-replaced retired book or a removed device's book. Both trusted
+/// facts come from the host, never the renderer: the revoked roster and whether every row through
+/// the server head is applied.
 fn delete_book_input(book_id: &str, revoked: &HashSet<String>, sync_current: bool) -> Value {
     json!({
         "book_id": book_id,
