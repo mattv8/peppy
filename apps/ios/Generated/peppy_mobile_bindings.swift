@@ -734,6 +734,13 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func capturePlatformContactsJson(inputJson: String) throws  -> String
     
     /**
+     * The body the carrier permit would carry right now, read without recording anything. A host
+     * divides or fits this body before `begin_send_attempt`, then sends only when the permit's
+     * body equals it.
+     */
+    func carrierSendBody(commandId: String) throws  -> String
+    
+    /**
      * Deletes only durable-finalized Android gateway MMS capture copies in a bounded batch.
      */
     func cleanupUploadedGatewayMmsCiphertext(limit: UInt32) throws  -> NativeGatewayMmsCleanup
@@ -1793,6 +1800,21 @@ open func capturePlatformContactsJson(inputJson: String)throws  -> String  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_capture_platform_contacts_json(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(inputJson),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The body the carrier permit would carry right now, read without recording anything. A host
+     * divides or fits this body before `begin_send_attempt`, then sends only when the permit's
+     * body equals it.
+     */
+open func carrierSendBody(commandId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_carrier_send_body(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(commandId),uniffiCallStatus
     )
 })
 }
@@ -21410,6 +21432,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_platform_contacts_json() != 12407) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_carrier_send_body() != 23616) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext() != 13469) {

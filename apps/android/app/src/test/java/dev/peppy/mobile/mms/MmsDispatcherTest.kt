@@ -23,8 +23,11 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeClient
+import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativeComposeDraftUpdate
+import uniffi.peppy_mobile_bindings.NativePermit
 import uniffi.peppy_mobile_bindings.NativePermitState
 import uniffi.peppy_mobile_bindings.NativeRcsLinkState
 
@@ -365,6 +368,76 @@ class MmsDispatcherTest : GatewayTestBase() {
         assertEquals(summary.toString(), 1, summary.submitted)
         assertEquals(1, carrier.calls.size)
         assertEquals("SubmittedToOs", client.beginSendAttempt(command).existingSendState)
+    }
+
+    /** Reads [readBody] before admission and admits [admittedBody], as core does when a reply quote changes the body. */
+    private fun carrierBody(client: NativeClient, readBody: String, admittedBody: String = readBody): NativeClientInterface = object : NativeClientInterface by client {
+        override fun carrierSendBody(commandId: String) = readBody
+        override fun beginSendAttempt(commandId: String): NativePermit {
+            val permit = client.beginSendAttempt(commandId)
+            val command = permit.command ?: return permit
+            return permit.copy(command = command.copy(message = command.message.copy(body = admittedBody)))
+        }
+    }
+
+    @Test
+    fun dispatchedPduCarriesTheCarrierBodyNotTheStoredBody() {
+        val client = enrollAndUnlock()
+        val (command, _) = queueMms(client, "stored reply", listOf("+15551234567", "+15557654321"))
+        val carrier = FakeMmsCarrier()
+
+        val summary = MmsDispatcher(context, carrierBody(client, "quoted excerpt admitted reply"), carrier, routes, true, true, { generous }).dispatch()
+
+        assertEquals(summary.toString(), 1, summary.submitted)
+        val pdu = File(context.filesDir, "mms-pdu/$command.pdu").readBytes().toString(Charsets.ISO_8859_1)
+        assertTrue(pdu.contains("quoted excerpt admitted reply"))
+        assertFalse(pdu.contains("stored reply"))
+        assertEquals("SubmittedToOs", client.beginSendAttempt(command).existingSendState)
+    }
+
+    @Test
+    fun carrierBodyThatPushesThePduOverTheLimitIsAKnownPreSubmissionFailure() {
+        val client = enrollAndUnlock()
+        val (command, _) = queueMms(client, "a".repeat(100), listOf("+15551234567", "+15557654321"))
+        val carrier = FakeMmsCarrier()
+        val cap = generous.copy(maximumPduBytes = 1_000)
+
+        val summary = MmsDispatcher(context, carrierBody(client, "b".repeat(2_000)), carrier, routes, true, true, { cap }).dispatch()
+
+        assertTrue(carrier.calls.isEmpty())
+        assertEquals(1, summary.refusedBeforeCarrier)
+        assertEquals("FailedBeforeSubmission", client.beginSendAttempt(command).existingSendState)
+        assertFalse(File(context.filesDir, "mms-pdu/$command.pdu").exists())
+    }
+
+    @Test
+    fun permitBodyChangedAfterThePduWasComposedDeletesThePduAndMakesNoCarrierCall() {
+        val client = enrollAndUnlock()
+        val (command, _) = queueMms(client, "stored reply", listOf("+15551234567", "+15557654321"))
+        val carrier = FakeMmsCarrier()
+
+        val summary = MmsDispatcher(context, carrierBody(client, readBody = "stored reply", admittedBody = "quoted stored reply"), carrier, routes, true, true, { generous }).dispatch()
+
+        assertTrue(carrier.calls.isEmpty())
+        assertEquals(1, summary.refusedBeforeCarrier)
+        assertEquals("FailedBeforeSubmission", client.beginSendAttempt(command).existingSendState)
+        assertFalse(File(context.filesDir, "mms-pdu/$command.pdu").exists())
+    }
+
+    @Test
+    fun unreadableCarrierBodyLeavesTheMmsCommandPendingWithoutAPermit() {
+        val client = enrollAndUnlock()
+        val (command, _) = queueMms(client, "hello", listOf("+15551234567", "+15557654321"))
+        val unreadable = object : NativeClientInterface by client {
+            override fun carrierSendBody(commandId: String): String = throw MobileBindingsException.Database()
+        }
+        val carrier = FakeMmsCarrier()
+
+        val summary = MmsDispatcher(context, unreadable, carrier, routes, true, true, { generous }).dispatch()
+
+        assertTrue(carrier.calls.isEmpty())
+        assertEquals(1, summary.waiting)
+        assertEquals(NativePermitState.PERMIT, client.beginSendAttempt(command).state)
     }
 
     @Test

@@ -55,7 +55,8 @@ data class DispatchSummary(
  *  2. permanently invalid shapes for this SMS adapter (not exactly one recipient, empty text, any
  *     attachment, more than 255 parts) take the core permit only while that exact route remains
  *     current to record FAILED_BEFORE_SUBMISSION; the OS is never called;
- *  3. the core permit (`beginSendAttempt` == PERMIT) durably records the attempt;
+ *  3. the core permit (`beginSendAttempt` == PERMIT) durably records the attempt; a permit whose
+ *     body differs from the body read before admission is FAILED_BEFORE_SUBMISSION, never sent;
  *  4. callback aggregation is registered with unique PendingIntents;
  *  5. exactly one carrier call; no resend is ever attempted.
  */
@@ -106,8 +107,17 @@ class SmsDispatcher(
                 }
                 continue
             }
+            // The body the permit will carry, read before admission. It can quote a reply's target.
+            val body = try {
+                client.carrierSendBody(pending.commandId)
+            } catch (_: MobileBindingsException.NotFound) {
+                continue // no longer pending
+            } catch (_: MobileBindingsException) {
+                waiting++ // unreadable now: left pending, as for a divide failure
+                continue
+            }
             val parts = try {
-                carrier.divide(route.subscriptionId, message.body)
+                carrier.divide(route.subscriptionId, body)
             } catch (_: RuntimeException) {
                 waiting++
                 continue
@@ -135,6 +145,13 @@ class SmsDispatcher(
                 continue
             }
             permits++
+            // The permit must carry the body the parts were divided from. A reply target that arrived or
+            // disappeared in between changes it: nothing has reached the OS, so this is a known refusal.
+            if (command.message.body != body) {
+                record(command.commandId, NativeSendResult.FAILED_BEFORE_SUBMISSION)
+                refused++
+                continue
+            }
             val recipient = command.message.recipients.single()
             val sent = parts.indices.map { SmsCallbackIntents.create(context, CallbackIdentity(CallbackKind.SENT, command.commandId, it, parts.size)) }
             val delivered = parts.indices.map { SmsCallbackIntents.create(context, CallbackIdentity(CallbackKind.DELIVERED, command.commandId, it, parts.size)) }

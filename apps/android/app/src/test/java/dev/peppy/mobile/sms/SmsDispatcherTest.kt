@@ -18,8 +18,10 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.util.concurrent.atomic.AtomicBoolean
+import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeClientInterface
+import uniffi.peppy_mobile_bindings.NativePermit
 import uniffi.peppy_mobile_bindings.NativePermitState
 
 
@@ -226,6 +228,77 @@ class SmsDispatcherTest : GatewayTestBase() {
         assertEquals(1, second.submitted)
         assertFalse(second.moreRemaining)
         assertEquals(SmsDispatcher.MAX_COMMANDS_PER_RUN + 1, carrier.calls.size)
+    }
+
+    /** Reads [readBody] before admission and admits [admittedBody], as core does when a reply quote changes the body. */
+    private fun carrierBody(client: NativeClient, readBody: String, admittedBody: String = readBody): NativeClientInterface = object : NativeClientInterface by client {
+        override fun carrierSendBody(commandId: String) = readBody
+        override fun beginSendAttempt(commandId: String): NativePermit {
+            val permit = client.beginSendAttempt(commandId)
+            val command = permit.command ?: return permit
+            return permit.copy(command = command.copy(message = command.message.copy(body = admittedBody)))
+        }
+    }
+
+    @Test
+    fun smsSendsThePartsOfTheCarrierBodyNotTheStoredBody() {
+        val client = enrollAndUnlock()
+        val recipient = nextTestRecipient()
+        val command = queueCommand(client, route, "reply", listOf(recipient))
+        val quoted = "\"quoted excerpt\"\nreply" // 22 characters: three 10-character parts
+        val carrier = FakeCarrier(partSize = 10)
+
+        val summary = SmsDispatcher(context, carrierBody(client, quoted), carrier, routes, true).dispatch()
+
+        assertEquals(1, summary.submitted)
+        val call = carrier.calls.single()
+        assertEquals(quoted.chunked(10), call.parts)
+        assertEquals(3, call.sent.size)
+        val identities = (call.sent + call.delivered).map { CallbackIdentity.parse(shadowOf(it).savedIntent.data)!! }
+        assertTrue(identities.all { it.commandId == command && it.parts == 3 })
+        assertEquals("SubmittedToOs", permitState(client, command).existingSendState)
+    }
+
+    @Test
+    fun permitBodyChangedAfterTheCarrierBodyWasReadIsAKnownPreSubmissionFailure() {
+        val client = enrollAndUnlock()
+        val command = queueCommand(client, route, "stored")
+        val carrier = FakeCarrier()
+
+        val summary = SmsDispatcher(context, carrierBody(client, readBody = "stored", admittedBody = "quoted stored"), carrier, routes, true).dispatch()
+
+        assertTrue(carrier.calls.isEmpty())
+        assertEquals(1, summary.refusedBeforeCarrier)
+        assertEquals("FailedBeforeSubmission", permitState(client, command).existingSendState)
+    }
+
+    @Test
+    fun carrierBodyOverThePartLimitIsRefusedBeforeAdmission() {
+        val client = enrollAndUnlock()
+        val command = queueCommand(client, route, "stored")
+        val carrier = FakeCarrier(partSize = 1)
+
+        val summary = SmsDispatcher(context, carrierBody(client, "x".repeat(CallbackIdentity.MAX_PARTS + 1)), carrier, routes, true).dispatch()
+
+        assertTrue(carrier.calls.isEmpty())
+        assertEquals(1, summary.refusedBeforeCarrier)
+        assertEquals("FailedBeforeSubmission", permitState(client, command).existingSendState)
+    }
+
+    @Test
+    fun unreadableCarrierBodyLeavesTheCommandPendingWithoutAPermit() {
+        val client = enrollAndUnlock()
+        val command = queueCommand(client, route, "hello")
+        val unreadable = object : NativeClientInterface by client {
+            override fun carrierSendBody(commandId: String): String = throw MobileBindingsException.Database()
+        }
+        val carrier = FakeCarrier()
+
+        val summary = SmsDispatcher(context, unreadable, carrier, routes, true).dispatch()
+
+        assertTrue(carrier.calls.isEmpty())
+        assertEquals(1, summary.waiting)
+        assertEquals(NativePermitState.PERMIT, permitState(client, command).state)
     }
 
     @Test

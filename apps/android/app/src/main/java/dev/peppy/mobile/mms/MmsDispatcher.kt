@@ -67,11 +67,19 @@ class MmsDispatcher(
             if ((!directory.exists() && !directory.mkdirs()) || !directory.isDirectory || callbacks.contains(pending.commandId) || !callbacks.hasBudget(cap.maximumPduBytes)) {
                 waitForEarlier(thread); continue
             }
+            // The PDU carries the body the permit will carry, read before admission. It can quote a reply's target.
+            val body = try {
+                client.carrierSendBody(pending.commandId)
+            } catch (_: MobileBindingsException.NotFound) {
+                continue // no longer pending
+            } catch (_: MobileBindingsException) {
+                waitForEarlier(thread); continue
+            }
             val output = File(directory, "${pending.commandId}.pdu")
             var fittingThisCommand = false
             var fitPreparationBudgetExhausted = false
             val prepared = try {
-                compose(pending.commandId, pending.message, cap, output) {
+                compose(pending.commandId, pending.message, body, cap, output) {
                     if (fittingThisCommand) true
                     else if (fitPreparations >= limit) {
                         fitPreparationBudgetExhausted = true
@@ -115,6 +123,14 @@ class MmsDispatcher(
                 callbacks.deletePrepared(pending.commandId); waitForEarlier(thread); continue
             }
             permits++
+            // The permit must carry the body the PDU was composed from. A reply target that arrived or
+            // disappeared in between changes it: nothing has reached the OS, so this is a known refusal.
+            if (command.message.body != body) {
+                record(command.commandId, NativeSendResult.FAILED_BEFORE_SUBMISSION)
+                callbacks.deletePrepared(command.commandId)
+                refused++
+                continue
+            }
             if (!callbacks.register(command.commandId)) { record(command.commandId, NativeSendResult.FAILED_BEFORE_SUBMISSION); callbacks.deletePrepared(command.commandId); refused++; continue }
             try { carrier.send(route.subscriptionId, uri, sent) }
             catch (_: SecurityException) { failBeforeSubmission(command.commandId); refused++; continue }
@@ -124,7 +140,7 @@ class MmsDispatcher(
         }
         return DispatchSummary(submitted, refused, waiting, more, carrierOnlyProofBlocked)
     }
-    private fun compose(commandId: String, message: uniffi.peppy_mobile_bindings.NativeMessage, cap: MmsLimits, output: File, beforePreparation: () -> Boolean): File {
+    private fun compose(commandId: String, message: uniffi.peppy_mobile_bindings.NativeMessage, body: String, cap: MmsLimits, output: File, beforePreparation: () -> Boolean): File {
         val handles = mutableListOf<uniffi.peppy_mobile_bindings.NativePlaintextHandle>()
         try {
             message.attachmentIds.forEach { handles += client.openNativePlaintextFile(it) }
@@ -133,7 +149,7 @@ class MmsDispatcher(
                 MmsFitPart(File(handle.nativePlaintextPath()), info.mediaType, info.displayName, id)
             }
             fun write(candidate: List<MmsFitPart>, destination: File, maximum: Long = cap.maximumPduBytes): Long = MmsPduComposer.compose(MmsPduRequest(
-                "peppy-$commandId", message.recipients.map { MmsRecipient(it, MmsRecipientKind.TO) }, message.subject, message.body,
+                "peppy-$commandId", message.recipients.map { MmsRecipient(it, MmsRecipientKind.TO) }, message.subject, body,
                 candidate.map { MmsFilePart(it.file, it.mediaType, it.name, null) }, maximum, destination,
             )).byteSize
             try {
@@ -141,7 +157,7 @@ class MmsDispatcher(
             } catch (error: MmsPduValidationException) {
                 if (error.message != "encoded PDU exceeds maximum size") throw error
                 val fitter = MmsImageFitter(File(context.noBackupFilesDir, "mms-fit"), beforePreparation = beforePreparation)
-                val fingerprint = MmsImageFitter.fingerprint(parts, cap, "${message.recipients}|${message.subject}|${message.body}")
+                val fingerprint = MmsImageFitter.fingerprint(parts, cap, "${message.recipients}|${message.subject}|$body")
                 when (val fitted = fitter.fit(commandId, fingerprint, cap.maximumPduBytes, parts) { candidate ->
                     val trial = File(output.parentFile, ".mms-fit-$commandId.pdu")
                     try { write(candidate, trial, MmsPduComposer.MAX_PDU_BYTES) } finally { trial.delete() }

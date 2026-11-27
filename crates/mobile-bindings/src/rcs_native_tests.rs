@@ -484,6 +484,28 @@ fn serialize_commit_preserves_the_exact_core_projection_bytes() {
     );
 }
 
+/// Go decodes the same file in `native_send_contract_test.go`'s reply fixture test.
+#[test]
+fn go_contract_reply_commit_fixture_round_trips_through_the_binding_serializer() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/contracts/fixtures/gmlink-replies/native-commit-reply.json"
+    );
+    let fixture: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let projection: peppy_client_core::NativeRcsCommitProjection =
+        serde_json::from_value(fixture.clone()).unwrap();
+    assert_eq!(
+        projection.reply_to_google_message_id.as_deref(),
+        Some("synthetic-reply-target")
+    );
+
+    let committed = serialize_commit(projection).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&committed.commit_json()).unwrap(),
+        fixture
+    );
+}
+
 #[test]
 fn pending_native_rcs_commands_returns_the_sanitized_candidate_shape() {
     let fixture = fixture();

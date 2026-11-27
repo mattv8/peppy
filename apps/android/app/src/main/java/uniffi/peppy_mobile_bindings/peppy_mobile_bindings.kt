@@ -895,6 +895,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_platform_contacts_json(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_carrier_send_body(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_commit_mms_live_gap_page(
@@ -1532,6 +1534,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_capture_notification(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_capture_platform_contacts_json(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_carrier_send_body(`ptr`: Long,`commandId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -2706,6 +2710,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_platform_contacts_json() and 0xFFFF) != 12407) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_carrier_send_body() and 0xFFFF) != 23616) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext() and 0xFFFF) != 13469) {
@@ -4100,6 +4107,13 @@ public interface NativeClientInterface {
     fun `capturePlatformContactsJson`(`inputJson`: kotlin.String): kotlin.String
     
     /**
+     * The body the carrier permit would carry right now, read without recording anything. A host
+     * divides or fits this body before `begin_send_attempt`, then sends only when the permit's
+     * body equals it.
+     */
+    fun `carrierSendBody`(`commandId`: kotlin.String): kotlin.String
+    
+    /**
      * Deletes only durable-finalized Android gateway MMS capture copies in a bounded batch.
      */
     fun `cleanupUploadedGatewayMmsCiphertext`(`limit`: kotlin.UInt): NativeGatewayMmsCleanup
@@ -5382,6 +5396,26 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterString.lower(`inputJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The body the carrier permit would carry right now, read without recording anything. A host
+     * divides or fits this body before `begin_send_attempt`, then sends only when the permit's
+     * body equals it.
+     */
+    @Throws(MobileBindingsException::class)override fun `carrierSendBody`(`commandId`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_carrier_send_body(
+        it,
+        
+        FfiConverterString.lower(`commandId`),_status)
 }
     }
     )

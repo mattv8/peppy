@@ -228,6 +228,10 @@ struct GoReceiveRecord {
     /// Other ids Google gives the same message; `omitempty` on the Go side.
     #[serde(default)]
     alternate_message_ids: Vec<String>,
+    /// Google id of the message this record replies to, `omitempty` on the Go side. Core treats
+    /// an empty or invalid value as absent.
+    #[serde(default)]
+    reply_to_google_message_id: Option<String>,
     /// Reaction facts, `omitempty` on the Go side. The host passes them to
     /// `ingest_rcs_message_reactions` separately, so the message record ignores them.
     #[serde(default, rename = "reactions")]
@@ -248,6 +252,7 @@ struct GoReceiveAttachment {
 struct GoReceiveParts {
     record: RcsProjectedRecord,
     group_sender: Option<RcsGroupSender>,
+    reply_to_google_message_id: Option<String>,
     status: Option<RcsStatusApplication>,
 }
 
@@ -297,12 +302,12 @@ mod tests {
     fn message(transport: Transport) -> Message {
         Message {
             payload: MessagePayload {
+                reply_to: None,
                 record: MessageRecord {
                     message_id: peppy_client_core::MessageId::new(),
                     conversation_id: ConversationId::new(),
                     source_sequence: SourceSequence(1),
                     attachments: vec![],
-                reply_to: None,
                 },
                 source_device_id: DeviceId::new(),
                 provider_message_id: None,
@@ -559,6 +564,7 @@ impl GoReceiveRecord {
                 attachments,
             },
             group_sender,
+            reply_to_google_message_id: self.reply_to_google_message_id,
             status: status.map(|status| RcsStatusApplication {
                 google_message_id: self.google_message_id,
                 google_conversation_id: self.google_conversation_id,
@@ -827,6 +833,7 @@ fn ingest_go_record(
         u64,
         RcsProjectedRecord,
         Option<RcsGroupSender>,
+        Option<String>,
     ) -> Result<RcsReceiveOutcome, peppy_client_core::Error>,
 ) -> Result<NativeRcsIngestOutcome, MobileBindingsError> {
     if go_record_json.len() > GO_RECORD_JSON_CAP {
@@ -840,6 +847,7 @@ fn ingest_go_record(
     let GoReceiveParts {
         record,
         group_sender,
+        reply_to_google_message_id,
         status,
     } = go_record.into_parts()?;
     with_client(&owner.client, |client| {
@@ -849,6 +857,7 @@ fn ingest_go_record(
             ownership_generation,
             record,
             group_sender,
+            reply_to_google_message_id,
         )?;
         if matches!(record_outcome, RcsReceiveOutcome::Rejected(_)) {
             return Ok(NativeRcsIngestOutcome {
@@ -1000,13 +1009,14 @@ impl NativeClient {
             conversation_id,
             ownership_generation,
             go_record_json,
-            |client, conversation, generation, record, sender| {
-                client.ingest_rcs_receive_observation(
+            |client, conversation, generation, record, sender, reply| {
+                client.ingest_rcs_receive_observation_replying(
                     conversation,
                     generation,
                     record,
                     sender,
                     RcsObservationProvenance::Live,
+                    reply.as_deref(),
                 )
             },
         )
@@ -1024,13 +1034,14 @@ impl NativeClient {
             conversation_id,
             ownership_generation,
             go_record_json,
-            |client, conversation, generation, record, sender| {
-                client.ingest_rcs_receive_observation(
+            |client, conversation, generation, record, sender, reply| {
+                client.ingest_rcs_receive_observation_replying(
                     conversation,
                     generation,
                     record,
                     sender,
                     provenance,
+                    reply.as_deref(),
                 )
             },
         )

@@ -4158,6 +4158,14 @@ impl NativeClient {
         with_client(&self.client, |client| client.begin_send_attempt(command_id)).map(permit_view)
     }
 
+    /// The body the carrier permit would carry right now, read without recording anything. A host
+    /// divides or fits this body before `begin_send_attempt`, then sends only when the permit's
+    /// body equals it.
+    pub fn carrier_send_body(&self, command_id: String) -> Result<String, MobileBindingsError> {
+        let command_id = parse_id(&command_id)?;
+        with_client(&self.client, |client| client.carrier_send_body(command_id))
+    }
+
     pub fn message_send_cancellation(
         &self,
         message_id: String,
