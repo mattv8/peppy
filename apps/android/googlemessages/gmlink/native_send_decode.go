@@ -76,30 +76,35 @@ func decodeNativeRcsCommit(input string) (nativeRcsCommitProjection, bool) {
 		return nativeRcsCommitProjection{}, false
 	}
 	_, hasExpectedMemberDigest := values["expected_member_digest"]
+	_, hasReply := values["reply_to_google_message_id"]
 	target, targetOK := decodeTarget(values["target"])
 	digest, digestOK := decodeDigest(values["proof_digest"])
 	media, mediaOK := decodeNativeMedia(values["media"])
 	commit := nativeRcsCommitProjection{
-		CommandID:            nativeString(values["command_id"]),
-		TmpID:                nativeString(values["tmp_id"]),
-		MappingRevision:      nativeUint64(values["mapping_revision"]),
-		ProofVersion:         nativeUint32(values["proof_version"]),
-		ProofDigest:          digest,
-		MessageBody:          nativeString(values["message_body"]),
-		Target:               target,
-		ExpectedMemberDigest: nativeString(values["expected_member_digest"]),
-		Media:                media,
+		CommandID:              nativeString(values["command_id"]),
+		TmpID:                  nativeString(values["tmp_id"]),
+		MappingRevision:        nativeUint64(values["mapping_revision"]),
+		ProofVersion:           nativeUint32(values["proof_version"]),
+		ProofDigest:            digest,
+		MessageBody:            nativeString(values["message_body"]),
+		Target:                 target,
+		ExpectedMemberDigest:   nativeString(values["expected_member_digest"]),
+		Media:                  media,
+		ReplyToGoogleMessageID: nativeString(values["reply_to_google_message_id"]),
 	}
 	strings := []string{"command_id", "tmp_id", "message_body"}
 	if commit.ExpectedMemberDigest != "" {
 		strings = append(strings, "expected_member_digest")
 	}
-	return commit, targetOK && digestOK && mediaOK && nativeKinds(values, strings, nil, []string{"mapping_revision", "proof_version"}, nil) && commit.CommandID != "" && validNativeTmpID(commit.TmpID) && validCommitContent(commit.MessageBody, commit.Media) && commit.ProofVersion == 2 && commit.Target.ProofVersion == 2 && (!hasExpectedMemberDigest || validMemberDigest(commit.ExpectedMemberDigest))
+	if hasReply {
+		strings = append(strings, "reply_to_google_message_id")
+	}
+	return commit, targetOK && digestOK && mediaOK && nativeKinds(values, strings, nil, []string{"mapping_revision", "proof_version"}, nil) && commit.CommandID != "" && validNativeTmpID(commit.TmpID) && validCommitContent(commit.MessageBody, commit.Media) && commit.ProofVersion == 2 && commit.Target.ProofVersion == 2 && (!hasExpectedMemberDigest || validMemberDigest(commit.ExpectedMemberDigest)) && (!hasReply || validGoogleMessageID(commit.ReplyToGoogleMessageID))
 }
 
 func nativeCommitObject(raw []byte) (map[string]json.RawMessage, bool) {
 	base := []string{"command_id", "tmp_id", "mapping_revision", "proof_version", "proof_digest", "message_body", "target"}
-	for _, optional := range [][]string{nil, {"expected_member_digest"}, {"media"}, {"expected_member_digest", "media"}} {
+	for _, optional := range [][]string{nil, {"expected_member_digest"}, {"media"}, {"expected_member_digest", "media"}, {"reply_to_google_message_id"}, {"expected_member_digest", "reply_to_google_message_id"}, {"media", "reply_to_google_message_id"}, {"expected_member_digest", "media", "reply_to_google_message_id"}} {
 		if values, ok := nativeObject(raw, append(base, optional...)...); ok {
 			return values, true
 		}

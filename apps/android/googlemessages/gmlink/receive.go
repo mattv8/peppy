@@ -15,19 +15,20 @@ import (
 )
 
 type rcsReceiveRecord struct {
-	GoogleMessageID      string                `json:"google_message_id"`
-	GoogleConversationID string                `json:"google_conversation_id"`
-	Direction            string                `json:"direction"`
-	Body                 string                `json:"body"`
-	SentAtMS             int64                 `json:"sent_at_ms"`
-	Status               string                `json:"status"`
-	TmpID                string                `json:"tmp_id,omitempty"`
-	RcsReported          bool                  `json:"rcs_reported"`
-	E2EEReported         *bool                 `json:"e2ee_reported,omitempty"`
-	SenderAddress        string                `json:"sender_address,omitempty"`
-	SenderUnknown        bool                  `json:"sender_unknown,omitempty"`
-	SelfSent             bool                  `json:"self_sent,omitempty"`
-	Attachments          *[]rcsMediaAttachment `json:"attachments,omitempty"`
+	GoogleMessageID        string                `json:"google_message_id"`
+	ReplyToGoogleMessageID string                `json:"reply_to_google_message_id,omitempty"`
+	GoogleConversationID   string                `json:"google_conversation_id"`
+	Direction              string                `json:"direction"`
+	Body                   string                `json:"body"`
+	SentAtMS               int64                 `json:"sent_at_ms"`
+	Status                 string                `json:"status"`
+	TmpID                  string                `json:"tmp_id,omitempty"`
+	RcsReported            bool                  `json:"rcs_reported"`
+	E2EEReported           *bool                 `json:"e2ee_reported,omitempty"`
+	SenderAddress          string                `json:"sender_address,omitempty"`
+	SenderUnknown          bool                  `json:"sender_unknown,omitempty"`
+	SelfSent               bool                  `json:"self_sent,omitempty"`
+	Attachments            *[]rcsMediaAttachment `json:"attachments,omitempty"`
 	// The other ids Google gives this message. The copy of the message in the phone's
 	// message store carries one of the message's ids.
 	AlternateMessageIDs *[]string      `json:"alternate_message_ids,omitempty"`
@@ -55,6 +56,7 @@ type rcsProjection struct {
 	GoogleConversationID string            `json:"google_conversation_id,omitempty"`
 	Record               *rcsReceiveRecord `json:"record,omitempty"`
 	Diagnostic           string            `json:"-"`
+	InvalidReplyID       bool              `json:"-"`
 }
 
 type rcsPageProjection struct {
@@ -65,8 +67,9 @@ type rcsPageProjection struct {
 	HasMore    bool               `json:"has_more"`
 	NewestMS   int64              `json:"newest_ms"`
 	// Skipped counts history records withheld because they are not supported one-to-one text.
-	Skipped             int `json:"skipped"`
-	ReactionDiagnostics int `json:"-"`
+	Skipped                 int `json:"skipped"`
+	ReactionDiagnostics     int `json:"-"`
+	InvalidReplyDiagnostics int `json:"-"`
 }
 
 type rcsPageSignal struct {
@@ -141,6 +144,14 @@ func projectRcsMessage(wrapped *libgm.WrappedMessage, conversation *gmproto.Conv
 		TmpID:                message.GetTmpID(),
 		RcsReported:          true,
 	}
+	invalidReply := false
+	if reply := message.GetReplyMessage(); reply != nil {
+		if id := reply.GetMessageID(); validGoogleMessageID(id) {
+			record.ReplyToGoogleMessageID = id
+		} else {
+			invalidReply = true
+		}
+	}
 	if len(attachments) != 0 {
 		record.Attachments = &attachments
 	}
@@ -159,9 +170,9 @@ func projectRcsMessage(wrapped *libgm.WrappedMessage, conversation *gmproto.Conv
 	if reactions, ok := projectReceiveReactions(message, conversation); ok {
 		record.Reactions = &reactions
 	} else {
-		return rcsProjection{Code: "ok", Record: record, Diagnostic: "reaction_projection_unverified"}
+		return rcsProjection{Code: "ok", Record: record, Diagnostic: "reaction_projection_unverified", InvalidReplyID: invalidReply}
 	}
-	return rcsProjection{Code: "ok", Record: record}
+	return rcsProjection{Code: "ok", Record: record, InvalidReplyID: invalidReply}
 }
 
 func projectReceiveReactions(message *gmproto.Message, conversation *gmproto.Conversation) ([]rcsReaction, bool) {
@@ -285,6 +296,9 @@ func projectRcsPage(page *gmproto.ListMessagesResponse, conversation *gmproto.Co
 		projection := projectRcsMessage(&libgm.WrappedMessage{Message: message}, conversation)
 		if projection.Diagnostic != "" {
 			result.ReactionDiagnostics++
+		}
+		if projection.InvalidReplyID {
+			result.InvalidReplyDiagnostics++
 		}
 		switch projection.Code {
 		case "ok":
@@ -511,6 +525,9 @@ func (link *Link) projectRcsEventFor(queued queuedEvent, wrapped *libgm.WrappedM
 	if projection.Diagnostic != "" {
 		link.emit("receive", "reaction_projection_unverified", 0)
 	}
+	if projection.InvalidReplyID {
+		link.emit("receive", "reply_id_invalid", 0)
+	}
 	encoded, _ := json.Marshal(projection)
 	link.enqueueOutput(hostOutput{
 		rcsRecord:         string(encoded),
@@ -611,6 +628,9 @@ func (link *Link) FetchRcsGap(googleConversationID, pageToken string) string {
 	projected := projectRcsPage(page, conversation)
 	if projected.ReactionDiagnostics != 0 {
 		link.emit("receive", "reaction_projection_unverified", 0)
+	}
+	if projected.InvalidReplyDiagnostics != 0 {
+		link.emit("receive", "reply_id_invalid", 0)
 	}
 	return encodeRcsPage(projected)
 }

@@ -1,0 +1,45 @@
+{
+  "invalid_tab_reply": {
+    "code": "ok",
+    "record": {
+      "body": "synthetic tab reply",
+      "direction": "incoming",
+      "google_conversation_id": "synthetic-conversation",
+      "google_message_id": "synthetic-tab-reply",
+      "rcs_reported": true,
+      "reactions": [],
+      "sent_at_ms": 1700000000000,
+      "status": "sent",
+      "tmp_id": "synthetic-tmp-synthetic-tab-reply"
+    }
+  },
+  "reply": {
+    "code": "ok",
+    "record": {
+      "body": "synthetic reply",
+      "direction": "incoming",
+      "google_conversation_id": "synthetic-conversation",
+      "google_message_id": "synthetic-reply",
+      "rcs_reported": true,
+      "reactions": [],
+      "reply_to_google_message_id": "synthetic-message",
+      "sent_at_ms": 1700000000000,
+      "status": "sent",
+      "tmp_id": "synthetic-tmp-synthetic-reply"
+    }
+  },
+  "target": {
+    "code": "ok",
+    "record": {
+      "body": "synthetic target",
+      "direction": "incoming",
+      "google_conversation_id": "synthetic-conversation",
+      "google_message_id": "synthetic-message",
+      "rcs_reported": true,
+      "reactions": [],
+      "sent_at_ms": 1700000000000,
+      "status": "sent",
+      "tmp_id": "synthetic-tmp-synthetic-message"
+    }
+  }
+}

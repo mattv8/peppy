@@ -13,6 +13,35 @@ const schemaDerivedNativeCommitInput = `{"command_id":"schema-command","tmp_id":
 
 func nativeCommitFixture(t *testing.T) string { t.Helper(); return schemaDerivedNativeCommitInput }
 
+func TestNativeCommitReplyOptionalCombinations(t *testing.T) {
+	for mask := 0; mask < 8; mask++ {
+		fields := ""
+		if mask&1 != 0 {
+			fields += `,"expected_member_digest":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="`
+		}
+		if mask&2 != 0 {
+			fields += `,"media":{"media_id":"media","key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"mime":"image/jpeg","size":1,"name":"a.jpg"}`
+		}
+		if mask&4 != 0 {
+			fields += `,"reply_to_google_message_id":"reply-id"`
+		}
+		input := strings.Replace(nativeCommitFixture(t), `"command_id"`, strings.TrimPrefix(fields, ",")+`,"command_id"`, 1)
+		if fields == "" {
+			input = nativeCommitFixture(t)
+		}
+		commit, ok := decodeNativeRcsCommit(input)
+		if !ok || (commit.ReplyToGoogleMessageID == "reply-id") != (mask&4 != 0) {
+			t.Fatalf("mask %d: commit=%#v ok=%t", mask, commit, ok)
+		}
+	}
+	for _, value := range []string{`""`, `null`, `123`, `"` + strings.Repeat("x", 513) + `"`, `"\ud800"`} {
+		input := strings.Replace(nativeCommitFixture(t), `"command_id"`, `"reply_to_google_message_id":`+value+`,"command_id"`, 1)
+		if _, ok := decodeNativeRcsCommit(input); ok {
+			t.Fatalf("accepted invalid reply %s", value)
+		}
+	}
+}
+
 func TestNativeRcsDecodeCommitFixturePreservesTargetAndEvidence(t *testing.T) {
 	fixture := nativeCommitFixture(t)
 	commit, ok := decodeNativeRcsCommit(fixture)

@@ -53,15 +53,16 @@ type nativeRcsPrepareCarrierBinding struct {
 }
 
 type nativeRcsCommitProjection struct {
-	CommandID            string
-	TmpID                string
-	MappingRevision      uint64
-	ProofVersion         uint32
-	ProofDigest          [32]byte
-	MessageBody          string
-	Media                *rcsMediaReference
-	Target               nativeRcsTargetSnapshot
-	ExpectedMemberDigest string
+	CommandID              string
+	TmpID                  string
+	MappingRevision        uint64
+	ProofVersion           uint32
+	ProofDigest            [32]byte
+	MessageBody            string
+	Media                  *rcsMediaReference
+	Target                 nativeRcsTargetSnapshot
+	ExpectedMemberDigest   string
+	ReplyToGoogleMessageID string
 }
 
 type nativeRcsTargetSnapshot struct {

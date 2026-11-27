@@ -100,6 +100,33 @@ func TestRcsProjectionProjectsOnlyApprovedTextFields(t *testing.T) {
 	}
 }
 
+func TestRcsProjectionReplyID(t *testing.T) {
+	message := &libgm.WrappedMessage{Message: &gmproto.Message{
+		MessageID: "message", ConversationID: "conversation", Type: rcsMessageType,
+		MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_OUTGOING_DELIVERED},
+		MessageInfo:   []*gmproto.MessageInfo{{Data: &gmproto.MessageInfo_MessageContent{MessageContent: &gmproto.MessageContent{Content: "body"}}}},
+	}}
+	conversation := &gmproto.Conversation{ConversationID: "conversation", Type: gmproto.ConversationType_RCS}
+	for _, test := range []struct {
+		reply   *gmproto.ReplyMessage
+		want    string
+		invalid bool
+	}{
+		{nil, "", false},
+		{&gmproto.ReplyMessage{MessageID: "reply-id"}, "reply-id", false},
+		{&gmproto.ReplyMessage{}, "", true},
+		{&gmproto.ReplyMessage{MessageID: strings.Repeat("x", 513)}, "", true},
+		{&gmproto.ReplyMessage{MessageID: "\xff"}, "", true},
+		{&gmproto.ReplyMessage{MessageID: "bad\tid"}, "", true},
+	} {
+		message.Message.ReplyMessage = test.reply
+		got := projectRcsMessage(message, conversation)
+		if got.Code != "ok" || got.Record.ReplyToGoogleMessageID != test.want || got.InvalidReplyID != test.invalid {
+			t.Fatalf("projection = %#v", got)
+		}
+	}
+}
+
 func TestRcsProjectionReportsTheOtherIDsOfAMessage(t *testing.T) {
 	conversation := &gmproto.Conversation{ConversationID: "conversation-1", Type: gmproto.ConversationType_RCS}
 	message := func(another *gmproto.AnotherMessageID) *libgm.WrappedMessage {

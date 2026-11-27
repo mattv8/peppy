@@ -39,6 +39,7 @@ var eventCodes = []eventCode{
 	{"conversation_refresh", "publication_stale"}, {"conversation_refresh", "refreshed"}, {"conversation_refresh", "cancelled"},
 	{"conversation_refresh", "probe_adopted"}, {"conversation_refresh", "probe_missed"},
 	{"receive", "reaction_projection_unverified"},
+	{"receive", "reply_id_invalid"},
 }
 
 type eventCode struct{ kind, code string }
