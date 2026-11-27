@@ -2331,6 +2331,44 @@ describe("browser host RPC", () => {
     expect(blockedSession.calls).not.toContainEqual(expect.objectContaining({ command: "_worker_draft_prepare_send" }));
   });
 
+  it("passes an optional string reply target to the send gate and refuses other types", async () => {
+    const draftId = "00000000-0000-4000-8000-000000000001";
+    const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
+    const session = {
+      signal: new AbortController().signal,
+      async mutate(command: string, args: Record<string, unknown>) {
+        calls.push({ command, args });
+        if (command === "_worker_draft_prepare_send") return { ...(args.input as Record<string, unknown>), id: draftId, expectedRevision: "8" };
+        if (command === "_worker_draft_begin_send") return { remote: null };
+        return { accepted: true };
+      },
+    };
+
+    await sendBrowserDraft({
+      session,
+      transport: { json: vi.fn(), discard: vi.fn() },
+      synchronizeDraft: async () => undefined,
+      args: { input: { id: draftId, expectedRevision: "8", replyTo: "message-1" } },
+    });
+    expect(calls.find(call => call.command === "_worker_draft_begin_send")?.args).toEqual(expect.objectContaining({ replyTo: "message-1" }));
+
+    calls.length = 0;
+    await expect(sendBrowserDraft({
+      session,
+      transport: { json: vi.fn(), discard: vi.fn() },
+      synchronizeDraft: async () => undefined,
+      args: { input: { id: draftId, expectedRevision: "8", replyTo: 42 } },
+    })).rejects.toEqual({ code: "invalid-request" });
+    expect(calls).toEqual([]);
+
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => new FakeSession() });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 3, command: "send_draft", args: { input: { text: "reply", replyTo: { id: "message-1" } } } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 3));
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 3, ok: false, error: expect.objectContaining({ code: "invalid-request" }) }));
+  });
+
   it("syncs a route-canonicalized revision before the production send flow accepts it", async () => {
     const calls: string[] = [];
     let syncAttempts = 0;

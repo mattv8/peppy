@@ -2252,10 +2252,13 @@ impl Session {
     ) -> BridgeResult<Vec<dto::MessageView>> {
         let mut retention_states = HashMap::new();
         let revoked = self.revoked_devices();
+        let page: Vec<&Message> = messages.iter().collect();
+        let replies =
+            dto::rcs_receive::page_reply_summaries(&self.client, &page).map_err(core_error)?;
         messages
             .iter()
             .map(|message| {
-                dto::rcs_receive::message_view(
+                dto::rcs_receive::message_view_in_page(
                     &self.client,
                     message,
                     self.attachment_views(
@@ -2266,6 +2269,7 @@ impl Session {
                         &mut retention_states,
                     ),
                     &revoked,
+                    &replies,
                 )
                 .map_err(core_error)
             })

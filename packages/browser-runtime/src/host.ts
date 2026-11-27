@@ -507,7 +507,13 @@ function coreArgs(command: string, args: Record<string, unknown>): Record<string
   if (!wrapper) return args;
   const value = args[wrapper];
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw { code: "invalid-request" };
+  if (command === "send_draft") draftReplyTo(value as Record<string, unknown>);
   return value as Record<string, unknown>;
+}
+
+/** The optional reply target is a message ID string; any other type is refused before core sees it. */
+function draftReplyTo(input: Record<string, unknown>): void {
+  if (input.replyTo !== undefined && typeof input.replyTo !== "string") throw { code: "invalid-request" };
 }
 
 /** A reaction carries one message ID and either one emoji or null (remove). Core validates the emoji. */
@@ -1934,6 +1940,7 @@ export async function sendBrowserDraft(options: {
 }): Promise<unknown> {
   const { session, transport, synchronizeDraft, args } = options;
   const input = object(args.input);
+  draftReplyTo(input);
   const prepared = object(await session.mutate("_worker_draft_prepare_send", { input }));
   const draftId = requiredId(prepared);
   const expectedRevision = requiredString(prepared.expectedRevision);
@@ -1945,6 +1952,7 @@ export async function sendBrowserDraft(options: {
     expectedRevision,
     expectedMemberRevision: input.expectedMemberRevision,
     groupCreateConfirmDuplicate: input.groupCreateConfirmDuplicate,
+    replyTo: input.replyTo,
   };
   let gate: Record<string, unknown>;
   try {

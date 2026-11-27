@@ -143,6 +143,7 @@
   "rcs-unproven",
   "recipientless-draft-exists",
   "reply-claim",
+  "reply-unavailable",
   "request_not_approved",
   "request_not_found",
   "response-too-large",

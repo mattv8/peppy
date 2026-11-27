@@ -1,13 +1,46 @@
 use crate::{
-    AttachmentStateDto, AttachmentView, MessageStatus, MessageTransport, MessageView,
-    RcsAttachmentState, RcsSendStatus, SendCancellationStateDto, SendCancellationView,
-    SentAgainView, message_view as base_message_view, send_recovery_view,
+    AttachmentStateDto, AttachmentView, MessageReplyView, MessageSender, MessageStatus,
+    MessageTransport, MessageView, RcsAttachmentState, RcsSendStatus, SendCancellationStateDto,
+    SendCancellationView, SentAgainView, message_view as base_message_view, send_recovery_view,
 };
 use peppy_client_core::{
-    Client, Direction, Error, Message, RcsMediaSyncState, RcsMessageStatus, SendCancellationState,
-    Transport,
+    Client, Direction, Error, Message, MessageReplySummary, RcsMediaSyncState, RcsMessageStatus,
+    SendCancellationState, Transport,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// Reply targets of one page, keyed by target id. Build it once per page with
+/// `page_reply_summaries`, so each distinct target is read once.
+pub type PageReplies = HashMap<peppy_client_core::MessageId, MessageReplySummary>;
+
+/// Loads the reply targets of `messages` in one batch.
+pub fn page_reply_summaries(client: &Client, messages: &[&Message]) -> Result<PageReplies, Error> {
+    let payloads: Vec<&peppy_client_core::MessagePayload> =
+        messages.iter().map(|message| &message.payload).collect();
+    client.message_reply_summaries(&payloads)
+}
+
+/// A message that is not a reply makes no lookup; a reply's target comes from the page batch.
+fn reply_to_view(
+    message: &Message,
+    replies: &PageReplies,
+) -> Result<Option<MessageReplyView>, Error> {
+    let Some(target) = message.payload.reply_to else {
+        return Ok(None);
+    };
+    let summary = replies.get(&target).ok_or(Error::Database)?;
+    Ok(Some(MessageReplyView {
+        message_id: summary.message_id.to_string(),
+        sender: if summary.sender_self {
+            MessageSender::SelfSent
+        } else {
+            MessageSender::Other
+        },
+        sender_address: summary.sender_address.clone(),
+        excerpt: summary.excerpt.clone(),
+        available: summary.available,
+    }))
+}
 
 fn send_cancellation_view(
     client: &Client,
@@ -156,7 +189,19 @@ pub fn message_view(
     attachments: Vec<AttachmentView>,
     revoked_devices: &HashSet<String>,
 ) -> Result<MessageView, Error> {
-    let mut view = conversation_message_view(client, message, attachments)?;
+    let replies = page_reply_summaries(client, &[message])?;
+    message_view_in_page(client, message, attachments, revoked_devices, &replies)
+}
+
+/// `message_view` for a message of a page whose reply targets were loaded by `page_reply_summaries`.
+pub fn message_view_in_page(
+    client: &Client,
+    message: &Message,
+    attachments: Vec<AttachmentView>,
+    revoked_devices: &HashSet<String>,
+    replies: &PageReplies,
+) -> Result<MessageView, Error> {
+    let mut view = conversation_message_view(client, message, attachments, replies)?;
     let displays_as_rcs = view.transport == Some(MessageTransport::Rcs);
     view.sent_again = if displays_as_rcs {
         None
@@ -179,6 +224,7 @@ fn conversation_message_view(
     client: &Client,
     message: &Message,
     mut attachments: Vec<AttachmentView>,
+    replies: &PageReplies,
 ) -> Result<MessageView, Error> {
     let is_rcs = message.payload.transport == Transport::Rcs;
     let message_id = message.payload.record.message_id;
@@ -235,6 +281,7 @@ fn conversation_message_view(
         }
     }
     let mut view = base_message_view(message, attachments);
+    view.reply_to = reply_to_view(message, replies)?;
     view.send_cancellation = send_cancellation_view(client, message)?;
     if !is_rcs && !has_outgoing_rcs_media && !has_rcs_evidence {
         return Ok(view);
@@ -357,6 +404,7 @@ mod tests {
     fn rcs_message(send_state: Option<peppy_client_core::SendState>) -> Message {
         Message {
             payload: MessagePayload {
+                reply_to: None,
                 record: MessageRecord {
                     message_id: peppy_client_core::MessageId::new(),
                     conversation_id: ConversationId::new(),
@@ -404,7 +452,6 @@ mod tests {
             (
                 peppy_client_core::SendState::QueuedLocal,
                 MessageStatus::QueuedLocal,
-                reply_to: None,
             ),
             (
                 peppy_client_core::SendState::FailedBeforeSubmission,

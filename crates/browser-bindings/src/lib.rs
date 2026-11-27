@@ -604,32 +604,34 @@ impl BrowserCore {
                     }
                 })
                 .unwrap_or_default();
-            let (messages, has_older_messages) =
-                if !metadata_only && Some(conversation.conversation_id) == active {
-                    let (history, has_more) = match history_from_message_id {
-                        Some(anchor) => {
-                            let has_more = !client
-                                .messages_page(conversation.conversation_id, Some(anchor), 1)
-                                .map_err(core)?
-                                .messages
-                                .is_empty();
-                            client
-                                .messages_since(conversation.conversation_id, anchor)
-                                .map(|messages| (messages, has_more))
-                        }
-                        None => client
-                            .messages_page(conversation.conversation_id, None, HISTORY_PAGE_SIZE)
-                            .map(|page| (page.messages, page.has_more)),
+            let (messages, has_older_messages) = if !metadata_only
+                && Some(conversation.conversation_id) == active
+            {
+                let (history, has_more) = match history_from_message_id {
+                    Some(anchor) => {
+                        let has_more = !client
+                            .messages_page(conversation.conversation_id, Some(anchor), 1)
+                            .map_err(core)?
+                            .messages
+                            .is_empty();
+                        client
+                            .messages_since(conversation.conversation_id, anchor)
+                            .map(|messages| (messages, has_more))
                     }
-                    .map_err(core)?;
-                    let messages = history
-                        .iter()
-                        .map(|message| rcs_receive::message_view(client, message, &revoked))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    (messages, Some(has_more))
-                } else {
-                    (Vec::new(), None)
-                };
+                    None => client
+                        .messages_page(conversation.conversation_id, None, HISTORY_PAGE_SIZE)
+                        .map(|page| (page.messages, page.has_more)),
+                }
+                .map_err(core)?;
+                let replies = rcs_receive::page_replies(client, &history)?;
+                let messages = history
+                    .iter()
+                    .map(|message| rcs_receive::message_view(client, message, &revoked, &replies))
+                    .collect::<Result<Vec<_>, _>>()?;
+                (messages, Some(has_more))
+            } else {
+                (Vec::new(), None)
+            };
             let reply_context = client.mms_reply_context(conversation.conversation_id).ok();
             let rcs_metadata = client
                 .rcs_conversation_metadata(conversation.conversation_id)
@@ -924,10 +926,11 @@ impl BrowserCore {
             .messages_page(conversation, Some(before), HISTORY_PAGE_SIZE)
             .map_err(core)?;
         let client = self.client()?;
+        let replies = rcs_receive::page_replies(client, &page.messages)?;
         let messages = page
             .messages
             .iter()
-            .map(|message| rcs_receive::message_view(client, message, &revoked))
+            .map(|message| rcs_receive::message_view(client, message, &revoked, &replies))
             .collect::<Result<Vec<_>, _>>()?;
         serde_json::to_value(dto::HistoryPage {
             conversation_id: conversation.to_string(),
@@ -959,8 +962,9 @@ impl BrowserCore {
             serde_json::from_value(args).map_err(|_| invalid())?;
         let client = self.client()?;
         let window = client.load_message_window(input.into()).map_err(core)?;
+        let replies = rcs_receive::page_replies(client, &window.messages)?;
         serde_json::to_value(dto::try_message_window_view(window, |message| {
-            rcs_receive::message_view(client, &message, &revoked)
+            rcs_receive::message_view(client, &message, &revoked, &replies)
         })?)
         .map_err(|_| core(CoreError::Database))
     }

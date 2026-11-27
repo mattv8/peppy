@@ -64,6 +64,11 @@ export type SendRecoveryView = { kind: SendRecoveryKind, canSendAgain: boolean,
  * The "Send again" copy of this message, when this device holds it.
  */
 sentAgain?: SentAgainView, };
+export type MessageReplyView = { messageId: string, sender: MessageSender, senderAddress?: string, excerpt?: string, 
+/**
+ * Whether the target message is loaded on this device.
+ */
+available: boolean, };
 export type MessageView = { id: string, revision: string, sender: MessageSender, 
 /**
  * Actual incoming sender, retained separately from the self/other display category.
@@ -88,4 +93,8 @@ sendRecovery?: SendRecoveryView,
 /**
  * This device's explicit "Send again" copy of this message, independent of the recovery state.
  */
-sentAgain?: SentAgainView, reactions?: Array<MessageReactionView>, ownReactionRequest?: OwnReactionRequestView, reactable?: ReactionRoute, };
+sentAgain?: SentAgainView, reactions?: Array<MessageReactionView>, ownReactionRequest?: OwnReactionRequestView, reactable?: ReactionRoute, 
+/**
+ * The message this one replies to; absent when the message is not a reply.
+ */
+replyTo?: MessageReplyView, };

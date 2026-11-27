@@ -6,9 +6,9 @@ use crate::{
     send_recovery_view,
 };
 use peppy_client_core::{
-    AttachmentId, Client, CommandId, ComposeDraft, ComposeDraftUpdate, ConversationId, DeviceId,
-    Direction, DraftId, DraftSendParts, Error as CoreError, GatewayRoute, GroupDraftSend, Message,
-    MessageId, SendRefusalReason, Transport, compose_transport,
+    AttachmentId, Client, CommandId, ComposeDraft, ComposeDraftUpdate, ComposeSendOptions,
+    ConversationId, DeviceId, Direction, DraftId, DraftSendParts, Error as CoreError, GatewayRoute,
+    GroupDraftSend, Message, MessageId, SendRefusalReason, Transport, compose_transport,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -58,6 +58,9 @@ pub struct DraftInput {
     /// Set only by "Create it again" after an unknown create outcome.
     #[serde(default)]
     pub group_create_confirm_duplicate: Option<bool>,
+    /// Local `MessageId` of the message this draft replies to; parsed by `draft_reply_target`.
+    #[serde(default)]
+    pub reply_to: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -85,6 +88,31 @@ fn ui(code: &'static str, message: &'static str) -> ComposeError {
         code,
         message: message.to_owned(),
     }
+}
+
+/// Parses the optional reply target. A malformed ID is an ordinary invalid request.
+pub fn draft_reply_target(input: &DraftInput) -> Result<Option<MessageId>, ComposeError> {
+    input
+        .reply_to
+        .as_deref()
+        .map(|value| {
+            MessageId::from_str(value)
+                .map_err(|_| ComposeError::Core(CoreError::InvalidRequest("reply target id")))
+        })
+        .transpose()
+}
+
+/// Whether core refused a draft send because its reply target is missing or in another conversation.
+pub fn is_reply_target_refusal(error: &CoreError) -> bool {
+    matches!(error, CoreError::InvalidRequest("reply target"))
+}
+
+/// The composer refusal for a reply target that is no longer usable. The draft is kept.
+pub fn reply_target_unavailable() -> ComposeError {
+    ui(
+        "reply-unavailable",
+        "The message you're replying to is no longer available.",
+    )
 }
 fn revision(value: &str) -> Result<u64, ComposeError> {
     value
@@ -551,6 +579,7 @@ pub fn prepare_draft_send(
     let draft_id = DraftId::from_str(&input.id)
         .map_err(|_| ui("invalid-draft", "Save the draft before sending it."))?;
     let expected = revision(&input.expected_revision)?;
+    draft_reply_target(input)?;
     let (gateway_id, sim_id) = match (input.gateway_id.as_deref(), input.sim_id.as_deref()) {
         (Some(gateway), Some(sim)) if !gateway.is_empty() && !sim.is_empty() => (gateway, sim),
         _ => {
@@ -739,6 +768,7 @@ pub fn prepare_draft_send(
         group_name: input.group_name.clone(),
         expected_member_revision: input.expected_member_revision.clone(),
         group_create_confirm_duplicate: input.group_create_confirm_duplicate,
+        reply_to: input.reply_to.clone(),
     })
 }
 
@@ -753,6 +783,7 @@ fn queue_prepared_draft_send(
     let stored = client
         .resolve_compose_draft_for_send(draft_id, revision)
         .map_err(ComposeError::Core)?;
+    let reply_to = draft_reply_target(input)?;
     let parts = prepared_draft_send_parts(client, input, gateways)?;
     let transport = compose_transport(
         &stored.recipients,
@@ -763,19 +794,31 @@ fn queue_prepared_draft_send(
         None if stored.recipients.len() > 1 => Some(group_send(input)?),
         _ => None,
     };
-    let sent = match (parts.as_ref(), group) {
-        (Some(parts), _) => client
-            .send_compose_draft_with_parts(draft_id, revision, parts.clone())
-            .map(|_| ()),
-        (None, Some(group)) => client
-            .send_compose_draft_for_group_checked_transport(draft_id, revision, transport, group)
-            .map(|_| ()),
-        (None, None) => client
-            .send_compose_draft_checked_transport(draft_id, revision, transport)
-            .map(|_| ()),
+    // A split MMS send is always checked as MMS; any other send is checked against its transport.
+    let expected_transport = if parts.is_some() {
+        Transport::Mms
+    } else {
+        transport
     };
+    let parts_count = parts
+        .as_ref()
+        .map(|parts| (parts.image_groups.len() + usize::from(parts.caption)) as u32);
+    let options = ComposeSendOptions {
+        expected_transport: Some(expected_transport),
+        group,
+        parts,
+        reply_to,
+    };
+    let sent = client
+        .send_compose_draft_with_options(draft_id, revision, options)
+        .map(|_| ());
     if matches!(sent, Err(CoreError::GroupMembersChanged)) {
         return members_changed_refusal(client, stored.conversation_id, revision);
+    }
+    if let Err(source) = &sent
+        && is_reply_target_refusal(source)
+    {
+        return Err(reply_target_unavailable());
     }
     if let Err(source) = sent {
         let current_revision = match &source {
@@ -799,7 +842,7 @@ fn queue_prepared_draft_send(
         status: "queued-local",
         reason: None,
         revision: Some((revision + 1).to_string()),
-        parts: parts.map(|parts| (parts.image_groups.len() + usize::from(parts.caption)) as u32),
+        parts: parts_count,
         group: None,
         refused_attachment_ids: None,
     })
@@ -1015,6 +1058,59 @@ mod tests {
     };
     use peppy_crypto::{KeyProfile, create_vault_check_header, derive_root_key};
 
+    fn draft_with_reply(reply_to: Option<&str>) -> DraftInput {
+        DraftInput {
+            id: String::new(),
+            conversation_id: String::new(),
+            text: "reply".into(),
+            recipient_ids: vec![],
+            attachment_ids: vec![],
+            gateway_id: None,
+            sim_id: None,
+            expected_revision: "1".into(),
+            group_name: None,
+            expected_member_revision: None,
+            group_create_confirm_duplicate: None,
+            reply_to: reply_to.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn draft_reply_target_parses_an_id_and_refuses_a_malformed_one() {
+        let id = MessageId::new();
+        assert!(matches!(
+            draft_reply_target(&draft_with_reply(None)),
+            Ok(None)
+        ));
+        assert!(matches!(
+            draft_reply_target(&draft_with_reply(Some(&id.to_string()))),
+            Ok(Some(parsed)) if parsed == id
+        ));
+        assert!(matches!(
+            draft_reply_target(&draft_with_reply(Some("not-an-id"))),
+            Err(ComposeError::Core(CoreError::InvalidRequest(
+                "reply target id"
+            )))
+        ));
+    }
+
+    #[test]
+    fn reply_target_refusal_maps_to_the_composer_message() {
+        assert!(is_reply_target_refusal(&CoreError::InvalidRequest(
+            "reply target"
+        )));
+        assert!(!is_reply_target_refusal(&CoreError::InvalidRequest(
+            "reply target id"
+        )));
+        assert!(matches!(
+            reply_target_unavailable(),
+            ComposeError::Ui {
+                code: "reply-unavailable",
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn revision_strings_match_desktop_host_fixture() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
@@ -1088,6 +1184,7 @@ mod tests {
             group_name: None,
             expected_member_revision: None,
             group_create_confirm_duplicate: None,
+            reply_to: None,
         }
     }
 
@@ -1397,6 +1494,7 @@ mod tests {
                 group_name: None,
                 expected_member_revision: None,
                 group_create_confirm_duplicate: None,
+                reply_to: None,
             },
         ) {
             Ok(saved) => saved,
@@ -1707,6 +1805,7 @@ mod tests {
             group_name: Some("Weekend".into()),
             expected_member_revision: expected_member_revision.map(str::to_owned),
             group_create_confirm_duplicate: Some(true),
+            reply_to: None,
         }
     }
 
