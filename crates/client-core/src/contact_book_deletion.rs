@@ -1,6 +1,6 @@
 //! Vault-wide deletion of a contact book, applied on every device.
 //!
-//! A device may delete the synced copy of a removed owner's address book for the whole vault.
+//! A device may delete a retired book or a removed owner's book for the whole vault.
 //! The deletion replicates as one book fence (`ContactBookDeleted`, retained for the life of the
 //! book) and one terminal record per contact (`ContactBookDeletedMember`) so each contact's
 //! history can be pruned. The fence lives in `deleted_contact_books`. Every later record of the
@@ -20,7 +20,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(crate) const DELETE_INPUT: &str = "contact book deletion input is invalid";
 pub(crate) const DELETE_NOT_FOUND: &str = "contact book is not on this device";
 pub(crate) const DELETE_ALREADY_DELETED: &str = "contact book was already deleted for all devices";
-pub(crate) const DELETE_OWNER_NOT_REMOVED: &str = "contact book owner is not a removed device";
+pub(crate) const DELETE_NOT_DELETABLE: &str =
+    "contact book is neither an eligible retired book nor owned by a removed device";
 pub(crate) const DELETE_OWNER_IS_THIS_DEVICE: &str = "contact book belongs to this device";
 pub(crate) const DELETE_OWNER_SUCCEEDED: &str =
     "contact book owner was succeeded by another device";
@@ -55,8 +56,8 @@ const BOOK_STATE_SQL: &[&str] = &[
     "DELETE FROM contact_takeover_indexed WHERE book_id=?1",
 ];
 
-/// Whether a deletion names `own_device` as the book owner. Such a deletion is quarantined: this
-/// device's own address book is local truth and no replicated event removes it.
+/// A deletion naming this device is quarantined because its own book is local truth, except for a
+/// retired book: peers may delete it, and a valid deletion is accepted without changing local data.
 pub(crate) fn targets_own_book(payload: &PrivatePayload, own_device: &str) -> bool {
     matches!(
         payload,
@@ -64,6 +65,37 @@ pub(crate) fn targets_own_book(payload: &PrivatePayload, own_device: &str) -> bo
             | PrivatePayload::ContactBookDeletedMember { owner_device_id, .. }
             if owner_device_id == own_device
     )
+}
+
+/// Whether an own-book deletion is valid and targets a retired stored book.
+pub(crate) fn own_book_is_retired(
+    conn: &Connection,
+    payload: &PrivatePayload,
+    own_device: &str,
+) -> Result<bool, Error> {
+    let (book_id, owner, generation) = match payload {
+        PrivatePayload::ContactBookDeleted {
+            book_id,
+            owner_device_id,
+            generation,
+            ..
+        }
+        | PrivatePayload::ContactBookDeletedMember {
+            book_id,
+            owner_device_id,
+            generation,
+            ..
+        } => (book_id, owner_device_id, generation),
+        _ => return Ok(false),
+    };
+    if check_ids(book_id, owner).is_err() || canonical_decimal(generation).is_err() {
+        return Ok(false);
+    }
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM contact_books WHERE id=? AND owner_device_id=? AND state='retired')",
+        params![book_id, own_device],
+        |row| row.get(0),
+    )?)
 }
 
 /// Applies a book fence or a per-contact record. `Ok(false)` quarantines the record, which is
@@ -540,7 +572,7 @@ pub(crate) fn drain_completion(tx: &mut Transaction<'_>, ctx: &Ctx<'_>) -> Resul
     Ok(())
 }
 
-/// Deletes a removed device's contact book for the whole vault. `input` is
+/// Deletes a non-replaced retired book or a removed device's book for the whole vault. `input` is
 /// `{"book_id", "revoked_device_ids", "sync_current"}`. The revoked list and `sync_current` are the
 /// host's trusted facts; a missing `sync_current` is false. Refusals are checked in this order:
 /// invalid input, locked vault (`KeysUnavailable`), then `DELETE_NOT_CURRENT` unless
@@ -576,8 +608,15 @@ pub(crate) fn delete(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Resul
         };
         return Err(Error::InvalidRequest(refusal));
     };
-    if !revoked.contains(&owner.as_str()) {
-        return Err(Error::InvalidRequest(DELETE_OWNER_NOT_REMOVED));
+    let retired: bool = tx.query_row(
+        "SELECT state='retired' FROM contact_books WHERE id=?",
+        [book_id],
+        |row| row.get(0),
+    )?;
+    if !revoked.contains(&owner.as_str())
+        && (!retired || crate::contacts::stored_replaced(&tx, book_id)?)
+    {
+        return Err(Error::InvalidRequest(DELETE_NOT_DELETABLE));
     }
     if owner == ctx.device_id.to_string() {
         return Err(Error::InvalidRequest(DELETE_OWNER_IS_THIS_DEVICE));

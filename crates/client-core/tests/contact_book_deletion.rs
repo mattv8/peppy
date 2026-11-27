@@ -206,22 +206,447 @@ fn deletion_naming_this_device_as_owner_is_quarantined() {
     let dir = TempDir::new().unwrap();
     let (vault, config, observer, _owner) = observed_book(&dir);
 
+    let producer = DeviceId::new();
     let report = sync(
-        &[sealed(
-            &vault,
-            DeviceId::new(),
-            1,
-            fence(config.device_id, "1"),
-        )],
+        &[
+            sealed(&vault, producer, 1, fence(config.device_id, "1")),
+            sealed(
+                &vault,
+                producer,
+                2,
+                PrivatePayload::ContactBookDeletedMember {
+                    book_id: BOOK.into(),
+                    contact_id: "ada".into(),
+                    owner_device_id: config.device_id.to_string(),
+                    generation: "1".into(),
+                },
+            ),
+        ],
         &observer,
     );
 
-    assert_eq!(report.quarantined, 1);
+    assert_eq!(report.quarantined, 2);
     assert_eq!(book_ids(&observer), vec![BOOK.to_owned()]);
     assert_eq!(
         count(&config.database_path, "SELECT COUNT(*) FROM contacts"),
         2
     );
+}
+
+#[test]
+fn retired_book_of_live_owner_can_be_deleted() {
+    let dir = TempDir::new().unwrap();
+    let (vault, _config, observer, owner) = observed_book(&dir);
+    let third_config = config(&dir, "third", &vault);
+    let third = unlocked(&third_config, &vault);
+    let initial = [
+        sealed(
+            &vault,
+            owner,
+            1,
+            PrivatePayload::ContactBookState {
+                book: book(owner, "1"),
+            },
+        ),
+        sealed(
+            &vault,
+            owner,
+            2,
+            PrivatePayload::ContactUpserted {
+                book: book(owner, "1"),
+                contact: contact("ada", "Ada"),
+            },
+        ),
+        sealed(
+            &vault,
+            owner,
+            3,
+            PrivatePayload::ContactUpserted {
+                book: book(owner, "1"),
+                contact: contact("bea", "Bea"),
+            },
+        ),
+    ];
+    assert_eq!(sync(&initial, &third).quarantined, 0);
+    let mut retired = book(owner, "1");
+    retired["state"] = json!("retired");
+    retired["state_revision"] = json!("2");
+    assert_eq!(
+        sync(
+            &[sealed(
+                &vault,
+                owner,
+                4,
+                PrivatePayload::ContactBookState {
+                    book: retired.clone()
+                }
+            )],
+            &observer
+        )
+        .quarantined,
+        0
+    );
+    assert_eq!(
+        sync(
+            &[sealed(
+                &vault,
+                owner,
+                4,
+                PrivatePayload::ContactBookState {
+                    book: retired.clone()
+                }
+            )],
+            &third
+        )
+        .quarantined,
+        0
+    );
+    let mut other = book(owner, "1");
+    other["id"] = json!("other-book");
+    let mut other_contact = contact("other", "Other");
+    other_contact["book_id"] = json!("other-book");
+    let other_event = sealed(
+        &vault,
+        owner,
+        5,
+        PrivatePayload::ContactUpserted {
+            book: other,
+            contact: other_contact,
+        },
+    );
+    assert_eq!(
+        sync(std::slice::from_ref(&other_event), &observer).quarantined,
+        0
+    );
+    assert_eq!(sync(&[other_event], &third).quarantined, 0);
+    let result: Value =
+        serde_json::from_str(&observer.delete_contact_book(&delete_input(&[])).unwrap()).unwrap();
+    assert_eq!(result["contacts"], 2);
+    assert_eq!(book_ids(&observer), ["other-book"]);
+    let deletions = observer.pending_outbox().unwrap();
+    assert_eq!(sync(&deletions, &third).quarantined, 0);
+    assert_eq!(book_ids(&third), ["other-book"]);
+    assert_eq!(
+        count(
+            &third_config.database_path,
+            "SELECT COUNT(*) FROM contacts WHERE book_id='address-book'"
+        ),
+        0
+    );
+    let late = [
+        sealed(
+            &vault,
+            owner,
+            6,
+            PrivatePayload::ContactBookState {
+                book: retired.clone(),
+            },
+        ),
+        sealed(
+            &vault,
+            owner,
+            7,
+            PrivatePayload::ContactUpserted {
+                book: retired,
+                contact: contact("ada", "Ada"),
+            },
+        ),
+    ];
+    assert_eq!(sync(&late, &third).quarantined, 0);
+    assert_eq!(book_ids(&third), ["other-book"]);
+    assert_eq!(
+        count(
+            &third_config.database_path,
+            "SELECT COUNT(*) FROM contacts WHERE book_id='address-book'"
+        ),
+        0
+    );
+    for client in [&observer, &third] {
+        assert_eq!(
+            crate::snapshot_projection::visible(client, "other-book"),
+            ["other"]
+        );
+    }
+    assert!(observer.quarantined().unwrap().is_empty());
+    assert!(third.quarantined().unwrap().is_empty());
+}
+
+#[test]
+fn replaced_book_requires_removed_owner_to_delete() {
+    let dir = TempDir::new().unwrap();
+    let (vault, config, observer, owner) = observed_book(&dir);
+    let mut replaced = book(owner, "1");
+    replaced["state"] = json!("retired");
+    replaced["state_revision"] = json!("2");
+    replaced["superseded_by"] = json!("replacement");
+    assert_eq!(
+        sync(
+            &[sealed(
+                &vault,
+                owner,
+                4,
+                PrivatePayload::ContactBookState { book: replaced }
+            )],
+            &observer,
+        )
+        .quarantined,
+        0
+    );
+    assert_eq!(
+        observer
+            .delete_contact_book(&delete_input(&[]))
+            .unwrap_err(),
+        Error::InvalidRequest(
+            "contact book is neither an eligible retired book nor owned by a removed device"
+        )
+    );
+    assert_eq!(
+        count(
+            &config.database_path,
+            "SELECT COUNT(*) FROM contact_books WHERE id='address-book'"
+        ),
+        1
+    );
+    observer
+        .delete_contact_book(&delete_input(&[owner.to_string()]))
+        .unwrap();
+    assert_eq!(
+        count(
+            &config.database_path,
+            "SELECT COUNT(*) FROM contact_books WHERE id='address-book'"
+        ),
+        0
+    );
+}
+
+#[test]
+fn own_retired_book_ignores_fence_and_member() {
+    let dir = TempDir::new().unwrap();
+    let fixture = captured(&dir, two_contacts());
+    let owner = fixture.owner_config.device_id;
+    let active_producer = DeviceId::new();
+    let active_report = sync(
+        &[
+            sealed(&fixture.vault, active_producer, 1, fence(owner, "1")),
+            sealed(
+                &fixture.vault,
+                active_producer,
+                2,
+                PrivatePayload::ContactBookDeletedMember {
+                    book_id: BOOK.into(),
+                    contact_id: "c1".into(),
+                    owner_device_id: owner.to_string(),
+                    generation: "1".into(),
+                },
+            ),
+        ],
+        &fixture.owner,
+    );
+    assert_eq!(active_report.quarantined, 2);
+    let mut retired = crate::snapshot_projection::book(&fixture.owner_config, BOOK);
+    retired["state"] = json!("retired");
+    crate::snapshot_projection::capture(&fixture.owner, &retired, vec![]);
+    let producer = DeviceId::new();
+    let report = sync(
+        &[
+            sealed(&fixture.vault, producer, 1, fence(owner, "1")),
+            sealed(
+                &fixture.vault,
+                producer,
+                2,
+                PrivatePayload::ContactBookDeletedMember {
+                    book_id: BOOK.into(),
+                    contact_id: "c1".into(),
+                    owner_device_id: owner.to_string(),
+                    generation: "1".into(),
+                },
+            ),
+        ],
+        &fixture.owner,
+    );
+    assert_eq!(report.quarantined, 0);
+    assert_eq!(book_ids(&fixture.owner), vec![BOOK.to_owned()]);
+    let path = &fixture.owner_config.database_path;
+    assert_eq!(count(path, "SELECT COUNT(*) FROM contacts"), 2);
+    assert_eq!(count(path, "SELECT COUNT(*) FROM deleted_contact_books"), 0);
+    assert_eq!(
+        count(path, "SELECT COUNT(*) FROM deleted_contact_members"),
+        0
+    );
+}
+
+#[test]
+fn own_retired_book_quarantines_malformed_deletion_generations() {
+    let dir = TempDir::new().unwrap();
+    let fixture = captured(&dir, two_contacts());
+    let mut retired = crate::snapshot_projection::book(&fixture.owner_config, BOOK);
+    retired["state"] = json!("retired");
+    crate::snapshot_projection::capture(&fixture.owner, &retired, vec![]);
+    let owner = fixture.owner_config.device_id;
+    let producer = DeviceId::new();
+    let mut records = Vec::new();
+    for (index, generation) in ["07", "9223372036854775808"].into_iter().enumerate() {
+        records.push(sealed(
+            &fixture.vault,
+            producer,
+            (index * 2 + 1) as u64,
+            fence(owner, generation),
+        ));
+        records.push(sealed(
+            &fixture.vault,
+            producer,
+            (index * 2 + 2) as u64,
+            PrivatePayload::ContactBookDeletedMember {
+                book_id: BOOK.into(),
+                contact_id: "c1".into(),
+                owner_device_id: owner.to_string(),
+                generation: generation.into(),
+            },
+        ));
+    }
+    assert_eq!(sync(&records, &fixture.owner).quarantined, 4);
+}
+
+#[test]
+fn real_owner_keeps_retired_book_and_continues_new_book_after_peer_deletes() {
+    let dir = TempDir::new().unwrap();
+    let mut fixture = captured(&dir, two_contacts());
+    let mut retired = crate::snapshot_projection::book(&fixture.owner_config, BOOK);
+    retired["state"] = json!("retired");
+    crate::snapshot_projection::capture(&fixture.owner, &retired, vec![]);
+    let new_book = crate::snapshot_projection::book(&fixture.owner_config, "new-book");
+    crate::snapshot_projection::capture(
+        &fixture.owner,
+        &new_book,
+        vec![crate::snapshot_projection::contact(
+            "new-book",
+            "new-contact",
+            "New",
+        )],
+    );
+    fixture.server.upload(&fixture.owner);
+    assert_eq!(fixture.server.sync(&fixture.owner).quarantined, 0);
+    assert_eq!(fixture.server.sync(&fixture.observer).quarantined, 0);
+    let third_config = config(&dir, "third-real", &fixture.vault);
+    let third = unlocked(&third_config, &fixture.vault);
+    assert_eq!(fixture.server.sync(&third).quarantined, 0);
+    fixture
+        .observer
+        .delete_contact_book(&delete_input(&[]))
+        .unwrap();
+    assert!(
+        fixture
+            .observer
+            .pending_outbox()
+            .unwrap()
+            .iter()
+            .all(|e| e.compaction.is_some())
+    );
+    let (member, contact_id, reference) = fixture.observer.pending_outbox().unwrap().into_iter()
+        .find_map(|envelope| {
+            let PrivatePayload::ContactBookDeletedMember { contact_id, .. } = opened(&fixture.vault, &envelope) else {
+                return None;
+            };
+            let compaction = envelope.compaction.as_ref().unwrap();
+            assert!(compaction.terminal);
+            let reference = compaction.supersedes.iter().find(|reference| {
+                reference.producer_device_id == fixture.owner_config.device_id
+                    && fixture.server.log.iter().any(|publication| {
+                        publication.producer_device_id == reference.producer_device_id
+                            && publication.producer_sequence == reference.producer_sequence
+                            && matches!(opened(&fixture.vault, publication),
+                                PrivatePayload::ContactUpserted { contact, .. } if contact["id"] == contact_id)
+                    })
+            })?.clone();
+            Some((envelope, contact_id, reference))
+        }).expect("a terminal member must supersede an owner contact publication");
+    assert!(
+        fixture
+            .observer
+            .pending_outbox()
+            .unwrap()
+            .iter()
+            .all(|envelope| {
+                envelope.envelope_id == member.envelope_id
+                    || !envelope
+                        .compaction
+                        .as_ref()
+                        .is_some_and(|metadata| metadata.supersedes.contains(&reference))
+            }),
+        "only the chosen member can cover this publication"
+    );
+    let owner_db = sqlcipher(&fixture.owner_config.database_path);
+    let covered = || {
+        owner_db.query_row(
+        "SELECT COUNT(*) FROM compaction_covered WHERE producer_device_id=? AND source_sequence=?",
+        params![reference.producer_device_id.to_string(), reference.producer_sequence.0 as i64],
+        |row| row.get::<_, i64>(0),
+    ).unwrap()
+    };
+    let terminal = || {
+        owner_db.query_row(
+        "SELECT COUNT(*) FROM compaction_frontier WHERE producer_device_id=? AND source_sequence=? AND identity=? AND terminal=1",
+        params![member.producer_device_id.to_string(), member.producer_sequence.0 as i64, format!("contact:{BOOK}:{contact_id}")],
+        |row| row.get::<_, i64>(0),
+    ).unwrap()
+    };
+    assert_eq!(
+        covered(),
+        0,
+        "owner publication is not covered before receiving the member"
+    );
+    assert_eq!(terminal(), 0, "member is absent before delivery");
+    fixture.server.upload(&fixture.observer);
+    assert_eq!(fixture.server.sync(&fixture.owner).quarantined, 0);
+    assert_eq!(covered(), 1, "owner learned the superseded publication");
+    assert_eq!(terminal(), 1, "owner learned the terminal member frontier");
+    assert_eq!(fixture.server.sync(&third).quarantined, 0);
+    let path = &fixture.owner_config.database_path;
+    assert_eq!(
+        count(
+            path,
+            "SELECT COUNT(*) FROM contact_books WHERE id='address-book'"
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            path,
+            "SELECT COUNT(*) FROM contacts WHERE book_id='address-book'"
+        ),
+        2
+    );
+    assert_eq!(count(path, "SELECT COUNT(*) FROM deleted_contact_books"), 0);
+    assert_eq!(
+        count(path, "SELECT COUNT(*) FROM deleted_contact_members"),
+        0
+    );
+    assert!(fixture.owner.pending_outbox().unwrap().is_empty());
+    assert!(crate::snapshot_projection::visible(&third, BOOK).is_empty());
+    assert_eq!(
+        crate::snapshot_projection::visible(&third, "new-book"),
+        ["new-contact"]
+    );
+    crate::snapshot_projection::capture(
+        &fixture.owner,
+        &new_book,
+        vec![crate::snapshot_projection::contact(
+            "new-book",
+            "new-contact",
+            "Changed",
+        )],
+    );
+    fixture.server.upload(&fixture.owner);
+    assert_eq!(fixture.server.sync(&third).quarantined, 0);
+    let view: Value = serde_json::from_str(
+        &third
+            .contact_book_view(
+                &json!({"schema_version": 1, "book_id": "new-book", "limit": 200}).to_string(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(view["contacts"][0]["name"]["given"], "Changed");
 }
 
 #[test]
@@ -577,8 +1002,26 @@ fn delete_refusals_each_carry_their_own_reason() {
     );
     assert_eq!(
         refusal(&fixture.observer, delete_input(&[])),
-        Error::InvalidRequest("contact book owner is not a removed device")
+        Error::InvalidRequest(
+            "contact book is neither an eligible retired book nor owned by a removed device"
+        )
     );
+    let path = &fixture.observer_config.database_path;
+    sqlcipher(path)
+        .execute(
+            "UPDATE contact_books SET state='unavailable' WHERE id=?",
+            [BOOK],
+        )
+        .unwrap();
+    assert_eq!(
+        refusal(&fixture.observer, delete_input(&[])),
+        Error::InvalidRequest(
+            "contact book is neither an eligible retired book nor owned by a removed device"
+        )
+    );
+    sqlcipher(path)
+        .execute("UPDATE contact_books SET state='active' WHERE id=?", [BOOK])
+        .unwrap();
     assert_eq!(
         refusal(&fixture.observer, "{not json".into()),
         Error::InvalidRequest("contact book deletion input is invalid")
@@ -1951,7 +2394,9 @@ fn refusal_order_is_input_then_lock_then_sync_then_book() {
         unlocked_again
             .delete_contact_book(&delete_json("someone-else", Some(true)))
             .unwrap_err(),
-        Error::InvalidRequest("contact book owner is not a removed device")
+        Error::InvalidRequest(
+            "contact book is neither an eligible retired book nor owned by a removed device"
+        )
     );
 }
 
