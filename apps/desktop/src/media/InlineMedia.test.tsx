@@ -14,9 +14,9 @@ describe("inline video controls", () => {
   async function renderVideo(touch = false) {
     stubMatchMedia(touch ? ["(hover: none)"] : []);
     render(<InlineMedia attachment={videoAttachment()} requestOriginal={vi.fn().mockResolvedValue({ state: "ready", url: "blob:video" })} checkOriginal={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: /play video/i }));
-    const video = await screen.findByLabelText("Clip");
-    vi.useFakeTimers();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /play video/i })); });
+    const video = screen.getByLabelText("Clip");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     return video;
   }
 
@@ -94,7 +94,9 @@ describe("inline video controls", () => {
     expect(video).toHaveAttribute("controls");
     fireEvent.pointerDown(video);
     fireEvent.pointerUp(window);
-    act(() => { vi.advanceTimersByTime(2000); });
+    act(() => { vi.advanceTimersByTime(1999); });
+    expect(video).toHaveAttribute("controls");
+    act(() => { vi.advanceTimersByTime(1); });
     expect(video).not.toHaveAttribute("controls");
   });
 
