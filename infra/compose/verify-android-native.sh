@@ -137,6 +137,7 @@ build_target() {
         fi
         cargo_args=("--locked" "-p" "peppy-mobile-bindings" "--lib" "--target" "$target")
         if [[ "$native_profile" == "release" ]]; then
+            export CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
             cargo_args+=("--release")
         fi
         env "CC_$target=$clang" "AR_$target=$llvm_ar" "RANLIB_$target=$llvm_ranlib" \
