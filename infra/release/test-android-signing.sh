@@ -2,6 +2,7 @@
 set -euo pipefail
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+"$script_dir/test-android-abi-apks.sh"
 caller_java_home=${JAVA_HOME:-}
 caller_sdk_root=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
 caller_path=$PATH
@@ -84,6 +85,19 @@ if grep -aFq wrong "$artifact"; then fingerprint=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
 printf 'Signer #1:\nSHA256: %s\n' "$fingerprint"
 SH
 chmod +x "$tools/zipalign" "$tools/apksigner" "$bin/jarsigner" "$bin/keytool"
+cat > "$bin/mv" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${PEPPY_TEST_MV_FAIL:-}" = 1 ]; then
+  count=0
+  [ ! -f "$PEPPY_TEST_MV_COUNT" ] || count=$(cat "$PEPPY_TEST_MV_COUNT")
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$PEPPY_TEST_MV_COUNT"
+  [ "$count" -ne 2 ] || { echo 'mv failed intentionally' >&2; exit 1; }
+fi
+exec /bin/mv "$@"
+SH
+chmod +x "$bin/mv"
 
 expect_failure_reason() {
   local expected=$1
@@ -110,6 +124,9 @@ import zipfile
 
 with zipfile.ZipFile(sys.argv[1], 'w') as archive:
     archive.writestr('base/lib/arm64-v8a/libfixture.so', pathlib.Path(sys.argv[2]).read_bytes())
+    archive.writestr('lib/arm64-v8a/libfixture.so', pathlib.Path(sys.argv[2]).read_bytes())
+    archive.writestr('lib/x86_64/libfixture.so', pathlib.Path(sys.argv[2]).read_bytes() + b'x86')
+    archive.writestr('classes.dex', b'fixture dex')
     if sys.argv[3]:
         archive.writestr(sys.argv[3], sys.argv[3])
 PY
@@ -136,6 +153,7 @@ export PEPPY_ANDROID_KEYSTORE_PASSWORD=store-secret
 export PEPPY_ANDROID_KEY_ALIAS=release
 export PEPPY_ANDROID_KEY_PASSWORD=key-secret
 export PEPPY_ANDROID_SIGNING_CERT_SHA256="AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA"
+export PEPPY_TEST_MV_COUNT="$root/mv-count"
 
 expect_failure_reason 'is not valid base64' env PEPPY_ANDROID_KEYSTORE_BASE64='not base64!' "$script_dir/sign-android-artifacts.sh" "$unsigned_apk" "$unsigned_aab" "$root/out"
 printf stale > "$root/out/peppy-android.apk"
@@ -144,9 +162,34 @@ expect_failure_reason 'zipalign failed intentionally' env ZIPALIGN_FAIL=1 "$scri
 test ! -e "$root/out/peppy-android.apk"
 test ! -e "$root/out/peppy-android.aab"
 
+expect_failure_reason 'mv failed intentionally' env signing_complete=1 PEPPY_TEST_MV_FAIL=1 "$script_dir/sign-android-artifacts.sh" "$unsigned_apk" "$unsigned_aab" "$root/out"
+for artifact in peppy-android.apk peppy-android.aab peppy-android-arm64-v8a.apk peppy-android-x86_64.apk; do
+  test ! -e "$root/out/$artifact"
+done
+if compgen -G "$root/out/.peppy-android-signing-stage.*" >/dev/null; then
+  printf 'failed signing left a staging directory\n' >&2
+  exit 1
+fi
+
+mkdir -p "$root/read-only-parent/out"
+(
+  trap 'chmod 0755 "$root/read-only-parent"' EXIT
+  chmod 0555 "$root/read-only-parent"
+  "$script_dir/sign-android-artifacts.sh" "$unsigned_apk" "$unsigned_aab" "$root/read-only-parent/out"
+  for artifact in peppy-android.apk peppy-android.aab peppy-android-arm64-v8a.apk peppy-android-x86_64.apk; do
+    test -f "$root/read-only-parent/out/$artifact"
+  done
+  if compgen -G "$root/read-only-parent/out/.peppy-android-signing-stage.*" >/dev/null; then
+    printf 'successful signing left a staging directory\n' >&2
+    exit 1
+  fi
+)
+
 "$script_dir/sign-android-artifacts.sh" "$unsigned_apk" "$unsigned_aab" "$root/out"
 test -f "$root/out/peppy-android.apk"
 test -f "$root/out/peppy-android.aab"
+test -f "$root/out/peppy-android-arm64-v8a.apk"
+test -f "$root/out/peppy-android-x86_64.apk"
 test ! -e "$(<"$root/keystore-path")"
 grep -Fq 'zipalign -f -P 16 4' "$log"
 grep -Fq 'apksigner sign' "$log"
@@ -156,6 +199,49 @@ if grep -Fq "$PEPPY_ANDROID_KEYSTORE_PASSWORD" "$log" || grep -Fq "$PEPPY_ANDROI
 fi
 
 "$script_dir/verify-android-artifacts.sh" "$root/out/peppy-android.apk" "$root/out/peppy-android.aab"
+"$script_dir/verify-android-artifacts.sh" "$root/out/peppy-android.apk" "$root/out/peppy-android.aab" \
+  "$root/out/peppy-android-arm64-v8a.apk" "$root/out/peppy-android-x86_64.apk"
+python3 - "$root/out/peppy-android-arm64-v8a.apk" "$root" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+source = pathlib.Path(sys.argv[1])
+root = pathlib.Path(sys.argv[2])
+for variant in ("extra", "modified", "wrong-abi", "both"):
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(root / f"{variant}.apk", "w") as target:
+        for entry in original.infolist():
+            data = original.read(entry)
+            if variant == "modified" and entry.filename == "classes.dex":
+                data = data[:-1] + bytes([data[-1] ^ 1])
+            if variant == "wrong-abi" and entry.filename.startswith("lib/arm64-v8a/"):
+                entry.filename = entry.filename.replace("arm64-v8a", "x86_64")
+            target.writestr(entry, data)
+        if variant == "extra":
+            target.writestr("extra", "extra")
+        if variant == "both":
+            target.writestr("lib/x86_64/libfixture.so", original.read("lib/arm64-v8a/libfixture.so"))
+PY
+for variant in extra modified wrong-abi both; do
+  expect_failure_reason 'ABI APK verification failed' "$script_dir/verify-android-artifacts.sh" \
+    "$root/out/peppy-android.apk" "$root/out/peppy-android.aab" "$root/$variant.apk" \
+    "$root/out/peppy-android-x86_64.apk"
+done
+expect_failure_reason 'expected ABI' "$script_dir/verify-android-artifacts.sh" \
+  "$root/out/peppy-android.apk" "$root/out/peppy-android.aab" \
+  "$root/out/peppy-android-arm64-v8a.apk" "$root/out/peppy-android-arm64-v8a.apk"
+expect_failure_reason 'expected ABI' "$script_dir/verify-android-artifacts.sh" \
+  "$root/out/peppy-android.apk" "$root/out/peppy-android.aab" \
+  "$root/out/peppy-android-x86_64.apk" "$root/out/peppy-android-arm64-v8a.apk"
+for count in 3 5; do
+  args=("$root/out/peppy-android.apk" "$root/out/peppy-android.aab" "$root/out/peppy-android-arm64-v8a.apk")
+  if [ "$count" -eq 5 ]; then
+    args+=("$root/out/peppy-android-x86_64.apk" "$root/out/peppy-android.apk")
+  fi
+  status=0
+  output=$("$script_dir/verify-android-artifacts.sh" "${args[@]}" 2>&1) || status=$?
+  [ "$status" -eq 2 ] && [[ "$output" = *usage:* ]] || { printf 'expected usage exit 2 for %s arguments\n' "$count" >&2; exit 1; }
+done
 make_aligned_archive "$root/unsigned-signed.aab" unsigned
 expect_failure_reason 'AAB strict signature verification failed' "$script_dir/verify-android-artifacts.sh" "$root/out/peppy-android.apk" "$root/unsigned-signed.aab"
 make_aligned_archive "$root/wrong.apk" wrong
@@ -183,6 +269,7 @@ import zipfile
 
 with zipfile.ZipFile(sys.argv[1], 'a', compression=zipfile.ZIP_STORED) as archive:
     archive.writestr('lib/arm64-v8a/libfixture.so', pathlib.Path(sys.argv[2]).read_bytes())
+    archive.writestr('lib/x86_64/libfixture.so', pathlib.Path(sys.argv[2]).read_bytes() + b'x86')
 PY
 "$caller_java_home/bin/jar" --create --file "$real_root/unsigned.aab" -C "$real_root/payload" .
 "$caller_java_home/bin/keytool" -J-Duser.language=en -J-Duser.country=US -genkeypair -alias release -keystore "$real_root/release.p12" -storetype PKCS12 -storepass changeit -keypass changeit -dname 'CN=release' -keyalg RSA -validity 365 >/dev/null

@@ -353,6 +353,8 @@ jobs:
           path: |
             dist/android-release/peppy-android.apk
             dist/android-release/peppy-android.aab
+            dist/android-release/peppy-android-arm64-v8a.apk
+            dist/android-release/peppy-android-x86_64.apk
             dist/android-release/peppy-android-native-debug-symbols.zip
           if-no-files-found: error
           retention-days: 14

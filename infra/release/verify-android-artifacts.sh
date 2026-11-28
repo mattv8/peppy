@@ -4,13 +4,17 @@ set +x
 export LC_ALL=C
 umask 077
 
-[ "$#" -eq 2 ] || { echo "usage: $0 <signed-apk> <signed-aab>" >&2; exit 2; }
+[ "$#" -eq 2 ] || [ "$#" -eq 4 ] || { echo "usage: $0 <signed-apk> <signed-aab> [<arm64-v8a-apk> <x86_64-apk>]" >&2; exit 2; }
 apk=$1
 aab=$2
+shift 2
 [ -f "$apk" ] || { echo "signed APK not found: $apk" >&2; exit 1; }
 [ -f "$aab" ] || { echo "signed AAB not found: $aab" >&2; exit 1; }
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 "$script_dir/check-elf-alignment.py" "$apk" "$aab"
+if [ "$#" -gt 0 ]; then
+  "$script_dir/check-elf-alignment.py" "$@"
+fi
 
 normalize_fingerprint() {
   local value
@@ -33,6 +37,8 @@ zipalign="$build_tools/zipalign"
 jarsigner=$(command -v jarsigner) || { echo 'jarsigner is required' >&2; exit 1; }
 keytool=$(command -v keytool) || { echo 'keytool is required' >&2; exit 1; }
 
+verify_apk() {
+local apk=$1 apk_verification apk_fingerprints actual_apk_fingerprint
 apk_verification=$("$apksigner" verify --verbose --print-certs "$apk") || {
   echo 'APK signature verification failed' >&2
   exit 1
@@ -54,6 +60,14 @@ actual_apk_fingerprint=$(normalize_fingerprint "$apk_fingerprints") || {
   echo 'APK signer certificate does not match PEPPY_ANDROID_SIGNING_CERT_SHA256' >&2
   exit 1
 }
+}
+verify_apk "$apk"
+for abi_apk in "$@"; do
+  verify_apk "$abi_apk"
+done
+if [ "$#" -gt 0 ]; then
+  "$script_dir/check-android-abi-apk.py" "$apk" --abi "arm64-v8a=$1" --abi "x86_64=$2"
+fi
 
 aab_certificate=$("$keytool" -J-Duser.language=en -J-Duser.country=US -printcert -jarfile "$aab") || {
   echo 'AAB signer certificate could not be read' >&2

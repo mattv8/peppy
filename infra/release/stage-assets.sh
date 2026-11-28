@@ -27,6 +27,8 @@ android="$download_dir/android-release-artifacts"; linux="$download_dir/desktop-
 if [ "$group" = all ] || [ "$group" = android ]; then
   copy_asset "$(find_exact "$android" 'peppy-android.apk')" "peppy-$version-android.apk"
   copy_asset "$(find_exact "$android" 'peppy-android.aab')" "peppy-$version-android.aab"
+  copy_asset "$(find_exact "$android" 'peppy-android-arm64-v8a.apk')" "peppy-$version-android-arm64-v8a.apk"
+  copy_asset "$(find_exact "$android" 'peppy-android-x86_64.apk')" "peppy-$version-android-x86_64.apk"
 fi
 if [ "$group" = all ] || [ "$group" = desktop ]; then
   work_dir=$(mktemp -d); trap 'rm -rf "$work_dir"' EXIT
