@@ -985,27 +985,8 @@ pub(crate) fn publish_book_state(
     book_id: &str,
 ) -> Result<bool, Error> {
     let (mut body, _) = owned_book(tx, ctx, book_id)?;
-    let live = tx
-        .prepare(
-            "SELECT id,revision FROM contacts WHERE book_id=? AND deleted_at IS NULL ORDER BY id",
-        )?
-        .query_map([book_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut hasher = Sha256::new();
-    for (id, rev) in &live {
-        hasher.update(id.as_bytes());
-        hasher.update([0]);
-        hasher.update(rev.to_string().as_bytes());
-        hasher.update(b"\n");
-    }
-    let inventory: String = hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    body["inventory"] = json!({"count": live.len(), "digest": inventory});
+    let (count, inventory) = live_inventory(tx, book_id)?;
+    body["inventory"] = json!({"count": count, "digest": inventory});
     let mut content = body.clone();
     content
         .as_object_mut()
@@ -1047,6 +1028,31 @@ pub(crate) fn publish_book_state(
     )?;
     crate::set_meta(tx, &key, &format!("{at}:{state}"))?;
     Ok(true)
+}
+
+fn live_inventory(conn: &Connection, book_id: &str) -> rusqlite::Result<(usize, String)> {
+    use std::io::Write as _;
+
+    let mut statement = conn.prepare(
+        "SELECT id,revision FROM contacts WHERE book_id=? AND deleted_at IS NULL ORDER BY id",
+    )?;
+    let mut rows = statement.query([book_id])?;
+    let mut hasher = Sha256::new();
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let value = row.get_ref(0)?;
+        // On invalid text, use the original conversion to preserve its exact error.
+        match value.as_str() {
+            Ok(id) => hasher.update(id.as_bytes()),
+            Err(_) => hasher.update(row.get::<_, String>(0)?.as_bytes()),
+        }
+        let revision: i64 = row.get(1)?;
+        hasher.update([0]);
+        writeln!(&mut hasher, "{revision}").expect("writing to a SHA-256 digest is infallible");
+        count += 1;
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    Ok((count, digest))
 }
 
 pub(crate) fn begin_scan(conn: &Connection, ctx: &Ctx<'_>, input: &str) -> Result<String, Error> {
@@ -2953,6 +2959,73 @@ fn apply_book(conn: &Connection, producer: &str, book: &Value) -> Result<bool, E
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inventory_hashes_sorted_live_rows_and_changes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE contacts (id TEXT, revision INTEGER, book_id TEXT, deleted_at INTEGER);
+            INSERT INTO contacts VALUES ('z', -9223372036854775808, 'b', NULL), ('a', 1, 'b', NULL),
+            ('ignored', 3, 'b', 1), ('other', 4, 'other', NULL);",
+        )
+        .unwrap();
+        assert_eq!(
+            live_inventory(&conn, "empty").unwrap(),
+            (
+                0,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into()
+            )
+        );
+        assert_eq!(
+            live_inventory(&conn, "b").unwrap(),
+            (
+                2,
+                "e50774f55dfa7f97897f70764462c19d6d043ddb08a576d1bee99a4c75ee5078".into()
+            )
+        );
+        conn.execute("UPDATE contacts SET revision=2 WHERE id='a'", [])
+            .unwrap();
+        assert_eq!(
+            live_inventory(&conn, "b").unwrap(),
+            (
+                2,
+                "642a0a3011a141ddd7705ab4367ba00693b7b49943e327fbbcfe6d563801f61b".into()
+            )
+        );
+        conn.execute("UPDATE contacts SET deleted_at=1 WHERE id='z'", [])
+            .unwrap();
+        assert_eq!(
+            live_inventory(&conn, "b").unwrap(),
+            (
+                1,
+                "07b51b24b22beeb84f50f50b1ada5f48636f30f22d37a9d56a826ac764f097f8".into()
+            )
+        );
+    }
+
+    #[test]
+    fn inventory_preserves_row_conversion_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE contacts (id, revision, book_id, deleted_at);
+            INSERT INTO contacts VALUES (42, 'bad', 'numeric', NULL),
+                (CAST(X'80' AS TEXT), 'bad', 'utf8', NULL),
+                ('valid', 'bad', 'revision', NULL);",
+        )
+        .unwrap();
+        for book_id in ["numeric", "utf8", "revision"] {
+            let old_error = conn.query_row(
+                "SELECT id,revision FROM contacts WHERE book_id=? AND deleted_at IS NULL ORDER BY id",
+                [book_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            ).unwrap_err();
+            assert_eq!(
+                format!("{:?}", live_inventory(&conn, book_id).unwrap_err()),
+                format!("{old_error:?}"),
+                "case {book_id}"
+            );
+        }
+    }
 
     fn db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
