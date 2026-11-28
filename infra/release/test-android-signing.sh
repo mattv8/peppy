@@ -240,7 +240,10 @@ for count in 3 5; do
   fi
   status=0
   output=$("$script_dir/verify-android-artifacts.sh" "${args[@]}" 2>&1) || status=$?
-  [ "$status" -eq 2 ] && [[ "$output" = *usage:* ]] || { printf 'expected usage exit 2 for %s arguments\n' "$count" >&2; exit 1; }
+  if [[ "$status" -ne 2 || "$output" != *usage:* ]]; then
+    printf 'expected usage exit 2 for %s arguments\n' "$count" >&2
+    exit 1
+  fi
 done
 make_aligned_archive "$root/unsigned-signed.aab" unsigned
 expect_failure_reason 'AAB strict signature verification failed' "$script_dir/verify-android-artifacts.sh" "$root/out/peppy-android.apk" "$root/unsigned-signed.aab"
