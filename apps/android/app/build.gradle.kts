@@ -345,7 +345,8 @@ android {
         }
         getByName("release") {
             isDebuggable = false
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             buildConfigField("boolean", "PEPPY_HOSTED_AUTH_DIAGNOSTICS", "false")
             ndk { debugSymbolLevel = "SYMBOL_TABLE" }
         }
