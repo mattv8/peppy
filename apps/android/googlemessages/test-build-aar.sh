@@ -57,7 +57,7 @@ go test ./...
 go test -race go.mau.fi/mautrix-gmessages/pkg/libgm
 go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20261011034528-197770444867 golang.org/x/mobile/cmd/gobind@v0.0.0-20261011034528-197770444867
 gomobile init
-gomobile bind -target=android/arm64,android/amd64 -androidapi 26 -javapkg dev.peppy.gmlink -ldflags=-extldflags=-Wl,-z,max-page-size=16384 -o build/gmlink.aar ./gmlink
+gomobile bind -target=android/arm64,android/amd64 -androidapi 26 -javapkg dev.peppy.gmlink -ldflags=-extldflags=-Wl,-z,max-page-size=16384,--pack-dyn-relocs=android -o build/gmlink.aar ./gmlink
 host build/gmlink.aar
 EOF
 )

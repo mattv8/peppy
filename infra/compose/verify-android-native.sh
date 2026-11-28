@@ -127,7 +127,7 @@ build_target() {
         export PATH="$ndk_bin:$PATH" CC="$clang" AR="$llvm_ar" RANLIB="$llvm_ranlib"
         export "CC_$cargo_target=$clang" "AR_$cargo_target=$llvm_ar" "RANLIB_$cargo_target=$llvm_ranlib"
         export "CARGO_TARGET_${upper_target}_LINKER=$clang" "CARGO_TARGET_${upper_target}_AR=$llvm_ar"
-        export "CARGO_TARGET_${upper_target}_RUSTFLAGS=-C link-arg=-Wl,--no-undefined -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
+        export "CARGO_TARGET_${upper_target}_RUSTFLAGS=-C link-arg=-Wl,--no-undefined -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384 -C link-arg=-Wl,--pack-dyn-relocs=android"
         if [[ "$force_native_clean" == "1" ]]; then
             echo "Android native cache recovery: target=$target profile=$native_profile reason=forced" >&2
             clean_target_cache "$target"

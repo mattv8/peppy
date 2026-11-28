@@ -20,7 +20,7 @@ go test ./...
 go test -race go.mau.fi/mautrix-gmessages/pkg/libgm
 GOBIN="$PWD/build/bin" go install "golang.org/x/mobile/cmd/gomobile@$mobile_pin" "golang.org/x/mobile/cmd/gobind@$mobile_pin"
 PATH="$PWD/build/bin:$PATH" gomobile init
-PATH="$PWD/build/bin:$PATH" gomobile bind -target=android/arm64,android/amd64 -androidapi 26 -javapkg dev.peppy.gmlink -ldflags='-extldflags=-Wl,-z,max-page-size=16384' -o build/gmlink.aar ./gmlink
+PATH="$PWD/build/bin:$PATH" gomobile bind -target=android/arm64,android/amd64 -androidapi 26 -javapkg dev.peppy.gmlink -ldflags='-extldflags=-Wl,-z,max-page-size=16384,--pack-dyn-relocs=android' -o build/gmlink.aar ./gmlink
 ./check-generated-host.sh build/gmlink.aar
 
 find_readelf() {
