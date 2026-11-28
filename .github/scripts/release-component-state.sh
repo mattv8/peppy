@@ -48,7 +48,7 @@ expected_assets() {
       printf 'latest.json\npeppy-%s-macos-arm64.dmg\npeppy-%s-macos-x64.dmg\n' "$version" "$version"
       ;;
     android)
-      printf 'peppy-%s-android.apk\npeppy-%s-android.aab\n' "$version" "$version"
+      printf 'peppy-%s-android.apk\npeppy-%s-android.aab\npeppy-%s-android-arm64-v8a.apk\npeppy-%s-android-x86_64.apk\n' "$version" "$version" "$version" "$version"
       ;;
     *) fail 'invalid component' 2 ;;
   esac
@@ -148,7 +148,7 @@ verify() (
       env -u PEPPY_RELEASE_GPG_KEY -u PEPPY_RELEASE_GPG_KEY_ID "$repo_root/infra/release/verify-update-assets.sh" "$version" stable "$temporary_dir"
       ;;
     android)
-      env -u PEPPY_RELEASE_GPG_KEY -u PEPPY_RELEASE_GPG_KEY_ID "$repo_root/infra/release/verify-android-artifacts.sh" "$temporary_dir/peppy-$version-android.apk" "$temporary_dir/peppy-$version-android.aab"
+      env -u PEPPY_RELEASE_GPG_KEY -u PEPPY_RELEASE_GPG_KEY_ID "$repo_root/infra/release/verify-android-artifacts.sh" "$temporary_dir/peppy-$version-android.apk" "$temporary_dir/peppy-$version-android.aab" "$temporary_dir/peppy-$version-android-arm64-v8a.apk" "$temporary_dir/peppy-$version-android-x86_64.apk"
       ;;
   esac
 )

@@ -40,11 +40,26 @@ android_fixture="$root/android-download"
 mkdir -p "$android_fixture/android-release-artifacts"
 printf apk > "$android_fixture/android-release-artifacts/peppy-android.apk"
 printf aab > "$android_fixture/android-release-artifacts/peppy-android.aab"
+printf arm64 > "$android_fixture/android-release-artifacts/peppy-android-arm64-v8a.apk"
+printf x86_64 > "$android_fixture/android-release-artifacts/peppy-android-x86_64.apk"
 android_out="$root/android"
 "$script_dir/stage-assets.sh" --group android 0.2.0 stable "$android_fixture" "$android_out"
-test "$(find "$android_out" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 3
+test "$(find "$android_out" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 5
 test -f "$android_out/peppy-0.2.0-android.apk"
 test -f "$android_out/peppy-0.2.0-android.aab"
+test -f "$android_out/peppy-0.2.0-android-arm64-v8a.apk"
+test -f "$android_out/peppy-0.2.0-android-x86_64.apk"
+grep -Fq 'peppy-0.2.0-android-arm64-v8a.apk' "$android_out/SHA256SUMS"
+grep -Fq 'peppy-0.2.0-android-x86_64.apk' "$android_out/SHA256SUMS"
 test ! -e "$android_out/latest.json"
+for abi in arm64-v8a x86_64; do
+  mv "$android_fixture/android-release-artifacts/peppy-android-$abi.apk" "$root/$abi.apk"
+  if "$script_dir/stage-assets.sh" --group android 0.2.0 stable "$android_fixture" "$root/missing-abi" >/dev/null 2>&1; then printf 'expected missing ABI asset failure\n' >&2; exit 1; fi
+  mv "$root/$abi.apk" "$android_fixture/android-release-artifacts/peppy-android-$abi.apk"
+  mkdir "$android_fixture/android-release-artifacts/duplicate"
+  cp "$android_fixture/android-release-artifacts/peppy-android-$abi.apk" "$android_fixture/android-release-artifacts/duplicate/peppy-android-$abi.apk"
+  if "$script_dir/stage-assets.sh" --group android 0.2.0 stable "$android_fixture" "$root/duplicate-abi" >/dev/null 2>&1; then printf 'expected duplicate ABI asset failure\n' >&2; exit 1; fi
+  rm -rf "$android_fixture/android-release-artifacts/duplicate"
+done
 
 printf 'release asset group tests passed\n'

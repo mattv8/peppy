@@ -61,7 +61,7 @@ The dashed box is your carrier's network. Peppy's encryption does not reach it, 
 | --- | --- | --- |
 | Browser | Full messaging in a desktop browser. | Open your server's HTTPS address. |
 | macOS, Windows, Linux | Desktop app with notifications and floating conversations. | [GitHub Releases](https://github.com/mattv8/peppy/releases) |
-| Android | Companion app that connects your phone's texts, contacts, and notifications. | The APK in the latest `android-v*` [release](https://github.com/mattv8/peppy/releases) |
+| Android | Companion app that connects your phone's texts, contacts, and notifications. | The latest `android-v*` [release](https://github.com/mattv8/peppy/releases) has a universal APK and smaller per-architecture APKs (arm64-v8a for phones, x86_64 for emulators). All use the same signing key, so the universal APK and the APK for your device's architecture can update each other. |
 | iPhone and iPad | Sync, contacts, and device management. It cannot send or receive carrier texts. | No installable build yet. |
 
 Android releases are numbered separately from desktop releases.

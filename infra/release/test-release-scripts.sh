@@ -13,6 +13,8 @@ fixture="$root/download"
 mkdir -p "$fixture/android-release-artifacts" "$fixture/desktop-linux-release-artifacts" "$fixture/desktop-macos-arm64-release-artifacts/apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg" "$fixture/desktop-macos-x64-release-artifacts/apps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg" "$fixture/desktop-windows-release-artifacts/nsis" "$fixture/desktop-windows-release-artifacts/msi"
 printf release > "$fixture/android-release-artifacts/peppy-android.apk"
 printf bundle > "$fixture/android-release-artifacts/peppy-android.aab"
+printf release > "$fixture/android-release-artifacts/peppy-android-arm64-v8a.apk"
+printf release > "$fixture/android-release-artifacts/peppy-android-x86_64.apk"
 mkdir -p "$root/linux/appimage" "$root/linux/deb" "$root/linux/rpm"
 printf appimage > "$root/linux/appimage/Peppy.AppImage"; printf deb > "$root/linux/deb/peppy.deb"; printf rpm > "$root/linux/rpm/peppy.rpm"
 tar -C "$root/linux" -czf "$fixture/desktop-linux-release-artifacts/desktop-linux-bundles.tar.gz" appimage deb rpm
@@ -24,9 +26,11 @@ printf exe > "$fixture/desktop-windows-release-artifacts/nsis/Peppy_X_x64-setup.
 "$script_dir/stage-assets.sh" 0.2.0-staging.5 staging "$fixture" "$root/prerelease"
 test -f "$root/prerelease/peppy-0.2.0-staging.5-linux-x86_64.deb"; test -f "$root/prerelease/peppy-0.2.0-staging.5-linux-x86_64.rpm"; test -s "$root/prerelease/SHA256SUMS"
 test -f "$root/prerelease/peppy-0.2.0-staging.5-android.apk"; test -f "$root/prerelease/peppy-0.2.0-staging.5-android.aab"
+test -f "$root/prerelease/peppy-0.2.0-staging.5-android-arm64-v8a.apk"; test -f "$root/prerelease/peppy-0.2.0-staging.5-android-x86_64.apk"
 test ! -e "$root/prerelease/peppy-0.2.0-staging.5-android-debug.apk"
-test "$(find "$root/prerelease" -type f | wc -l | tr -d ' ')" = 12; test "$(grep -c . "$root/prerelease/SHA256SUMS")" = 11
+test "$(find "$root/prerelease" -type f | wc -l | tr -d ' ')" = 14; test "$(grep -c . "$root/prerelease/SHA256SUMS")" = 13
 grep -Fq 'peppy-0.2.0-staging.5-android.apk' "$root/prerelease/SHA256SUMS"; grep -Fq 'peppy-0.2.0-staging.5-android.aab' "$root/prerelease/SHA256SUMS"
+grep -Fq 'peppy-0.2.0-staging.5-android-arm64-v8a.apk' "$root/prerelease/SHA256SUMS"; grep -Fq 'peppy-0.2.0-staging.5-android-x86_64.apk' "$root/prerelease/SHA256SUMS"
 test -f "$root/prerelease/peppy-0.2.0-staging.5-macos-arm64.dmg"
 test -f "$root/prerelease/peppy-0.2.0-staging.5-macos-x64.dmg"
 "$script_dir/stage-assets.sh" 0.2.0 stable "$fixture" "$root/stable"; test -f "$root/stable/peppy-0.2.0-linux-x86_64.rpm"
@@ -105,6 +109,15 @@ if "$script_dir/stage-assets.sh" 0.2.0 stable "$fixture" "$root/missing" >/dev/n
 printf release > "$fixture/android-release-artifacts/peppy-android.apk"; mkdir "$fixture/android-release-artifacts/duplicate"; cp "$fixture/android-release-artifacts/peppy-android.apk" "$fixture/android-release-artifacts/duplicate/peppy-android.apk"
 if "$script_dir/stage-assets.sh" 0.2.0 stable "$fixture" "$root/duplicate" >/dev/null 2>&1; then printf 'expected duplicate asset failure\n' >&2; exit 1; fi
 rm -rf "$fixture/android-release-artifacts/duplicate"
+for abi in arm64-v8a x86_64; do
+  rm "$fixture/android-release-artifacts/peppy-android-$abi.apk"
+  if "$script_dir/stage-assets.sh" 0.2.0 stable "$fixture" "$root/missing-abi" >/dev/null 2>&1; then printf 'expected missing ABI asset failure\n' >&2; exit 1; fi
+  printf release > "$fixture/android-release-artifacts/peppy-android-$abi.apk"
+  mkdir "$fixture/android-release-artifacts/duplicate"
+  cp "$fixture/android-release-artifacts/peppy-android-$abi.apk" "$fixture/android-release-artifacts/duplicate/peppy-android-$abi.apk"
+  if "$script_dir/stage-assets.sh" 0.2.0 stable "$fixture" "$root/duplicate-abi" >/dev/null 2>&1; then printf 'expected duplicate ABI asset failure\n' >&2; exit 1; fi
+  rm -rf "$fixture/android-release-artifacts/duplicate"
+done
 grep -Fq 'shell: bash' "$script_dir/../../.github/workflows/build-artifacts.yml"
 grep -Fq 'refs/heads/production:stable|push:refs/heads/staging:staging' "$script_dir/../../.github/workflows/build-artifacts.yml"
 grep -Fq "[ \"\$REQUESTED_REF\" = \"\$GITHUB_SHA\" ]" "$script_dir/../../.github/workflows/build-artifacts.yml"
@@ -216,6 +229,8 @@ chmod +x "$stage_bin/cp"
 cat > "$checksum_root/stage-parity-expected" <<'EOF'
 1a2fc26dc7ea5a2a4748b7cb2b1ef193d96ab2c99f93092f69e63075b28d1278  SHA256SUMS.sig
 1e6ed65d77d6364eeaed5a745ba5c4985ae2b700dd85d7cf7f027bdf294a33fc  peppy-v 1-dash-android.aab
+a4d451ec23463726f72c43d64c710968f6b602cd653b4de8adee1b556240a829  peppy-v 1-dash-android-arm64-v8a.apk
+a4d451ec23463726f72c43d64c710968f6b602cd653b4de8adee1b556240a829  peppy-v 1-dash-android-x86_64.apk
 a4d451ec23463726f72c43d64c710968f6b602cd653b4de8adee1b556240a829  peppy-v 1-dash-android.apk
 EOF
 for checksum_path in "$PATH" "$fallback_bin"; do

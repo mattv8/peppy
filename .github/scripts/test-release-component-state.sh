@@ -180,9 +180,16 @@ struct.pack_into("<Q", header, 32, 64)
 struct.pack_into("<HHH", header, 52, 64, 56, 1)
 struct.pack_into("<I", header, 64, 1)
 struct.pack_into("<Q", header, 112, 16384)
-for extension in ("apk", "aab"):
-    with zipfile.ZipFile(pathlib.Path(sys.argv[1]) / f"peppy-2.3.4-android.{extension}", "w") as archive:
-        archive.writestr("lib/arm64-v8a/libfixture.so", header)
+root = pathlib.Path(sys.argv[1])
+for suffix, abis in (
+    (".apk", ("arm64-v8a", "x86_64")),
+    (".aab", ("arm64-v8a", "x86_64")),
+    ("-arm64-v8a.apk", ("arm64-v8a",)),
+    ("-x86_64.apk", ("x86_64",)),
+):
+    with zipfile.ZipFile(root / f"peppy-2.3.4-android{suffix}", "w") as archive:
+        for abi in abis:
+            archive.writestr(f"lib/{abi}/libfixture.so", header)
 PY
 (cd "$root/android-assets" && shasum -a 256 peppy-* > SHA256SUMS)
 GNUPGHOME="$root/gpg-authority" gpg --batch --yes --detach-sign --output "$root/android-assets/SHA256SUMS.sig" "$root/android-assets/SHA256SUMS"
@@ -286,8 +293,14 @@ run_case() {
     printf 'cargo\n' > "$root/platform.expected"
     cmp -s "$root/platform.expected" "$root/platform.log" || case_failure 'wrong updater routing'
   else
-    printf 'apksigner\nzipalign\nkeytool\nkeytool\nkeytool\njarsigner\n' > "$root/platform.expected"
-    cmp -s "$root/platform.expected" "$root/platform.log" || case_failure 'wrong Android routing'
+    [ "$(grep -c '^apksigner$' "$root/platform.log" || true)" -eq 3 ] || case_failure 'wrong APK verifier routing'
+    [ "$(grep -c '^zipalign$' "$root/platform.log" || true)" -eq 3 ] || case_failure 'wrong APK alignment routing'
+    if [ "$boundary" = android-abi-rejected ]; then
+      [ "$(grep -c '^keytool$\|^jarsigner$' "$root/platform.log" || true)" -eq 0 ] || case_failure 'ABI rejection reached AAB verification'
+    else
+      [ "$(grep -c '^keytool$' "$root/platform.log" || true)" -eq 3 ] || case_failure 'wrong AAB certificate routing'
+      [ "$(grep -c '^jarsigner$' "$root/platform.log" || true)" -eq 1 ] || case_failure 'wrong AAB verifier routing'
+    fi
   fi
   if grep -Eq 'environment-leak|PRIVATE KEY|fixture updater private' "$root/case.out" "$root/case.err"; then
     case_failure 'unsafe diagnostics or private environment at platform boundary'
@@ -297,7 +310,7 @@ run_case() {
   fi
   if grep -Eq '(^| )(create|edit|upload|delete)( |$)' "$root/gh.log"; then case_failure 'GH write attempted'; fi
   [ "$(wc -l < "$root/downloads.log" | tr -d ' ')" -eq "$downloads" ] || case_failure 'wrong download count'
-  if [ "$downloads" -eq 19 ] || [ "$downloads" -eq 4 ]; then
+  if [ "$downloads" -eq 19 ] || [ "$downloads" -eq 6 ]; then
     LC_ALL=C sort "$root/downloads.log" > "$root/downloads.sorted"
     cmp -s "$root/$case_component.names" "$root/downloads.sorted" || case_failure 'wrong exact download names'
   fi
@@ -318,7 +331,19 @@ run_case() {
 # Downstream platform-tool cryptography is mocked, not claimed as platform proof.
 run_case desktop-valid 0 '' desktop 19
 case_component=android active_assets="$root/android-assets" active_metadata="$root/android-release.json"
-run_case android-valid-annotated 0 '' android 4
+run_case android-valid-annotated 0 '' android 6
+mv "$root/android-assets/peppy-2.3.4-android-arm64-v8a.apk" "$root/swapped.apk"
+mv "$root/android-assets/peppy-2.3.4-android-x86_64.apk" "$root/android-assets/peppy-2.3.4-android-arm64-v8a.apk"
+mv "$root/swapped.apk" "$root/android-assets/peppy-2.3.4-android-x86_64.apk"
+(cd "$root/android-assets" && shasum -a 256 peppy-* > SHA256SUMS)
+GNUPGHOME="$root/gpg-authority" gpg --batch --yes --detach-sign --output "$root/android-assets/SHA256SUMS.sig" "$root/android-assets/SHA256SUMS"
+run_case android-swapped-abi-assets 1 '' android-abi-rejected 6
+grep -Fq 'expected ABI arm64-v8a, found x86_64' "$root/case.err" || { echo 'wrong swapped ABI rejection reason' >&2; failures=$((failures + 1)); }
+mv "$root/android-assets/peppy-2.3.4-android-arm64-v8a.apk" "$root/swapped.apk"
+mv "$root/android-assets/peppy-2.3.4-android-x86_64.apk" "$root/android-assets/peppy-2.3.4-android-arm64-v8a.apk"
+mv "$root/swapped.apk" "$root/android-assets/peppy-2.3.4-android-x86_64.apk"
+(cd "$root/android-assets" && shasum -a 256 peppy-* > SHA256SUMS)
+GNUPGHOME="$root/gpg-authority" gpg --batch --yes --detach-sign --output "$root/android-assets/SHA256SUMS.sig" "$root/android-assets/SHA256SUMS"
 case_component=desktop active_assets="$root/assets" active_metadata="$root/release.json"
 git -C "$verify_repo" tag -d v2.3.4 >/dev/null
 git -C "$verify_repo" tag -a v2.3.4 -m fixture "$verify_sha"
@@ -388,7 +413,7 @@ selected_id=$authority_id
 platform_failure=cargo
 run_case updater-failure 42 'fixture updater rejected' desktop 19
 platform_failure=jarsigner case_component=android active_assets="$root/android-assets" active_metadata="$root/android-release.json"
-run_case android-verifier-failure 1 'AAB strict signature verification failed' android 4
+run_case android-verifier-failure 1 'AAB strict signature verification failed' android 6
 platform_failure='' case_component=desktop active_assets="$root/assets" active_metadata="$root/release.json"
 cleanup_failure=true
 run_case cleanup-success-status 0 '' desktop 19

@@ -986,7 +986,7 @@ android_sign_env = android_sign.fetch('env')
 end
 assert.call(android_sign_env.fetch('PEPPY_ANDROID_SIGNING_CERT_SHA256') == "${{ inputs.trusted_update_build && vars.PEPPY_ANDROID_SIGNING_CERT_SHA256 || '' }}", 'Android signer must receive the protected certificate fingerprint only for trusted builds')
 assert.call(android_steps.any? { |step| step.dig('with', 'path') == 'dist/android-release/peppy-android-debug.apk' }, 'development Android artifact must contain only the debug APK')
-assert.call(android_steps.any? { |step| step.dig('with', 'path') == "dist/android-release/peppy-android.apk\ndist/android-release/peppy-android.aab\ndist/android-release/peppy-android-native-debug-symbols.zip\n" }, 'release Android artifact must contain only signed assets and native debug symbols')
+assert.call(android_steps.any? { |step| step.dig('with', 'path') == "dist/android-release/peppy-android.apk\ndist/android-release/peppy-android.aab\ndist/android-release/peppy-android-arm64-v8a.apk\ndist/android-release/peppy-android-x86_64.apk\ndist/android-release/peppy-android-native-debug-symbols.zip\n" }, 'release Android artifact must contain only signed assets and native debug symbols')
 android_development_build = android_steps.find { |step| step['name'] == 'Build development Android debug APK' }
 assert.call(android_development_build.fetch('env').fetch('PEPPY_ANDROID_NATIVE_PROFILE') == 'release', 'development Android builds must retain release native compilation')
 assert.call(android_development_build.fetch('run').include?(':app:verifyReleaseManifestSecurity :app:assembleDebug :app:assembleSideload :app:verifySideloadGoogleMessagesLink -PpeppyDistribution=direct'), 'development Android builds must verify the direct sideload link before producing artifacts')
@@ -994,8 +994,11 @@ assert.call(android_development_build.fetch('run').include?(':app:bundleRelease 
 
 stage_script = File.read(File.join(root, '..', 'infra', 'release', 'stage-assets.sh'))
 assert.call(stage_script.include?("peppy-android.apk") && stage_script.include?("peppy-android.aab"), 'staging must require signed Android artifact names')
+%w[arm64-v8a x86_64].each do |abi|
+  assert.call(stage_script.include?(%Q[find_exact "$android" 'peppy-android-#{abi}.apk']) && stage_script.include?(%Q[peppy-$version-android-#{abi}.apk]), "staging must require and name the #{abi} APK")
+end
 assert.call(!stage_script.include?('peppy-android-unsigned'), 'staging must reject old unsigned Android artifact names')
-verify_step = publisher_steps.find { |step| step['run'] == 'bash infra/release/verify-android-artifacts.sh "dist/release/peppy-$VERSION-android.apk" "dist/release/peppy-$VERSION-android.aab"' }
+verify_step = publisher_steps.find { |step| step['run'] == 'bash infra/release/verify-android-artifacts.sh "dist/release/peppy-$VERSION-android.apk" "dist/release/peppy-$VERSION-android.aab" "dist/release/peppy-$VERSION-android-arm64-v8a.apk" "dist/release/peppy-$VERSION-android-x86_64.apk"' }
 assert.call(!verify_step.nil?, 'publisher must independently verify staged Android signatures')
 assert.call(verify_step.fetch('env').fetch('PEPPY_ANDROID_SIGNING_CERT_SHA256') == "${{ inputs.trusted_update_build && vars.PEPPY_ANDROID_SIGNING_CERT_SHA256 || '' }}", 'publisher must use the protected certificate fingerprint')
 assert.call(verify_step.fetch('env').fetch('VERSION') == '${{ inputs.version }}', 'publisher Android verification must receive the release version')
